@@ -41,8 +41,46 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 def download_audio(url, filename, task_id):
     """Download audio file from URL with progress reporting."""
-    response = requests.get(url, stream=True)
-    response.raise_for_status()
+    print(f"DEBUG: Attempting to download audio from: {url}")
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'audio/*,*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Referer': 'https://podcasts.apple.com/'
+    }
+    
+    try:
+        response = requests.get(url, stream=True, headers=headers, timeout=30)
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 403:
+            print(f"DEBUG: 403 Forbidden error for URL: {url}")
+            print(f"DEBUG: Response headers: {dict(e.response.headers)}")
+            
+            # Try alternative headers for Buzzsprout and other services
+            print("DEBUG: Trying alternative headers...")
+            alt_headers = {
+                'User-Agent': 'podcast-downloader/1.0',
+                'Accept': '*/*'
+            }
+            try:
+                response = requests.get(url, stream=True, headers=alt_headers, timeout=30)
+                response.raise_for_status()
+                print("DEBUG: Alternative headers worked!")
+            except requests.exceptions.HTTPError as e2:
+                if e2.response.status_code == 403:
+                    raise Exception(f"Access denied (403) for audio file. This podcast may have download restrictions. The hosting service (Buzzsprout) is blocking direct downloads. Try contacting the podcast creator or using a different episode. URL: {url}")
+                else:
+                    raise Exception(f"HTTP error {e2.response.status_code}: {e2}")
+            except requests.exceptions.RequestException as e2:
+                raise Exception(f"Failed to download audio file with alternative headers: {e2}")
+        else:
+            raise Exception(f"HTTP error {e.response.status_code}: {e}")
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Failed to download audio file: {e}")
     
     total_size = int(response.headers.get('content-length', 0))
     downloaded = 0
