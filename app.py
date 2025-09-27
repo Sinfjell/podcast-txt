@@ -68,6 +68,43 @@ def download_audio(url, filename, task_id):
     
     return filename
 
+def convert_apple_podcasts_url_to_rss(apple_url):
+    """Convert Apple Podcasts URL to RSS feed URL using iTunes Lookup API."""
+    try:
+        import re
+        
+        # Extract podcast ID from Apple Podcasts URL
+        # Pattern: https://podcasts.apple.com/.../podcast/.../id123456789
+        match = re.search(r'/id(\d+)', apple_url)
+        if not match:
+            return None, "Could not extract podcast ID from Apple Podcasts URL"
+        
+        podcast_id = match.group(1)
+        print(f"DEBUG: Extracted podcast ID: {podcast_id}")
+        
+        # Use iTunes Lookup API
+        lookup_url = f"https://itunes.apple.com/lookup?id={podcast_id}"
+        response = requests.get(lookup_url, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if data.get('resultCount', 0) == 0:
+            return None, "Podcast not found in iTunes database"
+        
+        result = data['results'][0]
+        rss_url = result.get('feedUrl')
+        
+        if not rss_url:
+            return None, "RSS feed URL not available for this podcast"
+        
+        print(f"DEBUG: Found RSS URL: {rss_url}")
+        return rss_url, None
+        
+    except Exception as e:
+        print(f"DEBUG: Error converting Apple Podcasts URL: {e}")
+        return None, f"Error converting URL: {str(e)}"
+
 def get_audio_duration(audio_file):
     """Get audio file duration in seconds."""
     try:
@@ -445,6 +482,38 @@ def transcription_page(task_id):
 def rss_help():
     """Display help page for finding RSS URLs."""
     return render_template('rss_help.html')
+
+@app.route('/convert-apple-url', methods=['POST'])
+def convert_apple_url():
+    """Convert Apple Podcasts URL to RSS feed URL."""
+    try:
+        data = request.get_json()
+        apple_url = data.get('apple_url', '').strip()
+        
+        if not apple_url:
+            return jsonify({'success': False, 'error': 'No URL provided'})
+        
+        # Check if it's an Apple Podcasts URL
+        if 'podcasts.apple.com' not in apple_url:
+            return jsonify({'success': False, 'error': 'Not an Apple Podcasts URL'})
+        
+        # Convert to RSS
+        rss_url, error = convert_apple_podcasts_url_to_rss(apple_url)
+        
+        if rss_url:
+            return jsonify({
+                'success': True, 
+                'rss_url': rss_url,
+                'message': 'Successfully converted Apple Podcasts URL to RSS feed'
+            })
+        else:
+            return jsonify({
+                'success': False, 
+                'error': error or 'Failed to convert URL'
+            })
+            
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Server error: {str(e)}'})
 
 if __name__ == '__main__':
     print("=" * 50)
