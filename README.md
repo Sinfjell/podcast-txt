@@ -1,25 +1,29 @@
-# Podcast Transcriber
+# Podcast Transcriber Web App
 
-A Python script that downloads the most recent episode from a podcast RSS feed and transcribes it using faster-whisper with automatic language detection (preferring Norwegian).
+A Flask web application that downloads podcast episodes from RSS feeds and transcribes them using OpenAI's Whisper API. Features an intuitive web interface with real-time progress tracking and support for large audio files through intelligent splitting.
 
 ## Features
 
-- **RSS Feed Parsing**: Automatically parses podcast RSS feeds
-- **Audio Download**: Downloads the most recent episode with progress reporting
-- **Speech-to-Text**: Uses faster-whisper with "large-v3" model for high-quality transcription
-- **Language Detection**: Automatically detects language, prefers Norwegian ("no")
-- **Multiple Output Formats**: Generates both full transcript and time-coded subtitles
-- **Efficient Processing**: Uses `compute_type="int8"` for optimal local performance
+- **🌐 Web Interface**: Easy-to-use Flask web app with real-time progress tracking
+- **📡 RSS Feed Support**: Automatically parses podcast RSS feeds and lists episodes
+- **🍎 Apple Podcasts Integration**: Convert Apple Podcasts URLs to RSS feeds automatically
+- **🎵 Audio Processing**: Handles large audio files by splitting them into manageable chunks
+- **📝 High-Quality Transcription**: Uses OpenAI's Whisper API for accurate speech-to-text
+- **📄 Multiple Output Formats**: Generates both full transcripts and SRT subtitle files
+- **🔍 RSS Help Guide**: Built-in help system for finding RSS feeds from various platforms
+- **⚡ Real-time Updates**: Live progress tracking with download speed and ETA estimates
 
 ## Requirements
 
 - Python 3.7+
+- OpenAI API key
 - Virtual environment (recommended)
 
 ## Installation
 
-1. **Clone or download this repository**
+1. **Clone the repository**
    ```bash
+   git clone <repository-url>
    cd podcast_txt
    ```
 
@@ -34,95 +38,123 @@ A Python script that downloads the most recent episode from a podcast RSS feed a
    pip install -r requirements.txt
    ```
 
+4. **Set up OpenAI API key**
+   ```bash
+   # Create .env file
+   echo "OPENAI_API_KEY=your_api_key_here" > .env
+   ```
+
 ## Usage
 
-### Basic Usage
+### Start the Web App
 
 ```bash
 # Activate virtual environment
 source venv/bin/activate
 
-# Run with default RSS feed (test feed)
-python3 podcast_transcriber.py
+# Start the Flask app
+python3 app.py
 ```
 
-### With Custom RSS Feed
+The app will be available at: **http://127.0.0.1:5002**
 
-```bash
-# Run with your own RSS feed URL
-python3 podcast_transcriber.py "https://your-podcast-rss-feed.com/rss"
-```
+### Using the Web Interface
 
-### Examples
+1. **Enter RSS Feed URL**: Paste your podcast's RSS feed URL
+2. **Convert Apple Podcasts URLs**: Use the built-in converter for Apple Podcasts links
+3. **Select Episode**: Choose from the list of available episodes
+4. **Start Transcription**: Click "Start Transcription" and watch real-time progress
+5. **Download Results**: Get both transcript (.txt) and subtitle (.srt) files
 
-```bash
-# NPR podcast
-python3 podcast_transcriber.py "https://feeds.npr.org/510289/podcast.xml"
+### Finding RSS Feeds
 
-# Any other podcast RSS feed
-python3 podcast_transcriber.py "https://example.com/podcast/feed.xml"
-```
+The app includes a comprehensive help guide for finding RSS feeds from:
+- **Apple Podcasts**: Automatic URL conversion to RSS
+- **Spotify**: Instructions to find original RSS feeds
+- **Google Podcasts**: Guidance for locating RSS feeds
+- **Direct RSS**: How to find RSS feeds from podcast websites
 
-## Output Files
+## How It Works
 
-The script generates two files:
+### Audio Processing
+- **Smart Splitting**: Large files (>25MB) are automatically split into chunks
+- **Sequential Processing**: Each chunk is transcribed separately
+- **Seamless Assembly**: Results are combined with proper timestamps
 
-- **`episode.txt`** - Full transcript of the podcast episode
-- **`episode.srt`** - Time-coded subtitle file in SRT format
+### Error Handling
+- **Download Protection**: Handles 403 errors from hosting services like Buzzsprout
+- **Retry Logic**: Multiple header strategies for different podcast hosts
+- **Clear Error Messages**: Helpful feedback when downloads fail
 
-## Process Flow
+## API Endpoints
 
-1. **RSS Parsing**: Parses the provided RSS feed URL
-2. **Episode Selection**: Selects the most recent episode (first `<item>`)
-3. **Audio Download**: Downloads the audio file with progress reporting
-4. **Transcription**: Runs speech-to-text using faster-whisper
-5. **File Generation**: Creates transcript and subtitle files
-6. **Cleanup**: Removes temporary audio file
+- `GET /` - Main application interface
+- `POST /parse_rss` - Parse RSS feed and list episodes
+- `POST /start_transcription` - Start transcription process
+- `GET /transcription/<task_id>` - View transcription results
+- `GET /status/<task_id>` - Get real-time transcription status
+- `GET /download/<task_id>/<format>` - Download transcript files
+- `GET /rss-help` - RSS feed help guide
+- `POST /convert-apple-url` - Convert Apple Podcasts URL to RSS
 
 ## Configuration
 
-The script uses these default settings:
-- **Model**: `large-v3` (high-quality transcription)
-- **Compute Type**: `int8` (efficient local processing)
-- **Language**: Auto-detection with Norwegian preference
-- **Beam Size**: 5
-- **Temperature**: 0.0 (deterministic output)
+### Environment Variables
+- `OPENAI_API_KEY` - Your OpenAI API key (required)
+
+### File Size Limits
+- **OpenAI Limit**: 25MB per audio file
+- **Auto-Splitting**: Files larger than 24MB are split automatically
+- **Chunk Size**: Optimal chunk duration for best transcription quality
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **ModuleNotFoundError**: Make sure virtual environment is activated
-   ```bash
-   source venv/bin/activate
-   ```
+1. **403 Forbidden Error**
+   - Some podcast hosts (like Buzzsprout) restrict direct downloads
+   - Try a different episode or contact the podcast creator
 
-2. **No audio file found**: Check if the RSS feed contains audio enclosures
-   - The feed must have `<enclosure>` tags with `type="audio/*"`
+2. **OpenAI API Errors**
+   - Ensure your API key is valid and has sufficient credits
+   - Check the `.env` file contains your API key
 
-3. **Transcription takes long time**: This is normal for long episodes
-   - The script shows progress during transcription
-   - Consider using a smaller model for faster processing
+3. **Large File Processing**
+   - Files are automatically split for OpenAI's 25MB limit
+   - Processing time scales with audio length
 
 ### Performance Tips
 
-- **First run**: The script downloads the Whisper model (~3GB) on first use
-- **Long episodes**: Transcription time depends on audio length (typically 1/10th of audio duration)
-- **Memory usage**: Large-v3 model requires ~6GB RAM
+- **First Run**: May take longer as dependencies are downloaded
+- **Long Episodes**: Transcription time is typically 1/10th of audio duration
+- **Memory Usage**: Flask app is lightweight, most processing is done by OpenAI
 
 ## Dependencies
 
+- `flask` - Web framework
+- `requests` - HTTP requests
 - `feedparser` - RSS feed parsing
-- `requests` - HTTP requests for audio download
-- `faster-whisper` - Speech-to-text transcription
+- `openai` - OpenAI Whisper API
+- `pydub` - Audio processing and splitting
+- `python-dotenv` - Environment variable management
 
 ## License
 
-This script is provided as-is for educational and personal use.
+This project is provided as-is for educational and personal use.
 
 ## Support
 
 For issues or questions:
 1. Check that your RSS feed URL is valid and contains audio files
-2. Ensure you have sufficient disk space and RAM
+2. Ensure your OpenAI API key is correctly configured
 3. Verify all dependencies are installed correctly
+4. Check the built-in RSS help guide for finding feeds
+
+## Recent Updates
+
+- ✅ Added Apple Podcasts URL to RSS converter
+- ✅ Improved audio download error handling
+- ✅ Enhanced RSS help guide with platform-specific instructions
+- ✅ Added real-time progress tracking
+- ✅ Implemented audio file splitting for large files
+- ✅ Fixed 403 Forbidden errors with better headers
