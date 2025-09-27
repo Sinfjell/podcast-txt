@@ -1,0 +1,7 @@
+feedparser>=6.0.10
+requests>=2.31.0
+faster-whisper>=0.10.0
+flask>=2.3.0
+pydub>=0.25.1
+python-dotenv>=1.0.0
+openai>=1.0.0

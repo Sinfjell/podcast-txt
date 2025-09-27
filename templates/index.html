@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block title %}Podcast Transcriber - Home{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title mb-0">
+                    <i class="fas fa-rss"></i> Enter Podcast RSS Feed
+                </h3>
+            </div>
+            <div class="card-body">
+                <form method="POST" action="{{ url_for('parse_rss') }}">
+                    <div class="mb-3">
+                        <label for="rss_url" class="form-label">RSS Feed URL</label>
+                        <input type="url" class="form-control" id="rss_url" name="rss_url" 
+                               placeholder="https://example.com/podcast/feed.xml" required>
+                        <div class="form-text">
+                            Enter the RSS feed URL of the podcast you want to transcribe.
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-search"></i> Get Episodes
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <div class="card mt-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-info-circle"></i> How it works
+                </h5>
+            </div>
+            <div class="card-body">
+                <ol>
+                    <li>Enter the RSS feed URL of your podcast</li>
+                    <li>Select the episode you want to transcribe</li>
+                    <li>Wait for the transcription to complete</li>
+                    <li>Download the transcript and subtitle files</li>
+                </ol>
+                <p class="text-muted">
+                    <strong>Note:</strong> The first run may take longer as the AI model needs to be downloaded (~3GB).
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

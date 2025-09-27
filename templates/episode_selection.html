@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+
+{% block title %}Select Episode - Podcast Transcriber{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h3 class="card-title mb-0">
+                    <i class="fas fa-list"></i> Select Episode to Transcribe
+                </h3>
+                <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">
+                    <i class="fas fa-arrow-left"></i> Back
+                </a>
+            </div>
+            <div class="card-body">
+                <form id="episodeForm" method="POST" action="{{ url_for('start_transcription') }}">
+                    <input type="hidden" name="rss_url" value="{{ rss_url }}">
+                    <input type="hidden" name="episode_index" id="episode_index" value="">
+                    
+                    <div class="row">
+                        {% for episode in episodes %}
+                        <div class="col-md-6 col-lg-4 mb-3">
+                            <div class="card episode-card h-100" data-episode-index="{{ episode.index }}" data-listener-attached="true">
+                                <div class="card-body">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="radio" name="episode" 
+                                               value="{{ episode.index }}" id="episode_{{ episode.index }}">
+                                        <label class="form-check-label w-100" for="episode_{{ episode.index }}">
+                                            <h6 class="card-title">{{ episode.title }}</h6>
+                                            <p class="card-text text-muted small">
+                                                <i class="fas fa-calendar"></i> {{ episode.published }}
+                                            </p>
+                                            {% if episode.description %}
+                                            <p class="card-text small">{{ episode.description }}</p>
+                                            {% endif %}
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    
+                    <div class="text-center mt-4">
+                        <button type="submit" class="btn btn-success btn-lg" id="transcribeBtn" disabled>
+                            <i class="fas fa-microphone"></i> Start Transcription
+                        </button>
+                    </div>
+                    
+                    {% if has_more %}
+                    <div class="text-center mt-3">
+                        <button type="button" class="btn btn-outline-primary" id="loadMoreBtn">
+                            <i class="fas fa-plus"></i> Load More Episodes ({{ all_episodes|length - episodes|length }} more)
+                        </button>
+                    </div>
+                    {% endif %}
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const episodeCards = document.querySelectorAll('.episode-card');
+    const transcribeBtn = document.getElementById('transcribeBtn');
+    const episodeIndexInput = document.getElementById('episode_index');
+    
+    episodeCards.forEach(card => {
+        card.addEventListener('click', function() {
+            // Remove selected class from all cards
+            episodeCards.forEach(c => c.classList.remove('selected'));
+            
+            // Add selected class to clicked card
+            this.classList.add('selected');
+            
+            // Check the radio button
+            const radio = this.querySelector('input[type="radio"]');
+            radio.checked = true;
+            
+            // Enable transcribe button
+            transcribeBtn.disabled = false;
+            
+            // Set episode index
+            episodeIndexInput.value = this.dataset.episodeIndex;
+        });
+    });
+    
+    // Handle form submission
+    document.getElementById('episodeForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const selectedEpisode = document.querySelector('input[name="episode"]:checked');
+        if (!selectedEpisode) {
+            alert('Please select an episode first.');
+            return;
+        }
+        
+        // Show loading state
+        transcribeBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting...';
+        transcribeBtn.disabled = true;
+        
+        // Submit form and redirect to progress page
+        fetch('/start_transcription', {
+            method: 'POST',
+            body: new FormData(this)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.task_id) {
+                // Redirect to transcription progress page
+                window.location.href = `/transcription/${data.task_id}`;
+            } else {
+                alert('Error starting transcription');
+                transcribeBtn.innerHTML = '<i class="fas fa-microphone"></i> Start Transcription';
+                transcribeBtn.disabled = false;
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Error starting transcription');
+            transcribeBtn.innerHTML = '<i class="fas fa-microphone"></i> Start Transcription';
+            transcribeBtn.disabled = false;
+        });
+    });
+    
+    // Handle load more episodes
+    const loadMoreBtn = document.getElementById('loadMoreBtn');
+    if (loadMoreBtn) {
+        loadMoreBtn.addEventListener('click', function() {
+            const allEpisodes = {{ all_episodes|tojson }};
+            const currentEpisodes = {{ episodes|tojson }};
+            const episodesContainer = document.querySelector('.row');
+            
+            // Add remaining episodes
+            for (let i = currentEpisodes.length; i < allEpisodes.length; i++) {
+                const episode = allEpisodes[i];
+                const episodeHtml = `
+                    <div class="col-md-6 col-lg-4 mb-3">
+                        <div class="card episode-card h-100" data-episode-index="${episode.index}">
+                            <div class="card-body">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="episode" 
+                                           value="${episode.index}" id="episode_${episode.index}">
+                                    <label class="form-check-label w-100" for="episode_${episode.index}">
+                                        <h6 class="card-title">${episode.title}</h6>
+                                        <p class="card-text text-muted small">
+                                            <i class="fas fa-calendar"></i> ${episode.published}
+                                        </p>
+                                        ${episode.description ? `<p class="card-text small">${episode.description}</p>` : ''}
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                episodesContainer.insertAdjacentHTML('beforeend', episodeHtml);
+            }
+            
+            // Re-attach event listeners to new cards
+            const newEpisodeCards = document.querySelectorAll('.episode-card:not([data-listener-attached])');
+            newEpisodeCards.forEach(card => {
+                card.setAttribute('data-listener-attached', 'true');
+                card.addEventListener('click', function() {
+                    // Remove selected class from all cards
+                    document.querySelectorAll('.episode-card').forEach(c => c.classList.remove('selected'));
+                    
+                    // Add selected class to clicked card
+                    this.classList.add('selected');
+                    
+                    // Check the radio button
+                    const radio = this.querySelector('input[type="radio"]');
+                    radio.checked = true;
+                    
+                    // Enable transcribe button
+                    transcribeBtn.disabled = false;
+                    
+                    // Set episode index
+                    episodeIndexInput.value = this.dataset.episodeIndex;
+                });
+            });
+            
+            // Hide load more button
+            loadMoreBtn.style.display = 'none';
+        });
+    }
+});
+</script>
+{% endblock %}
