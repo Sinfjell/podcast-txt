@@ -35,8 +35,8 @@
                                         <li>Select <strong>"Copy Link"</strong></li>
                                         <li>Paste the URL - it will look like: <code>https://podcasts.apple.com/us/podcast/podcast-name/id123456789</code></li>
                                     </ol>
-                                    <div class="alert alert-light">
-                                        <small><strong>Tip:</strong> The Apple Podcasts URL can be used directly as the RSS URL!</small>
+                                    <div class="alert alert-warning">
+                                        <small><strong>Note:</strong> Apple Podcasts URLs need to be converted to RSS feeds. See the "Generic Method" section below.</small>
                                     </div>
                                 </div>
                             </div>
@@ -58,7 +58,7 @@
                                         <li>Use the copied URL as your RSS URL</li>
                                     </ol>
                                     <div class="alert alert-warning">
-                                        <small><strong>Note:</strong> Spotify URLs work for most podcasts, but some may require finding the original RSS feed.</small>
+                                        <small><strong>Note:</strong> Spotify URLs are not RSS feeds. You need to find the original RSS feed.</small>
                                     </div>
                                 </div>
                             </div>
@@ -80,8 +80,8 @@
                                         <li>Copy the URL from your browser's address bar</li>
                                         <li>Use this URL as your RSS feed</li>
                                     </ol>
-                                    <div class="alert alert-light">
-                                        <small><strong>Tip:</strong> Google Podcasts URLs are usually compatible with RSS readers.</small>
+                                    <div class="alert alert-warning">
+                                        <small><strong>Note:</strong> Google Podcasts URLs are not RSS feeds. You need to find the original RSS feed.</small>
                                     </div>
                                 </div>
                             </div>
@@ -100,8 +100,8 @@
                                         <li>Right-click on the RSS link and <strong>"Copy link address"</strong></li>
                                         <li>Use the copied URL (usually ends with <code>.rss</code> or <code>.xml</code>)</li>
                                     </ol>
-                                    <div class="alert alert-light">
-                                        <small><strong>Alternative:</strong> Try searching for "<em>podcast name</em> RSS feed" on Google.</small>
+                                    <div class="alert alert-info">
+                                        <small><strong>For Apple Podcasts URLs:</strong> Visit the podcast's official website to find the RSS feed, or search for "<em>podcast name</em> RSS feed" on Google.</small>
                                     </div>
                                 </div>
                             </div>
@@ -116,19 +116,20 @@
                         <div class="card-body">
                             <div class="row">
                                 <div class="col-md-6">
-                                    <h6><i class="fas fa-check-circle text-success me-2"></i>What Works Best:</h6>
+                                    <h6><i class="fas fa-check-circle text-success me-2"></i>What Works:</h6>
                                     <ul class="list-unstyled">
-                                        <li>• <strong>Apple Podcasts URLs</strong> - Most reliable</li>
-                                        <li>• <strong>Direct RSS feeds</strong> - Always work</li>
-                                        <li>• <strong>Podcast website URLs</strong> - Usually work</li>
+                                        <li>• <strong>Direct RSS feeds</strong> - Always work (ends with .rss or .xml)</li>
+                                        <li>• <strong>Podcast website RSS links</strong> - Usually work</li>
+                                        <li>• <strong>Simplecast, Anchor, etc.</strong> - RSS hosting services</li>
                                     </ul>
                                 </div>
                                 <div class="col-md-6">
-                                    <h6><i class="fas fa-exclamation-triangle text-warning me-2"></i>Common Issues:</h6>
+                                    <h6><i class="fas fa-exclamation-triangle text-warning me-2"></i>What Doesn't Work:</h6>
                                     <ul class="list-unstyled">
-                                        <li>• Some Spotify URLs may not work</li>
-                                        <li>• YouTube podcast URLs won't work</li>
-                                        <li>• Make sure the URL is public (not private)</li>
+                                        <li>• Apple Podcasts URLs (podcasts.apple.com)</li>
+                                        <li>• Spotify URLs (open.spotify.com)</li>
+                                        <li>• YouTube podcast URLs</li>
+                                        <li>• Google Podcasts URLs</li>
                                     </ul>
                                 </div>
                             </div>
@@ -143,19 +144,19 @@
                         <div class="card-body">
                             <div class="row">
                                 <div class="col-md-6">
-                                    <h6>✅ Good Examples:</h6>
+                                    <h6>✅ Good Examples (RSS Feeds):</h6>
                                     <ul class="list-unstyled">
-                                        <li><code>https://podcasts.apple.com/us/podcast/podcast-name/id123456789</code></li>
                                         <li><code>https://feeds.simplecast.com/abc123</code></li>
                                         <li><code>https://podcast.example.com/rss.xml</code></li>
+                                        <li><code>https://anchor.fm/s/123456/podcast/rss</code></li>
                                     </ul>
                                 </div>
                                 <div class="col-md-6">
-                                    <h6>❌ Won't Work:</h6>
+                                    <h6>❌ Won't Work (Not RSS):</h6>
                                     <ul class="list-unstyled">
+                                        <li><code>https://podcasts.apple.com/us/podcast/podcast-name/id123456789</code></li>
+                                        <li><code>https://open.spotify.com/show/abc123</code></li>
                                         <li><code>https://www.youtube.com/watch?v=abc123</code></li>
-                                        <li><code>https://open.spotify.com/episode/private123</code></li>
-                                        <li><code>https://podcast.example.com</code> (no RSS)</li>
                                     </ul>
                                 </div>
                             </div>
