@@ -441,6 +441,11 @@ def transcription_page(task_id):
     
     return render_template('transcription.html', task_id=task_id)
 
+@app.route('/rss-help')
+def rss_help():
+    """Display help page for finding RSS URLs."""
+    return render_template('rss_help.html')
+
 if __name__ == '__main__':
     print("=" * 50)
     print("STARTING FLASK APP WITH COMPRESSION DEBUG")
