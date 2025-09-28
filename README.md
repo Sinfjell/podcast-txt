@@ -2,6 +2,10 @@
 
 A Flask web application that downloads podcast episodes from RSS feeds and transcribes them using OpenAI's Whisper API. Features an intuitive web interface with real-time progress tracking and support for large audio files through intelligent splitting.
 
+## 🐳 Docker Support
+
+This app now includes complete Docker support for easy deployment and local development. See [Docker Setup](#docker-setup) section below.
+
 ## Features
 
 - **🌐 Web Interface**: Easy-to-use Flask web app with real-time progress tracking
@@ -19,7 +23,35 @@ A Flask web application that downloads podcast episodes from RSS feeds and trans
 - OpenAI API key
 - Virtual environment (recommended)
 
-## Installation
+## 🚀 Quick Start with Docker (Recommended)
+
+### Option 1: One-Click Setup
+```bash
+git clone <repository-url>
+cd podcast_txt
+./run.sh
+```
+
+### Option 2: Manual Docker Setup
+```bash
+git clone <repository-url>
+cd podcast_txt
+
+# Copy environment template
+cp .env.example .env
+
+# Edit .env file and add your OpenAI API key
+# OPENAI_API_KEY=your_api_key_here
+
+# Run with Docker Compose
+docker-compose up --build
+```
+
+The app will be available at **http://localhost:5002**
+
+## 📋 Manual Installation (Alternative)
+
+If you prefer to run without Docker:
 
 1. **Clone the repository**
    ```bash
@@ -44,9 +76,40 @@ A Flask web application that downloads podcast episodes from RSS feeds and trans
    echo "OPENAI_API_KEY=your_api_key_here" > .env
    ```
 
+## Docker Setup
+
+### Environment Variables
+Create a `.env` file with:
+```env
+# Required
+OPENAI_API_KEY=sk-your-openai-api-key-here
+
+# Optional
+SECRET_KEY=your-secret-key-change-in-production
+FLASK_ENV=development
+```
+
+### Docker Commands
+```bash
+# Start the app
+docker-compose up
+
+# Start in background
+docker-compose up -d
+
+# Stop the app
+docker-compose down
+
+# View logs
+docker-compose logs -f
+
+# Rebuild after code changes
+docker-compose up --build
+```
+
 ## Usage
 
-### Start the Web App
+### Start the Web App (Manual Installation)
 
 ```bash
 # Activate virtual environment
@@ -56,7 +119,7 @@ source venv/bin/activate
 python3 app.py
 ```
 
-The app will be available at: **http://127.0.0.1:5002**
+The app will be available at: **http://127.0.0.1:5002** (manual) or **http://localhost:5002** (Docker)
 
 ### Using the Web Interface
 
@@ -150,11 +213,49 @@ For issues or questions:
 3. Verify all dependencies are installed correctly
 4. Check the built-in RSS help guide for finding feeds
 
-## Recent Updates
+## 📝 Changelog
 
+### v2.0.0 - Docker Support & Production Ready (Current)
+- 🐳 **Added complete Docker support** with Dockerfile and docker-compose.yml
+- 🚀 **One-click setup** with `./run.sh` script
+- 🔧 **Production-ready configuration** with proper environment handling
+- 📦 **Multi-stage Docker build** for optimized image size
+- 🏥 **Health checks** for container monitoring
+- 🔒 **Secure environment handling** with .env file support
+- 📚 **Comprehensive documentation** with Docker setup instructions
+- 🧹 **Cleaned up debug code** for production deployment
+- ⚡ **Improved error handling** and logging
+
+### v1.0.0 - Core Features
 - ✅ Added Apple Podcasts URL to RSS converter
 - ✅ Improved audio download error handling
 - ✅ Enhanced RSS help guide with platform-specific instructions
 - ✅ Added real-time progress tracking
 - ✅ Implemented audio file splitting for large files
 - ✅ Fixed 403 Forbidden errors with better headers
+
+## 🚀 Deployment Options
+
+The Docker setup works on multiple platforms:
+
+- **Local Development**: `docker-compose up --build`
+- **Production Hosting**: Railway, Render, DigitalOcean, AWS ECS
+- **Cloud Platforms**: Google Cloud Run, Azure Container Instances
+- **Self-hosted**: Any Docker-compatible server
+
+## 🔧 Development
+
+For development with live code reloading:
+```bash
+# Create development override
+echo 'version: "3.8"
+services:
+  podcast-transcriber:
+    volumes:
+      - .:/app
+    environment:
+      - FLASK_ENV=development' > docker-compose.dev.yml
+
+# Run with development config
+docker-compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
