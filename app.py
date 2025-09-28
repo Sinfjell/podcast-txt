@@ -26,7 +26,7 @@ from pydub import AudioSegment
 load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-here'
+app.secret_key = os.getenv('SECRET_KEY', 'your-secret-key-here-change-in-production')
 
 # Global variables for transcription status
 transcription_status = {}
@@ -35,13 +35,12 @@ transcription_results = {}
 # OpenAI configuration
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 if not OPENAI_API_KEY:
-    print("Warning: OPENAI_API_KEY not found in .env file")
+    print("Warning: OPENAI_API_KEY not found in environment variables")
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 def download_audio(url, filename, task_id):
     """Download audio file from URL with progress reporting."""
-    print(f"DEBUG: Attempting to download audio from: {url}")
     
     headers = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -57,11 +56,7 @@ def download_audio(url, filename, task_id):
         response.raise_for_status()
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 403:
-            print(f"DEBUG: 403 Forbidden error for URL: {url}")
-            print(f"DEBUG: Response headers: {dict(e.response.headers)}")
-            
             # Try alternative headers for Buzzsprout and other services
-            print("DEBUG: Trying alternative headers...")
             alt_headers = {
                 'User-Agent': 'podcast-downloader/1.0',
                 'Accept': '*/*'
@@ -69,7 +64,6 @@ def download_audio(url, filename, task_id):
             try:
                 response = requests.get(url, stream=True, headers=alt_headers, timeout=30)
                 response.raise_for_status()
-                print("DEBUG: Alternative headers worked!")
             except requests.exceptions.HTTPError as e2:
                 if e2.response.status_code == 403:
                     raise Exception(f"Access denied (403) for audio file. This podcast may have download restrictions. The hosting service (Buzzsprout) is blocking direct downloads. Try contacting the podcast creator or using a different episode. URL: {url}")
@@ -118,7 +112,6 @@ def convert_apple_podcasts_url_to_rss(apple_url):
             return None, "Could not extract podcast ID from Apple Podcasts URL"
         
         podcast_id = match.group(1)
-        print(f"DEBUG: Extracted podcast ID: {podcast_id}")
         
         # Use iTunes Lookup API
         lookup_url = f"https://itunes.apple.com/lookup?id={podcast_id}"
@@ -136,11 +129,9 @@ def convert_apple_podcasts_url_to_rss(apple_url):
         if not rss_url:
             return None, "RSS feed URL not available for this podcast"
         
-        print(f"DEBUG: Found RSS URL: {rss_url}")
         return rss_url, None
         
     except Exception as e:
-        print(f"DEBUG: Error converting Apple Podcasts URL: {e}")
         return None, f"Error converting URL: {str(e)}"
 
 def get_audio_duration(audio_file):
@@ -159,29 +150,22 @@ def get_audio_duration(audio_file):
 def split_audio_if_needed(audio_file, max_size_mb=24):
     """Split audio file into chunks if it exceeds the maximum size limit for OpenAI API."""
     file_size_mb = os.path.getsize(audio_file) / (1024 * 1024)
-    print(f"DEBUG: Checking file {audio_file}, size: {file_size_mb:.1f}MB, limit: {max_size_mb}MB")
     
     if file_size_mb <= max_size_mb:
-        print(f"DEBUG: File is within limit, no splitting needed")
         return [audio_file]
     
     print(f"Audio file is {file_size_mb:.1f}MB, splitting into chunks to fit OpenAI's {max_size_mb}MB limit...")
     
     # Calculate how many chunks we need
     num_chunks = int((file_size_mb / max_size_mb) + 1)
-    print(f"Will split into {num_chunks} chunks")
     
     try:
-        print(f"DEBUG: Loading audio file with pydub: {audio_file}")
         # Load audio file
         audio = AudioSegment.from_file(audio_file)
-        print(f"DEBUG: Audio loaded successfully, duration: {len(audio)/1000:.1f} seconds")
         
         # Calculate chunk duration
         total_duration_ms = len(audio)
         chunk_duration_ms = total_duration_ms // num_chunks
-        
-        print(f"Total duration: {total_duration_ms/1000:.1f}s, chunk duration: {chunk_duration_ms/1000:.1f}s")
         
         # Split audio into chunks
         base_name = os.path.splitext(audio_file)[0]
@@ -198,14 +182,10 @@ def split_audio_if_needed(audio_file, max_size_mb=24):
             # Export chunk
             chunk.export(chunk_file, format="mp3")
             
-            chunk_size_mb = os.path.getsize(chunk_file) / (1024 * 1024)
-            print(f"Chunk {i+1}: {chunk_file}, size: {chunk_size_mb:.1f}MB, duration: {(end_time-start_time)/1000:.1f}s")
-            
             chunk_files.append(chunk_file)
         
         # Remove original file
         os.remove(audio_file)
-        print(f"Successfully split into {len(chunk_files)} chunks")
         
         return chunk_files
             
@@ -218,17 +198,13 @@ def transcribe_audio_openai(audio_file, output_txt, output_srt, task_id):
     """Transcribe audio using OpenAI Whisper API - 10x faster!"""
     try:
         if not client:
-            raise Exception("OpenAI API key not configured. Please check your .env file.")
+            raise Exception("OpenAI API key not configured. Please set OPENAI_API_KEY environment variable.")
         
         # Split audio if needed to fit OpenAI's 25MB limit
-        print(f"DEBUG: Before splitting - audio_file: {audio_file}")
         transcription_status[task_id]['status'] = 'splitting'
         transcription_status[task_id]['progress'] = 5
-        transcription_status[task_id]['debug'] = f"Before splitting: {audio_file}"
         
         audio_chunks = split_audio_if_needed(audio_file, max_size_mb=24)
-        print(f"DEBUG: After splitting - got {len(audio_chunks)} chunks")
-        transcription_status[task_id]['debug'] = f"Split into {len(audio_chunks)} chunks"
         
         # Get audio duration for time estimation (use first chunk if multiple)
         audio_duration = get_audio_duration(audio_chunks[0])
@@ -251,15 +227,10 @@ def transcribe_audio_openai(audio_file, output_txt, output_srt, task_id):
         full_text = ""
         
         for i, chunk_file in enumerate(audio_chunks):
-            print(f"Transcribing chunk {i+1}/{len(audio_chunks)}: {chunk_file}")
-            
             # Update progress
             progress = 10 + (i / len(audio_chunks)) * 60  # 10-70% for transcription
             transcription_status[task_id]['progress'] = progress
             transcription_status[task_id]['status'] = f'transcribing chunk {i+1}/{len(audio_chunks)}'
-            
-            chunk_size_mb = os.path.getsize(chunk_file) / (1024 * 1024)
-            print(f"DEBUG: Transcribing chunk {i+1}, size: {chunk_size_mb:.1f}MB")
             
             # Upload and transcribe chunk with OpenAI
             with open(chunk_file, 'rb') as f:
@@ -555,6 +526,14 @@ def convert_apple_url():
 
 if __name__ == '__main__':
     print("=" * 50)
-    print("STARTING FLASK APP WITH COMPRESSION DEBUG")
+    print("STARTING PODCAST TRANSCRIBER WEB APP")
     print("=" * 50)
-    app.run(debug=True, host='127.0.0.1', port=5002)
+    print(f"OpenAI API Key configured: {'Yes' if OPENAI_API_KEY else 'No'}")
+    print(f"Environment: {os.getenv('FLASK_ENV', 'development')}")
+    print("=" * 50)
+    
+    # Use 0.0.0.0 for Docker compatibility
+    host = '0.0.0.0' if os.getenv('FLASK_ENV') == 'production' else '127.0.0.1'
+    debug = os.getenv('FLASK_ENV') != 'production'
+    
+    app.run(debug=debug, host=host, port=5002)
