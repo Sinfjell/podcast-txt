@@ -3,6 +3,17 @@
 {% block title %}Podskrift — Podcast to Text{% endblock %}
 
 {% block content %}
+<!-- Hero -->
+<div style="margin-bottom: 32px;">
+    <h1 style="font-size: clamp(28px, 5vw, 40px); font-weight: 700; letter-spacing: -0.04em; line-height: 1.15;">
+        Transcribe any podcast<br>
+        <span style="color: var(--accent-bright);">in minutes</span>
+    </h1>
+    <p style="color: var(--muted); font-size: 16px; margin-top: 10px; max-width: 520px; line-height: 1.6;">
+        Search for a podcast, pick an episode, and get a full transcript. Powered by OpenAI Whisper — bring your own API key, completely free.
+    </p>
+</div>
+
 <!-- Saved feeds quick access -->
 {% if current_user.is_authenticated and saved_feeds %}
 <div class="card" style="margin-bottom: 16px;">
