@@ -38,16 +38,10 @@
 
     {% if needs_api_key %}
     <div class="card mt-2" style="border-color: var(--accent-border);">
-        <div class="card-body">
-            <div class="flex-center gap-1 mb-1">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-bright)" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-                <span style="font-weight: 600; font-size: 14px;">OpenAI API Key</span>
-            </div>
-            <input type="password" class="form-input" id="openai_key" name="openai_key"
-                   placeholder="sk-..." required>
+        <div class="card-body text-center">
+            <p style="font-weight: 600; font-size: 14px;">No API key configured</p>
             <p class="form-hint">
-                Used only for this transcription, not stored.
-                <a href="https://platform.openai.com/api-keys" target="_blank">Get a key</a>
+                Add your OpenAI API key in <a href="{{ url_for('settings') }}">Settings</a> to start transcribing.
             </p>
         </div>
     </div>

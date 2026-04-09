@@ -10,7 +10,11 @@
         <div class="list-item">
             <div class="list-item-text">
                 <div class="list-item-title">{{ t.episode_title }}</div>
-                <div class="list-item-sub">{{ t.created_at.strftime('%Y-%m-%d %H:%M') }}{% if t.language %} &middot; {{ t.language }}{% endif %}</div>
+                <div class="list-item-sub">{{ (t.completed_at or t.started_at).strftime('%Y-%m-%d %H:%M') }}{% if t.language %} &middot; {{ t.language }}{% endif %}</div>
+            </div>
+            <div class="flex-center" style="gap: 8px;">
+                <a href="{{ url_for('download_file', task_id=t.id, file_type='txt') }}" class="btn btn-sm btn-ghost">TXT</a>
+                <a href="{{ url_for('download_file', task_id=t.id, file_type='srt') }}" class="btn btn-sm btn-ghost">SRT</a>
             </div>
         </div>
         {% endfor %}

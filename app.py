@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pydub import AudioSegment
 
-from models import db, User, SavedFeed, Transcription
+from models import db, User, SavedFeed, TranscriptionTask
 
 load_dotenv()
 
@@ -55,10 +55,6 @@ def load_user(user_id):
     return db.session.get(User, int(user_id))
 
 
-# In-memory transcription tracking (per-process, not persisted)
-transcription_status = {}
-transcription_results = {}
-
 # Global fallback OpenAI key
 GLOBAL_OPENAI_KEY = os.getenv('OPENAI_API_KEY')
 
@@ -78,6 +74,15 @@ def get_openai_client(user=None):
 # ---------------------------------------------------------------------------
 # Audio helpers
 # ---------------------------------------------------------------------------
+
+def _update_task(task_id, **kwargs):
+    """Update a TranscriptionTask row. Must be called within an app context."""
+    task = db.session.get(TranscriptionTask, task_id)
+    if task:
+        for k, v in kwargs.items():
+            setattr(task, k, v)
+        db.session.commit()
+
 
 def download_audio(url, filename, task_id):
     """Download audio file from URL with progress reporting."""
@@ -114,6 +119,7 @@ def download_audio(url, filename, task_id):
     total_size = int(response.headers.get('content-length', 0))
     downloaded = 0
     start_time = time.time()
+    last_db_update = 0
 
     with open(filename, 'wb') as f:
         for chunk in response.iter_content(chunk_size=8192):
@@ -121,16 +127,11 @@ def download_audio(url, filename, task_id):
                 f.write(chunk)
                 downloaded += len(chunk)
                 if total_size > 0:
-                    progress = (downloaded / total_size) * 100
-                    elapsed = time.time() - start_time
-                    if progress > 0:
-                        eta_seconds = (elapsed / progress) * (100 - progress)
-                        transcription_status[task_id]['eta'] = f"{eta_seconds / 60:.1f} min"
-                    transcription_status[task_id]['download_progress'] = progress
-                    if elapsed > 0:
-                        transcription_status[task_id]['download_speed'] = (
-                            f"{downloaded / 1024 / 1024 / elapsed:.1f} MB/s"
-                        )
+                    now = time.time()
+                    if now - last_db_update >= 2:
+                        progress = (downloaded / total_size) * 100
+                        _update_task(task_id, download_progress=int(progress))
+                        last_db_update = now
 
     return filename
 
@@ -173,103 +174,74 @@ def split_audio_if_needed(audio_file, max_size_mb=24):
         return [audio_file]
 
 
-def transcribe_audio(audio_file, output_txt, output_srt, task_id, openai_client):
+def transcribe_audio(audio_file, task_id, openai_client):
     """Transcribe audio using OpenAI Whisper API."""
-    try:
-        if not openai_client:
-            raise Exception(
-                "No OpenAI API key configured. "
-                "Go to Settings and add your key, or ask the admin to set a global key."
+    import json
+    from datetime import datetime, timezone
+
+    if not openai_client:
+        raise Exception(
+            "No OpenAI API key configured. "
+            "Go to Settings and add your key, or ask the admin to set a global key."
+        )
+
+    _update_task(task_id, status='splitting', progress=5)
+    audio_chunks = split_audio_if_needed(audio_file, max_size_mb=24)
+
+    audio_duration = get_audio_duration(audio_chunks[0])
+    if len(audio_chunks) > 1:
+        audio_duration *= len(audio_chunks)
+
+    _update_task(task_id, status='transcribing', progress=10)
+
+    upload_start = time.time()
+    all_segments = []
+    full_text = ""
+
+    for i, chunk_file in enumerate(audio_chunks):
+        progress = 10 + int((i / len(audio_chunks)) * 60)
+        status_msg = f'transcribing chunk {i + 1}/{len(audio_chunks)}'
+        _update_task(task_id, progress=progress, status=status_msg)
+
+        with open(chunk_file, 'rb') as f:
+            chunk_transcript = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=f,
+                language="no",
+                response_format="verbose_json",
+                timestamp_granularities=["segment"]
             )
 
-        transcription_status[task_id]['status'] = 'splitting'
-        transcription_status[task_id]['progress'] = 5
-        audio_chunks = split_audio_if_needed(audio_file, max_size_mb=24)
+        full_text += chunk_transcript.text + " "
 
-        audio_duration = get_audio_duration(audio_chunks[0])
-        if len(audio_chunks) > 1:
-            audio_duration *= len(audio_chunks)
+        if hasattr(chunk_transcript, 'segments') and chunk_transcript.segments:
+            chunk_dur = audio_duration / len(audio_chunks)
+            offset = i * chunk_dur
+            for seg in chunk_transcript.segments:
+                all_segments.append({
+                    'start': seg.start + offset,
+                    'end': seg.end + offset,
+                    'text': seg.text
+                })
 
-        transcription_status[task_id]['audio_duration'] = audio_duration
-        estimated_time = max(30, audio_duration * 0.1)
+        os.remove(chunk_file)
 
-        transcription_status[task_id]['status'] = 'transcribing'
-        transcription_status[task_id]['progress'] = 10
-        transcription_status[task_id]['eta'] = f"{estimated_time / 60:.1f} min"
+    full_text = full_text.strip()
+    elapsed = time.time() - upload_start
 
-        upload_start = time.time()
-        all_segments = []
-        full_text = ""
+    _update_task(
+        task_id,
+        status='completed',
+        progress=100,
+        transcript_text=full_text,
+        segments_json=json.dumps(all_segments) if all_segments else None,
+        language='no',
+        transcription_time=elapsed,
+        completed_at=datetime.now(timezone.utc),
+    )
 
-        for i, chunk_file in enumerate(audio_chunks):
-            progress = 10 + (i / len(audio_chunks)) * 60
-            transcription_status[task_id]['progress'] = progress
-            transcription_status[task_id]['status'] = (
-                f'transcribing chunk {i + 1}/{len(audio_chunks)}'
-            )
-
-            with open(chunk_file, 'rb') as f:
-                chunk_transcript = openai_client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=f,
-                    language="no",
-                    response_format="verbose_json",
-                    timestamp_granularities=["segment"]
-                )
-
-            full_text += chunk_transcript.text + " "
-
-            if hasattr(chunk_transcript, 'segments') and chunk_transcript.segments:
-                chunk_dur = audio_duration / len(audio_chunks)
-                offset = i * chunk_dur
-                for seg in chunk_transcript.segments:
-                    all_segments.append({
-                        'start': seg.start + offset,
-                        'end': seg.end + offset,
-                        'text': seg.text
-                    })
-
-            os.remove(chunk_file)
-
-        transcription_status[task_id]['status'] = 'processing'
-        transcription_status[task_id]['progress'] = 50
-
-        full_text = full_text.strip()
-
-        with open(output_txt, 'w', encoding='utf-8') as f:
-            f.write(full_text)
-
-        transcription_status[task_id]['progress'] = 75
-
-        with open(output_srt, 'w', encoding='utf-8') as f:
-            if all_segments:
-                for i, seg in enumerate(all_segments, 1):
-                    f.write(f"{i}\n")
-                    f.write(f"{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}\n")
-                    f.write(f"{seg['text'].strip()}\n\n")
-            else:
-                f.write("1\n00:00:00,000 --> 00:00:01,000\n")
-                f.write(full_text)
-
-        transcription_status[task_id]['status'] = 'completed'
-        transcription_status[task_id]['progress'] = 100
-
-        transcription_results[task_id] = {
-            'txt_file': output_txt,
-            'srt_file': output_srt,
-            'episode_title': transcription_status[task_id].get('episode_title', 'Unknown'),
-            'language': 'no',
-            'language_probability': 1.0,
-            'transcription_time': time.time() - upload_start,
-            'transcript_text': full_text,
-        }
-
-        if os.path.exists(audio_file):
-            os.remove(audio_file)
-
-    except Exception as e:
-        transcription_status[task_id]['status'] = 'error'
-        transcription_status[task_id]['error'] = str(e)
+    if os.path.exists(audio_file):
+        os.remove(audio_file)
 
 
 def format_timestamp(seconds):
@@ -538,6 +510,7 @@ def parse_rss():
 
 
 @app.route('/start_transcription', methods=['POST'])
+@login_required
 def start_transcription():
     rss_url = request.form.get('rss_url')
     episode_index = int(request.form.get('episode_index'))
@@ -547,66 +520,35 @@ def start_transcription():
         return jsonify({'error': 'Invalid episode selection'}), 400
 
     episode = episodes[episode_index]
-
-    # Determine which OpenAI client to use:
-    # 1. Logged-in user's saved key
-    # 2. Inline key from form (guest / BYOK mode)
-    # 3. Global fallback
-    inline_key = request.form.get('openai_key', '').strip()
-    user = current_user if current_user.is_authenticated else None
-
-    if inline_key:
-        openai_client = OpenAI(api_key=inline_key)
-    else:
-        openai_client = get_openai_client(user)
+    openai_client = get_openai_client(current_user)
 
     if not openai_client:
         return jsonify({
-            'error': 'No OpenAI API key provided. Paste your key to start transcribing.'
+            'error': 'No OpenAI API key configured. Add your key in Settings.'
         }), 400
 
     task_id = str(uuid.uuid4())
-    user_id = current_user.id if current_user.is_authenticated else None
 
-    transcription_status[task_id] = {
-        'status': 'starting',
-        'progress': 0,
-        'episode_title': episode['title'],
-        'download_progress': 0,
-        'eta': 'Calculating...',
-        'start_time': time.time(),
-        'user_id': user_id,
-        'rss_url': rss_url,
-    }
+    task = TranscriptionTask(
+        id=task_id,
+        user_id=current_user.id,
+        episode_title=episode['title'],
+        rss_url=rss_url,
+        status='downloading',
+    )
+    db.session.add(task)
+    db.session.commit()
 
     parsed_url = urlparse(episode['audio_url'])
     audio_filename = f"temp_audio_{task_id}" + os.path.splitext(parsed_url.path)[1]
-    txt_filename = f"transcript_{task_id}.txt"
-    srt_filename = f"transcript_{task_id}.srt"
 
     def transcribe_thread():
-        try:
-            transcription_status[task_id]['status'] = 'downloading'
-            download_audio(episode['audio_url'], audio_filename, task_id)
-            transcribe_audio(audio_filename, txt_filename, srt_filename, task_id, openai_client)
-
-            # Save to DB if user is logged in
-            if user_id:
-                with app.app_context():
-                    result = transcription_results.get(task_id)
-                    if result:
-                        t = Transcription(
-                            user_id=user_id,
-                            episode_title=episode['title'],
-                            rss_url=rss_url,
-                            language=result.get('language', 'no'),
-                            transcript_text=result.get('transcript_text', ''),
-                        )
-                        db.session.add(t)
-                        db.session.commit()
-        except Exception as e:
-            transcription_status[task_id]['status'] = 'error'
-            transcription_status[task_id]['error'] = str(e)
+        with app.app_context():
+            try:
+                download_audio(episode['audio_url'], audio_filename, task_id)
+                transcribe_audio(audio_filename, task_id, openai_client)
+            except Exception as e:
+                _update_task(task_id, status='error', error_message=str(e))
 
     thread = threading.Thread(target=transcribe_thread)
     thread.daemon = True
@@ -616,53 +558,82 @@ def start_transcription():
 
 
 @app.route('/status/<task_id>')
+@login_required
 def get_status(task_id):
-    if task_id not in transcription_status:
+    task = db.session.get(TranscriptionTask, task_id)
+    if not task or task.user_id != current_user.id:
         return jsonify({'error': 'Task not found'}), 404
 
-    status = transcription_status[task_id].copy()
-    status.pop('user_id', None)
-    status.pop('rss_url', None)
+    elapsed = (time.time() - task.started_at.timestamp()) if task.started_at else 0
+    result = {
+        'status': task.status,
+        'progress': task.progress,
+        'download_progress': task.download_progress,
+        'episode_title': task.episode_title,
+        'elapsed_time': f"{elapsed / 60:.1f} min",
+    }
 
-    if 'start_time' in status:
-        elapsed = time.time() - status['start_time']
-        status['elapsed_time'] = f"{elapsed / 60:.1f} min"
+    if task.status == 'error':
+        result['error'] = task.error_message or 'Unknown error'
 
-    if status['status'] == 'completed' and task_id in transcription_results:
-        status['download_txt'] = url_for('download_file', task_id=task_id, file_type='txt')
-        status['download_srt'] = url_for('download_file', task_id=task_id, file_type='srt')
-        result = transcription_results[task_id]
-        if 'transcription_time' in result:
-            status['actual_transcription_time'] = f"{result['transcription_time']:.1f} seconds"
+    if task.status == 'completed':
+        result['download_txt'] = url_for('download_file', task_id=task_id, file_type='txt')
+        result['download_srt'] = url_for('download_file', task_id=task_id, file_type='srt')
+        if task.transcription_time:
+            result['actual_transcription_time'] = f"{task.transcription_time:.1f} seconds"
+        if task.language:
+            result['language'] = task.language
 
-    return jsonify(status)
+    return jsonify(result)
 
 
 @app.route('/download/<task_id>/<file_type>')
+@login_required
 def download_file(task_id, file_type):
-    if task_id not in transcription_results:
+    import json as _json
+    from io import BytesIO
+
+    task = db.session.get(TranscriptionTask, task_id)
+    if not task or task.user_id != current_user.id or task.status != 'completed':
         return "File not found", 404
 
-    result = transcription_results[task_id]
+    safe_title = task.episode_title.replace(' ', '_')
 
     if file_type == 'txt':
-        filename = result['txt_file']
-        dl_name = f"{result['episode_title'].replace(' ', '_')}.txt"
+        content = (task.transcript_text or '').encode('utf-8')
+        return send_file(
+            BytesIO(content),
+            as_attachment=True,
+            download_name=f"{safe_title}.txt",
+            mimetype='text/plain',
+        )
     elif file_type == 'srt':
-        filename = result['srt_file']
-        dl_name = f"{result['episode_title'].replace(' ', '_')}.srt"
+        if task.segments_json:
+            segments = _json.loads(task.segments_json)
+            lines = []
+            for i, seg in enumerate(segments, 1):
+                lines.append(f"{i}")
+                lines.append(f"{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}")
+                lines.append(seg['text'].strip())
+                lines.append('')
+            content = '\n'.join(lines).encode('utf-8')
+        else:
+            content = f"1\n00:00:00,000 --> 00:00:01,000\n{task.transcript_text or ''}".encode('utf-8')
+        return send_file(
+            BytesIO(content),
+            as_attachment=True,
+            download_name=f"{safe_title}.srt",
+            mimetype='text/srt',
+        )
     else:
         return "Invalid file type", 400
 
-    if not os.path.exists(filename):
-        return "File not found", 404
-
-    return send_file(filename, as_attachment=True, download_name=dl_name)
-
 
 @app.route('/transcription/<task_id>')
+@login_required
 def transcription_page(task_id):
-    if task_id not in transcription_status:
+    task = db.session.get(TranscriptionTask, task_id)
+    if not task or task.user_id != current_user.id:
         return "Task not found", 404
     return render_template('transcription.html', task_id=task_id)
 
@@ -670,10 +641,10 @@ def transcription_page(task_id):
 @app.route('/history')
 @login_required
 def history():
-    transcriptions = Transcription.query.filter_by(
-        user_id=current_user.id
-    ).order_by(Transcription.created_at.desc()).limit(50).all()
-    return render_template('history.html', transcriptions=transcriptions)
+    tasks = TranscriptionTask.query.filter_by(
+        user_id=current_user.id, status='completed'
+    ).order_by(TranscriptionTask.completed_at.desc()).limit(50).all()
+    return render_template('history.html', transcriptions=tasks)
 
 
 @app.route('/rss-help')
@@ -739,6 +710,34 @@ def search_podcasts():
 
 with app.app_context():
     db.create_all()
+
+    # One-time migration: move old transcriptions table to transcription_tasks
+    from sqlalchemy import inspect, text
+    inspector = inspect(db.engine)
+    if 'transcriptions' in inspector.get_table_names():
+        rows = db.session.execute(text(
+            'SELECT id, user_id, episode_title, rss_url, language, transcript_text, created_at '
+            'FROM transcriptions'
+        )).fetchall()
+        for row in rows:
+            existing = db.session.get(TranscriptionTask, str(row[0]))
+            if not existing:
+                task = TranscriptionTask(
+                    id=str(uuid.uuid4()),
+                    user_id=row[1],
+                    episode_title=row[2],
+                    rss_url=row[3],
+                    language=row[4],
+                    transcript_text=row[5],
+                    status='completed',
+                    progress=100,
+                    started_at=row[6],
+                    completed_at=row[6],
+                )
+                db.session.add(task)
+        db.session.commit()
+        db.session.execute(text('DROP TABLE transcriptions'))
+        db.session.commit()
 
 if __name__ == '__main__':
     print("=" * 50)

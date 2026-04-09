@@ -19,7 +19,7 @@ class User(UserMixin, db.Model):
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     feeds = db.relationship('SavedFeed', backref='user', lazy=True, cascade='all, delete-orphan')
-    transcriptions = db.relationship('Transcription', backref='user', lazy=True, cascade='all, delete-orphan')
+    tasks = db.relationship('TranscriptionTask', backref='user', lazy=True, cascade='all, delete-orphan')
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -42,13 +42,20 @@ class SavedFeed(db.Model):
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
 
-class Transcription(db.Model):
-    __tablename__ = 'transcriptions'
+class TranscriptionTask(db.Model):
+    __tablename__ = 'transcription_tasks'
 
-    id = db.Column(db.Integer, primary_key=True)
+    id = db.Column(db.String(36), primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     episode_title = db.Column(db.String(512), nullable=False)
     rss_url = db.Column(db.String(1024), nullable=True)
-    language = db.Column(db.String(10), nullable=True)
+    status = db.Column(db.String(20), nullable=False, default='pending')
+    progress = db.Column(db.Integer, nullable=False, default=0)
+    download_progress = db.Column(db.Integer, nullable=False, default=0)
+    error_message = db.Column(db.Text, nullable=True)
     transcript_text = db.Column(db.Text, nullable=True)
-    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    segments_json = db.Column(db.Text, nullable=True)
+    language = db.Column(db.String(10), nullable=True)
+    transcription_time = db.Column(db.Float, nullable=True)
+    started_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    completed_at = db.Column(db.DateTime, nullable=True)
