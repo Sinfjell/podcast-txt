@@ -713,6 +713,7 @@ with app.app_context():
 
     # One-time migration: move old transcriptions table to transcription_tasks
     from sqlalchemy import inspect, text
+    from datetime import datetime, timezone
     inspector = inspect(db.engine)
     if 'transcriptions' in inspector.get_table_names():
         rows = db.session.execute(text(
@@ -722,6 +723,12 @@ with app.app_context():
         for row in rows:
             existing = db.session.get(TranscriptionTask, str(row[0]))
             if not existing:
+                created = row[6]
+                if isinstance(created, str):
+                    try:
+                        created = datetime.fromisoformat(created)
+                    except (ValueError, TypeError):
+                        created = datetime.now(timezone.utc)
                 task = TranscriptionTask(
                     id=str(uuid.uuid4()),
                     user_id=row[1],
@@ -731,8 +738,8 @@ with app.app_context():
                     transcript_text=row[5],
                     status='completed',
                     progress=100,
-                    started_at=row[6],
-                    completed_at=row[6],
+                    started_at=created,
+                    completed_at=created,
                 )
                 db.session.add(task)
         db.session.commit()
