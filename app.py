@@ -579,6 +579,7 @@ def get_status(task_id):
     if task.status == 'completed':
         result['download_txt'] = url_for('download_file', task_id=task_id, file_type='txt')
         result['download_srt'] = url_for('download_file', task_id=task_id, file_type='srt')
+        result['transcript_text'] = task.transcript_text or ''
         if task.transcription_time:
             result['actual_transcription_time'] = f"{task.transcription_time:.1f} seconds"
         if task.language:

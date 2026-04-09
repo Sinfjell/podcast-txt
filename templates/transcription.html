@@ -37,7 +37,8 @@
                     <span id="languageInfo" class="text-sm" style="opacity: 0.7;"></span>
                 </div>
                 <div class="flex-center" style="gap: 8px; justify-content: center;">
-                    <a href="#" id="downloadTxt" class="btn btn-primary">Download .txt</a>
+                    <button type="button" class="btn btn-primary" id="copyBtn" onclick="copyTranscript()">Copy transcript</button>
+                    <a href="#" id="downloadTxt" class="btn btn-ghost">Download .txt</a>
                     <a href="#" id="downloadSrt" class="btn btn-ghost">Download .srt</a>
                 </div>
             </div>
@@ -99,12 +100,23 @@ function updateUI(data) {
     }
 }
 
+var transcriptText = '';
+
 function showResult(data) {
     document.getElementById('resultContainer').style.display = 'block';
     document.getElementById('episodeTitle').textContent = data.episode_title || '';
     document.getElementById('languageInfo').textContent = data.language ? 'Language: ' + data.language : '';
     if (data.download_txt) document.getElementById('downloadTxt').href = data.download_txt;
     if (data.download_srt) document.getElementById('downloadSrt').href = data.download_srt;
+    if (data.transcript_text) transcriptText = data.transcript_text;
+}
+
+function copyTranscript() {
+    var btn = document.getElementById('copyBtn');
+    navigator.clipboard.writeText(transcriptText).then(function() {
+        btn.textContent = 'Copied!';
+        setTimeout(function() { btn.textContent = 'Copy transcript'; }, 2000);
+    });
 }
 
 function showError(msg) {
