@@ -30,7 +30,12 @@ ENV/
 
 # Temporary files
 temp_audio_*.mp3
+transcript_*.txt
+transcript_*.srt
 *.tmp
+
+# Database
+data/
 
 # IDE
 .vscode/

@@ -5,31 +5,87 @@
 {% block content %}
 <div class="row justify-content-center">
     <div class="col-md-8">
+        <!-- Saved feeds quick access -->
+        {% if current_user.is_authenticated and saved_feeds %}
+        <div class="card mb-4 border-success">
+            <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="fas fa-star"></i> Quick Access</h5>
+                <a href="{{ url_for('feeds') }}" class="btn btn-sm btn-outline-light">Manage feeds</a>
+            </div>
+            <div class="card-body p-2">
+                <div class="list-group list-group-flush">
+                    {% for feed in saved_feeds %}
+                    <a href="{{ url_for('use_feed', feed_id=feed.id) }}"
+                       class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+                        <span><i class="fas fa-rss text-warning me-2"></i> {{ feed.name }}</span>
+                        <i class="fas fa-chevron-right text-muted"></i>
+                    </a>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Search by name -->
+        <div class="card mb-4 border-primary">
+            <div class="card-header bg-primary text-white">
+                <h3 class="card-title mb-0">
+                    <i class="fas fa-search"></i> Find a Podcast
+                </h3>
+            </div>
+            <div class="card-body">
+                <div class="input-group mb-2">
+                    <input type="text" class="form-control form-control-lg" id="podcastSearch"
+                           placeholder="Search by podcast name..." autocomplete="off">
+                    <button class="btn btn-primary" type="button" id="searchBtn">
+                        <i class="fas fa-search"></i> Search
+                    </button>
+                </div>
+                <div class="form-text mb-2">
+                    Works with any podcast on Spotify, Apple Podcasts, or any other platform.
+                </div>
+                <div id="searchResults"></div>
+            </div>
+        </div>
+
+        <!-- Or enter RSS URL directly -->
         <div class="card">
             <div class="card-header">
-                <h3 class="card-title mb-0">
-                    <i class="fas fa-rss"></i> Enter Podcast RSS Feed
-                </h3>
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-rss"></i> Or enter RSS URL directly
+                </h5>
             </div>
             <div class="card-body">
                 <form method="POST" action="{{ url_for('parse_rss') }}">
                     <div class="mb-3">
-                        <label for="rss_url" class="form-label">RSS Feed URL</label>
-                        <input type="url" class="form-control" id="rss_url" name="rss_url" 
+                        <input type="url" class="form-control" id="rss_url" name="rss_url"
                                placeholder="https://example.com/podcast/feed.xml" required>
                         <div class="form-text">
-                            Enter the RSS feed URL of the podcast you want to transcribe.
+                            Already have the RSS feed URL?
                             <a href="/rss-help" class="text-primary ms-2">
-                                <i class="fas fa-question-circle"></i> Need help finding RSS URLs?
+                                <i class="fas fa-question-circle"></i> Help
                             </a>
                         </div>
                     </div>
-                    <button type="submit" class="btn btn-primary">
-                        <i class="fas fa-search"></i> Get Episodes
+                    <button type="submit" class="btn btn-outline-primary">
+                        <i class="fas fa-arrow-right"></i> Get Episodes
                     </button>
                 </form>
             </div>
         </div>
+
+        {% if not current_user.is_authenticated %}
+        <div class="card mt-4 border-info">
+            <div class="card-body text-center">
+                <i class="fas fa-user-plus fa-2x text-info mb-2"></i>
+                <h5>Create a free account</h5>
+                <p class="text-muted mb-2">Save your favorite feeds, use your own API key, and keep transcription history.</p>
+                <a href="{{ url_for('register') }}" class="btn btn-info">Register</a>
+                <span class="mx-2 text-muted">or</span>
+                <a href="{{ url_for('login') }}" class="btn btn-outline-info">Log in</a>
+            </div>
+        </div>
+        {% endif %}
 
         <div class="card mt-4">
             <div class="card-header">
@@ -39,151 +95,140 @@
             </div>
             <div class="card-body">
                 <ol>
-                    <li>Enter the RSS feed URL of your podcast</li>
+                    <li><strong>Search</strong> for any podcast by name</li>
                     <li>Select the episode you want to transcribe</li>
                     <li>Wait for the transcription to complete</li>
                     <li>Download the transcript and subtitle files</li>
                 </ol>
-                <p class="text-muted">
-                    <strong>Note:</strong> The first run may take longer as the AI model needs to be downloaded (~3GB).
-                </p>
-            </div>
-        </div>
-
-        <!-- Apple Podcasts URL Converter -->
-        <div class="card mt-4 border-primary">
-            <div class="card-header bg-primary text-white">
-                <h5 class="card-title mb-0">
-                    <i class="fab fa-apple me-2"></i> Got an Apple Podcasts URL? Convert it to RSS!
-                </h5>
-            </div>
-            <div class="card-body">
-                <p class="mb-3">
-                    If you found a podcast on Apple Podcasts, just paste the URL below and we'll convert it to an RSS feed for you!
-                </p>
-                
-                <div class="row">
-                    <div class="col-md-8">
-                        <div class="input-group">
-                            <input type="text" id="appleUrlInput" class="form-control" 
-                                   placeholder="https://podcasts.apple.com/us/podcast/..." 
-                                   value="https://podcasts.apple.com/us/podcast/ness/id1766283329">
-                            <button class="btn btn-primary" type="button" onclick="convertAppleUrl()">
-                                <i class="fas fa-magic me-1"></i>Convert to RSS
-                            </button>
-                        </div>
-                    </div>
-                    <div class="col-md-4">
-                        <div id="conversionResult" style="display: none;"></div>
-                    </div>
-                </div>
-                
-                <div class="mt-3">
-                    <small class="text-muted">
-                        <i class="fas fa-info-circle me-1"></i>
-                        Works with any Apple Podcasts URL. The converted RSS URL can be used directly in the form above!
-                    </small>
-                </div>
-            </div>
-        </div>
-
-        <div class="card mt-4 border-info">
-            <div class="card-header bg-info text-white">
-                <h5 class="card-title mb-0">
-                    <i class="fas fa-lightbulb"></i> Need help finding other RSS URLs?
-                </h5>
-            </div>
-            <div class="card-body">
-                <p class="mb-3">
-                    For Spotify, Google Podcasts, or other platforms, you'll need to find the original RSS feed. 
-                    Visit our comprehensive guide to learn how.
-                </p>
-                <div class="text-center">
-                    <a href="/rss-help" class="btn btn-info">
-                        <i class="fas fa-question-circle me-2"></i>
-                        Complete RSS Guide
-                    </a>
-                </div>
             </div>
         </div>
     </div>
 </div>
+{% endblock %}
 
+{% block scripts %}
 <script>
-function convertAppleUrl() {
-    const input = document.getElementById('appleUrlInput');
-    const resultDiv = document.getElementById('conversionResult');
-    const url = input.value.trim();
-    
-    if (!url) {
-        showResult('Please enter an Apple Podcasts URL', 'warning');
-        return;
-    }
-    
-    if (!url.includes('podcasts.apple.com')) {
-        showResult('Please enter a valid Apple Podcasts URL', 'danger');
-        return;
-    }
-    
-    // Show loading
-    showResult('Converting...', 'info', true);
-    
-    // Make API call
-    fetch('/convert-apple-url', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ apple_url: url })
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            showResult(`
-                <div class="alert alert-success p-2">
-                    <h6><i class="fas fa-check-circle me-2"></i>Success!</h6>
-                    <p class="mb-2 small">RSS Feed URL:</p>
-                    <div class="input-group input-group-sm">
-                        <input type="text" class="form-control form-control-sm" value="${data.rss_url}" readonly>
-                        <button class="btn btn-outline-secondary btn-sm" type="button" onclick="copyToClipboard('${data.rss_url}')">
-                            <i class="fas fa-copy"></i>
-                        </button>
-                    </div>
-                    <small class="text-muted mt-1 d-block">Copy this RSS URL and paste it in the form above!</small>
-                </div>
-            `, 'success');
-        } else {
-            showResult(`<div class="alert alert-danger p-2"><i class="fas fa-exclamation-triangle me-2"></i>Error: ${data.error}</div>`, 'danger');
+(function() {
+    var searchInput = document.getElementById('podcastSearch');
+    var searchBtn = document.getElementById('searchBtn');
+    var resultsDiv = document.getElementById('searchResults');
+    var debounceTimer = null;
+
+    function doSearch() {
+        var query = searchInput.value.trim();
+        if (query.length < 2) {
+            resultsDiv.textContent = '';
+            return;
         }
-    })
-    .catch(error => {
-        showResult(`<div class="alert alert-danger p-2"><i class="fas fa-exclamation-triangle me-2"></i>Error: ${error.message}</div>`, 'danger');
-    });
-}
 
-function showResult(message, type, isLoading = false) {
-    const resultDiv = document.getElementById('conversionResult');
-    resultDiv.innerHTML = message;
-    resultDiv.className = isLoading ? 'text-info' : '';
-    resultDiv.style.display = 'block';
-}
+        resultsDiv.textContent = 'Searching...';
+        resultsDiv.className = 'text-muted';
 
-function copyToClipboard(text) {
-    navigator.clipboard.writeText(text).then(() => {
-        // Show success message
-        const button = event.target.closest('button');
-        const originalHTML = button.innerHTML;
-        button.innerHTML = '<i class="fas fa-check"></i>';
-        button.classList.remove('btn-outline-secondary');
-        button.classList.add('btn-success');
-        
-        setTimeout(() => {
-            button.innerHTML = originalHTML;
-            button.classList.remove('btn-success');
-            button.classList.add('btn-outline-secondary');
-        }, 2000);
+        fetch('/search-podcasts?q=' + encodeURIComponent(query))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                // Clear
+                while (resultsDiv.firstChild) {
+                    resultsDiv.removeChild(resultsDiv.firstChild);
+                }
+                resultsDiv.className = '';
+
+                if (!data.results || data.results.length === 0) {
+                    resultsDiv.textContent = 'No podcasts found. Try a different search term.';
+                    resultsDiv.className = 'text-muted';
+                    return;
+                }
+
+                var list = document.createElement('div');
+                list.className = 'list-group';
+
+                data.results.forEach(function(podcast) {
+                    var item = document.createElement('div');
+                    item.className = 'list-group-item list-group-item-action d-flex align-items-center';
+                    item.style.cursor = 'pointer';
+
+                    if (podcast.artwork) {
+                        var img = document.createElement('img');
+                        img.src = podcast.artwork;
+                        img.alt = podcast.name;
+                        img.width = 50;
+                        img.height = 50;
+                        img.className = 'rounded me-3';
+                        img.style.objectFit = 'cover';
+                        item.appendChild(img);
+                    }
+
+                    var info = document.createElement('div');
+                    info.className = 'flex-grow-1';
+
+                    var title = document.createElement('strong');
+                    title.textContent = podcast.name;
+                    info.appendChild(title);
+
+                    if (podcast.artist) {
+                        var br = document.createElement('br');
+                        info.appendChild(br);
+                        var artist = document.createElement('small');
+                        artist.className = 'text-muted';
+                        artist.textContent = podcast.artist;
+                        if (podcast.genre) {
+                            artist.textContent += ' \u00B7 ' + podcast.genre;
+                        }
+                        info.appendChild(artist);
+                    }
+
+                    item.appendChild(info);
+
+                    var btn = document.createElement('span');
+                    btn.className = 'badge bg-primary';
+                    btn.textContent = 'Select';
+                    item.appendChild(btn);
+
+                    // Click handler — submit the RSS URL to parse_rss
+                    (function(feedUrl) {
+                        item.addEventListener('click', function() {
+                            // Create a form and submit
+                            var form = document.createElement('form');
+                            form.method = 'POST';
+                            form.action = '{{ url_for("parse_rss") }}';
+                            var input = document.createElement('input');
+                            input.type = 'hidden';
+                            input.name = 'rss_url';
+                            input.value = feedUrl;
+                            form.appendChild(input);
+                            document.body.appendChild(form);
+                            form.submit();
+                        });
+                    })(podcast.feed_url);
+
+                    list.appendChild(item);
+                });
+
+                resultsDiv.appendChild(list);
+            })
+            .catch(function(err) {
+                resultsDiv.textContent = 'Search failed: ' + err.message;
+                resultsDiv.className = 'text-danger';
+            });
+    }
+
+    searchBtn.addEventListener('click', doSearch);
+
+    searchInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            doSearch();
+            return;
+        }
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(doSearch, 400);
     });
-}
+
+    // Also trigger on input (covers paste, etc.)
+    searchInput.addEventListener('input', function() {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(doSearch, 400);
+    });
+})();
 </script>
-
 {% endblock %}
