@@ -1,71 +1,48 @@
 {% extends "base.html" %}
-{% block title %}My Feeds - Podcast Transcriber{% endblock %}
+{% block title %}My Feeds — Podskrift{% endblock %}
 
 {% block content %}
-<div class="row justify-content-center">
-    <div class="col-md-8">
-        <div class="card mb-4">
-            <div class="card-header">
-                <h4 class="mb-0"><i class="fas fa-plus-circle"></i> Add Feed</h4>
+<h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">My Feeds</h2>
+
+<div class="card">
+    <div class="card-header">
+        <h5>Add Feed</h5>
+    </div>
+    <div class="card-body">
+        <form method="POST" action="{{ url_for('add_feed') }}" style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <input type="text" class="form-input" name="name" placeholder="Name" required style="flex: 1; min-width: 120px;">
+            <input type="url" class="form-input" name="rss_url" placeholder="RSS feed URL" required style="flex: 2; min-width: 200px;">
+            <button type="submit" class="btn btn-primary">Save</button>
+        </form>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h5>Saved Feeds</h5>
+        <span class="badge">{{ feeds|length }}</span>
+    </div>
+    {% if feeds %}
+        {% for feed in feeds %}
+        <div class="list-item">
+            <div class="list-item-text">
+                <div class="list-item-title">{{ feed.name }}</div>
+                <div class="list-item-sub">{{ feed.rss_url }}</div>
             </div>
-            <div class="card-body">
-                <form method="POST" action="{{ url_for('add_feed') }}">
-                    <div class="row g-2 align-items-end">
-                        <div class="col-md-4">
-                            <label for="name" class="form-label">Name</label>
-                            <input type="text" class="form-control" id="name" name="name"
-                                   placeholder="e.g. Ness Podcast" required>
-                        </div>
-                        <div class="col-md-6">
-                            <label for="rss_url" class="form-label">RSS Feed URL</label>
-                            <input type="url" class="form-control" id="rss_url" name="rss_url"
-                                   placeholder="https://feed.example.com/rss" required>
-                        </div>
-                        <div class="col-md-2">
-                            <button type="submit" class="btn btn-primary w-100">
-                                <i class="fas fa-plus"></i> Save
-                            </button>
-                        </div>
-                    </div>
+            <div class="list-item-actions">
+                <a href="{{ url_for('use_feed', feed_id=feed.id) }}" class="btn btn-sm btn-accent">Use</a>
+                <form method="POST" action="{{ url_for('delete_feed', feed_id=feed.id) }}" style="display: inline;">
+                    <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Remove this feed?')">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                    </button>
                 </form>
             </div>
         </div>
-
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <h4 class="mb-0"><i class="fas fa-rss"></i> Saved Feeds</h4>
-                <span class="badge bg-secondary">{{ feeds|length }}</span>
-            </div>
-            <div class="card-body">
-                {% if feeds %}
-                <div class="list-group">
-                    {% for feed in feeds %}
-                    <div class="list-group-item feed-card d-flex justify-content-between align-items-center">
-                        <div>
-                            <h6 class="mb-1">{{ feed.name }}</h6>
-                            <small class="text-muted">{{ feed.rss_url }}</small>
-                        </div>
-                        <div class="btn-group">
-                            <a href="{{ url_for('use_feed', feed_id=feed.id) }}" class="btn btn-sm btn-primary">
-                                <i class="fas fa-play"></i> Use
-                            </a>
-                            <form method="POST" action="{{ url_for('delete_feed', feed_id=feed.id) }}" class="d-inline">
-                                <button type="submit" class="btn btn-sm btn-outline-danger"
-                                        onclick="return confirm('Remove this feed?')">
-                                    <i class="fas fa-trash"></i>
-                                </button>
-                            </form>
-                        </div>
-                    </div>
-                    {% endfor %}
-                </div>
-                {% else %}
-                <p class="text-muted text-center mb-0">
-                    No saved feeds yet. Add your first feed above!
-                </p>
-                {% endif %}
-            </div>
+        {% endfor %}
+    {% else %}
+        <div class="card-body text-center text-muted">
+            No saved feeds yet.
         </div>
-    </div>
+    {% endif %}
 </div>
 {% endblock %}

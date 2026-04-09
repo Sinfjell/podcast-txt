@@ -1,101 +1,46 @@
 {% extends "base.html" %}
-
-{% block title %}How to Find RSS URLs for Podcasts{% endblock %}
+{% block title %}Help — Podskrift{% endblock %}
 
 {% block content %}
-<div class="container mt-5">
-    <div class="row justify-content-center">
-        <div class="col-lg-8">
-            <div class="card">
-                <div class="card-header bg-primary text-white">
-                    <h2 class="mb-0">
-                        <i class="fas fa-podcast me-2"></i>
-                        How to Find RSS URLs for Podcasts
-                    </h2>
-                </div>
-                <div class="card-body">
-                    <div class="alert alert-info">
-                        <h5><i class="fas fa-lightbulb me-2"></i>Quick Start</h5>
-                        <p class="mb-0">Found a podcast on Spotify, Apple Podcasts, or another app? Here's how to find the RSS URL you need.</p>
-                    </div>
+<div style="max-width: 600px; margin: 24px auto;">
+    <h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">Finding RSS Feeds</h2>
 
-                    <div class="row">
-                        <!-- Apple Podcasts -->
-                        <div class="col-md-6 mb-4">
-                            <div class="card h-100 border-success">
-                                <div class="card-header bg-success text-white">
-                                    <h5 class="mb-0"><i class="fab fa-apple me-2"></i>Apple Podcasts</h5>
-                                </div>
-                                <div class="card-body">
-                                    <ol class="mb-3">
-                                        <li>Open Apple Podcasts or visit <a href="https://podcasts.apple.com" target="_blank">podcasts.apple.com</a></li>
-                                        <li>Find the podcast and click "Share" > "Copy Link"</li>
-                                        <li>Paste it on the home page — we convert it automatically!</li>
-                                    </ol>
-                                </div>
-                            </div>
-                        </div>
+    <div class="card">
+        <div class="card-header">
+            <h5>The easy way</h5>
+        </div>
+        <div class="card-body">
+            <p style="margin-bottom: 12px;">Just use the <strong>search bar</strong> on the home page. Type the podcast name and we'll find the feed for you.</p>
+            <a href="{{ url_for('index') }}" class="btn btn-accent">Go to search</a>
+        </div>
+    </div>
 
-                        <!-- Spotify -->
-                        <div class="col-md-6 mb-4">
-                            <div class="card h-100 border-warning">
-                                <div class="card-header bg-warning text-dark">
-                                    <h5 class="mb-0"><i class="fab fa-spotify me-2"></i>Spotify</h5>
-                                </div>
-                                <div class="card-body">
-                                    <div class="alert alert-warning">
-                                        <p class="mb-2">Spotify URLs are <strong>not</strong> RSS feeds.</p>
-                                        <p class="mb-0">You need the original RSS feed from the podcast's website.</p>
-                                    </div>
-                                    <ol class="mb-0">
-                                        <li>Visit the podcast's official website</li>
-                                        <li>Look for "RSS", "Feed", or "Subscribe" links</li>
-                                        <li>Copy the RSS feed URL</li>
-                                    </ol>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="row">
-                        <!-- Generic -->
-                        <div class="col-md-6 mb-4">
-                            <div class="card h-100 border-secondary">
-                                <div class="card-header bg-secondary text-white">
-                                    <h5 class="mb-0"><i class="fas fa-search me-2"></i>Other Platforms</h5>
-                                </div>
-                                <div class="card-body">
-                                    <ol class="mb-0">
-                                        <li>Visit the podcast's official website</li>
-                                        <li>Look for "RSS", "Feed", or "Subscribe" links</li>
-                                        <li>Right-click and "Copy link address"</li>
-                                        <li>URLs usually end with <code>.rss</code> or <code>.xml</code></li>
-                                    </ol>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Pro Tips -->
-                        <div class="col-md-6 mb-4">
-                            <div class="card h-100 border-primary">
-                                <div class="card-header bg-primary text-white">
-                                    <h5 class="mb-0"><i class="fas fa-star me-2"></i>Pro Tips</h5>
-                                </div>
-                                <div class="card-body">
-                                    <p><strong>Works:</strong> Direct RSS feeds, Apple Podcasts URLs (converted), Simplecast, Anchor feeds</p>
-                                    <p class="mb-0"><strong>Doesn't work:</strong> Spotify URLs, YouTube URLs, social media links</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="text-center mt-3">
-                        <a href="{{ url_for('index') }}" class="btn btn-primary btn-lg">
-                            <i class="fas fa-arrow-left me-2"></i>Back to Transcriber
-                        </a>
-                    </div>
-                </div>
+    <div class="card">
+        <div class="card-header">
+            <h5>Manual methods</h5>
+        </div>
+        <div class="card-body">
+            <div style="margin-bottom: 16px;">
+                <p style="font-weight: 600; margin-bottom: 4px;">Apple Podcasts</p>
+                <p class="text-muted text-sm">Copy the podcast URL, paste it in our search — we convert Apple URLs automatically.</p>
             </div>
+            <div style="margin-bottom: 16px;">
+                <p style="font-weight: 600; margin-bottom: 4px;">Spotify</p>
+                <p class="text-muted text-sm">Spotify doesn't expose RSS feeds. Use the search bar instead — it finds the same podcast via iTunes.</p>
+            </div>
+            <div>
+                <p style="font-weight: 600; margin-bottom: 4px;">Direct RSS</p>
+                <p class="text-muted text-sm">If you have the RSS URL (from the podcast's website), paste it directly in the RSS field on the home page.</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <h5>What you need</h5>
+        </div>
+        <div class="card-body">
+            <p class="text-muted text-sm">An <a href="https://platform.openai.com/api-keys" target="_blank">OpenAI API key</a>. Transcription uses the Whisper API — you pay OpenAI directly at ~$0.006/minute of audio. A typical 1-hour episode costs about $0.36.</p>
         </div>
     </div>
 </div>

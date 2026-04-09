@@ -1,47 +1,23 @@
 {% extends "base.html" %}
-{% block title %}History - Podcast Transcriber{% endblock %}
+{% block title %}History — Podskrift{% endblock %}
 
 {% block content %}
-<div class="row justify-content-center">
-    <div class="col-md-8">
-        <div class="card">
-            <div class="card-header">
-                <h4 class="mb-0"><i class="fas fa-history"></i> Transcription History</h4>
-            </div>
-            <div class="card-body">
-                {% if transcriptions %}
-                <div class="table-responsive">
-                    <table class="table table-hover">
-                        <thead>
-                            <tr>
-                                <th>Episode</th>
-                                <th>Language</th>
-                                <th>Date</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {% for t in transcriptions %}
-                            <tr>
-                                <td>
-                                    <strong>{{ t.episode_title }}</strong>
-                                    {% if t.rss_url %}
-                                    <br><small class="text-muted">{{ t.rss_url[:60] }}{% if t.rss_url|length > 60 %}...{% endif %}</small>
-                                    {% endif %}
-                                </td>
-                                <td>{{ t.language or '—' }}</td>
-                                <td>{{ t.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-                {% else %}
-                <p class="text-muted text-center mb-0">
-                    No transcriptions yet. Start by transcribing an episode!
-                </p>
-                {% endif %}
+<h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">Transcription History</h2>
+
+<div class="card">
+    {% if transcriptions %}
+        {% for t in transcriptions %}
+        <div class="list-item">
+            <div class="list-item-text">
+                <div class="list-item-title">{{ t.episode_title }}</div>
+                <div class="list-item-sub">{{ t.created_at.strftime('%Y-%m-%d %H:%M') }}{% if t.language %} &middot; {{ t.language }}{% endif %}</div>
             </div>
         </div>
-    </div>
+        {% endfor %}
+    {% else %}
+        <div class="card-body text-center text-muted">
+            No transcriptions yet. Start by transcribing an episode.
+        </div>
+    {% endif %}
 </div>
 {% endblock %}

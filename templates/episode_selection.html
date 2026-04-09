@@ -1,114 +1,95 @@
 {% extends "base.html" %}
-
-{% block title %}Select Episode - Podcast Transcriber{% endblock %}
+{% block title %}Select Episode — Podskrift{% endblock %}
 
 {% block content %}
-<div class="row">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <h3 class="card-title mb-0">
-                    <i class="fas fa-list"></i> Select Episode
-                    {% if feed_name %}<small class="text-muted ms-2">{{ feed_name }}</small>{% endif %}
-                </h3>
-                <div>
-                    {% if current_user.is_authenticated %}
-                    <button type="button" class="btn btn-outline-success btn-sm me-2" data-bs-toggle="modal" data-bs-target="#saveFeedModal">
-                        <i class="fas fa-save"></i> Save Feed
-                    </button>
-                    {% endif %}
-                    <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm">
-                        <i class="fas fa-arrow-left"></i> Back
-                    </a>
-                </div>
-            </div>
-            <div class="card-body">
-                <form id="episodeForm" method="POST" action="{{ url_for('start_transcription') }}">
-                    <input type="hidden" name="rss_url" value="{{ rss_url }}">
-                    <input type="hidden" name="episode_index" id="episode_index" value="">
-
-                    <div class="row">
-                        {% for episode in episodes %}
-                        <div class="col-md-6 col-lg-4 mb-3">
-                            <div class="card episode-card h-100" data-episode-index="{{ episode.index }}" data-listener-attached="true">
-                                <div class="card-body">
-                                    <div class="form-check">
-                                        <input class="form-check-input" type="radio" name="episode"
-                                               value="{{ episode.index }}" id="episode_{{ episode.index }}">
-                                        <label class="form-check-label w-100" for="episode_{{ episode.index }}">
-                                            <h6 class="card-title">{{ episode.title }}</h6>
-                                            <p class="card-text text-muted small">
-                                                <i class="fas fa-calendar"></i> {{ episode.published }}
-                                            </p>
-                                            {% if episode.description %}
-                                            <p class="card-text small">{{ episode.description }}</p>
-                                            {% endif %}
-                                        </label>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        {% endfor %}
-                    </div>
-
-                    {% if needs_api_key %}
-                    <div class="card border-warning mt-4 mb-3">
-                        <div class="card-body">
-                            <h6 class="card-title"><i class="fas fa-key text-warning"></i> OpenAI API Key Required</h6>
-                            <p class="card-text small text-muted mb-2">
-                                Paste your OpenAI API key to transcribe. Your key is used only for this transcription and is not stored.
-                                <a href="https://platform.openai.com/api-keys" target="_blank">Get a key</a>
-                            </p>
-                            <input type="password" class="form-control" id="openai_key" name="openai_key"
-                                   placeholder="sk-..." required>
-                        </div>
-                    </div>
-                    {% endif %}
-
-                    <div class="text-center mt-4">
-                        <button type="submit" class="btn btn-success btn-lg" id="transcribeBtn" disabled>
-                            <i class="fas fa-microphone"></i> Start Transcription
-                        </button>
-                    </div>
-
-                    {% if has_more %}
-                    <div class="text-center mt-3">
-                        <button type="button" class="btn btn-outline-primary" id="loadMoreBtn">
-                            <i class="fas fa-plus"></i> Load More Episodes ({{ all_episodes|length - episodes|length }} more)
-                        </button>
-                    </div>
-                    {% endif %}
-                </form>
-            </div>
-        </div>
+<div class="flex-between mb-2">
+    <div>
+        <h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em;">
+            Select Episode
+        </h2>
+        {% if feed_name %}
+        <p class="text-muted text-sm mt-1">{{ feed_name }}</p>
+        {% endif %}
+    </div>
+    <div class="flex-center" style="gap: 8px;">
+        {% if current_user.is_authenticated %}
+        <button type="button" class="btn btn-sm btn-ghost" id="saveFeedBtn">Save feed</button>
+        {% endif %}
+        <a href="{{ url_for('index') }}" class="btn btn-sm btn-ghost">Back</a>
     </div>
 </div>
 
-<!-- Save Feed Modal -->
-{% if current_user.is_authenticated %}
-<div class="modal fade" id="saveFeedModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <form method="POST" action="{{ url_for('add_feed') }}">
-                <div class="modal-header">
-                    <h5 class="modal-title"><i class="fas fa-save"></i> Save This Feed</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <input type="hidden" name="rss_url" value="{{ rss_url }}">
-                    <div class="mb-3">
-                        <label for="feedName" class="form-label">Feed Name</label>
-                        <input type="text" class="form-control" id="feedName" name="name" required
-                               placeholder="e.g. My Podcast">
-                    </div>
-                    <p class="text-muted small">URL: {{ rss_url }}</p>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-success">Save Feed</button>
-                </div>
-            </form>
+<form id="episodeForm" method="POST" action="{{ url_for('start_transcription') }}">
+    <input type="hidden" name="rss_url" value="{{ rss_url }}">
+    <input type="hidden" name="episode_index" id="episode_index" value="">
+
+    <div class="grid grid-2">
+        {% for episode in episodes %}
+        <div class="episode-card" data-episode-index="{{ episode.index }}" data-listener-attached="true">
+            <input type="radio" name="episode" value="{{ episode.index }}" id="ep_{{ episode.index }}" style="display: none;">
+            <div class="episode-title">{{ episode.title }}</div>
+            <div class="episode-meta">{{ episode.published }}</div>
+            {% if episode.description %}
+            <div class="episode-desc">{{ episode.description }}</div>
+            {% endif %}
         </div>
+        {% endfor %}
+    </div>
+
+    {% if needs_api_key %}
+    <div class="card mt-2" style="border-color: var(--accent-border);">
+        <div class="card-body">
+            <div class="flex-center gap-1 mb-1">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-bright)" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                <span style="font-weight: 600; font-size: 14px;">OpenAI API Key</span>
+            </div>
+            <input type="password" class="form-input" id="openai_key" name="openai_key"
+                   placeholder="sk-..." required>
+            <p class="form-hint">
+                Used only for this transcription, not stored.
+                <a href="https://platform.openai.com/api-keys" target="_blank">Get a key</a>
+            </p>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="text-center mt-3">
+        <button type="submit" class="btn btn-accent btn-lg" id="transcribeBtn" disabled>
+            Start Transcription
+        </button>
+    </div>
+
+    {% if has_more %}
+    <div class="text-center mt-2">
+        <button type="button" class="btn btn-ghost" id="loadMoreBtn">
+            Load {{ all_episodes|length - episodes|length }} more episodes
+        </button>
+    </div>
+    {% endif %}
+</form>
+
+<!-- Save Feed Dialog -->
+{% if current_user.is_authenticated %}
+<div id="saveFeedDialog" class="hidden" style="position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 200; display: none; align-items: center; justify-content: center;">
+    <div class="card" style="width: 400px; max-width: 90vw;">
+        <form method="POST" action="{{ url_for('add_feed') }}">
+            <div class="card-header">
+                <h5>Save this feed</h5>
+                <button type="button" class="alert-close" id="closeSaveDialog">&times;</button>
+            </div>
+            <div class="card-body">
+                <input type="hidden" name="rss_url" value="{{ rss_url }}">
+                <div class="form-group">
+                    <label class="form-label" for="feedName">Feed name</label>
+                    <input type="text" class="form-input" id="feedName" name="name" required placeholder="e.g. My Podcast">
+                </div>
+                <p class="text-muted text-sm">{{ rss_url }}</p>
+            </div>
+            <div style="padding: 0 20px 20px; display: flex; gap: 8px; justify-content: flex-end;">
+                <button type="button" class="btn btn-ghost" id="cancelSave">Cancel</button>
+                <button type="submit" class="btn btn-accent">Save</button>
+            </div>
+        </form>
     </div>
 </div>
 {% endif %}
@@ -124,8 +105,7 @@ document.addEventListener('DOMContentLoaded', function() {
     function selectCard(card) {
         episodeCards.forEach(function(c) { c.classList.remove('selected'); });
         card.classList.add('selected');
-        var radio = card.querySelector('input[type="radio"]');
-        radio.checked = true;
+        card.querySelector('input[type="radio"]').checked = true;
         transcribeBtn.disabled = false;
         episodeIndexInput.value = card.dataset.episodeIndex;
     }
@@ -136,94 +116,69 @@ document.addEventListener('DOMContentLoaded', function() {
 
     document.getElementById('episodeForm').addEventListener('submit', function(e) {
         e.preventDefault();
-        var selected = document.querySelector('input[name="episode"]:checked');
-        if (!selected) { alert('Please select an episode.'); return; }
-
+        if (!document.querySelector('input[name="episode"]:checked')) return;
         transcribeBtn.disabled = true;
         transcribeBtn.textContent = 'Starting...';
 
-        fetch('/start_transcription', {method: 'POST', body: new FormData(this)})
+        fetch('/start_transcription', { method: 'POST', body: new FormData(this) })
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data.task_id) {
                     window.location.href = '/transcription/' + data.task_id;
                 } else {
-                    alert(data.error || 'Error starting transcription');
+                    alert(data.error || 'Error');
                     transcribeBtn.disabled = false;
                     transcribeBtn.textContent = 'Start Transcription';
                 }
             })
-            .catch(function(err) {
-                alert('Error: ' + err.message);
+            .catch(function() {
                 transcribeBtn.disabled = false;
                 transcribeBtn.textContent = 'Start Transcription';
             });
     });
 
+    // Load more
     var loadMoreBtn = document.getElementById('loadMoreBtn');
     if (loadMoreBtn) {
         loadMoreBtn.addEventListener('click', function() {
             var allEpisodes = {{ all_episodes|tojson }};
             var currentCount = {{ episodes|length }};
-            var container = document.querySelector('.row');
-
+            var grid = document.querySelector('.grid');
             for (var i = currentCount; i < allEpisodes.length; i++) {
                 var ep = allEpisodes[i];
-                var col = document.createElement('div');
-                col.className = 'col-md-6 col-lg-4 mb-3';
-
                 var card = document.createElement('div');
-                card.className = 'card episode-card h-100';
+                card.className = 'episode-card';
                 card.dataset.episodeIndex = ep.index;
-
-                var body = document.createElement('div');
-                body.className = 'card-body';
-
-                var check = document.createElement('div');
-                check.className = 'form-check';
-
                 var radio = document.createElement('input');
-                radio.className = 'form-check-input';
-                radio.type = 'radio';
-                radio.name = 'episode';
-                radio.value = ep.index;
-                radio.id = 'episode_' + ep.index;
-
-                var label = document.createElement('label');
-                label.className = 'form-check-label w-100';
-                label.htmlFor = 'episode_' + ep.index;
-
-                var title = document.createElement('h6');
-                title.className = 'card-title';
-                title.textContent = ep.title;
-
-                var date = document.createElement('p');
-                date.className = 'card-text text-muted small';
-                date.textContent = ep.published;
-
-                label.appendChild(title);
-                label.appendChild(date);
-
+                radio.type = 'radio'; radio.name = 'episode'; radio.value = ep.index; radio.style.display = 'none';
+                card.appendChild(radio);
+                var title = document.createElement('div');
+                title.className = 'episode-title'; title.textContent = ep.title;
+                card.appendChild(title);
+                var meta = document.createElement('div');
+                meta.className = 'episode-meta'; meta.textContent = ep.published;
+                card.appendChild(meta);
                 if (ep.description) {
-                    var desc = document.createElement('p');
-                    desc.className = 'card-text small';
-                    desc.textContent = ep.description;
-                    label.appendChild(desc);
+                    var desc = document.createElement('div');
+                    desc.className = 'episode-desc'; desc.textContent = ep.description;
+                    card.appendChild(desc);
                 }
-
-                check.appendChild(radio);
-                check.appendChild(label);
-                body.appendChild(check);
-                card.appendChild(body);
-                col.appendChild(card);
-                container.appendChild(col);
-
                 card.addEventListener('click', function() { selectCard(this); });
+                grid.appendChild(card);
             }
-
             loadMoreBtn.style.display = 'none';
             episodeCards = document.querySelectorAll('.episode-card');
         });
+    }
+
+    // Save feed dialog
+    var saveBtn = document.getElementById('saveFeedBtn');
+    var dialog = document.getElementById('saveFeedDialog');
+    if (saveBtn && dialog) {
+        saveBtn.addEventListener('click', function() { dialog.style.display = 'flex'; });
+        document.getElementById('closeSaveDialog').addEventListener('click', function() { dialog.style.display = 'none'; });
+        document.getElementById('cancelSave').addEventListener('click', function() { dialog.style.display = 'none'; });
+        dialog.addEventListener('click', function(e) { if (e.target === dialog) dialog.style.display = 'none'; });
     }
 });
 </script>
