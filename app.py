@@ -741,10 +741,16 @@ def search_podcasts():
 with app.app_context():
     db.create_all()
 
-    # One-time migration: move old transcriptions table to transcription_tasks
+    # Add columns that may be missing on existing databases
     from sqlalchemy import inspect, text
     from datetime import datetime, timezone
     inspector = inspect(db.engine)
+    existing_cols = {c['name'] for c in inspector.get_columns('transcription_tasks')}
+    if 'audio_duration' not in existing_cols:
+        db.session.execute(text('ALTER TABLE transcription_tasks ADD COLUMN audio_duration FLOAT'))
+        db.session.commit()
+
+    # One-time migration: move old transcriptions table to transcription_tasks
     if 'transcriptions' in inspector.get_table_names():
         rows = db.session.execute(text(
             'SELECT id, user_id, episode_title, rss_url, language, transcript_text, created_at '
