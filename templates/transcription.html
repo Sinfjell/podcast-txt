@@ -2,7 +2,7 @@
 {% block title %}Transcribing — Podskrift{% endblock %}
 
 {% block content %}
-<div style="max-width: 500px; margin: 40px auto;">
+<div style="max-width: 700px; margin: 40px auto;">
     <div class="card">
         <div class="card-header">
             <h3>Transcription</h3>
@@ -57,18 +57,35 @@
 {% block scripts %}
 <script>
 var taskId = '{{ task_id }}';
+var retryCount = 0;
+var maxRetries = 5;
 
 function updateStatus() {
     fetch('/status/' + taskId)
-        .then(function(r) { return r.json(); })
+        .then(function(r) {
+            if (!r.ok && r.status === 401) {
+                window.location.href = '/login?next=' + encodeURIComponent(window.location.pathname);
+                return;
+            }
+            return r.json();
+        })
         .then(function(data) {
+            if (!data) return;
+            retryCount = 0;
             if (data.error && !data.status) { showError(data.error); return; }
             updateUI(data);
             if (data.status !== 'completed' && data.status !== 'error') {
-                setTimeout(updateStatus, 1000);
+                setTimeout(updateStatus, 2000);
             }
         })
-        .catch(function() { showError('Lost connection'); });
+        .catch(function() {
+            retryCount++;
+            if (retryCount <= maxRetries) {
+                setTimeout(updateStatus, 3000 * retryCount);
+            } else {
+                showError('Lost connection. Refresh to check status.');
+            }
+        });
 }
 
 function updateUI(data) {
