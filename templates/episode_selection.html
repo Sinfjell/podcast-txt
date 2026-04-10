@@ -28,7 +28,11 @@
         <div class="episode-card" data-episode-index="{{ episode.index }}" data-listener-attached="true">
             <input type="radio" name="episode" value="{{ episode.index }}" id="ep_{{ episode.index }}" style="display: none;">
             <div class="episode-title">{{ episode.title }}</div>
-            <div class="episode-meta">{{ episode.published }}</div>
+            <div class="episode-meta">
+                {{ episode.published }}
+                {% if episode.duration_min %} · {{ episode.duration_min }} min{% endif %}
+                {% if episode.estimated_cost %} · ~${{ "%.3f"|format(episode.estimated_cost) }}{% endif %}
+            </div>
             {% if episode.description %}
             <div class="episode-desc">{{ episode.description }}</div>
             {% endif %}
@@ -150,7 +154,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 title.className = 'episode-title'; title.textContent = ep.title;
                 card.appendChild(title);
                 var meta = document.createElement('div');
-                meta.className = 'episode-meta'; meta.textContent = ep.published;
+                meta.className = 'episode-meta';
+                var metaText = ep.published;
+                if (ep.duration_min) metaText += ' · ' + ep.duration_min + ' min';
+                if (ep.estimated_cost) metaText += ' · ~$' + ep.estimated_cost.toFixed(3);
+                meta.textContent = metaText;
                 card.appendChild(meta);
                 if (ep.description) {
                     var desc = document.createElement('div');

@@ -281,6 +281,26 @@ def convert_apple_podcasts_url_to_rss(apple_url):
         return None, f"Error converting URL: {e}"
 
 
+def _parse_duration(raw):
+    """Parse itunes:duration which can be seconds, MM:SS, or HH:MM:SS."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    if ':' in raw:
+        parts = raw.split(':')
+        try:
+            if len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            if len(parts) == 2:
+                return int(parts[0]) * 60 + int(parts[1])
+        except ValueError:
+            return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def get_episodes_from_rss(rss_url):
     """Parse RSS feed and return episode list."""
     try:
@@ -299,12 +319,16 @@ def get_episodes_from_rss(rss_url):
 
             if audio_url:
                 desc = entry.get('description', '')
+                duration_secs = _parse_duration(entry.get('itunes_duration', ''))
+                duration_min = duration_secs / 60 if duration_secs else None
                 episodes.append({
                     'index': i,
                     'title': entry.title,
                     'published': entry.get('published', 'Unknown date'),
                     'audio_url': audio_url,
-                    'description': desc[:200] + '...' if len(desc) > 200 else desc
+                    'description': desc[:200] + '...' if len(desc) > 200 else desc,
+                    'duration_min': round(duration_min, 1) if duration_min else None,
+                    'estimated_cost': round(duration_min * 0.006, 3) if duration_min else None,
                 })
 
         return episodes, None
