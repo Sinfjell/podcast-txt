@@ -13,6 +13,7 @@
                 <div class="list-item-sub">{{ (t.completed_at or t.started_at).strftime('%Y-%m-%d %H:%M') }}{% if t.language %} &middot; {{ t.language }}{% endif %}</div>
             </div>
             <div class="flex-center" style="gap: 8px;">
+                <button type="button" class="btn btn-sm btn-ghost" onclick="copyTranscript(this, '{{ t.id }}')">Copy</button>
                 <a href="{{ url_for('download_file', task_id=t.id, file_type='txt') }}" class="btn btn-sm btn-ghost">TXT</a>
                 <a href="{{ url_for('download_file', task_id=t.id, file_type='srt') }}" class="btn btn-sm btn-ghost">SRT</a>
             </div>
@@ -24,4 +25,19 @@
         </div>
     {% endif %}
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function copyTranscript(btn, taskId) {
+    fetch('/download/' + taskId + '/txt')
+        .then(function(r) { return r.text(); })
+        .then(function(text) {
+            navigator.clipboard.writeText(text).then(function() {
+                btn.textContent = 'Copied!';
+                setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
+            });
+        });
+}
+</script>
 {% endblock %}
