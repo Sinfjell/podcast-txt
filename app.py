@@ -236,6 +236,7 @@ def transcribe_audio(audio_file, task_id, openai_client):
         transcript_text=full_text,
         segments_json=json.dumps(all_segments) if all_segments else None,
         language='no',
+        audio_duration=audio_duration,
         transcription_time=elapsed,
         completed_at=datetime.now(timezone.utc),
     )
@@ -669,7 +670,11 @@ def history():
     tasks = TranscriptionTask.query.filter_by(
         user_id=current_user.id, status='completed'
     ).order_by(TranscriptionTask.completed_at.desc()).limit(50).all()
-    return render_template('history.html', transcriptions=tasks)
+    total_cost = sum(
+        (t.audio_duration / 60) * 0.006
+        for t in tasks if t.audio_duration
+    )
+    return render_template('history.html', transcriptions=tasks, total_cost=total_cost)
 
 
 @app.route('/rss-help')

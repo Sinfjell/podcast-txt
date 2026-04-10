@@ -2,17 +2,26 @@
 {% block title %}History — Podskrift{% endblock %}
 
 {% block content %}
-<h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">Transcription History</h2>
+<div class="flex-between mb-2">
+    <h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em;">Transcription History</h2>
+    {% if total_cost > 0 %}
+    <span class="text-sm text-muted">Total estimated cost: ~${{ "%.2f"|format(total_cost) }}</span>
+    {% endif %}
+</div>
 
 <div class="card">
     {% if transcriptions %}
         {% for t in transcriptions %}
-        <div class="list-item">
-            <div class="list-item-text">
+        <div class="list-item" style="gap: 16px;">
+            <div class="list-item-text" style="min-width: 0; flex: 1;">
                 <div class="list-item-title">{{ t.episode_title }}</div>
-                <div class="list-item-sub">{{ (t.completed_at or t.started_at).strftime('%Y-%m-%d %H:%M') }}{% if t.language %} &middot; {{ t.language }}{% endif %}</div>
+                <div class="list-item-sub">
+                    {{ (t.completed_at or t.started_at).strftime('%Y-%m-%d %H:%M') }}
+                    {% if t.audio_duration %} · {{ (t.audio_duration / 60)|round(1) }} min · ~${{ "%.3f"|format(t.audio_duration / 60 * 0.006) }}{% endif %}
+                    {% if t.language %} · {{ t.language }}{% endif %}
+                </div>
             </div>
-            <div class="flex-center" style="gap: 8px;">
+            <div class="flex-center" style="gap: 6px; flex-shrink: 0;">
                 <button type="button" class="btn btn-sm btn-ghost" onclick="copyTranscript(this, '{{ t.id }}')">Copy</button>
                 <a href="{{ url_for('download_file', task_id=t.id, file_type='txt') }}" class="btn btn-sm btn-ghost">TXT</a>
                 <a href="{{ url_for('download_file', task_id=t.id, file_type='srt') }}" class="btn btn-sm btn-ghost">SRT</a>

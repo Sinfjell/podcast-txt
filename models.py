@@ -56,6 +56,7 @@ class TranscriptionTask(db.Model):
     transcript_text = db.Column(db.Text, nullable=True)
     segments_json = db.Column(db.Text, nullable=True)
     language = db.Column(db.String(10), nullable=True)
+    audio_duration = db.Column(db.Float, nullable=True)
     transcription_time = db.Column(db.Float, nullable=True)
     started_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     completed_at = db.Column(db.DateTime, nullable=True)
