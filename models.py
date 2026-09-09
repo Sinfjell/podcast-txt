@@ -73,6 +73,9 @@ class TranscriptionTask(db.Model):
     chunk_total = db.Column(db.Integer, nullable=True)
     bytes_downloaded = db.Column(db.BigInteger, nullable=True)
     bytes_total = db.Column(db.BigInteger, nullable=True)
+    # Touched on every progress write, so a restart can tell a live task
+    # (owned by another gunicorn worker) from one abandoned by a crash.
+    heartbeat_at = db.Column(db.DateTime, nullable=True)
 
 
 #: Columns added after the first release, applied via ALTER TABLE on startup.
@@ -88,4 +91,5 @@ TASK_COLUMN_MIGRATIONS = {
     'chunk_total': 'INTEGER',
     'bytes_downloaded': 'BIGINT',
     'bytes_total': 'BIGINT',
+    'heartbeat_at': 'DATETIME',
 }

@@ -10,7 +10,7 @@ import os
 import ssl
 import time
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import certifi
 import requests
 import feedparser
@@ -105,12 +105,17 @@ def get_openai_client(user=None):
 # Audio helpers
 # ---------------------------------------------------------------------------
 
+#: A task with no progress write for this long is treated as abandoned.
+STALE_TASK_SECONDS = 15 * 60
+
+
 def _update_task(task_id, **kwargs):
     """Update a TranscriptionTask row. Must be called within an app context."""
     task = db.session.get(TranscriptionTask, task_id)
     if task:
         for k, v in kwargs.items():
             setattr(task, k, v)
+        task.heartbeat_at = datetime.now(timezone.utc)
         db.session.commit()
 
 
@@ -726,6 +731,8 @@ def start_transcription():
     rss_url = request.form.get('rss_url')
 
     if audio_url:
+        if not _is_fetchable_url(audio_url):
+            return jsonify({'error': 'That audio URL cannot be fetched.'}), 400
         meta = {
             'title': request.form.get('episode_title') or 'Episode',
             'audio_url': audio_url,
@@ -805,6 +812,40 @@ def start_transcription():
     thread.start()
 
     return jsonify({'task_id': task_id})
+
+
+def _is_fetchable_url(raw):
+    """Allow only public http(s) URLs.
+
+    The direct-episode path takes an audio URL from the client and the server
+    fetches it, so without this an authenticated user could point Podskrift at
+    localhost or a link-local metadata endpoint and read the response back as a
+    transcript.
+    """
+    import ipaddress
+    import socket
+
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return False
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        return False
+
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, None)
+    except socket.gaierror:
+        return False
+
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return False
+    return True
 
 
 def _float_or_none(raw):
@@ -1045,15 +1086,21 @@ with app.app_context():
     db.session.commit()
 
     # Transcription runs in a daemon thread, so a deploy or crash leaves tasks
-    # stuck in a running state forever. Fail them at boot instead.
-    orphaned = TranscriptionTask.query.filter(
-        ~TranscriptionTask.status.in_(['completed', 'error'])
-    ).all()
+    # stuck in a running state forever. Fail those at boot -- but only ones that
+    # have gone quiet: this module is imported by every gunicorn worker, and a
+    # worker respawning mid-life must not kill jobs another worker is running.
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=STALE_TASK_SECONDS)
+    orphaned = [
+        t for t in TranscriptionTask.query.filter(
+            ~TranscriptionTask.status.in_(['completed', 'error'])
+        ).all()
+        if _seconds_since(t.heartbeat_at or t.started_at) > STALE_TASK_SECONDS
+    ]
     for task in orphaned:
         task.status = 'error'
         task.phase = 'error'
         task.error_message = (
-            'Transcription was interrupted by a server restart. Please try again.'
+            'Transcription was interrupted and stopped making progress. Please try again.'
         )
     if orphaned:
         db.session.commit()

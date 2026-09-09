@@ -211,14 +211,17 @@
         var copy = phaseCopy(d);
         el('statusText').textContent = copy[0];
         el('phaseDetail').textContent = copy[1];
-        el('progressText').textContent = Math.round(d.progress || 0) + '%';
+        el('progressText').textContent = (d.phase === 'downloading' && !d.bytes_total)
+            ? '' : Math.round(d.progress || 0) + '%';
 
         var bar = el('progressBar');
-        bar.style.width = (d.progress || 0) + '%';
+        bar.style.width = (d.phase === 'downloading' && !d.bytes_total)
+            ? '100%' : (d.progress || 0) + '%';
         // No byte counter available means we genuinely can't measure it — say so
         // with motion instead of a bar frozen at a number.
-        bar.classList.toggle('indeterminate',
-            d.phase === 'downloading' && !d.bytes_total && !d.bytes_downloaded);
+        // A CDN that omits content-length gives us no percentage at all. Animate
+        // rather than showing a bar frozen at 0% -- that was the original complaint.
+        bar.classList.toggle('indeterminate', d.phase === 'downloading' && !d.bytes_total);
 
         setSteps(d.phase || d.status);
 
