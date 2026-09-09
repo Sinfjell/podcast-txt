@@ -1,6 +1,5 @@
 """Database models for Podcast Transcriber."""
 
-import os
 from datetime import datetime, timezone
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import UserMixin
@@ -18,6 +17,14 @@ class User(UserMixin, db.Model):
     openai_api_key = db.Column(db.String(255), nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
+    # Trial metering. Only ever touched for users transcribing on OUR key --
+    # a user with their own key spends their own quota and is never metered.
+    # A NULL limit means "use the configured default", so raising TRIAL_MINUTES
+    # lifts every account that has not been given an individual grant.
+    trial_seconds_limit = db.Column(db.Integer, nullable=True)
+    trial_seconds_used = db.Column(db.Integer, nullable=False, default=0,
+                                   server_default='0')
+
     feeds = db.relationship('SavedFeed', backref='user', lazy=True, cascade='all, delete-orphan')
     tasks = db.relationship('TranscriptionTask', backref='user', lazy=True, cascade='all, delete-orphan')
 
@@ -26,10 +33,6 @@ class User(UserMixin, db.Model):
 
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
-
-    def get_openai_key(self):
-        """Return user's key, or fall back to global env key."""
-        return self.openai_api_key or os.getenv('OPENAI_API_KEY')
 
 
 class SavedFeed(db.Model):
@@ -77,6 +80,18 @@ class TranscriptionTask(db.Model):
     # (owned by another gunicorn worker) from one abandoned by a crash.
     heartbeat_at = db.Column(db.DateTime, nullable=True)
 
+    # Seconds of audio currently reserved against the owner's trial allowance.
+    # NULL for tasks run on the user's own key.
+    trial_seconds_charged = db.Column(db.Integer, nullable=True)
+    # Set once the charge above is final. The pro-rata refund computes a
+    # fraction OF trial_seconds_charged and then overwrites it, so a second
+    # refund would re-apply the fraction to the already-reduced value and hand
+    # back seconds that had been spent. Settling is the claim; the amount is not.
+    # server_default matches the ALTER TABLE in USER/TASK_COLUMN_MIGRATIONS, so a
+    # freshly created database and a migrated one have the same schema.
+    trial_settled = db.Column(db.Boolean, nullable=False, default=False,
+                              server_default='0')
+
 
 #: Columns added after the first release, applied via ALTER TABLE on startup.
 #: Keyed by column name so the migration stays declarative as the model grows.
@@ -92,4 +107,12 @@ TASK_COLUMN_MIGRATIONS = {
     'bytes_downloaded': 'BIGINT',
     'bytes_total': 'BIGINT',
     'heartbeat_at': 'DATETIME',
+    'trial_seconds_charged': 'INTEGER',
+    'trial_settled': 'BOOLEAN NOT NULL DEFAULT 0',
+}
+
+#: Same, for the users table.
+USER_COLUMN_MIGRATIONS = {
+    'trial_seconds_limit': 'INTEGER',
+    'trial_seconds_used': 'INTEGER NOT NULL DEFAULT 0',
 }

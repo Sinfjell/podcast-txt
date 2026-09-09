@@ -14,6 +14,18 @@
     </p>
 </div>
 
+{% if trial and not trial.on_own_key %}
+<div class="alert alert-{% if trial.exhausted %}warning{% else %}info{% endif %}" style="margin-bottom: 16px;">
+    {% if trial.exhausted %}
+    Your free trial is used up. <a href="{{ url_for('settings') }}">Add your own OpenAI API key</a>
+    to keep transcribing.
+    {% else %}
+    Free trial: <strong>{{ trial.remaining_minutes }} minutes</strong> of audio left, on our key.
+    <a href="{{ url_for('settings') }}">Add your own key</a> for unlimited use.
+    {% endif %}
+</div>
+{% endif %}
+
 <!-- Saved feeds quick access -->
 {% if current_user.is_authenticated and saved_feeds %}
 <div class="card" style="margin-bottom: 16px;">

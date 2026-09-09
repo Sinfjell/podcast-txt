@@ -33,10 +33,11 @@ from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError, APITimeoutError
 from pydub import AudioSegment
 
-from sqlalchemy import event as sa_event
+from sqlalchemy import event as sa_event, text, update as sa_update
 from sqlalchemy.engine import Engine
 
-from models import db, User, SavedFeed, TranscriptionTask, TASK_COLUMN_MIGRATIONS
+from models import (db, User, SavedFeed, TranscriptionTask,
+                    TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS)
 
 load_dotenv()
 
@@ -138,13 +139,8 @@ SUPPORTED_LANGUAGES = [
 VALID_LANGUAGE_CODES = {code for code, _ in SUPPORTED_LANGUAGES}
 
 
-def get_openai_client(user=None):
-    """Get OpenAI client using user's key or global fallback."""
-    key = None
-    if user and hasattr(user, 'get_openai_key'):
-        key = user.get_openai_key()
-    if not key:
-        key = GLOBAL_OPENAI_KEY
+def build_openai_client(key):
+    """Wrap a raw key in a configured OpenAI client, or None if there is no key."""
     if not key:
         return None
     return OpenAI(
@@ -152,6 +148,263 @@ def get_openai_client(user=None):
         timeout=WHISPER_TIMEOUT_SECONDS,
         max_retries=WHISPER_MAX_RETRIES,
     )
+
+
+# ---------------------------------------------------------------------------
+# Trial metering
+# ---------------------------------------------------------------------------
+#
+# A user with their own OpenAI key spends their own quota and is never metered.
+# Everyone else transcribes on OUR key, which is real money -- so every second
+# of audio is reserved against a per-account allowance before any request
+# reaches Whisper, and a global ceiling caps what the whole service can spend
+# no matter how many accounts exist.
+
+
+def _env_minutes(name, default):
+    """Read a minutes-valued env var, falling back to `default` on junk.
+
+    Warns loudly: a typo in a spend ceiling otherwise silently restores the
+    default, which is the permissive direction if the operator meant to lower it.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError):
+        app.logger.warning('%s=%r is not a number; using the default of %s minutes',
+                           name, raw, default)
+        return int(default)
+
+
+#: Free audio minutes granted to an account with no key of its own.
+TRIAL_DEFAULT_SECONDS = _env_minutes('TRIAL_MINUTES', 60) * 60
+#: Hard ceiling on trial minutes across ALL accounts. Without this, the per-user
+#: cap bounds nothing -- signups are free, so N accounts cost N x the grant.
+TRIAL_GLOBAL_SECONDS = _env_minutes('TRIAL_GLOBAL_MINUTES', 600) * 60
+#: What to reserve when the feed publishes no itunes:duration. Reconciled
+#: against the real duration after download, before a single Whisper call.
+TRIAL_UNKNOWN_ESTIMATE_SECONDS = _env_minutes('TRIAL_UNKNOWN_ESTIMATE_MINUTES', 30) * 60
+#: Longest single episode the trial will take on, so one four-hour interview
+#: cannot swallow an entire allowance in one go.
+TRIAL_MAX_EPISODE_SECONDS = _env_minutes('TRIAL_MAX_EPISODE_MINUTES', 180) * 60
+#: Kill switch. Set TRIAL_ENABLED=0 to stop handing out our key entirely.
+TRIAL_ENABLED = os.getenv('TRIAL_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+
+
+class TrialExhausted(Exception):
+    """Raised when a job would cost more trial allowance than is left."""
+
+
+class TaskAbandoned(Exception):
+    """Raised when a task was failed out from under the worker still running it."""
+
+
+def trial_available():
+    """Is there a trial to hand out at all?"""
+    return bool(TRIAL_ENABLED and GLOBAL_OPENAI_KEY and TRIAL_DEFAULT_SECONDS > 0)
+
+
+def trial_status(user):
+    """(limit, used, remaining) trial seconds for `user`."""
+    limit = user.trial_seconds_limit
+    if limit is None:
+        limit = TRIAL_DEFAULT_SECONDS
+    used = user.trial_seconds_used or 0
+    return limit, used, max(0, limit - used)
+
+
+def trial_global_used_seconds():
+    """Trial seconds spent across every account."""
+    return int(db.session.execute(text(
+        'SELECT COALESCE(SUM(trial_seconds_used), 0) FROM users'
+    )).scalar() or 0)
+
+
+def resolve_openai_key(user):
+    """Return (key, source) where source is 'user', 'trial', or None.
+
+    A user's own key always wins -- it costs us nothing and has no cap.
+    """
+    own = getattr(user, 'openai_api_key', None) if user is not None else None
+    if own:
+        return own, 'user'
+    if trial_available():
+        return GLOBAL_OPENAI_KEY, 'trial'
+    return None, None
+
+
+def trial_reserve(user_id, seconds):
+    """Atomically reserve `seconds` of allowance. True only if granted.
+
+    Deliberately one statement. Podskrift runs two gunicorn workers, so a
+    threading.Lock would guard one process and let the other one through;
+    SQLite serialises the write, and both the per-user cap and the global
+    ceiling are evaluated inside it. Two parallel starts therefore cannot
+    both be told there is room that only one of them can have.
+    """
+    seconds = int(math.ceil(seconds))
+    if seconds <= 0:
+        return True
+    result = db.session.execute(text("""
+        UPDATE users
+           SET trial_seconds_used = COALESCE(trial_seconds_used, 0) + :n
+         WHERE id = :uid
+           AND COALESCE(trial_seconds_used, 0) + :n
+               <= COALESCE(trial_seconds_limit, :default_limit)
+           AND (SELECT COALESCE(SUM(trial_seconds_used), 0) FROM users) + :n
+               <= :global_limit
+    """), {'n': seconds, 'uid': user_id,
+           'default_limit': TRIAL_DEFAULT_SECONDS,
+           'global_limit': TRIAL_GLOBAL_SECONDS})
+    db.session.commit()
+    return result.rowcount == 1
+
+
+def trial_release(user_id, seconds):
+    """Hand back reserved seconds that were never spent."""
+    seconds = int(seconds)
+    if seconds <= 0:
+        return
+    db.session.execute(text("""
+        UPDATE users
+           SET trial_seconds_used = MAX(0, COALESCE(trial_seconds_used, 0) - :n)
+         WHERE id = :uid
+    """), {'n': seconds, 'uid': user_id})
+    db.session.commit()
+
+
+def _claim_task_charge(task_id, expected, new):
+    """Move a task's reserved amount from `expected` to `new`. True if we won.
+
+    The worker thread and the stale sweeper can both try to settle the same
+    task; only the one that moves this column may move the user's balance.
+    """
+    result = db.session.execute(text("""
+        UPDATE transcription_tasks
+           SET trial_seconds_charged = :new
+         WHERE id = :tid AND trial_settled = 0 AND trial_seconds_charged = :expected
+    """), {'tid': task_id, 'new': int(new), 'expected': int(expected)})
+    db.session.commit()
+    return result.rowcount == 1
+
+
+def trial_refund_task(task):
+    """Refund the part of a failed task we did not actually spend.
+
+    Chunks already sent to Whisper were billed to us whatever happens to the
+    task afterwards, so refunding the whole reservation would hand back money
+    that is gone -- and the stale sweeper fires on tasks whose worker is often
+    several chunks in. Refund the unstarted remainder instead, pro-rata on
+    chunk progress. Safe to call repeatedly: the conditional UPDATE on the
+    task is what decides which caller may move the balance.
+    """
+    # Read the row rather than trusting the caller's copy. /status hands us an
+    # object loaded at the top of the request; if the worker reconciled the
+    # charge in between, a claim against the stale value silently matches
+    # nothing and the user forfeits the allowance with no path to get it back.
+    row = db.session.execute(text(
+        'SELECT user_id, trial_seconds_charged, chunk_total, chunk_index, trial_settled '
+        'FROM transcription_tasks WHERE id = :tid'
+    ), {'tid': task.id}).first()
+    if row is None:
+        return 0
+    user_id, charged, chunk_total, chunk_index, settled = row
+    if settled or not charged or charged <= 0:
+        return 0
+
+    if (chunk_total or 0) > 0 and chunk_index is not None:
+        # chunk_index is written immediately BEFORE that chunk is uploaded, so
+        # index k means k+1 chunks have been sent and billed to us. Rounding
+        # toward charging is deliberate: refunding a chunk that did reach
+        # Whisper is exactly how a swept single-chunk episode -- every episode
+        # under 24 MB, so the common case -- came out free.
+        started = min(chunk_total, max(0, chunk_index) + 1)
+        spent = int(charged * started / chunk_total)
+    else:
+        spent = 0  # nothing reached Whisper yet
+
+    # Settling is the claim, and it also pins the amount we read: a row whose
+    # charge moved under us (reconcile) or that someone else already settled
+    # does not match, so only one caller ever moves the balance -- and never
+    # twice, which a claim on the amount alone could not guarantee once the
+    # refund became pro-rata.
+    claimed = db.session.execute(text("""
+        UPDATE transcription_tasks
+           SET trial_seconds_charged = :spent, trial_settled = 1
+         WHERE id = :tid AND trial_settled = 0 AND trial_seconds_charged = :charged
+    """), {'tid': task.id, 'spent': spent, 'charged': charged}).rowcount == 1
+    db.session.commit()
+    if not claimed:
+        return 0
+    refund = charged - spent
+    trial_release(user_id, refund)
+    return refund
+
+
+def settle_stranded_charges():
+    """Settle charges on tasks that failed without anyone refunding them.
+
+    A worker killed between reconciling a charge and settling it leaves a task
+    that is already 'error' with an unsettled charge. The orphan sweep never
+    revisits it -- that only looks at tasks still running -- so the user would
+    forfeit those minutes for good.
+
+    Returns how many stranded tasks it found, not how many it settled: both
+    gunicorn workers run this at boot and see the same rows, and the
+    conditional UPDATE inside trial_refund_task decides which one wins each.
+    The count is for logging and tests; nothing branches on it.
+    """
+    stranded = TranscriptionTask.query.filter(
+        TranscriptionTask.status == 'error',
+        TranscriptionTask.trial_settled == False,      # noqa: E712 - SQL, not Python
+        TranscriptionTask.trial_seconds_charged > 0,
+    ).all()
+    for task in stranded:
+        trial_refund_task(task)
+    return len(stranded)
+
+
+def trial_reconcile_task(task_id, actual_seconds):
+    """Match a task's reservation to the audio we actually downloaded.
+
+    Runs after the download but BEFORE the first Whisper call, so an episode
+    that turns out longer than the feed claimed costs us bandwidth, never API
+    spend. Raises TrialExhausted when the real length will not fit.
+    """
+    task = db.session.get(TranscriptionTask, task_id)
+    if not task or task.trial_settled or not task.trial_seconds_charged:
+        # NULL is an own-key task, nothing metered. Settled means the sweeper
+        # got here first -- re-opening the charge would bill the user for an
+        # episode that goes on to send nothing.
+        return
+    reserved = int(task.trial_seconds_charged)
+    actual = int(math.ceil(max(0.0, actual_seconds or 0.0)))
+    user_id = task.user_id
+
+    if TRIAL_MAX_EPISODE_SECONDS and actual > TRIAL_MAX_EPISODE_SECONDS:
+        raise TrialExhausted(
+            f'This episode runs {actual // 60} minutes, past the '
+            f'{TRIAL_MAX_EPISODE_SECONDS // 60}-minute per-episode limit of the free '
+            'trial. Add your own OpenAI API key in Settings to transcribe it.'
+        )
+
+    if actual > reserved:
+        extra = actual - reserved
+        if not trial_reserve(user_id, extra):
+            raise TrialExhausted(
+                f'This episode runs {actual // 60} minutes and your free trial has '
+                'less than that left. Add your own OpenAI API key in Settings to '
+                'keep transcribing.'
+            )
+        if not _claim_task_charge(task_id, reserved, actual):
+            # Someone else settled the task while we were topping up; give the
+            # top-up straight back rather than leaking it against the user.
+            trial_release(user_id, extra)
+    elif actual < reserved:
+        if _claim_task_charge(task_id, reserved, actual):
+            trial_release(user_id, reserved - actual)
 
 
 # ---------------------------------------------------------------------------
@@ -332,13 +585,26 @@ STALE_TASK_SECONDS = 15 * 60
 
 
 def _update_task(task_id, **kwargs):
-    """Update a TranscriptionTask row. Must be called within an app context."""
-    task = db.session.get(TranscriptionTask, task_id)
-    if task:
-        for k, v in kwargs.items():
-            setattr(task, k, v)
-        task.heartbeat_at = datetime.now(timezone.utc)
-        db.session.commit()
+    """Update a TranscriptionTask row. Must be called within an app context.
+
+    'error' is terminal. The stale sweeper runs in the other gunicorn worker
+    and may fail a task -- settling its trial charge -- while this worker is
+    still mid-episode. Letting the worker write 'transcribing' (and later
+    'completed') over that verdict resurrects a task whose allowance has
+    already been handed back, which is how a swept episode got transcribed
+    for free. Read the status straight from the database: the session may
+    still hold our own last write.
+    """
+    stmt = (
+        sa_update(TranscriptionTask)
+        .where(TranscriptionTask.id == task_id)
+        .values(heartbeat_at=datetime.now(timezone.utc), **kwargs)
+    )
+    if kwargs.get('status') != 'error':
+        stmt = stmt.where(TranscriptionTask.status != 'error')
+    result = db.session.execute(stmt)
+    db.session.commit()
+    return result.rowcount == 1
 
 
 def download_audio(url, filename, task_id):
@@ -437,12 +703,15 @@ def download_audio(url, filename, task_id):
     return filename
 
 
-def get_audio_duration(audio_file):
-    """Get audio duration in seconds, falling back to a size estimate.
+def probe_audio_duration(audio_file):
+    """Measured duration in seconds, or None if ffprobe could not read the file.
 
     Uses ffprobe, which ships with the ffmpeg that pydub already requires.
     This previously used librosa, which pulled in scipy, llvmlite, sklearn,
     numba and numpy -- 398 MB of a 547 MB virtualenv for this one call.
+
+    Kept separate from get_audio_duration() because billing must be able to
+    tell "we measured 12 minutes" from "we guessed 12 minutes".
     """
     try:
         out = subprocess.run(
@@ -455,8 +724,28 @@ def get_audio_duration(audio_file):
             return duration
     except (subprocess.SubprocessError, ValueError, OSError):
         pass
-    # ~1 MB per minute of spoken-word audio
-    return (os.path.getsize(audio_file) / (1024 * 1024)) * 60
+    return None
+
+
+def estimate_audio_duration(audio_file):
+    """Duration from file size when ffprobe cannot read the file.
+
+    ~1 MB per minute of spoken-word audio. Deliberately not an average: for
+    billing this is the only number left, so it has to be a number we are
+    willing to charge for.
+    """
+    try:
+        return (os.path.getsize(audio_file) / (1024 * 1024)) * 60
+    except OSError:
+        return 0.0
+
+
+def get_audio_duration(audio_file):
+    """Duration in seconds, measured if possible and estimated otherwise."""
+    measured = probe_audio_duration(audio_file)
+    if measured is not None:
+        return measured
+    return estimate_audio_duration(audio_file)
 
 
 def split_audio_if_needed(audio_file, max_size_mb=24):
@@ -502,6 +791,19 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
             "Go to Settings and add your key, or ask the admin to set a global key."
         )
 
+    # Measure the file we actually downloaded, BEFORE splitting removes it.
+    # This is the number the trial is billed on, and it must not come from the
+    # feed: itunes:duration on the RSS path and duration_min on the direct path
+    # are both supplied by the client, so charging on either would let a caller
+    # claim one minute and transcribe four hours on our key.
+    measured_duration = probe_audio_duration(audio_file)
+    billable_duration = (measured_duration if measured_duration is not None
+                         else estimate_audio_duration(audio_file))
+
+    # Last point at which refusing is still free: everything below this line
+    # bills OpenAI.
+    trial_reconcile_task(task_id, billable_duration)
+
     _update_task(
         task_id,
         status='splitting',
@@ -511,36 +813,50 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
     )
     audio_chunks = split_audio_if_needed(audio_file, max_size_mb=24)
 
-    task = db.session.get(TranscriptionTask, task_id)
-    # The RSS feed's itunes:duration beats anything we can measure locally --
-    # get_audio_duration() falls back to size*60 and multiplies chunk 0 by the
-    # chunk count, both of which skew the ETA badly.
-    audio_duration = task.audio_duration if task and task.audio_duration else None
-    if not audio_duration:
-        audio_duration = get_audio_duration(audio_chunks[0])
-        if len(audio_chunks) > 1:
-            audio_duration *= len(audio_chunks)
-
-    _update_task(
-        task_id,
-        status='transcribing',
-        phase='transcribing',
-        chunk_total=len(audio_chunks),
-        chunk_index=0,
-        audio_duration=audio_duration,
-        progress=PHASE_SPANS['transcribing'][0],
-        phase_started_at=datetime.now(timezone.utc),
-    )
-
+    # split_audio_if_needed() removes the source file once it has split it, so
+    # EVERY exit from here on -- the abandonment raise included -- has to go
+    # through this cleanup, or temp_audio_<uuid>_chunk_N.mp3 stays on disk
+    # forever. The abandonment raise used to sit above this try and leaked up
+    # to MAX_AUDIO_BYTES per occurrence.
+    remaining = set(audio_chunks)
     upload_start = time.time()
     all_segments = []
     full_text = ""
-    # split_audio_if_needed() removes the source file once it has split it, so a
-    # failure part-way through the loop would otherwise leave the remaining
-    # temp_audio_<uuid>_chunk_N.mp3 files on disk forever.
-    remaining = set(audio_chunks)
 
     try:
+        # For the ETA, a measurement of the whole file beats everything. The
+        # feed's claim is only better than the size-based fallback, so it wins
+        # only when ffprobe could not read the file at all.
+        task = db.session.get(TranscriptionTask, task_id)
+        feed_duration = task.audio_duration if task and task.audio_duration else None
+        audio_duration = measured_duration or feed_duration or billable_duration
+
+        # _update_task refuses to move a task out of 'error', so a False here
+        # means the sweeper failed this task while we were splitting -- and
+        # settled its charge. Splitting is the widest window for that: pydub's
+        # export has no timeout. Stop rather than transcribe against an
+        # allowance already refunded.
+        started = _update_task(
+            task_id,
+            status='transcribing',
+            phase='transcribing',
+            chunk_total=len(audio_chunks),
+            # Left unset on purpose: the loop writes chunk_index immediately
+            # before it uploads that chunk, so "unset" is the only honest way
+            # to say nothing has been sent yet. trial_refund_task() reads it as
+            # a billing signal, and a 0 here would charge for a chunk never sent.
+            chunk_index=None,
+            audio_duration=audio_duration,
+            progress=PHASE_SPANS['transcribing'][0],
+            phase_started_at=datetime.now(timezone.utc),
+        )
+        if not started:
+            raise TaskAbandoned(
+                'Task was marked failed while it was being split; stopping so '
+                'it cannot bill against an allowance already refunded.'
+            )
+
+        upload_start = time.time()
         full_text, all_segments = _transcribe_chunks(
             audio_chunks, remaining, task_id, openai_client, language, audio_duration
         )
@@ -581,13 +897,32 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
     full_text = ""
 
     for i, chunk_file in enumerate(audio_chunks):
-        _update_task(
+        # The stale sweeper may have given up on this task and refunded the
+        # unspent allowance. Read the status straight from the database rather
+        # than through the session, which may still hold our own last write.
+        if db.session.execute(
+            text('SELECT status FROM transcription_tasks WHERE id = :tid'),
+            {'tid': task_id},
+        ).scalar() == 'error':
+            raise TaskAbandoned(
+                'Task was marked failed while it was still running; stopping so '
+                'it cannot keep billing against an allowance already refunded.'
+            )
+
+        # This write is the same terminal-'error' guard as the check above,
+        # one statement before the upload -- so acting on it closes the
+        # check-to-upload window almost entirely, for free.
+        if not _update_task(
             task_id,
             status=f'transcribing chunk {i + 1}/{len(audio_chunks)}',
             chunk_index=i,
             phase_started_at=datetime.now(timezone.utc),
             progress=_transcribe_checkpoint(i, len(audio_chunks)),
-        )
+        ):
+            raise TaskAbandoned(
+                'Task was marked failed between chunks; stopping so it cannot '
+                'keep billing against an allowance already refunded.'
+            )
 
         with open(chunk_file, 'rb') as f:
             create_kwargs = {
@@ -946,7 +1281,7 @@ def settings():
         flash(message, 'warning' if caveat else 'success')
         return redirect(url_for('settings'))
 
-    return render_template('settings.html')
+    return render_template('settings.html', trial=_trial_context())
 
 
 # ---------------------------------------------------------------------------
@@ -1017,11 +1352,34 @@ def use_feed(feed_id):
     )
 
 
+def _trial_context():
+    """Trial figures for the templates, or None when there is no trial."""
+    if not (trial_available() and current_user.is_authenticated):
+        return None
+    limit, used, remaining = trial_status(current_user)
+    return {
+        'limit_minutes': limit // 60,
+        'used_minutes': used // 60,
+        'remaining_minutes': remaining // 60,
+        'exhausted': remaining <= 0,
+        'on_own_key': bool(current_user.openai_api_key),
+    }
+
+
 def _user_has_api_key():
-    """Check if current user has an API key available (own key or global fallback)."""
-    if current_user.is_authenticated and current_user.openai_api_key:
+    """Can the current user actually start a transcription right now?
+
+    True on their own key, or on trial allowance they still have left. An
+    exhausted trial counts as no key, which is what puts the "add your key"
+    prompt in front of exactly the people who need to see it.
+    """
+    if not current_user.is_authenticated:
+        return False
+    if current_user.openai_api_key:
         return True
-    return bool(GLOBAL_OPENAI_KEY)
+    if trial_available():
+        return trial_status(current_user)[2] > 0
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1036,7 +1394,8 @@ def index():
             user_id=current_user.id
         ).order_by(SavedFeed.created_at.desc()).limit(5).all()
     return render_template('index.html', saved_feeds=saved_feeds,
-                           languages=SUPPORTED_LANGUAGES)
+                           languages=SUPPORTED_LANGUAGES,
+                           trial=_trial_context())
 
 
 @app.route('/parse_rss', methods=['POST'])
@@ -1090,7 +1449,7 @@ def start_transcription():
             'podcast_name': request.form.get('podcast_name'),
             'artwork': request.form.get('artwork'),
             'published': request.form.get('published'),
-            'duration_min': _float_or_none(request.form.get('duration_min')),
+            'duration_min': _positive_float_or_none(request.form.get('duration_min')),
         }
     else:
         if not rss_url or request.form.get('episode_index') in (None, ''):
@@ -1111,34 +1470,75 @@ def start_transcription():
             'podcast_name': request.form.get('podcast_name'),
             'artwork': episode.get('artwork') or request.form.get('artwork'),
             'published': episode.get('published'),
-            'duration_min': episode.get('duration_min'),
+            'duration_min': _positive_float_or_none(episode.get('duration_min')),
         }
 
-    openai_client = get_openai_client(current_user)
-    if not openai_client:
+    api_key, key_source = resolve_openai_key(current_user)
+    if not api_key:
         return jsonify({
             'error': 'No OpenAI API key configured. Add your key in Settings.'
         }), 400
+    openai_client = build_openai_client(api_key)
+
+    # Reserve the allowance BEFORE the job exists, so a refusal leaves nothing
+    # behind. The feed's duration is only an estimate; trial_reconcile_task()
+    # corrects it against the real audio before anything reaches Whisper.
+    trial_charge = None
+    if key_source == 'trial':
+        # Floored at a minute: trial_seconds_charged == 0 means "settled", so a
+        # zero reservation would quietly make the task unmetered.
+        estimate = max(60, int((meta['duration_min'] or 0) * 60)
+                       or TRIAL_UNKNOWN_ESTIMATE_SECONDS)
+        if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
+            return jsonify({'error': (
+                f'This episode runs {estimate // 60} minutes, past the '
+                f'{TRIAL_MAX_EPISODE_SECONDS // 60}-minute per-episode limit of the '
+                'free trial. Add your own OpenAI API key in Settings to transcribe it.'
+            )}), 402
+        if not trial_reserve(current_user.id, estimate):
+            _, _, remaining = trial_status(current_user)
+            if remaining < estimate:
+                message = (
+                    f'Your free trial has {remaining // 60} minutes left, and this '
+                    f'episode needs about {estimate // 60}. Add your own OpenAI API '
+                    'key in Settings to keep transcribing.'
+                )
+            else:
+                # The user still has room; the service as a whole does not.
+                # Saying "you have 60 minutes left" here would contradict itself.
+                message = (
+                    'Podskrift has handed out all the free minutes it has budgeted. '
+                    'Add your own OpenAI API key in Settings to keep transcribing.'
+                )
+            return jsonify({'error': message}), 402
+        trial_charge = estimate
 
     task_id = str(uuid.uuid4())
-    task = TranscriptionTask(
-        id=task_id,
-        user_id=current_user.id,
-        episode_title=meta['title'],
-        rss_url=rss_url,
-        status='downloading',
-        phase='downloading',
-        phase_started_at=datetime.now(timezone.utc),
-        podcast_name=meta.get('podcast_name'),
-        artwork_url=meta.get('artwork'),
-        episode_published=meta.get('published'),
-        # Feed duration is the best ETA source we have, and it is available
-        # before a single byte is downloaded.
-        audio_duration=(meta['duration_min'] * 60) if meta.get('duration_min') else None,
-        language=language or None,
-    )
-    db.session.add(task)
-    db.session.commit()
+    try:
+        task = TranscriptionTask(
+            id=task_id,
+            user_id=current_user.id,
+            episode_title=meta['title'],
+            rss_url=rss_url,
+            status='downloading',
+            phase='downloading',
+            phase_started_at=datetime.now(timezone.utc),
+            podcast_name=meta.get('podcast_name'),
+            artwork_url=meta.get('artwork'),
+            episode_published=meta.get('published'),
+            # Feed duration is the best ETA source we have, and it is available
+            # before a single byte is downloaded.
+            audio_duration=(meta['duration_min'] * 60) if meta.get('duration_min') else None,
+            language=language or None,
+            trial_seconds_charged=trial_charge,
+        )
+        db.session.add(task)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        if trial_charge:
+            trial_release(current_user.id, trial_charge)
+        raise
 
     parsed_url = urlparse(meta['audio_url'])
     audio_filename = f"temp_audio_{task_id}" + (os.path.splitext(parsed_url.path)[1] or '.mp3')
@@ -1149,10 +1549,22 @@ def start_transcription():
             try:
                 download_audio(source_url, audio_filename, task_id)
                 transcribe_audio(audio_filename, task_id, openai_client, language=language)
+            except TaskAbandoned:
+                # The sweeper wrote the error and settled the charge. Refund
+                # anyway: it is idempotent, and it is the backstop if anything
+                # re-opened the charge between the sweep and our abort.
+                abandoned = db.session.get(TranscriptionTask, task_id)
+                if abandoned:
+                    trial_refund_task(abandoned)
             except Exception as e:
                 _update_task(task_id, status='error', phase='error',
                              error_message=describe_openai_error(e)
                              if _is_openai_error(e) else str(e))
+                # A job that never produced a transcript must not consume the
+                # trial allowance it reserved.
+                failed = db.session.get(TranscriptionTask, task_id)
+                if failed:
+                    trial_refund_task(failed)
             finally:
                 if os.path.exists(audio_filename):
                     try:
@@ -1201,11 +1613,18 @@ def _is_fetchable_url(raw):
     return True
 
 
-def _float_or_none(raw):
+def _positive_float_or_none(raw):
+    """Parse a duration. Zero and negatives are treated as "not stated".
+
+    A negative duration_min would otherwise reserve nothing (trial_reserve
+    grants any non-positive request) and hand the segment offsets a negative
+    chunk length.
+    """
     try:
-        return float(raw)
+        value = float(raw)
     except (TypeError, ValueError):
         return None
+    return value if value > 0 else None
 
 
 def _stale_after_seconds(task):
@@ -1224,8 +1643,8 @@ def _stale_after_seconds(task):
         # large episode is silent work -- scale off the episode length instead.
         return max(STALE_TASK_SECONDS, task.audio_duration / 5)
     if task.bytes_downloaded:
-        # Not every feed publishes itunes:duration, and audio_duration is only
-        # measured *after* splitting -- the phase this window has to cover. The
+        # audio_duration is not written until the download has finished and the
+        # file has been probed -- the phase this window has to cover. The
         # bytes already on disk are the only signal left. ~1 MB per minute of
         # spoken-word audio, same /5 factor as above.
         return max(STALE_TASK_SECONDS, (task.bytes_downloaded / (1024 * 1024)) * 60 / 5)
@@ -1251,6 +1670,7 @@ def _fail_if_stale(task):
         'restarted. Please try again.'
     )
     db.session.commit()
+    trial_refund_task(task)
     return True
 
 
@@ -1477,13 +1897,19 @@ with app.app_context():
     db.create_all()
 
     # Add columns that may be missing on existing databases
-    from sqlalchemy import inspect, text
+    from sqlalchemy import inspect
     inspector = inspect(db.engine)
     existing_cols = {c['name'] for c in inspector.get_columns('transcription_tasks')}
     for column, ddl_type in TASK_COLUMN_MIGRATIONS.items():
         if column not in existing_cols:
             db.session.execute(text(
                 f'ALTER TABLE transcription_tasks ADD COLUMN {column} {ddl_type}'
+            ))
+    existing_user_cols = {c['name'] for c in inspector.get_columns('users')}
+    for column, ddl_type in USER_COLUMN_MIGRATIONS.items():
+        if column not in existing_user_cols:
+            db.session.execute(text(
+                f'ALTER TABLE users ADD COLUMN {column} {ddl_type}'
             ))
     db.session.commit()
 
@@ -1505,6 +1931,10 @@ with app.app_context():
         )
     if orphaned:
         db.session.commit()
+        for task in orphaned:
+            trial_refund_task(task)
+
+    settle_stranded_charges()
 
     # One-time migration: move old transcriptions table to transcription_tasks
     if 'transcriptions' in inspector.get_table_names():
@@ -1543,6 +1973,12 @@ if __name__ == '__main__':
     print("PODCAST TRANSCRIBER WEB APP")
     print("=" * 50)
     print(f"OpenAI API Key (global): {'Yes' if GLOBAL_OPENAI_KEY else 'No'}")
+    if trial_available():
+        print(f"Trial: {TRIAL_DEFAULT_SECONDS // 60} min/account, "
+              f"{TRIAL_GLOBAL_SECONDS // 60} min total ceiling "
+              f"(~${TRIAL_GLOBAL_SECONDS / 60 * WHISPER_COST_PER_MINUTE:.2f} max spend)")
+    else:
+        print("Trial: off (no global key, or TRIAL_ENABLED=0)")
     print(f"Environment: {os.getenv('FLASK_ENV', 'development')}")
     print("=" * 50)
 

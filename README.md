@@ -177,7 +177,45 @@ The app includes a comprehensive help guide for finding RSS feeds from:
 ## Configuration
 
 ### Environment Variables
-- `OPENAI_API_KEY` - Your OpenAI API key (required)
+- `OPENAI_API_KEY` — the **global trial key**. Optional, and it costs you money:
+  every account with no key of its own transcribes on it. Leave it unset and the
+  trial is off; users must add their own key. See "Free trial" below.
+- `SECRET_KEY` — Flask session key. Set it in production.
+- `DATABASE_URL` — SQLAlchemy URL. Defaults to `sqlite:///data/podcast.db`.
+
+### Free trial
+
+Set `OPENAI_API_KEY` and keyless accounts get a metered allowance on it. Audio
+seconds are reserved before any request reaches Whisper, and charged on audio
+**we measure with ffprobe** — never on the duration the feed or the client
+claims, which a caller controls.
+
+| Variable | Default | What it bounds |
+| --- | --- | --- |
+| `TRIAL_ENABLED` | `1` | Kill switch. `0` stops handing out the key. |
+| `TRIAL_MINUTES` | `60` | Free audio minutes per account (~$0.36 each). |
+| `TRIAL_GLOBAL_MINUTES` | `600` | **Lifetime** minutes across all accounts (~$3.60). |
+| `TRIAL_MAX_EPISODE_MINUTES` | `180` | Longest single episode the trial accepts. |
+| `TRIAL_UNKNOWN_ESTIMATE_MINUTES` | `30` | Reserved when a feed states no duration. |
+
+`TRIAL_GLOBAL_MINUTES` is a **lifetime ceiling, not a monthly budget** — nothing
+resets it on a schedule. It counts minutes actually *spent*: a job that fails
+before transcribing gives its reservation back, so the ceiling tracks the bill
+rather than the attempts. That is deliberate — the failure mode is "the trial
+stops working", never "the bill kept growing". At the defaults, ten accounts
+using their full grant exhaust it.
+Raising the env var re-opens it.
+
+`TRIAL_MINUTES` is the default only. A per-account override lives in
+`users.trial_seconds_limit`; `NULL` means "use the default", so raising the env
+var lifts everyone who has no individual grant. There is no UI for it — set it
+with SQL:
+
+```sql
+UPDATE users SET trial_seconds_limit = 7200 WHERE email = 'someone@example.com';
+```
+
+Run `ops/trial-usage.sh` to see what the trial has actually cost.
 
 ### File Size Limits
 - **OpenAI Limit**: 25MB per audio file
