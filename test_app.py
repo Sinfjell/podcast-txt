@@ -2638,6 +2638,16 @@ def test_the_menu_panel_is_hidden_by_an_attribute_not_by_opacity(trial_on):
     """
     body = A.app.test_client().get('/').data.decode()
     assert '.nav-links[hidden] { display: none; }' in body
+    # Invisible is not gone: before the script runs on first paint, and for the
+    # 160ms of the close animation, the panel is opacity:0 but still fixed over
+    # the page. Taps meant for the hero were landing on unseen nav links.
+    mobile_nav = body[body.index('@media (max-width: 640px)'):]
+    mobile_nav = mobile_nav[:mobile_nav.index('@media (prefers-reduced-motion')]
+    assert 'pointer-events: none;' in mobile_nav, (
+        'the closed panel is hit-testable again -- .btn:disabled elsewhere in '
+        'the sheet is not what this is asking about'
+    )
+    assert '.nav-links.open { pointer-events: auto; }' in body
     # The deferred hide specifically: hiding immediately would make the panel
     # vanish instead of sliding out, and not hiding at all is the defect.
     assert 'closeTimer = setTimeout(function () { panel.hidden = true; }' in body
@@ -2670,8 +2680,16 @@ def test_the_menu_degrades_without_javascript(trial_on):
     body = A.app.test_client().get('/').data.decode()
     assert '<noscript>' in body
     noscript = body[body.index('<noscript>'):body.index('</noscript>')]
-    assert 'position: static' in noscript
     assert '.nav-toggle, .nav-scrim { display: none !important; }' in noscript
+    # The column has to wrap onto its own line: dropped into .nav-inner (a 56px
+    # centred flex row) it overflowed above the viewport and took its first
+    # three links off-screen.
+    assert 'flex-wrap: wrap' in noscript and 'height: auto' in noscript
+    assert 'position: static' in noscript
+    # And it has to actually be visible: without these an in-flight transition
+    # holds the computed opacity at 0 and the whole menu stays invisible.
+    assert 'opacity: 1 !important' in noscript
+    assert 'transition: none !important' in noscript
 
 
 def test_the_stop_button_handler_is_reachable_from_its_onclick(trial_on):
@@ -2738,8 +2756,13 @@ def test_the_logged_in_menu_offers_the_account_pages(trial_on):
 
 def test_cancelling_cannot_overwrite_a_finished_transcript(trial_on, monkeypatch):
     """The race the review reproduced: cancel read the row, the worker completed
-    inside the window, and cancel stamped 'cancelled' over it. The transcript
-    then 404'd on download and was absent from history -- paid for, unreachable.
+    inside the window, and cancel stamped 'cancelled' over it -- keeping the
+    full charge while the transcript 404'd and fell out of history.
+
+    The worker's write goes through a SEPARATE connection on purpose. Committing
+    it through db.session would expire the identity map, so the request's copy
+    would refresh itself and the stale-read window would never open -- which is
+    how the first version of this test passed against the unfixed code.
     """
     from models import db, TranscriptionTask
 
@@ -2755,18 +2778,19 @@ def test_cancelling_cannot_overwrite_a_finished_transcript(trial_on, monkeypatch
     client = _login(uid)
     real_get = db.session.get
 
-    def complete_it_mid_request(model, ident, *a, **kw):
+    def complete_it_behind_our_back(model, ident, *a, **kw):
         obj = real_get(model, ident, *a, **kw)
-        if ident == 'cancel-race' and complete_it_mid_request.armed:
-            complete_it_mid_request.armed = False
-            db.session.execute(A.text(
-                "UPDATE transcription_tasks SET status='completed', "
-                "transcript_text='the goods' WHERE id='cancel-race'"))
-            db.session.commit()
+        if ident == 'cancel-race' and complete_it_behind_our_back.armed:
+            complete_it_behind_our_back.armed = False
+            with db.engine.connect() as conn:
+                conn.execute(A.text(
+                    "UPDATE transcription_tasks SET status='completed', "
+                    "transcript_text='the goods' WHERE id='cancel-race'"))
+                conn.commit()
         return obj
-    complete_it_mid_request.armed = True
+    complete_it_behind_our_back.armed = True
 
-    monkeypatch.setattr(db.session, 'get', complete_it_mid_request)
+    monkeypatch.setattr(db.session, 'get', complete_it_behind_our_back)
     resp = client.post('/cancel/cancel-race')
     monkeypatch.undo()
 
@@ -2797,9 +2821,11 @@ def test_cancelling_a_failed_task_reports_the_failure(trial_on):
 
 
 def test_stopping_during_a_download_aborts_it(trial_on, monkeypatch, tmp_path):
-    """Stop during the download let the whole episode download AND re-encode
-    while the UI said it had stopped -- holding a concurrency slot and disk on
-    a shared box for work nobody was waiting for."""
+    """Stop during the download used to let the whole episode download AND
+    re-encode while the UI said it had stopped, holding a concurrency slot and
+    disk. Drives download_audio for real: asserting that _update_task returns
+    False proves nothing, because that was already true before the fix.
+    """
     from models import db, TranscriptionTask
 
     uid = _make_user('stopdownload@test.com')
@@ -2807,13 +2833,47 @@ def test_stopping_during_a_download_aborts_it(trial_on, monkeypatch, tmp_path):
         db.session.add(TranscriptionTask(id='stop-dl', user_id=uid,
                                          episode_title='x', status='downloading'))
         db.session.commit()
-        # A download in progress on a task that has since been cancelled.
-        db.session.execute(A.text(
-            "UPDATE transcription_tasks SET status='cancelled' WHERE id='stop-dl'"))
-        db.session.commit()
-        assert A._update_task('stop-dl', bytes_downloaded=1024) is False, (
-            'the write that carries the cancel signal succeeded anyway'
-        )
+
+    delivered = []
+    closed = []
+
+    class FakeResponse:
+        headers = {'content-length': '400000'}
+        is_redirect = False
+        is_permanent_redirect = False
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, chunk_size=8192):
+            for i in range(50):
+                delivered.append(i)
+                if i == 1:
+                    # The user hits Stop two chunks in.
+                    with db.engine.connect() as conn:
+                        conn.execute(A.text(
+                            "UPDATE transcription_tasks SET status='cancelled' "
+                            "WHERE id='stop-dl'"))
+                        conn.commit()
+                time.sleep(0.02)      # clear the 1s write throttle
+                yield b'\0' * 8192
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda raw: True)
+    monkeypatch.setattr(A.requests, 'get', lambda *a, **kw: FakeResponse())
+    monkeypatch.setattr(A.requests, 'head', lambda *a, **kw: FakeResponse())
+    monkeypatch.setattr(A, 'MIN_DOWNLOAD_WRITE_INTERVAL', 0, raising=False)
+
+    target = tmp_path / 'ep.mp3'
+    with A.app.app_context():
+        with pytest.raises(A.TaskAbandoned):
+            A.download_audio('https://example.com/ep.mp3', str(target), 'stop-dl')
+
+    assert len(delivered) < 50, 'the download ran to completion after cancelling'
+    assert closed, 'the streamed response was left open, leaking the connection'
 
 
 def test_stopping_before_the_split_aborts_it(trial_on, monkeypatch, tmp_path):

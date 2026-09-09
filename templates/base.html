@@ -432,7 +432,13 @@
                    invisible links stayed in the tab order). The script sets it
                    before the open transition and after the close one. */
                 transition: transform var(--transition), opacity var(--transition);
+                /* Invisible is not the same as gone. Until the script runs on
+                   first paint, and for the 160ms of the close animation, this
+                   panel is opacity:0 but still fixed over the page -- taps meant
+                   for the hero landed on nav links nobody could see. */
+                pointer-events: none;
             }
+            .nav-links.open { pointer-events: auto; }
             .nav-links[hidden] { display: none; }
             .nav-links.open {
                 transform: translateY(0);
@@ -603,7 +609,25 @@
            nothing to reveal it, so fall back to a plain always-visible list and
            drop the toggle that would do nothing. */
         @media (max-width: 640px) {
-            .nav-links { position: static; opacity: 1; transform: none; padding: 8px 0; }
+            /* The column has to wrap onto its own line: dropped into .nav-inner,
+               a 56px-tall centred flex row, it overflowed above the viewport and
+               took its first links off-screen. */
+            .nav-inner { flex-wrap: wrap; height: auto; padding-bottom: 8px; }
+            .nav-links {
+                position: static;
+                width: 100%;
+                /* !important and transition:none because this sheet only exists
+                   when scripting is off -- there is nothing to animate, and an
+                   in-flight transition would otherwise keep the computed opacity
+                   at 0 and leave the whole menu invisible. */
+                opacity: 1 !important;
+                transform: none !important;
+                transition: none !important;
+                pointer-events: auto !important;
+                box-shadow: none;
+                border-bottom: 0;
+                padding: 8px 0;
+            }
             .nav-toggle, .nav-scrim { display: none !important; }
         }
     </style></noscript>

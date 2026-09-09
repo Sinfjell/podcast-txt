@@ -757,6 +757,10 @@ def download_audio(url, filename, task_id):
                 # then re-encode while the UI said it had stopped -- holding a
                 # concurrency slot and disk on a shared box for nothing.
                 if not _update_task(task_id, bytes_downloaded=downloaded):
+                    # Close before raising: a streamed response holds the
+                    # connection open, and every Stop-during-download would
+                    # otherwise leak a socket on a box shared with 50+ services.
+                    response.close()
                     raise TaskAbandoned('Task was cancelled during download.')
                 last_db_update = now
 
@@ -1968,6 +1972,10 @@ def get_status(task_id):
     if task.transcript_text and task.status != 'completed':
         result['partial_text'] = task.transcript_text
 
+    if task.status == 'cancelled' and task.transcript_text:
+        result['download_txt'] = url_for('download_file', task_id=task_id, file_type='txt')
+        result['transcript_text'] = task.transcript_text
+
     if task.status == 'completed':
         result['download_txt'] = url_for('download_file', task_id=task_id, file_type='txt')
         result['download_srt'] = url_for('download_file', task_id=task_id, file_type='srt')
@@ -2051,7 +2059,11 @@ def download_file(task_id, file_type):
     from io import BytesIO
 
     task = db.session.get(TranscriptionTask, task_id)
-    if not task or task.user_id != current_user.id or task.status != 'completed':
+    # A cancelled task keeps whatever was transcribed before it stopped, and the
+    # user was charged pro-rata for exactly that -- so it has to be reachable.
+    if (not task or task.user_id != current_user.id
+            or task.status not in ('completed', 'cancelled')
+            or not task.transcript_text):
         return "File not found", 404
 
     safe_title = task.episode_title.replace(' ', '_')
