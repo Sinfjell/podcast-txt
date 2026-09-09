@@ -90,6 +90,10 @@
 
         /* Layout */
         .container {
+            /* body is a column flex container, and `margin: 0 auto` on a flex item
+               cancels the default cross-axis stretch -- without an explicit width the
+               container collapses to its content and never reaches max-width. */
+            width: 100%;
             max-width: 800px;
             margin: 0 auto;
             padding: 32px 24px;
@@ -365,6 +369,107 @@
             .container { padding: 20px 16px; }
         }
 
+        .btn:disabled, .btn[disabled] {
+            opacity: 0.4;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+
+        /* Wide layout for pages that actually have content to spread out */
+        .container-wide { max-width: 1120px; }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 4px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+        .tab {
+            background: none;
+            border: none;
+            border-bottom: 2px solid transparent;
+            color: var(--muted);
+            font: inherit;
+            font-size: 13.5px;
+            font-weight: 500;
+            padding: 8px 12px;
+            cursor: pointer;
+            transition: color var(--transition), border-color var(--transition);
+        }
+        .tab:hover { color: var(--text); }
+        .tab.active { color: var(--accent-bright); border-bottom-color: var(--accent-bright); }
+
+        /* Progress: taller bar + explicit phase steps */
+        .progress-track-lg { height: 8px; border-radius: 4px; }
+        .progress-track-lg .progress-fill { border-radius: 4px; }
+        .progress-fill.indeterminate {
+            background: linear-gradient(90deg,
+                var(--border) 0%, var(--accent-bright) 50%, var(--border) 100%);
+            background-size: 200% 100%;
+            animation: slide 1.4s linear infinite;
+        }
+        @keyframes slide { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+        .steps { display: flex; gap: 6px; margin: 20px 0 4px; }
+        .step { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+        .step-bar { height: 3px; border-radius: 2px; background: var(--border); }
+        .step.done .step-bar, .step.active .step-bar { background: var(--accent-bright); }
+        .step.active .step-bar { animation: pulse 1.6s ease-in-out infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+        .step-label {
+            font-size: 11px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+        .step.done .step-label, .step.active .step-label { color: var(--text); }
+
+        /* Episode hero on the transcription page */
+        .episode-hero { display: flex; gap: 18px; align-items: flex-start; }
+        .episode-hero img {
+            width: 96px; height: 96px;
+            border-radius: var(--radius-sm);
+            object-fit: cover;
+            flex-shrink: 0;
+            background: var(--border);
+        }
+        .episode-hero-info { flex: 1; min-width: 0; }
+        @media (max-width: 640px) {
+            .episode-hero img { width: 64px; height: 64px; }
+        }
+
+        /* Stat row */
+        .stat-row { display: flex; flex-wrap: wrap; gap: 24px; margin-top: 14px; }
+        .stat-label {
+            font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em;
+            color: var(--muted);
+        }
+        .stat-value { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+        /* Live transcript pane */
+        .transcript-pane {
+            max-height: 420px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            font-size: 14px;
+            line-height: 1.75;
+            color: var(--text);
+        }
+        .transcript-pane:empty::after {
+            content: 'Text will appear here as each chunk finishes.';
+            color: var(--muted);
+            font-style: italic;
+        }
+        .transcript-pane .cursor {
+            display: inline-block;
+            width: 7px; height: 15px;
+            background: var(--accent-bright);
+            vertical-align: text-bottom;
+            animation: blink 1s step-end infinite;
+        }
+        @keyframes blink { 50% { opacity: 0; } }
+
         /* Animations */
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(6px); }
@@ -403,7 +508,7 @@
         </div>
     </nav>
 
-    <div class="container fade-in">
+    <div class="container {% block container_class %}{% endblock %} fade-in">
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 {% for category, message in messages %}

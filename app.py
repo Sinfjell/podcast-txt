@@ -6,10 +6,12 @@ A Flask web application for transcribing podcast episodes from RSS feeds using O
 Supports user accounts, saved RSS feeds, and self-serve API keys.
 """
 
+import math
 import os
 import ssl
 import time
 import threading
+from datetime import datetime, timezone
 import certifi
 import requests
 import feedparser
@@ -22,23 +24,26 @@ if not os.path.exists(certifi.where()):
         os.environ.setdefault('SSL_CERT_FILE', _sys_ca)
 from flask import Flask, render_template, request, jsonify, send_file, flash, redirect, url_for
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 import uuid
 from dotenv import load_dotenv
 from openai import OpenAI
 from pydub import AudioSegment
 
-from models import db, User, SavedFeed, TranscriptionTask
+from models import db, User, SavedFeed, TranscriptionTask, TASK_COLUMN_MIGRATIONS
 
 load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'change-me-in-production')
 
-# Database
+# Database. DATABASE_URL lets tests point at a throwaway file -- importing this
+# module runs migrations and the orphan sweep, which must never touch real data.
 db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 os.makedirs(db_path, exist_ok=True)
-app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(db_path, 'podcast.db')}"
+app.config['SQLALCHEMY_DATABASE_URI'] = (
+    os.getenv('DATABASE_URL') or f"sqlite:///{os.path.join(db_path, 'podcast.db')}"
+)
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db.init_app(app)
@@ -58,6 +63,49 @@ def load_user(user_id):
 # Global fallback OpenAI key
 GLOBAL_OPENAI_KEY = os.getenv('OPENAI_API_KEY')
 
+# Whisper pricing, used for the cost estimates shown in the UI
+WHISPER_COST_PER_MINUTE = 0.006
+
+# Keep a hanging Whisper call inside the stale-task window, so the client gives
+# up before _fail_if_stale() presumes the task dead. Sized against the 900s floor
+# rather than the (larger) per-task window, so it holds for every task: 420 x 2
+# attempts = 840s. Note httpx reads a bare float as a per-operation timeout, not
+# a wall-clock total, so this is a close approximation and not a hard ceiling --
+# retry backoff eats a few seconds of the margin. A steadily-progressing upload
+# never trips it: 24 MB (the chunk cap) over 420s is only 57 KB/s.
+WHISPER_TIMEOUT_SECONDS = 420.0
+WHISPER_MAX_RETRIES = 1
+
+# Caps on the audio we will pull down from a client-supplied URL.
+MAX_REDIRECTS = 5
+MAX_AUDIO_BYTES = 500 * 1024 * 1024
+
+# Roughly how many seconds of audio Whisper gets through per second of wall clock.
+# Only used to interpolate progress between chunk checkpoints -- the API gives us
+# no streaming progress, so without an estimate the bar would sit still for minutes.
+WHISPER_REALTIME_FACTOR = 12.0
+
+# Share of the overall progress bar owned by each phase.
+PHASE_SPANS = {
+    'downloading': (0, 20),
+    'splitting': (20, 30),
+    'transcribing': (30, 100),
+}
+
+# Languages offered in the UI. '' means let Whisper auto-detect.
+SUPPORTED_LANGUAGES = [
+    ('', 'Auto-detect'),
+    ('no', 'Norsk'),
+    ('en', 'English'),
+    ('sv', 'Svenska'),
+    ('da', 'Dansk'),
+    ('de', 'Deutsch'),
+    ('fr', 'Fran\u00e7ais'),
+    ('es', 'Espa\u00f1ol'),
+    ('nl', 'Nederlands'),
+]
+VALID_LANGUAGE_CODES = {code for code, _ in SUPPORTED_LANGUAGES}
+
 
 def get_openai_client(user=None):
     """Get OpenAI client using user's key or global fallback."""
@@ -68,12 +116,22 @@ def get_openai_client(user=None):
         key = GLOBAL_OPENAI_KEY
     if not key:
         return None
-    return OpenAI(api_key=key)
+    return OpenAI(
+        api_key=key,
+        timeout=WHISPER_TIMEOUT_SECONDS,
+        max_retries=WHISPER_MAX_RETRIES,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Audio helpers
 # ---------------------------------------------------------------------------
+
+#: Floor for how long a task may go without a progress write before it counts
+#: as abandoned. The real window scales with the work in flight -- see
+#: _stale_after_seconds().
+STALE_TASK_SECONDS = 15 * 60
+
 
 def _update_task(task_id, **kwargs):
     """Update a TranscriptionTask row. Must be called within an app context."""
@@ -81,6 +139,7 @@ def _update_task(task_id, **kwargs):
     if task:
         for k, v in kwargs.items():
             setattr(task, k, v)
+        task.heartbeat_at = datetime.now(timezone.utc)
         db.session.commit()
 
 
@@ -97,42 +156,86 @@ def download_audio(url, filename, task_id):
         'Referer': 'https://podcasts.apple.com/'
     }
 
-    try:
-        response = requests.get(url, stream=True, headers=headers, timeout=30)
-        response.raise_for_status()
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 403:
-            alt_headers = {'User-Agent': 'podcast-downloader/1.0', 'Accept': '*/*'}
+    def _fetch(request_headers):
+        """GET the audio, revalidating the target on every redirect hop.
+
+        Redirects are followed manually: `requests` follows them itself, which
+        would let a public host 302 straight to a private address and slip past
+        the check done on the original URL.
+        """
+        current = url
+        for _ in range(MAX_REDIRECTS):
+            if not _is_fetchable_url(current):
+                raise Exception('Audio URL points somewhere that cannot be fetched.')
+            resp = requests.get(
+                current, stream=True, headers=request_headers,
+                timeout=30, allow_redirects=False,
+            )
+            if resp.is_redirect or resp.is_permanent_redirect:
+                location = resp.headers.get('location')
+                resp.close()
+                if not location:
+                    raise Exception('Redirect without a target while fetching audio.')
+                current = urljoin(current, location)
+                continue
             try:
-                response = requests.get(url, stream=True, headers=alt_headers, timeout=30)
-                response.raise_for_status()
+                resp.raise_for_status()
+            except requests.exceptions.HTTPError:
+                resp.close()   # streamed responses hold the connection open
+                raise
+            return resp
+        raise Exception('Too many redirects while fetching audio.')
+
+    try:
+        response = _fetch(headers)
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else None
+        if status == 403:
+            try:
+                response = _fetch({'User-Agent': 'podcast-downloader/1.0', 'Accept': '*/*'})
             except requests.exceptions.HTTPError as e2:
+                status2 = e2.response.status_code if e2.response is not None else 'unknown'
                 raise Exception(
-                    f"Access denied ({e2.response.status_code}) for audio file. "
+                    f"Access denied ({status2}) for audio file. "
                     "This podcast may restrict direct downloads."
                 )
+            except requests.exceptions.RequestException as e2:
+                raise Exception(f"Failed to download audio: {e2}")
         else:
-            raise Exception(f"HTTP error {e.response.status_code}")
+            raise Exception(f"HTTP error {status}" if status else f"HTTP error: {e}")
     except requests.exceptions.RequestException as e:
         raise Exception(f"Failed to download audio: {e}")
 
-    total_size = int(response.headers.get('content-length', 0))
+    total_size = int(response.headers.get('content-length', 0) or 0)
     downloaded = 0
-    start_time = time.time()
-    last_db_update = 0
+    last_db_update = 0.0
+
+    # Report bytes even when the CDN omits content-length -- without this the bar
+    # sat at 0% for the whole download on every feed that doesn't send the header.
+    _update_task(task_id, bytes_downloaded=0, bytes_total=total_size)
 
     with open(filename, 'wb') as f:
         for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total_size > 0:
-                    now = time.time()
-                    if now - last_db_update >= 2:
-                        progress = (downloaded / total_size) * 100
-                        _update_task(task_id, download_progress=int(progress))
-                        last_db_update = now
+            if not chunk:
+                continue
+            f.write(chunk)
+            downloaded += len(chunk)
+            if downloaded > MAX_AUDIO_BYTES:
+                response.close()
+                raise Exception(
+                    f'This episode is larger than the '
+                    f'{MAX_AUDIO_BYTES // (1024 * 1024)} MB limit Podskrift will download.'
+                )
+            now = time.time()
+            if now - last_db_update >= 1:
+                _update_task(task_id, bytes_downloaded=downloaded)
+                last_db_update = now
 
+    _update_task(
+        task_id,
+        bytes_downloaded=downloaded,
+        bytes_total=total_size or downloaded,
+    )
     return filename
 
 
@@ -174,10 +277,14 @@ def split_audio_if_needed(audio_file, max_size_mb=24):
         return [audio_file]
 
 
-def transcribe_audio(audio_file, task_id, openai_client):
-    """Transcribe audio using OpenAI Whisper API."""
+def transcribe_audio(audio_file, task_id, openai_client, language=None):
+    """Transcribe audio using OpenAI Whisper API.
+
+    Progress is written as checkpoints (chunk index + when that chunk started);
+    /status interpolates between them so the bar keeps moving while a single
+    chunk is in flight. Whisper exposes no streaming progress of its own.
+    """
     import json
-    from datetime import datetime, timezone
 
     if not openai_client:
         raise Exception(
@@ -185,32 +292,105 @@ def transcribe_audio(audio_file, task_id, openai_client):
             "Go to Settings and add your key, or ask the admin to set a global key."
         )
 
-    _update_task(task_id, status='splitting', progress=5)
+    _update_task(
+        task_id,
+        status='splitting',
+        phase='splitting',
+        phase_started_at=datetime.now(timezone.utc),
+        progress=PHASE_SPANS['splitting'][0],
+    )
     audio_chunks = split_audio_if_needed(audio_file, max_size_mb=24)
 
-    audio_duration = get_audio_duration(audio_chunks[0])
-    if len(audio_chunks) > 1:
-        audio_duration *= len(audio_chunks)
+    task = db.session.get(TranscriptionTask, task_id)
+    # The RSS feed's itunes:duration beats anything we can measure locally --
+    # get_audio_duration() falls back to size*60 and multiplies chunk 0 by the
+    # chunk count, both of which skew the ETA badly.
+    audio_duration = task.audio_duration if task and task.audio_duration else None
+    if not audio_duration:
+        audio_duration = get_audio_duration(audio_chunks[0])
+        if len(audio_chunks) > 1:
+            audio_duration *= len(audio_chunks)
 
-    _update_task(task_id, status='transcribing', progress=10)
+    _update_task(
+        task_id,
+        status='transcribing',
+        phase='transcribing',
+        chunk_total=len(audio_chunks),
+        chunk_index=0,
+        audio_duration=audio_duration,
+        progress=PHASE_SPANS['transcribing'][0],
+        phase_started_at=datetime.now(timezone.utc),
+    )
 
     upload_start = time.time()
     all_segments = []
     full_text = ""
+    # split_audio_if_needed() removes the source file once it has split it, so a
+    # failure part-way through the loop would otherwise leave the remaining
+    # temp_audio_<uuid>_chunk_N.mp3 files on disk forever.
+    remaining = set(audio_chunks)
+
+    try:
+        full_text, all_segments = _transcribe_chunks(
+            audio_chunks, remaining, task_id, openai_client, language, audio_duration
+        )
+    finally:
+        for leftover in remaining:
+            if os.path.exists(leftover):
+                try:
+                    os.remove(leftover)
+                except OSError:
+                    pass
+
+    elapsed = time.time() - upload_start
+
+    _update_task(
+        task_id,
+        status='completed',
+        phase='completed',
+        progress=100,
+        transcript_text=full_text,
+        segments_json=json.dumps(all_segments) if all_segments else None,
+        audio_duration=audio_duration,
+        transcription_time=elapsed,
+        completed_at=datetime.now(timezone.utc),
+    )
+
+    if os.path.exists(audio_file):
+        os.remove(audio_file)
+
+
+def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language,
+                       audio_duration):
+    """Send each chunk to Whisper, publishing partial text as it goes.
+
+    Returns (full_text, segments). `remaining` is mutated as chunks are consumed
+    so the caller can clean up whatever is left if this raises.
+    """
+    all_segments = []
+    full_text = ""
 
     for i, chunk_file in enumerate(audio_chunks):
-        progress = 10 + int((i / len(audio_chunks)) * 60)
-        status_msg = f'transcribing chunk {i + 1}/{len(audio_chunks)}'
-        _update_task(task_id, progress=progress, status=status_msg)
+        _update_task(
+            task_id,
+            status=f'transcribing chunk {i + 1}/{len(audio_chunks)}',
+            chunk_index=i,
+            phase_started_at=datetime.now(timezone.utc),
+            progress=_transcribe_checkpoint(i, len(audio_chunks)),
+        )
 
         with open(chunk_file, 'rb') as f:
-            chunk_transcript = openai_client.audio.transcriptions.create(
-                model="whisper-1",
-                file=f,
-                language="no",
-                response_format="verbose_json",
-                timestamp_granularities=["segment"]
-            )
+            create_kwargs = {
+                'model': "whisper-1",
+                'file': f,
+                'response_format': "verbose_json",
+                'timestamp_granularities': ["segment"],
+            }
+            # Omitting `language` entirely is what makes Whisper auto-detect;
+            # passing None or '' is rejected by the API.
+            if language:
+                create_kwargs['language'] = language
+            chunk_transcript = openai_client.audio.transcriptions.create(**create_kwargs)
 
         full_text += chunk_transcript.text + " "
 
@@ -224,25 +404,92 @@ def transcribe_audio(audio_file, task_id, openai_client):
                     'text': seg.text
                 })
 
+        detected = getattr(chunk_transcript, 'language', None)
+        # Publish the text we have so far so the page can show it streaming in
+        # instead of an empty box. History only lists completed tasks, so a
+        # partial write here is never user-visible as a finished transcript.
+        _update_task(
+            task_id,
+            transcript_text=full_text.strip(),
+            progress=_transcribe_checkpoint(i + 1, len(audio_chunks)),
+            language=language or detected or None,
+        )
+
         os.remove(chunk_file)
+        remaining.discard(chunk_file)
 
-    full_text = full_text.strip()
-    elapsed = time.time() - upload_start
+    return full_text.strip(), all_segments
 
-    _update_task(
-        task_id,
-        status='completed',
-        progress=100,
-        transcript_text=full_text,
-        segments_json=json.dumps(all_segments) if all_segments else None,
-        language='no',
-        audio_duration=audio_duration,
-        transcription_time=elapsed,
-        completed_at=datetime.now(timezone.utc),
-    )
 
-    if os.path.exists(audio_file):
-        os.remove(audio_file)
+def _transcribe_checkpoint(chunks_done, chunk_total):
+    """Overall progress percentage at a chunk boundary."""
+    lo, hi = PHASE_SPANS['transcribing']
+    if not chunk_total:
+        return lo
+    return int(lo + (chunks_done / chunk_total) * (hi - lo))
+
+
+def _seconds_since(dt):
+    """Seconds elapsed since `dt`, treating naive values as UTC (SQLite gives us naive)."""
+    if not dt:
+        return 0.0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0.0, time.time() - dt.timestamp())
+
+
+def _asymptotic_fraction(elapsed, expected):
+    """How far through a step we probably are, as a fraction that never reaches 1.
+
+    Linear to 0.9 over the estimate, then asymptotic toward 0.99. A hard
+    `min(0.97, ...)` cap would park the bar at 97% whenever Whisper runs slower
+    than WHISPER_REALTIME_FACTOR -- the same frozen bar, just at a nicer number.
+    """
+    if expected <= 0:
+        return 0.9
+    if elapsed <= expected:
+        return 0.9 * (elapsed / expected)
+    overrun = (elapsed - expected) / expected
+    return 0.9 + 0.09 * (1 - math.exp(-overrun))
+
+
+def compute_live_progress(task):
+    """Interpolate a task's progress between its last two checkpoints.
+
+    Returns (percent, eta_seconds_or_None). The stored `progress` column is
+    treated as a floor so the bar can never travel backwards between polls.
+    """
+    stored = task.progress or 0
+    if task.status in ('completed', 'error'):
+        return (100 if task.status == 'completed' else stored), None
+
+    phase_elapsed = _seconds_since(task.phase_started_at)
+
+    if task.phase == 'transcribing' and task.chunk_total:
+        lo, hi = PHASE_SPANS['transcribing']
+        # Expected wall-clock seconds for the chunk currently in flight
+        per_chunk = (task.audio_duration or 0) / task.chunk_total / WHISPER_REALTIME_FACTOR
+        per_chunk = max(per_chunk, 8.0)
+        within = _asymptotic_fraction(phase_elapsed, per_chunk)
+        done = ((task.chunk_index or 0) + within) / task.chunk_total
+        percent = lo + done * (hi - lo)
+        remaining_chunks = task.chunk_total - (task.chunk_index or 0) - within
+        eta = max(0.0, per_chunk * remaining_chunks)
+        return max(stored, int(percent)), eta
+
+    if task.phase == 'downloading' and task.bytes_total:
+        lo, hi = PHASE_SPANS['downloading']
+        frac = min(1.0, (task.bytes_downloaded or 0) / task.bytes_total)
+        rate = (task.bytes_downloaded or 0) / phase_elapsed if phase_elapsed > 1 else 0
+        eta = ((task.bytes_total - (task.bytes_downloaded or 0)) / rate) if rate > 0 else None
+        return max(stored, int(lo + frac * (hi - lo))), eta
+
+    if task.phase == 'splitting':
+        lo, hi = PHASE_SPANS['splitting']
+        # No measurable signal here; creep toward the top of the band
+        return max(stored, int(lo + _asymptotic_fraction(phase_elapsed, 30) * (hi - lo))), None
+
+    return stored, None
 
 
 def format_timestamp(seconds):
@@ -302,35 +549,64 @@ def _parse_duration(raw):
         return None
 
 
+def _format_published(entry):
+    """Render an episode date as YYYY-MM-DD, falling back to the raw RSS string."""
+    parsed = entry.get('published_parsed') or entry.get('updated_parsed')
+    if parsed:
+        try:
+            return time.strftime('%Y-%m-%d', parsed)
+        except (TypeError, ValueError):
+            pass
+    return entry.get('published', 'Unknown date')
+
+
 def get_episodes_from_rss(rss_url):
-    """Parse RSS feed and return episode list."""
+    """Parse RSS feed and return (episodes, error). Feed title lands on each episode."""
     try:
         feed = feedparser.parse(rss_url)
         if not feed.entries:
             return None, "No episodes found in RSS feed"
+
+        feed_title = getattr(feed.feed, 'title', '') or ''
+        feed_image = ''
+        if getattr(feed.feed, 'image', None):
+            feed_image = feed.feed.image.get('href', '') or ''
 
         episodes = []
         for i, entry in enumerate(feed.entries):
             audio_url = None
             if hasattr(entry, 'enclosures'):
                 for enc in entry.enclosures:
-                    if enc.type.startswith('audio/'):
+                    if enc.get('type', '').startswith('audio/'):
                         audio_url = enc.href
                         break
 
-            if audio_url:
-                desc = entry.get('description', '')
-                duration_secs = _parse_duration(entry.get('itunes_duration', ''))
-                duration_min = duration_secs / 60 if duration_secs else None
-                episodes.append({
-                    'index': i,
-                    'title': entry.title,
-                    'published': entry.get('published', 'Unknown date'),
-                    'audio_url': audio_url,
-                    'description': desc[:200] + '...' if len(desc) > 200 else desc,
-                    'duration_min': round(duration_min, 1) if duration_min else None,
-                    'estimated_cost': round(duration_min * 0.006, 3) if duration_min else None,
-                })
+            if not audio_url:
+                continue
+
+            desc = entry.get('description', '')
+            duration_secs = _parse_duration(entry.get('itunes_duration', ''))
+            duration_min = duration_secs / 60 if duration_secs else None
+            artwork = feed_image
+            if getattr(entry, 'image', None):
+                artwork = entry.image.get('href', '') or feed_image
+
+            episodes.append({
+                'index': i,
+                'title': entry.title,
+                'published': _format_published(entry),
+                'audio_url': audio_url,
+                'description': desc[:200] + '...' if len(desc) > 200 else desc,
+                'duration_min': round(duration_min, 1) if duration_min else None,
+                'estimated_cost': (
+                    round(duration_min * WHISPER_COST_PER_MINUTE, 3) if duration_min else None
+                ),
+                'artwork': artwork,
+                'podcast_name': feed_title,
+            })
+
+        if not episodes:
+            return None, "No playable audio episodes found in this feed"
 
         return episodes, None
     except Exception as e:
@@ -486,6 +762,9 @@ def use_feed(feed_id):
         feed_name=feed.name,
         has_more=has_more,
         needs_api_key=not _user_has_api_key(),
+        podcast_name=episodes[0].get('podcast_name') or feed.name,
+        artwork=episodes[0].get('artwork') or '',
+        languages=SUPPORTED_LANGUAGES,
     )
 
 
@@ -507,7 +786,8 @@ def index():
         saved_feeds = SavedFeed.query.filter_by(
             user_id=current_user.id
         ).order_by(SavedFeed.created_at.desc()).limit(5).all()
-    return render_template('index.html', saved_feeds=saved_feeds)
+    return render_template('index.html', saved_feeds=saved_feeds,
+                           languages=SUPPORTED_LANGUAGES)
 
 
 @app.route('/parse_rss', methods=['POST'])
@@ -531,55 +811,196 @@ def parse_rss():
         rss_url=rss_url,
         has_more=has_more,
         needs_api_key=not _user_has_api_key(),
+        podcast_name=episodes[0].get('podcast_name') or '',
+        artwork=episodes[0].get('artwork') or '',
+        languages=SUPPORTED_LANGUAGES,
     )
 
 
 @app.route('/start_transcription', methods=['POST'])
 @login_required
 def start_transcription():
+    """Start a transcription from either an RSS feed + index, or a direct audio URL.
+
+    The direct form is what episode search results post, so an episode found by
+    name never has to be located a second time inside its feed.
+    """
+    language = request.form.get('language', 'no')
+    if language not in VALID_LANGUAGE_CODES:
+        language = 'no'
+
+    audio_url = request.form.get('audio_url')
     rss_url = request.form.get('rss_url')
-    episode_index = int(request.form.get('episode_index'))
 
-    episodes, error = get_episodes_from_rss(rss_url)
-    if error or episode_index >= len(episodes):
-        return jsonify({'error': 'Invalid episode selection'}), 400
+    if audio_url:
+        if not _is_fetchable_url(audio_url):
+            return jsonify({'error': 'That audio URL cannot be fetched.'}), 400
+        meta = {
+            'title': request.form.get('episode_title') or 'Episode',
+            'audio_url': audio_url,
+            'podcast_name': request.form.get('podcast_name'),
+            'artwork': request.form.get('artwork'),
+            'published': request.form.get('published'),
+            'duration_min': _float_or_none(request.form.get('duration_min')),
+        }
+    else:
+        if not rss_url or request.form.get('episode_index') in (None, ''):
+            return jsonify({'error': 'Pick an episode first'}), 400
+        try:
+            episode_index = int(request.form.get('episode_index'))
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid episode selection'}), 400
 
-    episode = episodes[episode_index]
+        episodes, error = get_episodes_from_rss(rss_url)
+        if error or episode_index < 0 or episode_index >= len(episodes):
+            return jsonify({'error': 'Invalid episode selection'}), 400
+
+        episode = episodes[episode_index]
+        meta = {
+            'title': episode['title'],
+            'audio_url': episode['audio_url'],
+            'podcast_name': request.form.get('podcast_name'),
+            'artwork': episode.get('artwork') or request.form.get('artwork'),
+            'published': episode.get('published'),
+            'duration_min': episode.get('duration_min'),
+        }
+
     openai_client = get_openai_client(current_user)
-
     if not openai_client:
         return jsonify({
             'error': 'No OpenAI API key configured. Add your key in Settings.'
         }), 400
 
     task_id = str(uuid.uuid4())
-
     task = TranscriptionTask(
         id=task_id,
         user_id=current_user.id,
-        episode_title=episode['title'],
+        episode_title=meta['title'],
         rss_url=rss_url,
         status='downloading',
+        phase='downloading',
+        phase_started_at=datetime.now(timezone.utc),
+        podcast_name=meta.get('podcast_name'),
+        artwork_url=meta.get('artwork'),
+        episode_published=meta.get('published'),
+        # Feed duration is the best ETA source we have, and it is available
+        # before a single byte is downloaded.
+        audio_duration=(meta['duration_min'] * 60) if meta.get('duration_min') else None,
+        language=language or None,
     )
     db.session.add(task)
     db.session.commit()
 
-    parsed_url = urlparse(episode['audio_url'])
-    audio_filename = f"temp_audio_{task_id}" + os.path.splitext(parsed_url.path)[1]
+    parsed_url = urlparse(meta['audio_url'])
+    audio_filename = f"temp_audio_{task_id}" + (os.path.splitext(parsed_url.path)[1] or '.mp3')
+    source_url = meta['audio_url']
 
     def transcribe_thread():
         with app.app_context():
             try:
-                download_audio(episode['audio_url'], audio_filename, task_id)
-                transcribe_audio(audio_filename, task_id, openai_client)
+                download_audio(source_url, audio_filename, task_id)
+                transcribe_audio(audio_filename, task_id, openai_client, language=language)
             except Exception as e:
-                _update_task(task_id, status='error', error_message=str(e))
+                _update_task(task_id, status='error', phase='error', error_message=str(e))
+            finally:
+                if os.path.exists(audio_filename):
+                    try:
+                        os.remove(audio_filename)
+                    except OSError:
+                        pass
 
     thread = threading.Thread(target=transcribe_thread)
     thread.daemon = True
     thread.start()
 
     return jsonify({'task_id': task_id})
+
+
+def _is_fetchable_url(raw):
+    """Allow only public http(s) URLs.
+
+    The direct-episode path takes an audio URL from the client and the server
+    fetches it, so without this an authenticated user could point Podskrift at
+    localhost or a link-local metadata endpoint and read the response back as a
+    transcript.
+    """
+    import ipaddress
+    import socket
+
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return False
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        return False
+
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, None)
+    except socket.gaierror:
+        return False
+
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return False
+    return True
+
+
+def _float_or_none(raw):
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _stale_after_seconds(task):
+    """How long this particular task may stay quiet before it is presumed dead.
+
+    The heartbeat is written per chunk, so the window has to clear the slowest
+    plausible single chunk. A 24 MB chunk of 64 kbps audio is ~50 minutes long,
+    and if Whisper degrades to ~1.5x realtime that one chunk runs for over half
+    an hour -- a flat 15-minute window would kill a job that is very much alive.
+    """
+    if task.chunk_total and task.audio_duration:
+        per_chunk = task.audio_duration / task.chunk_total / WHISPER_REALTIME_FACTOR
+        return max(STALE_TASK_SECONDS, per_chunk * 8)
+    if task.audio_duration:
+        # Splitting sets no chunk_total yet, and pydub decoding plus re-exporting a
+        # large episode is silent work -- scale off the episode length instead.
+        return max(STALE_TASK_SECONDS, task.audio_duration / 5)
+    if task.bytes_downloaded:
+        # Not every feed publishes itunes:duration, and audio_duration is only
+        # measured *after* splitting -- the phase this window has to cover. The
+        # bytes already on disk are the only signal left. ~1 MB per minute of
+        # spoken-word audio, same /5 factor as above.
+        return max(STALE_TASK_SECONDS, (task.bytes_downloaded / (1024 * 1024)) * 60 / 5)
+    return STALE_TASK_SECONDS
+
+
+def _fail_if_stale(task):
+    """Fail a task whose worker has stopped writing progress.
+
+    The boot sweep alone is not enough: a task orphaned by a restart has a
+    heartbeat only seconds old, so the sweep on that same boot skips it and
+    nothing runs again afterwards. Checking here means the page polling the
+    task is what notices, which is exactly where the user is waiting.
+    """
+    if task.status in ('completed', 'error'):
+        return False
+    if _seconds_since(task.heartbeat_at or task.started_at) <= _stale_after_seconds(task):
+        return False
+    task.status = 'error'
+    task.phase = 'error'
+    task.error_message = (
+        'Transcription stopped making progress, most likely because the server '
+        'restarted. Please try again.'
+    )
+    db.session.commit()
+    return True
 
 
 @app.route('/status/<task_id>')
@@ -589,17 +1010,37 @@ def get_status(task_id):
     if not task or task.user_id != current_user.id:
         return jsonify({'error': 'Task not found'}), 404
 
-    elapsed = (time.time() - task.started_at.timestamp()) if task.started_at else 0
+    _fail_if_stale(task)
+    percent, eta = compute_live_progress(task)
+    elapsed = _seconds_since(task.started_at)
+
     result = {
         'status': task.status,
-        'progress': task.progress,
-        'download_progress': task.download_progress,
+        'phase': task.phase or task.status,
+        'progress': percent,
         'episode_title': task.episode_title,
-        'elapsed_time': f"{elapsed / 60:.1f} min",
+        'podcast_name': task.podcast_name,
+        'artwork_url': task.artwork_url,
+        'episode_published': task.episode_published,
+        'audio_duration': task.audio_duration,
+        'chunk_index': task.chunk_index,
+        'chunk_total': task.chunk_total,
+        'bytes_downloaded': task.bytes_downloaded,
+        'bytes_total': task.bytes_total,
+        'elapsed_seconds': int(elapsed),
+        'eta_seconds': int(eta) if eta is not None else None,
+        'estimated_cost': (
+            round((task.audio_duration / 60) * WHISPER_COST_PER_MINUTE, 3)
+            if task.audio_duration else None
+        ),
     }
 
     if task.status == 'error':
         result['error'] = task.error_message or 'Unknown error'
+
+    # Partial text so the page fills in as chunks land, rather than staying empty
+    if task.transcript_text and task.status != 'completed':
+        result['partial_text'] = task.transcript_text
 
     if task.status == 'completed':
         result['download_txt'] = url_for('download_file', task_id=task_id, file_type='txt')
@@ -671,10 +1112,12 @@ def history():
         user_id=current_user.id, status='completed'
     ).order_by(TranscriptionTask.completed_at.desc()).limit(50).all()
     total_cost = sum(
-        (t.audio_duration / 60) * 0.006
+        (t.audio_duration / 60) * WHISPER_COST_PER_MINUTE
         for t in tasks if t.audio_duration
     )
-    return render_template('history.html', transcriptions=tasks, total_cost=total_cost)
+    return render_template('history.html', transcriptions=tasks,
+                           total_cost=total_cost,
+                           cost_per_minute=WHISPER_COST_PER_MINUTE)
 
 
 @app.route('/rss-help')
@@ -700,38 +1143,79 @@ def convert_apple_url():
         return jsonify({'success': False, 'error': f'Server error: {e}'})
 
 
+def _best_artwork(item):
+    """Pick the largest artwork iTunes offers.
+
+    Episode results (entity=podcastEpisode) never carry artworkUrl100 -- they use
+    60/160/600 -- so reading only the 100 key left every episode row without an image.
+    """
+    for key in ('artworkUrl600', 'artworkUrl160', 'artworkUrl100', 'artworkUrl60'):
+        if item.get(key):
+            return item[key]
+    return ''
+
+
 @app.route('/search-podcasts', methods=['GET'])
 def search_podcasts():
-    """Search for podcasts by name using iTunes Search API."""
+    """Search iTunes for podcast shows, or for individual episodes.
+
+    `type=episode` uses entity=podcastEpisode, which returns episodeUrl -- the
+    direct audio file. That lets someone search an episode topic and go straight
+    to transcribing it, instead of finding the show first and paging its feed.
+    """
     query = request.args.get('q', '').strip()
+    search_type = request.args.get('type', 'show')
     if not query or len(query) < 2:
         return jsonify({'results': []})
 
+    is_episode = search_type == 'episode'
+    params = {'term': query, 'media': 'podcast', 'limit': 25}
+    if is_episode:
+        params['entity'] = 'podcastEpisode'
+
     try:
-        resp = requests.get(
-            'https://itunes.apple.com/search',
-            params={'term': query, 'media': 'podcast', 'limit': 10},
-            timeout=10,
-        )
+        resp = requests.get('https://itunes.apple.com/search', params=params, timeout=10)
         resp.raise_for_status()
         data = resp.json()
+    except Exception as e:
+        return jsonify({'results': [], 'error': str(e)})
 
-        results = []
-        for item in data.get('results', []):
+    results = []
+    for item in data.get('results', []):
+        if is_episode:
+            audio_url = item.get('episodeUrl')
+            if not audio_url:
+                continue
+            duration_min = None
+            if item.get('trackTimeMillis'):
+                duration_min = round(item['trackTimeMillis'] / 60000, 1)
+            results.append({
+                'type': 'episode',
+                'name': item.get('trackName', ''),
+                'artist': item.get('collectionName', ''),
+                'artwork': _best_artwork(item),
+                'audio_url': audio_url,
+                'feed_url': item.get('feedUrl', ''),
+                'released': (item.get('releaseDate') or '')[:10],
+                'duration_min': duration_min,
+                'estimated_cost': (
+                    round(duration_min * WHISPER_COST_PER_MINUTE, 3) if duration_min else None
+                ),
+            })
+        else:
             feed_url = item.get('feedUrl')
             if not feed_url:
                 continue
             results.append({
+                'type': 'show',
                 'name': item.get('collectionName', ''),
                 'artist': item.get('artistName', ''),
-                'artwork': item.get('artworkUrl100', ''),
+                'artwork': _best_artwork(item),
                 'feed_url': feed_url,
                 'genre': item.get('primaryGenreName', ''),
             })
 
-        return jsonify({'results': results})
-    except Exception as e:
-        return jsonify({'results': [], 'error': str(e)})
+    return jsonify({'results': results})
 
 
 # ---------------------------------------------------------------------------
@@ -743,11 +1227,32 @@ with app.app_context():
 
     # Add columns that may be missing on existing databases
     from sqlalchemy import inspect, text
-    from datetime import datetime, timezone
     inspector = inspect(db.engine)
     existing_cols = {c['name'] for c in inspector.get_columns('transcription_tasks')}
-    if 'audio_duration' not in existing_cols:
-        db.session.execute(text('ALTER TABLE transcription_tasks ADD COLUMN audio_duration FLOAT'))
+    for column, ddl_type in TASK_COLUMN_MIGRATIONS.items():
+        if column not in existing_cols:
+            db.session.execute(text(
+                f'ALTER TABLE transcription_tasks ADD COLUMN {column} {ddl_type}'
+            ))
+    db.session.commit()
+
+    # Transcription runs in a daemon thread, so a deploy or crash leaves tasks
+    # stuck in a running state forever. Fail those at boot -- but only ones that
+    # have gone quiet: this module is imported by every gunicorn worker, and a
+    # worker respawning mid-life must not kill jobs another worker is running.
+    orphaned = [
+        t for t in TranscriptionTask.query.filter(
+            ~TranscriptionTask.status.in_(['completed', 'error'])
+        ).all()
+        if _seconds_since(t.heartbeat_at or t.started_at) > _stale_after_seconds(t)
+    ]
+    for task in orphaned:
+        task.status = 'error'
+        task.phase = 'error'
+        task.error_message = (
+            'Transcription was interrupted and stopped making progress. Please try again.'
+        )
+    if orphaned:
         db.session.commit()
 
     # One-time migration: move old transcriptions table to transcription_tasks

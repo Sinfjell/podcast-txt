@@ -70,11 +70,25 @@ If you prefer to run without Docker:
    pip install -r requirements.txt
    ```
 
+   For development, install the test dependencies too:
+   ```bash
+   pip install -r requirements-dev.txt
+   ```
+
 4. **Set up OpenAI API key**
    ```bash
    # Create .env file
    echo "OPENAI_API_KEY=your_api_key_here" > .env
    ```
+
+## Running the tests
+
+```bash
+pytest test_app.py
+```
+
+The suite points `DATABASE_URL` at a temporary file before importing the app, so
+it never touches `data/podcast.db`.
 
 ## Docker Setup
 

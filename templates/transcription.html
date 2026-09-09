@@ -1,146 +1,286 @@
 {% extends "base.html" %}
 {% block title %}Transcribing — Podskrift{% endblock %}
+{% block container_class %}container-wide{% endblock %}
 
 {% block content %}
-<div style="max-width: 700px; margin: 40px auto;">
-    <div class="card">
-        <div class="card-header">
-            <h3>Transcription</h3>
-        </div>
-        <div class="card-body">
-            <div id="statusContainer" class="text-center text-muted" style="padding: 24px 0;">
-                Initializing...
-            </div>
+<!-- Episode header: gives the page something to show for the minutes it runs -->
+<div class="card mb-2">
+    <div class="card-body">
+        <div class="episode-hero">
+            <img id="heroArtwork" alt="" style="display: none;">
+            <div class="episode-hero-info">
+                <p class="section-label" id="podcastName"></p>
+                <h2 id="episodeTitle" style="font-size: 21px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.3;">
+                    Loading episode…
+                </h2>
+                <p class="text-muted text-sm mt-1" id="episodeMeta"></p>
 
-            <div id="progressContainer" class="hidden">
-                <div class="flex-between mb-1">
-                    <span id="statusText" class="text-sm">Starting...</span>
-                    <span id="progressText" class="text-sm text-muted">0%</span>
-                </div>
-                <div class="progress-track mb-2">
-                    <div class="progress-fill" id="progressBar" style="width: 0%"></div>
-                </div>
-                <div id="downloadProgress" class="hidden">
-                    <div class="flex-between mb-1">
-                        <span class="text-sm text-muted">Download</span>
+                <div class="stat-row">
+                    <div>
+                        <div class="stat-label">Elapsed</div>
+                        <div class="stat-value" id="statElapsed">—</div>
                     </div>
-                    <div class="progress-track">
-                        <div class="progress-fill" id="downloadBar" style="width: 0%; background: var(--muted);"></div>
+                    <div>
+                        <div class="stat-label">Remaining</div>
+                        <div class="stat-value" id="statEta">—</div>
                     </div>
-                </div>
-            </div>
-
-            <div id="resultContainer" class="hidden">
-                <div class="alert alert-success" style="flex-direction: column; align-items: flex-start;">
-                    <strong>Transcription complete</strong>
-                    <span id="episodeTitle" class="text-sm" style="margin-top: 4px;"></span>
-                    <span id="languageInfo" class="text-sm" style="opacity: 0.7;"></span>
-                </div>
-                <div class="flex-center" style="gap: 8px; justify-content: center;">
-                    <button type="button" class="btn btn-primary" id="copyBtn" onclick="copyTranscript()">Copy transcript</button>
-                    <a href="#" id="downloadTxt" class="btn btn-ghost">Download .txt</a>
-                    <a href="#" id="downloadSrt" class="btn btn-ghost">Download .srt</a>
-                </div>
-            </div>
-
-            <div id="errorContainer" class="hidden">
-                <div class="alert alert-error" style="flex-direction: column; align-items: flex-start;">
-                    <strong>Error</strong>
-                    <span id="errorMessage" class="text-sm" style="margin-top: 4px;"></span>
+                    <div>
+                        <div class="stat-label">Audio length</div>
+                        <div class="stat-value" id="statDuration">—</div>
+                    </div>
+                    <div>
+                        <div class="stat-label">Est. cost</div>
+                        <div class="stat-value" id="statCost">—</div>
+                    </div>
                 </div>
             </div>
         </div>
+    </div>
+</div>
+
+<!-- Progress -->
+<div class="card mb-2" id="progressCard">
+    <div class="card-body">
+        <div class="flex-between mb-1">
+            <span id="statusText" class="text-sm" style="font-weight: 600;">Starting…</span>
+            <span id="progressText" class="text-sm text-muted" style="font-variant-numeric: tabular-nums;">0%</span>
+        </div>
+        <div class="progress-track progress-track-lg">
+            <div class="progress-fill" id="progressBar" style="width: 0%"></div>
+        </div>
+
+        <div class="steps" id="steps">
+            <div class="step" data-phase="downloading">
+                <div class="step-bar"></div><div class="step-label">Download</div>
+            </div>
+            <div class="step" data-phase="splitting">
+                <div class="step-bar"></div><div class="step-label">Prepare</div>
+            </div>
+            <div class="step" data-phase="transcribing">
+                <div class="step-bar"></div><div class="step-label">Transcribe</div>
+            </div>
+            <div class="step" data-phase="completed">
+                <div class="step-bar"></div><div class="step-label">Done</div>
+            </div>
+        </div>
+        <p class="text-sm text-muted mt-1" id="phaseDetail"></p>
+    </div>
+</div>
+
+<!-- Result banner -->
+<div id="resultBanner" class="hidden">
+    <div class="alert alert-success" style="flex-direction: column; align-items: flex-start;">
+        <strong>Transcription complete</strong>
+        <span id="completionInfo" class="text-sm" style="margin-top: 4px; opacity: 0.8;"></span>
+    </div>
+</div>
+
+<div id="errorContainer" class="hidden">
+    <div class="alert alert-error" style="flex-direction: column; align-items: flex-start;">
+        <strong>Error</strong>
+        <span id="errorMessage" class="text-sm" style="margin-top: 4px;"></span>
+    </div>
+    <div class="text-center mt-2">
+        <a href="{{ url_for('index') }}" class="btn btn-ghost">Start over</a>
+    </div>
+</div>
+
+<!-- Transcript, filling in live -->
+<div class="card" id="transcriptCard">
+    <div class="card-header">
+        <h5>Transcript</h5>
+        <div class="flex-center" style="gap: 8px;">
+            <button type="button" class="btn btn-sm btn-primary hidden" id="copyBtn" onclick="copyTranscript()">Copy</button>
+            <a href="#" id="downloadTxt" class="btn btn-sm btn-ghost hidden">.txt</a>
+            <a href="#" id="downloadSrt" class="btn btn-sm btn-ghost hidden">.srt</a>
+        </div>
+    </div>
+    <div class="card-body">
+        <div class="transcript-pane" id="transcriptPane"></div>
     </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-var taskId = '{{ task_id }}';
-var retryCount = 0;
-var maxRetries = 5;
+(function() {
+    var taskId = '{{ task_id }}';
+    var retryCount = 0;
+    var maxRetries = 5;
+    var transcriptText = '';
+    var PHASE_ORDER = ['downloading', 'splitting', 'transcribing', 'completed'];
 
-function updateStatus() {
-    fetch('/status/' + taskId)
-        .then(function(r) {
-            if (!r.ok && r.status === 401) {
-                window.location.href = '/login?next=' + encodeURIComponent(window.location.pathname);
-                return;
-            }
-            return r.json();
-        })
-        .then(function(data) {
-            if (!data) return;
-            retryCount = 0;
-            if (data.error && !data.status) { showError(data.error); return; }
-            updateUI(data);
-            if (data.status !== 'completed' && data.status !== 'error') {
-                setTimeout(updateStatus, 2000);
-            }
-        })
-        .catch(function() {
-            retryCount++;
-            if (retryCount <= maxRetries) {
-                setTimeout(updateStatus, 3000 * retryCount);
-            } else {
-                showError('Lost connection. Refresh to check status.');
-            }
-        });
-}
+    var el = function(id) { return document.getElementById(id); };
 
-function updateUI(data) {
-    var sc = document.getElementById('statusContainer');
-    var pc = document.getElementById('progressContainer');
-    var rc = document.getElementById('resultContainer');
-    var ec = document.getElementById('errorContainer');
-
-    sc.style.display = 'none';
-    pc.style.display = 'none';
-    rc.style.display = 'none';
-    ec.style.display = 'none';
-
-    if (data.status === 'error') { showError(data.error || 'Unknown error'); return; }
-    if (data.status === 'completed') { showResult(data); return; }
-
-    pc.style.display = 'block';
-    var msg = data.status === 'downloading' ? 'Downloading audio...'
-            : data.status === 'splitting' ? 'Preparing audio...'
-            : data.status.indexOf('transcribing') !== -1 ? 'Transcribing...'
-            : 'Processing...';
-    document.getElementById('statusText').textContent = msg;
-    document.getElementById('progressText').textContent = Math.round(data.progress || 0) + '%';
-    document.getElementById('progressBar').style.width = (data.progress || 0) + '%';
-
-    if (data.download_progress !== undefined) {
-        document.getElementById('downloadProgress').style.display = 'block';
-        document.getElementById('downloadBar').style.width = data.download_progress + '%';
+    function show(node, visible) {
+        node.classList.toggle('hidden', !visible);
+        node.style.display = visible ? '' : 'none';
     }
-}
 
-var transcriptText = '';
+    function fmtDuration(secs) {
+        if (secs === null || secs === undefined) return '—';
+        secs = Math.max(0, Math.round(secs));
+        var m = Math.floor(secs / 60), s = secs % 60;
+        if (m >= 60) {
+            var h = Math.floor(m / 60);
+            return h + 'h ' + (m % 60) + 'm';
+        }
+        return m > 0 ? m + 'm ' + String(s).padStart(2, '0') + 's' : s + 's';
+    }
 
-function showResult(data) {
-    document.getElementById('resultContainer').style.display = 'block';
-    document.getElementById('episodeTitle').textContent = data.episode_title || '';
-    document.getElementById('languageInfo').textContent = data.language ? 'Language: ' + data.language : '';
-    if (data.download_txt) document.getElementById('downloadTxt').href = data.download_txt;
-    if (data.download_srt) document.getElementById('downloadSrt').href = data.download_srt;
-    if (data.transcript_text) transcriptText = data.transcript_text;
-}
+    function fmtBytes(n) {
+        if (!n) return '0 MB';
+        return (n / 1048576).toFixed(1) + ' MB';
+    }
 
-function copyTranscript() {
-    var btn = document.getElementById('copyBtn');
-    navigator.clipboard.writeText(transcriptText).then(function() {
-        btn.textContent = 'Copied!';
-        setTimeout(function() { btn.textContent = 'Copy transcript'; }, 2000);
-    });
-}
+    function setSteps(phase) {
+        var current = PHASE_ORDER.indexOf(phase);
+        if (current === -1) current = 0;
+        var steps = el('steps').querySelectorAll('.step');
+        for (var i = 0; i < steps.length; i++) {
+            steps[i].classList.toggle('done', i < current);
+            steps[i].classList.toggle('active', i === current && phase !== 'completed');
+            if (phase === 'completed') steps[i].classList.add('done');
+        }
+    }
 
-function showError(msg) {
-    document.getElementById('errorContainer').style.display = 'block';
-    document.getElementById('errorMessage').textContent = msg;
-}
+    function renderHeader(d) {
+        if (d.artwork_url) {
+            var img = el('heroArtwork');
+            img.src = d.artwork_url.replace(/\/\d+x\d+bb/, '/600x600bb');
+            img.style.display = '';
+        }
+        el('podcastName').textContent = d.podcast_name || '';
+        el('episodeTitle').textContent = d.episode_title || 'Episode';
+        el('episodeMeta').textContent = d.episode_published || '';
+        el('statElapsed').textContent = fmtDuration(d.elapsed_seconds);
+        el('statDuration').textContent = d.audio_duration ? fmtDuration(d.audio_duration) : '—';
+        el('statCost').textContent = d.estimated_cost ? '$' + d.estimated_cost.toFixed(3) : '—';
+        el('statEta').textContent =
+            (d.status === 'completed') ? 'Done'
+            : (d.eta_seconds !== null && d.eta_seconds !== undefined) ? fmtDuration(d.eta_seconds)
+            : 'Estimating…';
+    }
 
-updateStatus();
+    function phaseCopy(d) {
+        var phase = d.phase || d.status;
+        if (phase === 'downloading') {
+            var total = d.bytes_total
+                ? fmtBytes(d.bytes_downloaded) + ' of ' + fmtBytes(d.bytes_total)
+                : fmtBytes(d.bytes_downloaded) + ' downloaded';
+            return ['Downloading audio', total];
+        }
+        if (phase === 'splitting') {
+            return ['Preparing audio', 'Splitting into chunks small enough for the Whisper API.'];
+        }
+        if (String(phase).indexOf('transcribing') !== -1) {
+            var detail = d.chunk_total > 1
+                ? 'Chunk ' + ((d.chunk_index || 0) + 1) + ' of ' + d.chunk_total
+                : 'Sending audio to Whisper — this is the slow part.';
+            return ['Transcribing', detail];
+        }
+        return ['Working', ''];
+    }
+
+    function updateUI(d) {
+        renderHeader(d);
+
+        if (d.status === 'error') {
+            show(el('progressCard'), false);
+            show(el('errorContainer'), true);
+            el('errorMessage').textContent = d.error || 'Unknown error';
+            return;
+        }
+
+        if (d.status === 'completed') {
+            show(el('progressCard'), false);
+            show(el('resultBanner'), true);
+            setSteps('completed');
+            transcriptText = d.transcript_text || '';
+            el('transcriptPane').textContent = transcriptText;
+            var bits = [];
+            if (d.language) bits.push('Language: ' + d.language);
+            if (d.actual_transcription_time) bits.push('Took ' + d.actual_transcription_time);
+            el('completionInfo').textContent = bits.join(' · ');
+            if (d.download_txt) { el('downloadTxt').href = d.download_txt; show(el('downloadTxt'), true); }
+            if (d.download_srt) { el('downloadSrt').href = d.download_srt; show(el('downloadSrt'), true); }
+            show(el('copyBtn'), true);
+            return;
+        }
+
+        var copy = phaseCopy(d);
+        el('statusText').textContent = copy[0];
+        el('phaseDetail').textContent = copy[1];
+        el('progressText').textContent = (d.phase === 'downloading' && !d.bytes_total)
+            ? '' : Math.round(d.progress || 0) + '%';
+
+        var bar = el('progressBar');
+        bar.style.width = (d.phase === 'downloading' && !d.bytes_total)
+            ? '100%' : (d.progress || 0) + '%';
+        // No byte counter available means we genuinely can't measure it — say so
+        // with motion instead of a bar frozen at a number.
+        // A CDN that omits content-length gives us no percentage at all. Animate
+        // rather than showing a bar frozen at 0% -- that was the original complaint.
+        bar.classList.toggle('indeterminate', d.phase === 'downloading' && !d.bytes_total);
+
+        setSteps(d.phase || d.status);
+
+        if (d.partial_text) {
+            var pane = el('transcriptPane');
+            pane.textContent = d.partial_text;
+            var cursor = document.createElement('span');
+            cursor.className = 'cursor';
+            pane.appendChild(cursor);
+            pane.scrollTop = pane.scrollHeight;
+        }
+    }
+
+    function poll() {
+        fetch('/status/' + taskId)
+            .then(function(r) {
+                if (r.status === 401) {
+                    window.location.href = '/login?next=' + encodeURIComponent(window.location.pathname);
+                    return null;
+                }
+                return r.json();
+            })
+            .then(function(d) {
+                if (!d) return;
+                retryCount = 0;
+                if (d.error && !d.status) {
+                    show(el('progressCard'), false);
+                    show(el('errorContainer'), true);
+                    el('errorMessage').textContent = d.error;
+                    return;
+                }
+                updateUI(d);
+                if (d.status !== 'completed' && d.status !== 'error') {
+                    setTimeout(poll, 2000);
+                }
+            })
+            .catch(function() {
+                retryCount++;
+                if (retryCount <= maxRetries) {
+                    setTimeout(poll, 3000 * retryCount);
+                } else {
+                    show(el('progressCard'), false);
+                    show(el('errorContainer'), true);
+                    el('errorMessage').textContent = 'Lost connection. Refresh to check status.';
+                }
+            });
+    }
+
+    window.copyTranscript = function() {
+        var btn = el('copyBtn');
+        navigator.clipboard.writeText(transcriptText).then(function() {
+            btn.textContent = 'Copied!';
+            setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
+        });
+    };
+
+    show(el('resultBanner'), false);
+    show(el('errorContainer'), false);
+    poll();
+})();
 </script>
 {% endblock %}

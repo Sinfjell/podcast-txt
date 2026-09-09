@@ -60,3 +60,36 @@ class TranscriptionTask(db.Model):
     transcription_time = db.Column(db.Float, nullable=True)
     started_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     completed_at = db.Column(db.DateTime, nullable=True)
+
+    # Episode metadata, so the progress page has something to show while it works
+    podcast_name = db.Column(db.String(512), nullable=True)
+    artwork_url = db.Column(db.String(1024), nullable=True)
+    episode_published = db.Column(db.String(128), nullable=True)
+
+    # Fine-grained progress state, read by /status to interpolate between checkpoints
+    phase = db.Column(db.String(20), nullable=True)
+    phase_started_at = db.Column(db.DateTime, nullable=True)
+    chunk_index = db.Column(db.Integer, nullable=True)
+    chunk_total = db.Column(db.Integer, nullable=True)
+    bytes_downloaded = db.Column(db.BigInteger, nullable=True)
+    bytes_total = db.Column(db.BigInteger, nullable=True)
+    # Touched on every progress write, so a restart can tell a live task
+    # (owned by another gunicorn worker) from one abandoned by a crash.
+    heartbeat_at = db.Column(db.DateTime, nullable=True)
+
+
+#: Columns added after the first release, applied via ALTER TABLE on startup.
+#: Keyed by column name so the migration stays declarative as the model grows.
+TASK_COLUMN_MIGRATIONS = {
+    'audio_duration': 'FLOAT',
+    'podcast_name': 'VARCHAR(512)',
+    'artwork_url': 'VARCHAR(1024)',
+    'episode_published': 'VARCHAR(128)',
+    'phase': 'VARCHAR(20)',
+    'phase_started_at': 'DATETIME',
+    'chunk_index': 'INTEGER',
+    'chunk_total': 'INTEGER',
+    'bytes_downloaded': 'BIGINT',
+    'bytes_total': 'BIGINT',
+    'heartbeat_at': 'DATETIME',
+}

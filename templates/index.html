@@ -35,15 +35,27 @@
 <!-- Search -->
 <div class="card">
     <div class="card-header">
-        <h3>Find a podcast</h3>
+        <h3>Find a podcast or episode</h3>
     </div>
     <div class="card-body">
+        <div class="tabs" id="searchTabs">
+            <button type="button" class="tab active" data-type="show">Podcasts</button>
+            <button type="button" class="tab" data-type="episode">Episodes</button>
+        </div>
         <div class="input-group">
             <input type="text" class="form-input form-input-lg" id="podcastSearch"
-                   placeholder="Search by name..." autocomplete="off">
+                   placeholder="Search podcasts by name..." autocomplete="off">
             <button class="btn btn-primary" type="button" id="searchBtn">Search</button>
         </div>
-        <p class="form-hint">Works with any podcast — Spotify, Apple Podcasts, or any other platform.</p>
+        <p class="form-hint" id="searchHint">Works with any podcast — Spotify, Apple Podcasts, or any other platform.</p>
+        <div id="episodeLangRow" class="hidden" style="margin-top: 12px;">
+            <label class="form-label" for="searchLanguage">Spoken language</label>
+            <select class="form-input" id="searchLanguage" style="max-width: 220px;">
+                {% for code, label in languages %}
+                <option value="{{ code }}"{% if code == 'no' %} selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </div>
         <div id="searchResults"></div>
     </div>
 </div>
@@ -80,7 +92,7 @@
     <p class="section-label">How it works</p>
     <div class="grid grid-2" style="gap: 8px;">
         <div style="font-size: 13.5px; color: var(--muted); padding: 8px 0;">
-            <span style="color: var(--accent-bright); font-weight: 600;">1.</span> Search for any podcast by name
+            <span style="color: var(--accent-bright); font-weight: 600;">1.</span> Search by podcast name — or jump straight to an episode
         </div>
         <div style="font-size: 13.5px; color: var(--muted); padding: 8px 0;">
             <span style="color: var(--accent-bright); font-weight: 600;">2.</span> Select the episode to transcribe
@@ -101,29 +113,147 @@
     var searchInput = document.getElementById('podcastSearch');
     var searchBtn = document.getElementById('searchBtn');
     var resultsDiv = document.getElementById('searchResults');
+    var tabs = document.getElementById('searchTabs');
+    var hint = document.getElementById('searchHint');
     var debounceTimer = null;
+    var searchType = 'show';
+    var langRow = document.getElementById('episodeLangRow');
+    var langSelect = document.getElementById('searchLanguage');
+
+    var storedLang = localStorage.getItem('podskrift_language');
+    if (storedLang !== null && langSelect.querySelector('option[value="' + storedLang + '"]')) {
+        langSelect.value = storedLang;
+    }
+    langSelect.addEventListener('change', function() {
+        localStorage.setItem('podskrift_language', langSelect.value);
+    });
+
+    var PARSE_RSS_URL = '{{ url_for("parse_rss") }}';
+    var START_URL = '{{ url_for("start_transcription") }}';
+    var IS_AUTHENTICATED = {{ 'true' if current_user.is_authenticated else 'false' }};
+    var LOGIN_URL = '{{ url_for("login") }}';
+
+    function clearResults() {
+        while (resultsDiv.firstChild) resultsDiv.removeChild(resultsDiv.firstChild);
+    }
+
+    function setMessage(text, color) {
+        clearResults();
+        resultsDiv.textContent = text;
+        resultsDiv.style.color = color || 'var(--muted)';
+        resultsDiv.style.padding = '12px 0';
+    }
+
+    function postForm(action, fields) {
+        var form = document.createElement('form');
+        form.method = 'POST';
+        form.action = action;
+        Object.keys(fields).forEach(function(name) {
+            if (fields[name] === null || fields[name] === undefined) return;
+            var input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = name;
+            input.value = fields[name];
+            form.appendChild(input);
+        });
+        document.body.appendChild(form);
+        form.submit();
+    }
+
+    function buildRow(item) {
+        var row = document.createElement('div');
+        row.className = 'search-result';
+
+        if (item.artwork) {
+            var img = document.createElement('img');
+            img.src = item.artwork;
+            img.alt = '';
+            row.appendChild(img);
+        }
+
+        var info = document.createElement('div');
+        info.className = 'search-result-info';
+
+        var title = document.createElement('div');
+        title.className = 'search-result-title';
+        title.textContent = item.name;
+        info.appendChild(title);
+
+        var sub = document.createElement('div');
+        sub.className = 'search-result-artist';
+        var parts = [item.artist];
+        if (item.type === 'episode') {
+            if (item.released) parts.push(item.released);
+            if (item.duration_min) parts.push(item.duration_min + ' min');
+            if (item.estimated_cost) parts.push('~$' + item.estimated_cost.toFixed(3));
+        } else if (item.genre) {
+            parts.push(item.genre);
+        }
+        sub.textContent = parts.filter(Boolean).join(' \u00B7 ');
+        info.appendChild(sub);
+        row.appendChild(info);
+
+        var badge = document.createElement('span');
+        badge.className = 'badge';
+        badge.textContent = item.type === 'episode' ? 'Transcribe' : 'Episodes';
+        row.appendChild(badge);
+
+        row.addEventListener('click', function() {
+            if (item.type !== 'episode') {
+                postForm(PARSE_RSS_URL, { rss_url: item.feed_url });
+                return;
+            }
+            // Episode hits carry the audio URL already -- no need to find the
+            // episode a second time inside its feed.
+            if (!IS_AUTHENTICATED) {
+                window.location.href = LOGIN_URL;
+                return;
+            }
+            badge.textContent = 'Starting…';
+            var body = new FormData();
+            body.append('audio_url', item.audio_url);
+            body.append('episode_title', item.name);
+            body.append('podcast_name', item.artist || '');
+            body.append('artwork', item.artwork || '');
+            body.append('published', item.released || '');
+            if (item.duration_min) body.append('duration_min', item.duration_min);
+            body.append('language', langSelect.value);
+
+            fetch(START_URL, { method: 'POST', body: body })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.task_id) {
+                        window.location.href = '/transcription/' + data.task_id;
+                    } else {
+                        badge.textContent = 'Transcribe';
+                        setMessage(data.error || 'Could not start transcription.', 'var(--error)');
+                    }
+                })
+                .catch(function() {
+                    badge.textContent = 'Transcribe';
+                    setMessage('Could not start transcription.', 'var(--error)');
+                });
+        });
+
+        return row;
+    }
 
     function doSearch() {
         var query = searchInput.value.trim();
-        if (query.length < 2) {
-            while (resultsDiv.firstChild) resultsDiv.removeChild(resultsDiv.firstChild);
-            return;
-        }
+        if (query.length < 2) { clearResults(); return; }
 
-        resultsDiv.textContent = 'Searching...';
-        resultsDiv.style.color = 'var(--muted)';
-        resultsDiv.style.padding = '12px 0';
+        setMessage('Searching…');
 
-        fetch('/search-podcasts?q=' + encodeURIComponent(query))
+        fetch('/search-podcasts?type=' + searchType + '&q=' + encodeURIComponent(query))
             .then(function(r) { return r.json(); })
             .then(function(data) {
-                while (resultsDiv.firstChild) resultsDiv.removeChild(resultsDiv.firstChild);
+                clearResults();
                 resultsDiv.style.padding = '0';
 
                 if (!data.results || data.results.length === 0) {
-                    resultsDiv.textContent = 'No podcasts found.';
-                    resultsDiv.style.color = 'var(--muted)';
-                    resultsDiv.style.padding = '12px 0';
+                    setMessage(searchType === 'episode'
+                        ? 'No episodes found. Try the Podcasts tab and browse the feed.'
+                        : 'No podcasts found.');
                     return;
                 }
 
@@ -132,71 +262,34 @@
                 list.style.border = '1px solid var(--border)';
                 list.style.borderRadius = 'var(--radius)';
                 list.style.overflow = 'hidden';
-
-                data.results.forEach(function(podcast) {
-                    var item = document.createElement('div');
-                    item.className = 'search-result';
-
-                    if (podcast.artwork) {
-                        var img = document.createElement('img');
-                        img.src = podcast.artwork;
-                        img.alt = podcast.name;
-                        item.appendChild(img);
-                    }
-
-                    var info = document.createElement('div');
-                    info.className = 'search-result-info';
-
-                    var title = document.createElement('div');
-                    title.className = 'search-result-title';
-                    title.textContent = podcast.name;
-                    info.appendChild(title);
-
-                    var artist = document.createElement('div');
-                    artist.className = 'search-result-artist';
-                    artist.textContent = podcast.artist;
-                    if (podcast.genre) artist.textContent += ' \u00B7 ' + podcast.genre;
-                    info.appendChild(artist);
-
-                    item.appendChild(info);
-
-                    var badge = document.createElement('span');
-                    badge.className = 'badge';
-                    badge.textContent = 'Select';
-                    item.appendChild(badge);
-
-                    (function(feedUrl) {
-                        item.addEventListener('click', function() {
-                            var form = document.createElement('form');
-                            form.method = 'POST';
-                            form.action = '{{ url_for("parse_rss") }}';
-                            var input = document.createElement('input');
-                            input.type = 'hidden';
-                            input.name = 'rss_url';
-                            input.value = feedUrl;
-                            form.appendChild(input);
-                            document.body.appendChild(form);
-                            form.submit();
-                        });
-                    })(podcast.feed_url);
-
-                    list.appendChild(item);
-                });
-
+                data.results.forEach(function(item) { list.appendChild(buildRow(item)); });
                 resultsDiv.appendChild(list);
             })
-            .catch(function(err) {
-                resultsDiv.textContent = 'Search failed.';
-                resultsDiv.style.color = 'var(--error)';
-                resultsDiv.style.padding = '12px 0';
+            .catch(function() {
+                setMessage('Search failed.', 'var(--error)');
             });
     }
 
+    tabs.addEventListener('click', function(e) {
+        var tab = e.target.closest('.tab');
+        if (!tab) return;
+        tabs.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+        tab.classList.add('active');
+        searchType = tab.dataset.type;
+        // The picker only means anything on the episode tab, which transcribes directly
+        langRow.classList.toggle('hidden', searchType !== 'episode');
+        searchInput.placeholder = searchType === 'episode'
+            ? 'Search episodes by title or topic...'
+            : 'Search podcasts by name...';
+        hint.textContent = searchType === 'episode'
+            ? 'Finds individual episodes and starts transcribing the one you pick.'
+            : 'Works with any podcast — Spotify, Apple Podcasts, or any other platform.';
+        if (searchInput.value.trim().length >= 2) doSearch();
+    });
+
     searchBtn.addEventListener('click', doSearch);
     searchInput.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter') { e.preventDefault(); doSearch(); return; }
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(doSearch, 400);
+        if (e.key === 'Enter') { e.preventDefault(); clearTimeout(debounceTimer); doSearch(); }
     });
     searchInput.addEventListener('input', function() {
         clearTimeout(debounceTimer);
