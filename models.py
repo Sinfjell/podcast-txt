@@ -33,15 +33,6 @@ class User(UserMixin, db.Model):
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
 
-    def get_openai_key(self):
-        """Return the user's OWN key, or None.
-
-        The global trial key is deliberately not resolved here. It costs us
-        money, so it is only ever handed out by app.resolve_openai_key(),
-        which meters it against this user's trial allowance.
-        """
-        return self.openai_api_key
-
 
 class SavedFeed(db.Model):
     __tablename__ = 'saved_feeds'

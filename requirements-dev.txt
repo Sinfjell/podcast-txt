@@ -1,3 +1,6 @@
 # Development/test dependencies. Not installed in the production image.
 -r requirements.txt
 pytest>=8.0.0
+# pydub imports `audioop`, removed from the stdlib in Python 3.13.
+# Production runs 3.12 and does not need this; local dev on 3.13+ does.
+audioop-lts>=0.2.1; python_version >= '3.13'

@@ -197,6 +197,10 @@ class TrialExhausted(Exception):
     """Raised when a job would cost more trial allowance than is left."""
 
 
+class TaskAbandoned(Exception):
+    """Raised when a task was failed out from under the worker still running it."""
+
+
 def trial_available():
     """Is there a trial to hand out at all?"""
     return bool(TRIAL_ENABLED and GLOBAL_OPENAI_KEY and TRIAL_DEFAULT_SECONDS > 0)
@@ -287,15 +291,30 @@ def _claim_task_charge(task_id, expected, new):
 
 
 def trial_refund_task(task):
-    """Refund a failed task's reservation. Safe to call repeatedly."""
+    """Refund the part of a failed task we did not actually spend.
+
+    Chunks already sent to Whisper were billed to us whatever happens to the
+    task afterwards, so refunding the whole reservation would hand back money
+    that is gone -- and the stale sweeper fires on tasks whose worker is often
+    several chunks in. Refund the unstarted remainder instead, pro-rata on
+    chunk progress. Safe to call repeatedly: the conditional UPDATE on the
+    task is what decides which caller may move the balance.
+    """
     charged = task.trial_seconds_charged
     if not charged or charged <= 0:
         return 0
     user_id = task.user_id
-    if not _claim_task_charge(task.id, charged, 0):
+    chunk_total = task.chunk_total or 0
+    chunk_index = task.chunk_index or 0
+    if chunk_total > 0:
+        spent = int(charged * min(1.0, max(0, chunk_index) / chunk_total))
+    else:
+        spent = 0  # nothing reached Whisper yet
+    if not _claim_task_charge(task.id, charged, spent):
         return 0
-    trial_release(user_id, charged)
-    return charged
+    refund = charged - spent
+    trial_release(user_id, refund)
+    return refund
 
 
 def trial_reconcile_task(task_id, actual_seconds):
@@ -619,12 +638,15 @@ def download_audio(url, filename, task_id):
     return filename
 
 
-def get_audio_duration(audio_file):
-    """Get audio duration in seconds, falling back to a size estimate.
+def probe_audio_duration(audio_file):
+    """Measured duration in seconds, or None if ffprobe could not read the file.
 
     Uses ffprobe, which ships with the ffmpeg that pydub already requires.
     This previously used librosa, which pulled in scipy, llvmlite, sklearn,
     numba and numpy -- 398 MB of a 547 MB virtualenv for this one call.
+
+    Kept separate from get_audio_duration() because billing must be able to
+    tell "we measured 12 minutes" from "we guessed 12 minutes".
     """
     try:
         out = subprocess.run(
@@ -637,8 +659,28 @@ def get_audio_duration(audio_file):
             return duration
     except (subprocess.SubprocessError, ValueError, OSError):
         pass
-    # ~1 MB per minute of spoken-word audio
-    return (os.path.getsize(audio_file) / (1024 * 1024)) * 60
+    return None
+
+
+def estimate_audio_duration(audio_file):
+    """Duration from file size when ffprobe cannot read the file.
+
+    ~1 MB per minute of spoken-word audio. Deliberately not an average: for
+    billing this is the only number left, so it has to be a number we are
+    willing to charge for.
+    """
+    try:
+        return (os.path.getsize(audio_file) / (1024 * 1024)) * 60
+    except OSError:
+        return 0.0
+
+
+def get_audio_duration(audio_file):
+    """Duration in seconds, measured if possible and estimated otherwise."""
+    measured = probe_audio_duration(audio_file)
+    if measured is not None:
+        return measured
+    return estimate_audio_duration(audio_file)
 
 
 def split_audio_if_needed(audio_file, max_size_mb=24):
@@ -684,6 +726,19 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
             "Go to Settings and add your key, or ask the admin to set a global key."
         )
 
+    # Measure the file we actually downloaded, BEFORE splitting removes it.
+    # This is the number the trial is billed on, and it must not come from the
+    # feed: itunes:duration on the RSS path and duration_min on the direct path
+    # are both supplied by the client, so charging on either would let a caller
+    # claim one minute and transcribe four hours on our key.
+    measured_duration = probe_audio_duration(audio_file)
+    billable_duration = (measured_duration if measured_duration is not None
+                         else estimate_audio_duration(audio_file))
+
+    # Last point at which refusing is still free: everything below this line
+    # bills OpenAI.
+    trial_reconcile_task(task_id, billable_duration)
+
     _update_task(
         task_id,
         status='splitting',
@@ -693,19 +748,12 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
     )
     audio_chunks = split_audio_if_needed(audio_file, max_size_mb=24)
 
+    # For the ETA, a measurement of the whole file beats everything. The feed's
+    # claim is only better than the size-based fallback, so it wins only when
+    # ffprobe could not read the file at all.
     task = db.session.get(TranscriptionTask, task_id)
-    # The RSS feed's itunes:duration beats anything we can measure locally --
-    # get_audio_duration() falls back to size*60 and multiplies chunk 0 by the
-    # chunk count, both of which skew the ETA badly.
-    audio_duration = task.audio_duration if task and task.audio_duration else None
-    if not audio_duration:
-        audio_duration = get_audio_duration(audio_chunks[0])
-        if len(audio_chunks) > 1:
-            audio_duration *= len(audio_chunks)
-
-    # Last point at which refusing is still free: everything below this line
-    # bills OpenAI.
-    trial_reconcile_task(task_id, audio_duration)
+    feed_duration = task.audio_duration if task and task.audio_duration else None
+    audio_duration = measured_duration or feed_duration or billable_duration
 
     _update_task(
         task_id,
@@ -767,6 +815,18 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
     full_text = ""
 
     for i, chunk_file in enumerate(audio_chunks):
+        # The stale sweeper may have given up on this task and refunded the
+        # unspent allowance. Read the status straight from the database rather
+        # than through the session, which may still hold our own last write.
+        if db.session.execute(
+            text('SELECT status FROM transcription_tasks WHERE id = :tid'),
+            {'tid': task_id},
+        ).scalar() == 'error':
+            raise TaskAbandoned(
+                'Task was marked failed while it was still running; stopping so '
+                'it cannot keep billing against an allowance already refunded.'
+            )
+
         _update_task(
             task_id,
             status=f'transcribing chunk {i + 1}/{len(audio_chunks)}',
@@ -1300,7 +1360,7 @@ def start_transcription():
             'podcast_name': request.form.get('podcast_name'),
             'artwork': request.form.get('artwork'),
             'published': request.form.get('published'),
-            'duration_min': _float_or_none(request.form.get('duration_min')),
+            'duration_min': _positive_float_or_none(request.form.get('duration_min')),
         }
     else:
         if not rss_url or request.form.get('episode_index') in (None, ''):
@@ -1321,7 +1381,7 @@ def start_transcription():
             'podcast_name': request.form.get('podcast_name'),
             'artwork': episode.get('artwork') or request.form.get('artwork'),
             'published': episode.get('published'),
-            'duration_min': episode.get('duration_min'),
+            'duration_min': _positive_float_or_none(episode.get('duration_min')),
         }
 
     api_key, key_source = resolve_openai_key(current_user)
@@ -1345,11 +1405,20 @@ def start_transcription():
             )}), 402
         if not trial_reserve(current_user.id, estimate):
             _, _, remaining = trial_status(current_user)
-            return jsonify({'error': (
-                f'Your free trial has {remaining // 60} minutes left, and this '
-                f'episode needs about {estimate // 60}. Add your own OpenAI API key '
-                'in Settings to keep transcribing.'
-            )}), 402
+            if remaining < estimate:
+                message = (
+                    f'Your free trial has {remaining // 60} minutes left, and this '
+                    f'episode needs about {estimate // 60}. Add your own OpenAI API '
+                    'key in Settings to keep transcribing.'
+                )
+            else:
+                # The user still has room; the service as a whole does not.
+                # Saying "you have 60 minutes left" here would contradict itself.
+                message = (
+                    'Podskrift has handed out all the free minutes it has budgeted. '
+                    'Add your own OpenAI API key in Settings to keep transcribing.'
+                )
+            return jsonify({'error': message}), 402
         trial_charge = estimate
 
     task_id = str(uuid.uuid4())
@@ -1388,6 +1457,9 @@ def start_transcription():
             try:
                 download_audio(source_url, audio_filename, task_id)
                 transcribe_audio(audio_filename, task_id, openai_client, language=language)
+            except TaskAbandoned:
+                # The sweeper already wrote the error and settled the charge.
+                pass
             except Exception as e:
                 _update_task(task_id, status='error', phase='error',
                              error_message=describe_openai_error(e)
@@ -1445,11 +1517,18 @@ def _is_fetchable_url(raw):
     return True
 
 
-def _float_or_none(raw):
+def _positive_float_or_none(raw):
+    """Parse a duration. Zero and negatives are treated as "not stated".
+
+    A negative duration_min would otherwise reserve nothing (trial_reserve
+    grants any non-positive request) and hand the segment offsets a negative
+    chunk length.
+    """
     try:
-        return float(raw)
+        value = float(raw)
     except (TypeError, ValueError):
         return None
+    return value if value > 0 else None
 
 
 def _stale_after_seconds(task):

@@ -1230,10 +1230,10 @@ def test_refund_is_idempotent(trial_on):
         db.session.commit()
 
         # Two stale views of the same row, as two gunicorn workers would have.
-        worker = types.SimpleNamespace(id='trial-refund-2', user_id=uid,
-                                       trial_seconds_charged=300)
-        sweeper = types.SimpleNamespace(id='trial-refund-2', user_id=uid,
-                                        trial_seconds_charged=300)
+        fields = dict(id='trial-refund-2', user_id=uid, trial_seconds_charged=300,
+                      chunk_total=None, chunk_index=None)
+        worker = types.SimpleNamespace(**fields)
+        sweeper = types.SimpleNamespace(**fields)
         assert A.trial_refund_task(worker) == 300
         assert A.trial_refund_task(sweeper) == 0, 'refunded twice'
     assert _used(uid) == 0
@@ -1313,27 +1313,181 @@ def test_own_key_task_is_never_metered(trial_on):
     assert _used(uid) == 0
 
 
-def test_nothing_reaches_whisper_once_the_allowance_is_gone(trial_on, monkeypatch):
-    """The money guard. transcribe_audio must reconcile BEFORE the first
-    chunk is uploaded -- otherwise the cap only reports overspend."""
+def test_billing_ignores_the_duration_the_client_claimed(trial_on, monkeypatch, tmp_path):
+    """The hole the first cut of this feature shipped with.
+
+    Both the reservation and task.audio_duration came from duration_min, a
+    form field on the direct path and itunes:duration on the RSS path -- both
+    client-supplied. Reconcile therefore compared a number to itself and was a
+    guaranteed no-op: claim one minute, transcribe four hours on our key.
+    """
     from models import db, TranscriptionTask
 
-    uid = _make_user('guard@test.com', limit=600)
+    uid = _make_user('liar@test.com', limit=3600)
+    audio = tmp_path / 'ep.mp3'
+    audio.write_bytes(b'\0' * 1024)
     calls = []
-    monkeypatch.setattr(A, 'split_audio_if_needed', lambda f, **kw: ['chunk-a.mp3'])
+    # The file really is four hours long; the client said one minute.
+    monkeypatch.setattr(A, 'probe_audio_duration', lambda f: 14400.0)
+    monkeypatch.setattr(A, 'split_audio_if_needed', lambda f, **kw: [str(audio)])
     monkeypatch.setattr(A, '_transcribe_chunks',
                         lambda *a, **kw: calls.append(a) or ('text', []))
 
     with A.app.app_context():
-        A.trial_reserve(uid, 600)
+        A.trial_reserve(uid, 60)
         db.session.add(TranscriptionTask(
-            id='trial-guard', user_id=uid, episode_title='x', status='splitting',
-            audio_duration=7200.0, trial_seconds_charged=600))
+            id='trial-liar', user_id=uid, episode_title='x', status='downloading',
+            audio_duration=60.0, trial_seconds_charged=60))
         db.session.commit()
         with pytest.raises(A.TrialExhausted):
-            A.transcribe_audio('audio.mp3', 'trial-guard', object(), language='no')
+            A.transcribe_audio(str(audio), 'trial-liar', object(), language='no')
 
-    assert calls == [], 'audio was sent to Whisper after the allowance ran out'
+    assert calls == [], 'four hours of audio was billed as one claimed minute'
+
+
+def test_billing_uses_the_size_estimate_when_ffprobe_fails(trial_on, monkeypatch, tmp_path):
+    """An unreadable file must still be charged for -- otherwise "corrupt the
+    header" is a way to transcribe for free."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('unreadable@test.com', limit=3600)
+    audio = tmp_path / 'ep.mp3'
+    audio.write_bytes(b'\0' * (40 * 1024 * 1024))   # ~40 min at 1 MB/min
+    monkeypatch.setattr(A, 'probe_audio_duration', lambda f: None)
+    monkeypatch.setattr(A, 'split_audio_if_needed', lambda f, **kw: [str(audio)])
+    monkeypatch.setattr(A, '_transcribe_chunks', lambda *a, **kw: ('text', []))
+
+    with A.app.app_context():
+        A.trial_reserve(uid, 60)
+        db.session.add(TranscriptionTask(
+            id='trial-unreadable', user_id=uid, episode_title='x',
+            status='downloading', audio_duration=60.0, trial_seconds_charged=60))
+        db.session.commit()
+        A.transcribe_audio(str(audio), 'trial-unreadable', object(), language='no')
+
+    assert _used(uid) == pytest.approx(2400, abs=60), (
+        'size-based estimate was not charged'
+    )
+
+
+def test_a_swept_task_stops_billing(trial_on, monkeypatch, tmp_path):
+    """The stale sweeper refunds a task whose worker is still running. If the
+    worker keeps going, the episode is transcribed free AND the allowance is
+    handed back -- so the worker has to notice and stop."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('swept@test.com', limit=3600)
+    sent = []
+
+    class FakeChunk:
+        text = 'hi'
+        segments = []
+        language = 'no'
+
+    class FakeClient:
+        class audio:
+            class transcriptions:
+                @staticmethod
+                def create(**kw):
+                    sent.append(kw)
+                    # The sweeper fires between chunk 1 and chunk 2.
+                    db.session.execute(A.text(
+                        "UPDATE transcription_tasks SET status='error' WHERE id='trial-swept'"))
+                    db.session.commit()
+                    return FakeChunk()
+
+    chunks = []
+    for i in range(3):
+        f = tmp_path / f'c{i}.mp3'
+        f.write_bytes(b'\0' * 16)
+        chunks.append(str(f))
+
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='trial-swept', user_id=uid, episode_title='x', status='transcribing',
+            chunk_total=3, chunk_index=0, trial_seconds_charged=900))
+        db.session.commit()
+        with pytest.raises(A.TaskAbandoned):
+            A._transcribe_chunks(chunks, set(chunks), 'trial-swept', FakeClient(),
+                                 'no', 900.0)
+
+    assert len(sent) == 1, f'{len(sent)} chunks billed after the task was swept'
+
+
+def test_refund_keeps_what_was_already_spent(trial_on):
+    """Chunks already sent to Whisper are billed to us whatever happens next.
+    Refunding them would hand back money that is gone."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('prorata@test.com', limit=3600)
+    with A.app.app_context():
+        A.trial_reserve(uid, 900)
+        t = TranscriptionTask(id='trial-prorata', user_id=uid, episode_title='x',
+                              status='error', chunk_total=3, chunk_index=2,
+                              trial_seconds_charged=900)
+        db.session.add(t)
+        db.session.commit()
+        assert A.trial_refund_task(t) == 300      # one of three chunks unspent
+    assert _used(uid) == 600
+
+
+def test_refund_returns_everything_before_the_first_chunk(trial_on):
+    from models import db, TranscriptionTask
+
+    uid = _make_user('prorata2@test.com', limit=3600)
+    with A.app.app_context():
+        A.trial_reserve(uid, 900)
+        t = TranscriptionTask(id='trial-prorata2', user_id=uid, episode_title='x',
+                              status='error', chunk_total=None, chunk_index=None,
+                              trial_seconds_charged=900)
+        db.session.add(t)
+        db.session.commit()
+        assert A.trial_refund_task(t) == 900
+    assert _used(uid) == 0
+
+
+def test_negative_duration_is_treated_as_unstated(trial_on):
+    """A negative duration_min reserved nothing: trial_reserve() grants any
+    non-positive request, so it was a free pass past the meter."""
+    assert A._positive_float_or_none('-500') is None
+    assert A._positive_float_or_none('0') is None
+    assert A._positive_float_or_none('12.5') == 12.5
+
+    uid = _make_user('negative@test.com', limit=3600)
+    A.app.config['TESTING'] = True
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    client.post('/start_transcription', data={
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Ep', 'duration_min': '-500', 'language': 'no',
+    })
+    # Falls back to the flat unknown-episode estimate rather than reserving 0.
+    assert _used(uid) == A.TRIAL_UNKNOWN_ESTIMATE_SECONDS
+
+
+def test_global_ceiling_message_does_not_contradict_itself(trial_on, monkeypatch):
+    """"You have 60 minutes left, and this needs 30" -- while refusing."""
+    from models import db
+    with A.app.app_context():
+        db.session.execute(A.text('UPDATE users SET trial_seconds_used = 0'))
+        db.session.commit()
+    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 60)
+    uid = _make_user('ceiling@test.com', limit=36000)
+    A.app.config['TESTING'] = True
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    resp = client.post('/start_transcription', data={
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Ep', 'duration_min': '30', 'language': 'no',
+    })
+    assert resp.status_code == 402
+    error = resp.get_json()['error']
+    assert 'budgeted' in error, error
+    assert 'minutes left' not in error, f'contradicts itself: {error}'
 
 
 def test_start_transcription_refuses_an_exhausted_trial(trial_on):
@@ -1367,3 +1521,37 @@ def test_exhausted_trial_reads_as_no_key(trial_on):
         pass
     body = client.get('/settings').data.decode()
     assert 'trial is used up' in body.lower()
+
+def test_reservations_are_atomic_across_processes(trial_on):
+    """The threaded test above shares one interpreter, and a threading.Lock
+    would pass it. Podskrift runs `gunicorn --workers 2`, so the guarantee has
+    to hold between separate PROCESSES -- which only the conditional UPDATE
+    gives us. This spawns real ones to prove it.
+    """
+    import subprocess
+    import sys
+
+    uid = _make_user('crossproc@test.com', limit=600)
+    child = (
+        'import os, sys;'
+        f'os.environ["DATABASE_URL"] = {os.environ["DATABASE_URL"]!r};'
+        'os.environ["OPENAI_API_KEY"] = "sk-global-not-a-real-key";'
+        'sys.path.insert(0, %r);' % os.path.dirname(os.path.abspath(__file__)) +
+        'import app;'
+        'app.TRIAL_DEFAULT_SECONDS = 600;'
+        'app.TRIAL_GLOBAL_SECONDS = 10 ** 7;'
+        f'ctx = app.app.app_context(); ctx.push();'
+        f'print("GRANTED" if app.trial_reserve({uid}, 100) else "REFUSED")'
+    )
+    procs = [subprocess.Popen([sys.executable, '-c', child],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True) for _ in range(12)]
+    outs = []
+    for p in procs:
+        out, err = p.communicate(timeout=120)
+        assert p.returncode == 0, f'child failed: {err[-400:]}'
+        outs.append(out.strip())
+
+    granted = outs.count('GRANTED')
+    assert granted == 6, f'{granted} of 12 processes granted against a 6-slot cap'
+    assert _used(uid) == 600
