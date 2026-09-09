@@ -20,7 +20,10 @@
                         Your key for transcriptions.
                         <a href="https://platform.openai.com/api-keys" target="_blank">Get one here</a>.
                         {% if not current_user.openai_api_key %}
-                        <br><span style="color: var(--warning);">No key saved — you'll need to paste one each time.</span>
+                        <br><span style="color: var(--warning);">
+                            {% if trial %}No key saved — you're on the free trial below.
+                            {% else %}No key saved — add one to start transcribing.{% endif %}
+                        </span>
                         {% endif %}
                     </p>
                 </div>
@@ -28,5 +31,40 @@
             </form>
         </div>
     </div>
+
+    {% if trial %}
+    <div class="card" style="margin-top: 16px;">
+        <div class="card-header">
+            <h5>Free trial</h5>
+        </div>
+        <div class="card-body">
+            {% if trial.on_own_key %}
+            <p style="color: var(--muted); font-size: 14px; line-height: 1.6;">
+                You're transcribing on your own key, so nothing is counted against the trial.
+                {{ trial.remaining_minutes }} of {{ trial.limit_minutes }} trial minutes are still
+                unused if you ever remove your key.
+            </p>
+            {% else %}
+            <p style="font-size: 14px; margin-bottom: 10px;">
+                <strong>{{ trial.remaining_minutes }}</strong> of {{ trial.limit_minutes }} free
+                audio minutes left.
+            </p>
+            <div style="height: 8px; border-radius: 4px; background: var(--border); overflow: hidden;">
+                <div style="height: 100%; border-radius: 4px; background: {% if trial.exhausted %}var(--error){% else %}var(--accent-bright){% endif %};
+                            width: {{ (100 * trial.used_minutes / trial.limit_minutes) if trial.limit_minutes else 0 }}%;"></div>
+            </div>
+            <p class="form-hint" style="margin-top: 10px;">
+                {% if trial.exhausted %}
+                Your trial is used up. Add your own OpenAI API key above to keep transcribing —
+                it bills you directly at OpenAI's rate (about $0.36 per hour of audio).
+                {% else %}
+                Trial minutes run on our OpenAI key. Only completed transcriptions are counted;
+                a failed job is refunded automatically.
+                {% endif %}
+            </p>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
 </div>
 {% endblock %}

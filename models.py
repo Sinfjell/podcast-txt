@@ -1,6 +1,5 @@
 """Database models for Podcast Transcriber."""
 
-import os
 from datetime import datetime, timezone
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import UserMixin
@@ -18,6 +17,13 @@ class User(UserMixin, db.Model):
     openai_api_key = db.Column(db.String(255), nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
+    # Trial metering. Only ever touched for users transcribing on OUR key --
+    # a user with their own key spends their own quota and is never metered.
+    # A NULL limit means "use the configured default", so raising TRIAL_MINUTES
+    # lifts every account that has not been given an individual grant.
+    trial_seconds_limit = db.Column(db.Integer, nullable=True)
+    trial_seconds_used = db.Column(db.Integer, nullable=False, default=0)
+
     feeds = db.relationship('SavedFeed', backref='user', lazy=True, cascade='all, delete-orphan')
     tasks = db.relationship('TranscriptionTask', backref='user', lazy=True, cascade='all, delete-orphan')
 
@@ -28,8 +34,13 @@ class User(UserMixin, db.Model):
         return check_password_hash(self.password_hash, password)
 
     def get_openai_key(self):
-        """Return user's key, or fall back to global env key."""
-        return self.openai_api_key or os.getenv('OPENAI_API_KEY')
+        """Return the user's OWN key, or None.
+
+        The global trial key is deliberately not resolved here. It costs us
+        money, so it is only ever handed out by app.resolve_openai_key(),
+        which meters it against this user's trial allowance.
+        """
+        return self.openai_api_key
 
 
 class SavedFeed(db.Model):
@@ -77,6 +88,11 @@ class TranscriptionTask(db.Model):
     # (owned by another gunicorn worker) from one abandoned by a crash.
     heartbeat_at = db.Column(db.DateTime, nullable=True)
 
+    # Seconds of audio currently reserved against the owner's trial allowance.
+    # NULL for tasks run on the user's own key; 0 once a failed task has been
+    # refunded, which is also what makes the refund idempotent.
+    trial_seconds_charged = db.Column(db.Integer, nullable=True)
+
 
 #: Columns added after the first release, applied via ALTER TABLE on startup.
 #: Keyed by column name so the migration stays declarative as the model grows.
@@ -92,4 +108,11 @@ TASK_COLUMN_MIGRATIONS = {
     'bytes_downloaded': 'BIGINT',
     'bytes_total': 'BIGINT',
     'heartbeat_at': 'DATETIME',
+    'trial_seconds_charged': 'INTEGER',
+}
+
+#: Same, for the users table.
+USER_COLUMN_MIGRATIONS = {
+    'trial_seconds_limit': 'INTEGER',
+    'trial_seconds_used': 'INTEGER NOT NULL DEFAULT 0',
 }

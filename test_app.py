@@ -1075,3 +1075,295 @@ def test_window_actually_expires_reservations():
     old = time.time() - A.REGISTER_WINDOW_SECONDS - 1
     A._register_attempts[ip] = [(old, f'n{i}') for i in range(A.REGISTER_MAX_PER_IP)]
     assert A.register_reserve_slot(ip) is not None, 'expired reservations never freed'
+
+
+# --------------------------------------------------------------------------
+# Trial metering
+#
+# These guard real money. The global OPENAI_API_KEY used to be handed to every
+# keyless user by User.get_openai_key(), uncounted and uncapped -- setting that
+# one env var would have been an open wallet.
+# --------------------------------------------------------------------------
+
+def _make_user(email, key=None, limit=None, used=0):
+    from models import db, User
+    with A.app.app_context():
+        db.session.query(User).filter_by(email=email).delete()
+        db.session.commit()
+        u = User(email=email, openai_api_key=key,
+                 trial_seconds_limit=limit, trial_seconds_used=used)
+        u.set_password('password123')
+        db.session.add(u)
+        db.session.commit()
+        return u.id
+
+
+def _used(user_id):
+    from models import db, User
+    with A.app.app_context():
+        return db.session.get(User, user_id).trial_seconds_used
+
+
+@pytest.fixture
+def trial_on(monkeypatch):
+    """Turn the trial on with a small, easy-to-reason-about allowance."""
+    monkeypatch.setattr(A, 'GLOBAL_OPENAI_KEY', 'sk-global-not-a-real-key')
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', True)
+    monkeypatch.setattr(A, 'TRIAL_DEFAULT_SECONDS', 600)        # 10 min
+    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 10 ** 7)     # effectively off
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 10800)
+    return True
+
+
+def test_no_global_key_means_no_trial(monkeypatch):
+    """Safe by default: without a key of ours there is nothing to give away."""
+    monkeypatch.setattr(A, 'GLOBAL_OPENAI_KEY', None)
+    assert A.trial_available() is False
+    uid = _make_user('notrial@test.com')
+    from models import db, User
+    with A.app.app_context():
+        assert A.resolve_openai_key(db.session.get(User, uid)) == (None, None)
+
+
+def test_kill_switch_stops_the_trial(trial_on, monkeypatch):
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
+    assert A.trial_available() is False
+
+
+def test_own_key_beats_the_trial_key(trial_on):
+    """A user's own key costs us nothing, so it must always win."""
+    from models import db, User
+    uid = _make_user('ownkey@test.com', key='sk-' + 'u' * 40)
+    with A.app.app_context():
+        key, source = A.resolve_openai_key(db.session.get(User, uid))
+    assert source == 'user'
+    assert key.startswith('sk-uuu')
+
+
+def test_keyless_user_gets_the_trial_key(trial_on):
+    from models import db, User
+    uid = _make_user('keyless@test.com')
+    with A.app.app_context():
+        key, source = A.resolve_openai_key(db.session.get(User, uid))
+    assert (key, source) == ('sk-global-not-a-real-key', 'trial')
+
+
+def test_reserve_stops_at_the_per_user_limit(trial_on):
+    uid = _make_user('cap@test.com', limit=600)
+    with A.app.app_context():
+        assert A.trial_reserve(uid, 400) is True
+        assert A.trial_reserve(uid, 300) is False   # would total 700 > 600
+        assert A.trial_reserve(uid, 200) is True    # exactly 600 fits
+    assert _used(uid) == 600
+
+
+def test_reserve_stops_at_the_global_ceiling(trial_on, monkeypatch):
+    """The per-user cap bounds nothing on its own -- signups are free, so N
+    accounts cost N x the grant. This ceiling is what caps the actual bill."""
+    from models import db, User
+    with A.app.app_context():
+        db.session.execute(A.text('UPDATE users SET trial_seconds_used = 0'))
+        db.session.commit()
+    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 900)
+    a = _make_user('g1@test.com', limit=6000)
+    b = _make_user('g2@test.com', limit=6000)
+    with A.app.app_context():
+        assert A.trial_reserve(a, 600) is True
+        # b is nowhere near its own limit, but the service as a whole is.
+        assert A.trial_reserve(b, 600) is False
+        assert A.trial_reserve(b, 300) is True
+
+
+def test_parallel_reservations_cannot_oversubscribe(trial_on):
+    """The rate limiter shipped with exactly this hole: a check and a record
+    that were not one atomic step let 20 concurrent callers all pass."""
+    import threading as _t
+    uid = _make_user('race@test.com', limit=1000)
+    granted = []
+    lock = _t.Lock()
+
+    def attempt():
+        with A.app.app_context():
+            ok = A.trial_reserve(uid, 100)
+        if ok:
+            with lock:
+                granted.append(1)
+
+    threads = [_t.Thread(target=attempt) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(granted) == 10, f'{len(granted)} of 20 granted against a 10-slot cap'
+    assert _used(uid) == 1000
+
+
+def test_failed_task_refunds_its_reservation(trial_on):
+    from models import db, TranscriptionTask
+    uid = _make_user('refund@test.com', limit=600)
+    with A.app.app_context():
+        assert A.trial_reserve(uid, 300) is True
+        t = TranscriptionTask(id='trial-refund-1', user_id=uid, episode_title='x',
+                              status='error', trial_seconds_charged=300)
+        db.session.add(t)
+        db.session.commit()
+        assert A.trial_refund_task(t) == 300
+    assert _used(uid) == 0
+
+
+def test_refund_is_idempotent(trial_on):
+    """The worker thread and the stale sweeper both settle the same dead task,
+    each holding its own copy of the row read before either acted. Both see
+    charged=300, so the "already zero" early return does not save us -- only
+    the conditional UPDATE decides which one may move the balance.
+    """
+    from models import db, TranscriptionTask
+    import types
+
+    uid = _make_user('refund2@test.com', limit=600)
+    with A.app.app_context():
+        A.trial_reserve(uid, 300)
+        db.session.add(TranscriptionTask(id='trial-refund-2', user_id=uid,
+                                         episode_title='x', status='error',
+                                         trial_seconds_charged=300))
+        db.session.commit()
+
+        # Two stale views of the same row, as two gunicorn workers would have.
+        worker = types.SimpleNamespace(id='trial-refund-2', user_id=uid,
+                                       trial_seconds_charged=300)
+        sweeper = types.SimpleNamespace(id='trial-refund-2', user_id=uid,
+                                        trial_seconds_charged=300)
+        assert A.trial_refund_task(worker) == 300
+        assert A.trial_refund_task(sweeper) == 0, 'refunded twice'
+    assert _used(uid) == 0
+
+
+def test_reconcile_releases_an_overestimate(trial_on):
+    """Feeds without itunes:duration reserve a flat estimate. A 5-minute
+    episode must not keep charging for the 30 minutes we guessed."""
+    from models import db, TranscriptionTask
+    uid = _make_user('recon@test.com', limit=3600)
+    with A.app.app_context():
+        A.trial_reserve(uid, 1800)
+        db.session.add(TranscriptionTask(id='trial-recon-1', user_id=uid,
+                                         episode_title='x', status='transcribing',
+                                         trial_seconds_charged=1800))
+        db.session.commit()
+        A.trial_reconcile_task('trial-recon-1', 300)
+        assert db.session.get(TranscriptionTask, 'trial-recon-1').trial_seconds_charged == 300
+    assert _used(uid) == 300
+
+
+def test_reconcile_tops_up_an_underestimate(trial_on):
+    from models import db, TranscriptionTask
+    uid = _make_user('recon2@test.com', limit=3600)
+    with A.app.app_context():
+        A.trial_reserve(uid, 600)
+        db.session.add(TranscriptionTask(id='trial-recon-2', user_id=uid,
+                                         episode_title='x', status='transcribing',
+                                         trial_seconds_charged=600))
+        db.session.commit()
+        A.trial_reconcile_task('trial-recon-2', 900)
+    assert _used(uid) == 900
+
+
+def test_reconcile_refuses_an_episode_that_does_not_fit(trial_on):
+    """The feed said 10 minutes, the file is 40. Refusing here is free;
+    refusing after the first chunk is not."""
+    from models import db, TranscriptionTask
+    uid = _make_user('recon3@test.com', limit=900)
+    with A.app.app_context():
+        A.trial_reserve(uid, 600)
+        db.session.add(TranscriptionTask(id='trial-recon-3', user_id=uid,
+                                         episode_title='x', status='transcribing',
+                                         trial_seconds_charged=600))
+        db.session.commit()
+        with pytest.raises(A.TrialExhausted):
+            A.trial_reconcile_task('trial-recon-3', 2400)
+        # Still holding only the original reservation, nothing extra taken.
+        assert db.session.get(TranscriptionTask, 'trial-recon-3').trial_seconds_charged == 600
+    assert _used(uid) == 600
+
+
+def test_reconcile_refuses_an_over_long_episode(trial_on, monkeypatch):
+    from models import db, TranscriptionTask
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 1800)
+    uid = _make_user('recon4@test.com', limit=10 ** 6)
+    with A.app.app_context():
+        A.trial_reserve(uid, 600)
+        db.session.add(TranscriptionTask(id='trial-recon-4', user_id=uid,
+                                         episode_title='x', status='transcribing',
+                                         trial_seconds_charged=600))
+        db.session.commit()
+        with pytest.raises(A.TrialExhausted):
+            A.trial_reconcile_task('trial-recon-4', 3600)
+
+
+def test_own_key_task_is_never_metered(trial_on):
+    """trial_seconds_charged is NULL for own-key work; reconcile must ignore it."""
+    from models import db, TranscriptionTask
+    uid = _make_user('unmetered@test.com', key='sk-' + 'z' * 40, limit=600)
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='trial-unmetered', user_id=uid,
+                                         episode_title='x', status='transcribing',
+                                         trial_seconds_charged=None))
+        db.session.commit()
+        A.trial_reconcile_task('trial-unmetered', 99999)
+    assert _used(uid) == 0
+
+
+def test_nothing_reaches_whisper_once_the_allowance_is_gone(trial_on, monkeypatch):
+    """The money guard. transcribe_audio must reconcile BEFORE the first
+    chunk is uploaded -- otherwise the cap only reports overspend."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('guard@test.com', limit=600)
+    calls = []
+    monkeypatch.setattr(A, 'split_audio_if_needed', lambda f, **kw: ['chunk-a.mp3'])
+    monkeypatch.setattr(A, '_transcribe_chunks',
+                        lambda *a, **kw: calls.append(a) or ('text', []))
+
+    with A.app.app_context():
+        A.trial_reserve(uid, 600)
+        db.session.add(TranscriptionTask(
+            id='trial-guard', user_id=uid, episode_title='x', status='splitting',
+            audio_duration=7200.0, trial_seconds_charged=600))
+        db.session.commit()
+        with pytest.raises(A.TrialExhausted):
+            A.transcribe_audio('audio.mp3', 'trial-guard', object(), language='no')
+
+    assert calls == [], 'audio was sent to Whisper after the allowance ran out'
+
+
+def test_start_transcription_refuses_an_exhausted_trial(trial_on):
+    uid = _make_user('exhausted@test.com', limit=600, used=600)
+    A.app.config['TESTING'] = True
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+
+    resp = client.post('/start_transcription', data={
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Ep',
+        'duration_min': '30',
+        'language': 'no',
+    })
+    assert resp.status_code == 402
+    assert 'trial' in resp.get_json()['error'].lower()
+
+
+def test_exhausted_trial_reads_as_no_key(trial_on):
+    """Which is what puts the "add your key" prompt in front of the people
+    who have actually hit the wall."""
+    uid = _make_user('prompt@test.com', limit=600, used=600)
+    A.app.config['TESTING'] = True
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    with A.app.test_request_context():
+        pass
+    body = client.get('/settings').data.decode()
+    assert 'trial is used up' in body.lower()

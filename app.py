@@ -33,10 +33,11 @@ from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError, APITimeoutError
 from pydub import AudioSegment
 
-from sqlalchemy import event as sa_event
+from sqlalchemy import event as sa_event, text
 from sqlalchemy.engine import Engine
 
-from models import db, User, SavedFeed, TranscriptionTask, TASK_COLUMN_MIGRATIONS
+from models import (db, User, SavedFeed, TranscriptionTask,
+                    TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS)
 
 load_dotenv()
 
@@ -138,13 +139,8 @@ SUPPORTED_LANGUAGES = [
 VALID_LANGUAGE_CODES = {code for code, _ in SUPPORTED_LANGUAGES}
 
 
-def get_openai_client(user=None):
-    """Get OpenAI client using user's key or global fallback."""
-    key = None
-    if user and hasattr(user, 'get_openai_key'):
-        key = user.get_openai_key()
-    if not key:
-        key = GLOBAL_OPENAI_KEY
+def build_openai_client(key):
+    """Wrap a raw key in a configured OpenAI client, or None if there is no key."""
     if not key:
         return None
     return OpenAI(
@@ -152,6 +148,192 @@ def get_openai_client(user=None):
         timeout=WHISPER_TIMEOUT_SECONDS,
         max_retries=WHISPER_MAX_RETRIES,
     )
+
+
+def get_openai_client(user=None):
+    """Get an OpenAI client for `user`, falling back to the global trial key.
+
+    Callers that spend money must use resolve_openai_key() instead, so they
+    learn WHICH key they got and can meter the trial one.
+    """
+    return build_openai_client(resolve_openai_key(user)[0])
+
+
+# ---------------------------------------------------------------------------
+# Trial metering
+# ---------------------------------------------------------------------------
+#
+# A user with their own OpenAI key spends their own quota and is never metered.
+# Everyone else transcribes on OUR key, which is real money -- so every second
+# of audio is reserved against a per-account allowance before any request
+# reaches Whisper, and a global ceiling caps what the whole service can spend
+# no matter how many accounts exist.
+
+
+def _env_minutes(name, default):
+    """Read a minutes-valued env var, falling back to `default` on junk."""
+    try:
+        return max(0, int(float(os.getenv(name, default))))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+#: Free audio minutes granted to an account with no key of its own.
+TRIAL_DEFAULT_SECONDS = _env_minutes('TRIAL_MINUTES', 60) * 60
+#: Hard ceiling on trial minutes across ALL accounts. Without this, the per-user
+#: cap bounds nothing -- signups are free, so N accounts cost N x the grant.
+TRIAL_GLOBAL_SECONDS = _env_minutes('TRIAL_GLOBAL_MINUTES', 600) * 60
+#: What to reserve when the feed publishes no itunes:duration. Reconciled
+#: against the real duration after download, before a single Whisper call.
+TRIAL_UNKNOWN_ESTIMATE_SECONDS = _env_minutes('TRIAL_UNKNOWN_ESTIMATE_MINUTES', 30) * 60
+#: Longest single episode the trial will take on, so one four-hour interview
+#: cannot swallow an entire allowance in one go.
+TRIAL_MAX_EPISODE_SECONDS = _env_minutes('TRIAL_MAX_EPISODE_MINUTES', 180) * 60
+#: Kill switch. Set TRIAL_ENABLED=0 to stop handing out our key entirely.
+TRIAL_ENABLED = os.getenv('TRIAL_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+
+
+class TrialExhausted(Exception):
+    """Raised when a job would cost more trial allowance than is left."""
+
+
+def trial_available():
+    """Is there a trial to hand out at all?"""
+    return bool(TRIAL_ENABLED and GLOBAL_OPENAI_KEY and TRIAL_DEFAULT_SECONDS > 0)
+
+
+def trial_status(user):
+    """(limit, used, remaining) trial seconds for `user`."""
+    limit = user.trial_seconds_limit
+    if limit is None:
+        limit = TRIAL_DEFAULT_SECONDS
+    used = user.trial_seconds_used or 0
+    return limit, used, max(0, limit - used)
+
+
+def trial_global_used_seconds():
+    """Trial seconds spent across every account."""
+    return int(db.session.execute(text(
+        'SELECT COALESCE(SUM(trial_seconds_used), 0) FROM users'
+    )).scalar() or 0)
+
+
+def resolve_openai_key(user):
+    """Return (key, source) where source is 'user', 'trial', or None.
+
+    A user's own key always wins -- it costs us nothing and has no cap.
+    """
+    own = getattr(user, 'openai_api_key', None) if user is not None else None
+    if own:
+        return own, 'user'
+    if trial_available():
+        return GLOBAL_OPENAI_KEY, 'trial'
+    return None, None
+
+
+def trial_reserve(user_id, seconds):
+    """Atomically reserve `seconds` of allowance. True only if granted.
+
+    Deliberately one statement. Podskrift runs two gunicorn workers, so a
+    threading.Lock would guard one process and let the other one through;
+    SQLite serialises the write, and both the per-user cap and the global
+    ceiling are evaluated inside it. Two parallel starts therefore cannot
+    both be told there is room that only one of them can have.
+    """
+    seconds = int(math.ceil(seconds))
+    if seconds <= 0:
+        return True
+    result = db.session.execute(text("""
+        UPDATE users
+           SET trial_seconds_used = COALESCE(trial_seconds_used, 0) + :n
+         WHERE id = :uid
+           AND COALESCE(trial_seconds_used, 0) + :n
+               <= COALESCE(trial_seconds_limit, :default_limit)
+           AND (SELECT COALESCE(SUM(trial_seconds_used), 0) FROM users) + :n
+               <= :global_limit
+    """), {'n': seconds, 'uid': user_id,
+           'default_limit': TRIAL_DEFAULT_SECONDS,
+           'global_limit': TRIAL_GLOBAL_SECONDS})
+    db.session.commit()
+    return result.rowcount == 1
+
+
+def trial_release(user_id, seconds):
+    """Hand back reserved seconds that were never spent."""
+    seconds = int(seconds)
+    if seconds <= 0:
+        return
+    db.session.execute(text("""
+        UPDATE users
+           SET trial_seconds_used = MAX(0, COALESCE(trial_seconds_used, 0) - :n)
+         WHERE id = :uid
+    """), {'n': seconds, 'uid': user_id})
+    db.session.commit()
+
+
+def _claim_task_charge(task_id, expected, new):
+    """Move a task's reserved amount from `expected` to `new`. True if we won.
+
+    The worker thread and the stale sweeper can both try to settle the same
+    task; only the one that moves this column may move the user's balance.
+    """
+    result = db.session.execute(text("""
+        UPDATE transcription_tasks
+           SET trial_seconds_charged = :new
+         WHERE id = :tid AND trial_seconds_charged = :expected
+    """), {'tid': task_id, 'new': int(new), 'expected': int(expected)})
+    db.session.commit()
+    return result.rowcount == 1
+
+
+def trial_refund_task(task):
+    """Refund a failed task's reservation. Safe to call repeatedly."""
+    charged = task.trial_seconds_charged
+    if not charged or charged <= 0:
+        return 0
+    user_id = task.user_id
+    if not _claim_task_charge(task.id, charged, 0):
+        return 0
+    trial_release(user_id, charged)
+    return charged
+
+
+def trial_reconcile_task(task_id, actual_seconds):
+    """Match a task's reservation to the audio we actually downloaded.
+
+    Runs after the download but BEFORE the first Whisper call, so an episode
+    that turns out longer than the feed claimed costs us bandwidth, never API
+    spend. Raises TrialExhausted when the real length will not fit.
+    """
+    task = db.session.get(TranscriptionTask, task_id)
+    if not task or task.trial_seconds_charged is None:
+        return  # own-key task: nothing is metered
+    reserved = int(task.trial_seconds_charged)
+    actual = int(math.ceil(max(0.0, actual_seconds or 0.0)))
+    user_id = task.user_id
+
+    if TRIAL_MAX_EPISODE_SECONDS and actual > TRIAL_MAX_EPISODE_SECONDS:
+        raise TrialExhausted(
+            f'This episode runs {actual // 60} minutes, past the '
+            f'{TRIAL_MAX_EPISODE_SECONDS // 60}-minute per-episode limit of the free '
+            'trial. Add your own OpenAI API key in Settings to transcribe it.'
+        )
+
+    if actual > reserved:
+        extra = actual - reserved
+        if not trial_reserve(user_id, extra):
+            raise TrialExhausted(
+                f'This episode runs {actual // 60} minutes and your free trial has '
+                'less than that left. Add your own OpenAI API key in Settings to '
+                'keep transcribing.'
+            )
+        if not _claim_task_charge(task_id, reserved, actual):
+            # Someone else settled the task while we were topping up; give the
+            # top-up straight back rather than leaking it against the user.
+            trial_release(user_id, extra)
+    elif actual < reserved:
+        if _claim_task_charge(task_id, reserved, actual):
+            trial_release(user_id, reserved - actual)
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +702,10 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
         audio_duration = get_audio_duration(audio_chunks[0])
         if len(audio_chunks) > 1:
             audio_duration *= len(audio_chunks)
+
+    # Last point at which refusing is still free: everything below this line
+    # bills OpenAI.
+    trial_reconcile_task(task_id, audio_duration)
 
     _update_task(
         task_id,
@@ -946,7 +1132,7 @@ def settings():
         flash(message, 'warning' if caveat else 'success')
         return redirect(url_for('settings'))
 
-    return render_template('settings.html')
+    return render_template('settings.html', trial=_trial_context())
 
 
 # ---------------------------------------------------------------------------
@@ -1017,11 +1203,34 @@ def use_feed(feed_id):
     )
 
 
+def _trial_context():
+    """Trial figures for the templates, or None when there is no trial."""
+    if not (trial_available() and current_user.is_authenticated):
+        return None
+    limit, used, remaining = trial_status(current_user)
+    return {
+        'limit_minutes': limit // 60,
+        'used_minutes': used // 60,
+        'remaining_minutes': remaining // 60,
+        'exhausted': remaining <= 0,
+        'on_own_key': bool(current_user.openai_api_key),
+    }
+
+
 def _user_has_api_key():
-    """Check if current user has an API key available (own key or global fallback)."""
-    if current_user.is_authenticated and current_user.openai_api_key:
+    """Can the current user actually start a transcription right now?
+
+    True on their own key, or on trial allowance they still have left. An
+    exhausted trial counts as no key, which is what puts the "add your key"
+    prompt in front of exactly the people who need to see it.
+    """
+    if not current_user.is_authenticated:
+        return False
+    if current_user.openai_api_key:
         return True
-    return bool(GLOBAL_OPENAI_KEY)
+    if trial_available():
+        return trial_status(current_user)[2] > 0
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1036,7 +1245,8 @@ def index():
             user_id=current_user.id
         ).order_by(SavedFeed.created_at.desc()).limit(5).all()
     return render_template('index.html', saved_feeds=saved_feeds,
-                           languages=SUPPORTED_LANGUAGES)
+                           languages=SUPPORTED_LANGUAGES,
+                           trial=_trial_context())
 
 
 @app.route('/parse_rss', methods=['POST'])
@@ -1114,31 +1324,60 @@ def start_transcription():
             'duration_min': episode.get('duration_min'),
         }
 
-    openai_client = get_openai_client(current_user)
-    if not openai_client:
+    api_key, key_source = resolve_openai_key(current_user)
+    if not api_key:
         return jsonify({
             'error': 'No OpenAI API key configured. Add your key in Settings.'
         }), 400
+    openai_client = build_openai_client(api_key)
+
+    # Reserve the allowance BEFORE the job exists, so a refusal leaves nothing
+    # behind. The feed's duration is only an estimate; trial_reconcile_task()
+    # corrects it against the real audio before anything reaches Whisper.
+    trial_charge = None
+    if key_source == 'trial':
+        estimate = int((meta['duration_min'] or 0) * 60) or TRIAL_UNKNOWN_ESTIMATE_SECONDS
+        if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
+            return jsonify({'error': (
+                f'This episode runs {estimate // 60} minutes, past the '
+                f'{TRIAL_MAX_EPISODE_SECONDS // 60}-minute per-episode limit of the '
+                'free trial. Add your own OpenAI API key in Settings to transcribe it.'
+            )}), 402
+        if not trial_reserve(current_user.id, estimate):
+            _, _, remaining = trial_status(current_user)
+            return jsonify({'error': (
+                f'Your free trial has {remaining // 60} minutes left, and this '
+                f'episode needs about {estimate // 60}. Add your own OpenAI API key '
+                'in Settings to keep transcribing.'
+            )}), 402
+        trial_charge = estimate
 
     task_id = str(uuid.uuid4())
-    task = TranscriptionTask(
-        id=task_id,
-        user_id=current_user.id,
-        episode_title=meta['title'],
-        rss_url=rss_url,
-        status='downloading',
-        phase='downloading',
-        phase_started_at=datetime.now(timezone.utc),
-        podcast_name=meta.get('podcast_name'),
-        artwork_url=meta.get('artwork'),
-        episode_published=meta.get('published'),
-        # Feed duration is the best ETA source we have, and it is available
-        # before a single byte is downloaded.
-        audio_duration=(meta['duration_min'] * 60) if meta.get('duration_min') else None,
-        language=language or None,
-    )
-    db.session.add(task)
-    db.session.commit()
+    try:
+        task = TranscriptionTask(
+            id=task_id,
+            user_id=current_user.id,
+            episode_title=meta['title'],
+            rss_url=rss_url,
+            status='downloading',
+            phase='downloading',
+            phase_started_at=datetime.now(timezone.utc),
+            podcast_name=meta.get('podcast_name'),
+            artwork_url=meta.get('artwork'),
+            episode_published=meta.get('published'),
+            # Feed duration is the best ETA source we have, and it is available
+            # before a single byte is downloaded.
+            audio_duration=(meta['duration_min'] * 60) if meta.get('duration_min') else None,
+            language=language or None,
+            trial_seconds_charged=trial_charge,
+        )
+        db.session.add(task)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        if trial_charge:
+            trial_release(current_user.id, trial_charge)
+        raise
 
     parsed_url = urlparse(meta['audio_url'])
     audio_filename = f"temp_audio_{task_id}" + (os.path.splitext(parsed_url.path)[1] or '.mp3')
@@ -1153,6 +1392,11 @@ def start_transcription():
                 _update_task(task_id, status='error', phase='error',
                              error_message=describe_openai_error(e)
                              if _is_openai_error(e) else str(e))
+                # A job that never produced a transcript must not consume the
+                # trial allowance it reserved.
+                failed = db.session.get(TranscriptionTask, task_id)
+                if failed:
+                    trial_refund_task(failed)
             finally:
                 if os.path.exists(audio_filename):
                     try:
@@ -1251,6 +1495,7 @@ def _fail_if_stale(task):
         'restarted. Please try again.'
     )
     db.session.commit()
+    trial_refund_task(task)
     return True
 
 
@@ -1477,13 +1722,19 @@ with app.app_context():
     db.create_all()
 
     # Add columns that may be missing on existing databases
-    from sqlalchemy import inspect, text
+    from sqlalchemy import inspect
     inspector = inspect(db.engine)
     existing_cols = {c['name'] for c in inspector.get_columns('transcription_tasks')}
     for column, ddl_type in TASK_COLUMN_MIGRATIONS.items():
         if column not in existing_cols:
             db.session.execute(text(
                 f'ALTER TABLE transcription_tasks ADD COLUMN {column} {ddl_type}'
+            ))
+    existing_user_cols = {c['name'] for c in inspector.get_columns('users')}
+    for column, ddl_type in USER_COLUMN_MIGRATIONS.items():
+        if column not in existing_user_cols:
+            db.session.execute(text(
+                f'ALTER TABLE users ADD COLUMN {column} {ddl_type}'
             ))
     db.session.commit()
 
@@ -1505,6 +1756,8 @@ with app.app_context():
         )
     if orphaned:
         db.session.commit()
+        for task in orphaned:
+            trial_refund_task(task)
 
     # One-time migration: move old transcriptions table to transcription_tasks
     if 'transcriptions' in inspector.get_table_names():
@@ -1543,6 +1796,12 @@ if __name__ == '__main__':
     print("PODCAST TRANSCRIBER WEB APP")
     print("=" * 50)
     print(f"OpenAI API Key (global): {'Yes' if GLOBAL_OPENAI_KEY else 'No'}")
+    if trial_available():
+        print(f"Trial: {TRIAL_DEFAULT_SECONDS // 60} min/account, "
+              f"{TRIAL_GLOBAL_SECONDS // 60} min total ceiling "
+              f"(~${TRIAL_GLOBAL_SECONDS / 60 * WHISPER_COST_PER_MINUTE:.2f} max spend)")
+    else:
+        print("Trial: off (no global key, or TRIAL_ENABLED=0)")
     print(f"Environment: {os.getenv('FLASK_ENV', 'development')}")
     print("=" * 50)
 
