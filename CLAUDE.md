@@ -28,10 +28,17 @@ before merging, regardless of how many files the diff has.
   NULL.
 
 ### Capacity — the box is shared
-- Production is a Plesk host with 50+ other services. An out-of-memory or
-  out-of-disk event here is their outage too, so transcription is admission-
-  controlled: `MAX_CONCURRENT_TRANSCRIPTIONS` per worker, plus a free-disk
-  floor, both checked **before** anything is reserved or written.
+- Production is a Plesk host with 50+ other services. Filling its disk is
+  their outage too, so transcription is admission-controlled:
+  `MAX_CONCURRENT_TRANSCRIPTIONS` per worker plus a free-disk floor, both
+  checked **before** anything is reserved or written.
+- **Splitting must never decode the audio.** `ffmpeg -c copy` cuts without
+  decoding; pydub's `AudioSegment` held the whole episode as raw PCM in memory
+  *and* wrote a full WAV to `TMPDIR` — ~1.9 GB of each for a three-hour
+  episode, per concurrent job, on a box with 4.5 GB free.
+- The disk floor must exceed `workers x MAX_CONCURRENT_TRANSCRIPTIONS x 2 x
+  MAX_AUDIO_BYTES`: the check reserves nothing, so concurrent requests all see
+  the same free space. Raising `MAX_AUDIO_BYTES` means raising the floor.
 - The capacity slot tracks work in flight, not requests served: the worker
   thread releases it in a `finally`, and every refusal path hands it back. A
   leaked slot is permanent for the life of the process.

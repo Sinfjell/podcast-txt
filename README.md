@@ -228,13 +228,22 @@ takes other sites down too.
 | Variable | Default | What it bounds |
 | --- | --- | --- |
 | `MAX_CONCURRENT_TRANSCRIPTIONS` | `2` | Jobs at once **per gunicorn worker**. |
-| `MIN_FREE_DISK_MB` | `2048` | Refuse to start below this much free space. |
+| `MIN_FREE_DISK_MB` | `4096` | Refuse to start below this much free space. |
 
-`MAX_CONCURRENT_TRANSCRIPTIONS` is per worker — a `threading.Semaphore` cannot
-span processes — so with `--workers 2` the real ceiling is 4 concurrent jobs:
-~2 GB of disk against 24 GB free, ~2.5 GB of decode against 4.5 GB available.
-Over the limit, requests get a 503 telling the user to try again shortly; they
+Splitting does not decode the audio — `ffmpeg -c copy` cuts on frame boundaries
+— so memory is not the binding resource; **disk is.** A job in flight holds the
+source plus its chunks, about `2 x MAX_AUDIO_BYTES` (250 MB) at the moment before
+the source is deleted.
+
+`MAX_CONCURRENT_TRANSCRIPTIONS` is per worker, because a `threading.Semaphore`
+cannot span processes. With `--workers 2` the real ceiling is 4 concurrent jobs
+= **2 GB worst case**, which is why the floor is 4 GB: the disk check reserves
+nothing, so every concurrent request sees the same free space and the floor has
+to exceed everything admission control will admit at once.
+
+Over the limit, requests get a 503 telling the user to try again shortly. They
 are not queued, because an unbounded queue is the same outage arriving later.
+Own-key users are capped alongside trial users — the disk is ours either way.
 
 ### Also set a hard budget at OpenAI
 

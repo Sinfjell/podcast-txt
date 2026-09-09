@@ -1130,7 +1130,7 @@ def fresh_transcription_slots():
     yield
 
 
-def _post_start(monkeypatch, user_id, data):
+def _post_start(monkeypatch, user_id, data, free_disk=10 ** 12):
     """POST /start_transcription with the worker thread stubbed out.
 
     The reservation is what these tests assert on, and it is made before the
@@ -1142,6 +1142,10 @@ def _post_start(monkeypatch, user_id, data):
     monkeypatch.setattr(A.threading, 'Thread',
                         lambda *a, **kw: types.SimpleNamespace(
                             daemon=True, start=lambda: None))
+    # Otherwise every money-path test silently depends on the host's free disk:
+    # on a runner below MIN_FREE_DISK_MB they get a 503 instead of the assertion
+    # they exist for. Tests that want the disk guard stub it themselves.
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: free_disk)
     A.app.config['TESTING'] = True
     client = A.app.test_client()
     with client.session_transaction() as sess:
@@ -2125,11 +2129,10 @@ def test_a_finished_job_hands_its_slot_back(trial_on, monkeypatch, tmp_path):
 def test_a_full_disk_refuses_before_anything_is_reserved(trial_on, monkeypatch):
     """The database, the backups and 50+ co-tenant sites share this volume.
     Filling it is their outage too."""
-    monkeypatch.setattr(A, 'free_disk_bytes', lambda path='.': 10 * 1024 * 1024)
     uid = _make_user('fulldisk@test.com', limit=36000)
     resp = _post_start(monkeypatch, uid, {
         'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
-        'duration_min': '5', 'language': 'no'})
+        'duration_min': '5', 'language': 'no'}, free_disk=10 * 1024 * 1024)
     assert resp.status_code == 503
     assert 'disk space' in resp.get_json()['error'].lower()
     assert _used(uid) == 0, 'allowance was reserved despite the refusal'
@@ -2137,8 +2140,120 @@ def test_a_full_disk_refuses_before_anything_is_reserved(trial_on, monkeypatch):
 
 def test_unreadable_disk_stats_do_not_block_transcription(trial_on, monkeypatch):
     """statvfs can fail; that is not a reason to refuse every job."""
-    monkeypatch.setattr(A, 'free_disk_bytes', lambda path='.': None)
     uid = _make_user('nostat@test.com', limit=36000)
     assert _post_start(monkeypatch, uid, {
         'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
+        'duration_min': '5', 'language': 'no'}, free_disk=None).status_code == 200
+
+def test_the_worker_releases_its_slot_even_if_the_app_context_fails(trial_on, monkeypatch):
+    """The try/finally has to wrap app_context(), not sit inside it. An error
+    entering the context -- a MemoryError under exactly the pressure this cap
+    defends against -- would otherwise skip the release and wedge the worker
+    at 503 for the life of the process.
+
+    Only the worker thread's context is broken: failing the main thread's would
+    take the test client's own request teardown down with it, which tests the
+    harness rather than the code.
+    """
+    import threading as _t
+
+    monkeypatch.setattr(A, 'MAX_CONCURRENT_TRANSCRIPTIONS', 1)
+    slots = _t.BoundedSemaphore(1)
+    monkeypatch.setattr(A, '_transcription_slots', slots)
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+
+    main_thread = _t.get_ident()
+    real_ctx = A.app.app_context
+
+    def only_break_the_worker():
+        if _t.get_ident() != main_thread:
+            raise MemoryError('cannot allocate an app context')
+        return real_ctx()
+
+    monkeypatch.setattr(A.app, 'app_context', only_break_the_worker)
+
+    uid = _make_user('ctxfail@test.com', limit=36000)
+    A.app.config['TESTING'] = True
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    assert client.post('/start_transcription', data={
+        'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
         'duration_min': '5', 'language': 'no'}).status_code == 200
+
+    for _ in range(100):
+        if slots.acquire(blocking=False):
+            slots.release()
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail('the slot was lost when the app context failed')
+
+
+# --------------------------------------------------------------------------
+# Splitting
+# --------------------------------------------------------------------------
+
+def test_splitting_does_not_decode_the_episode(tmp_path):
+    """pydub decoded the whole file to PCM in memory and wrote a full WAV to
+    TMPDIR first -- ~1.9 GB of each for a three-hour episode, per concurrent
+    job. ffmpeg's stream copy cuts on frame boundaries and costs the chunk."""
+    import shutil
+    import subprocess as sp
+
+    source = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          'temp_audio_fc603a76-8625-49bb-905e-40aa4e1a91b0.mp3')
+    if not os.path.exists(source) or not shutil.which('ffmpeg'):
+        pytest.skip('needs ffmpeg and the sample episode')
+
+    audio = tmp_path / 'ep.mp3'
+    shutil.copy(source, audio)
+    total = A.probe_audio_duration(str(audio))
+
+    chunks = A.split_audio_if_needed(str(audio), max_size_mb=2)
+    assert len(chunks) > 1, 'a 7.8 MB file was not split at a 2 MB limit'
+    assert not os.path.exists(audio), 'the source was left behind'
+    for c in chunks:
+        assert os.path.getsize(c) < 25 * 1024 * 1024
+
+    # The cut is lossless: the chunks account for the whole episode.
+    summed = sum(A.probe_audio_duration(c) or 0 for c in chunks)
+    assert abs(summed - total) < 1.0, f'{summed:.1f}s of chunks vs {total:.1f}s source'
+
+
+def test_an_unreadable_oversize_file_says_what_went_wrong(monkeypatch, tmp_path):
+    """Uploading it anyway would fail at OpenAI's 25 MB limit with an error
+    that points at the wrong thing."""
+    audio = tmp_path / 'big.mp3'
+    audio.write_bytes(b'\0' * (30 * 1024 * 1024))
+    monkeypatch.setattr(A, 'probe_audio_duration', lambda f: None)
+    with pytest.raises(RuntimeError, match='cannot be split'):
+        A.split_audio_if_needed(str(audio), max_size_mb=24)
+
+
+def test_a_failed_split_strands_no_chunks(monkeypatch, tmp_path):
+    """The caller only cleans up the chunks it is handed back."""
+    import subprocess as sp
+    audio = tmp_path / 'big.mp3'
+    audio.write_bytes(b'\0' * (30 * 1024 * 1024))
+    monkeypatch.setattr(A, 'probe_audio_duration', lambda f: 600.0)
+
+    calls = {'n': 0}
+    real_run = sp.run
+
+    def fail_on_the_second(cmd, **kw):
+        if cmd[0] == 'ffmpeg':
+            calls['n'] += 1
+            if calls['n'] == 1:
+                open(cmd[-1], 'wb').write(b'\0' * 1024)
+                return sp.CompletedProcess(cmd, 0, b'', b'')
+            raise sp.CalledProcessError(1, cmd)
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(A.subprocess, 'run', fail_on_the_second)
+    with pytest.raises(sp.CalledProcessError):
+        A.split_audio_if_needed(str(audio), max_size_mb=24)
+
+    leftovers = [f for f in os.listdir(tmp_path) if '_chunk_' in f]
+    assert leftovers == [], f'stranded chunks: {leftovers}'
