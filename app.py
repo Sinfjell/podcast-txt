@@ -11,6 +11,7 @@ import glob
 import math
 import os
 import sqlite3
+import shutil
 import subprocess
 import ssl
 import time
@@ -804,16 +805,43 @@ def get_audio_duration(audio_file):
 #: duration, which stream-copying the source never was.
 WHISPER_SAMPLE_RATE = 16000
 WHISPER_AUDIO_BITRATE_KBPS = 48
-#: One hour at 48 kbps is ~21.6 MB, inside OpenAI's 25 MB limit with room for
-#: the container overhead. Most episodes come out as a single part.
-SEGMENT_SECONDS = 3600
+#: 15 minutes at 48 kbps is ~5.4 MB, well inside OpenAI's 25 MB limit. An hour
+#: per part would fit too, but parts are also the unit of two other things: the
+#: progress bar's granularity, and how much a failed job is refunded. One part
+#: means a job that dies after the first upload refunds nothing.
+SEGMENT_SECONDS = 900
 #: Hard check on what we actually produced. Belt to SEGMENT_SECONDS' braces.
 WHISPER_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+#: Re-encoding writes no heartbeat, so it has to finish inside the stale-task
+#: floor or a live job gets swept and the user is told the server restarted.
+#: ffmpeg runs at roughly 100x realtime here, so this is generous.
+FFMPEG_TIMEOUT_SECONDS = 600
+#: A part must fit the upload limit by construction, not by luck. Raising the
+#: bitrate or the segment length without checking this would fail every episode
+#: longer than one part with "could not be split into uploadable parts".
+assert (SEGMENT_SECONDS * WHISPER_AUDIO_BITRATE_KBPS * 1000 / 8
+        < WHISPER_MAX_UPLOAD_BYTES * 0.9), \
+    'SEGMENT_SECONDS x WHISPER_AUDIO_BITRATE_KBPS does not fit WHISPER_MAX_UPLOAD_BYTES'
+
 #: Roughly one second at the bitrate above. ffmpeg's segmenter cuts on packet
 #: boundaries, so an episode that is an exact multiple of SEGMENT_SECONDS leaves
 #: a crumb behind -- an hour-long file came out as 3600.0s plus a 0.144s tail.
 #: Whisper rejects audio that short, and it would cost a whole extra request.
 MIN_PART_BYTES = WHISPER_AUDIO_BITRATE_KBPS * 1000 // 8
+
+
+def probe_audio_bitrate_kbps(audio_file):
+    """Source bitrate in kbps, or None if ffprobe cannot say."""
+    try:
+        out = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=bit_rate',
+             '-of', 'default=noprint_wrappers=1:nokey=1', audio_file],
+            capture_output=True, text=True, timeout=60, check=True,
+        )
+        kbps = int(float(out.stdout.strip())) // 1000
+        return kbps if kbps > 0 else None
+    except (subprocess.SubprocessError, ValueError, OSError):
+        return None
 
 
 def _ffmpeg_error(message, stderr=b''):
@@ -849,18 +877,32 @@ def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
     ffmpeg runs niced and single-threaded: production is a shared Plesk host
     with 50+ other services, and re-encoding is the one CPU-hungry step here.
     """
+    if shutil.which('ffmpeg') is None:
+        # Checked up front rather than caught: the nice(1) wrapper turns a
+        # missing ffmpeg into exit 127, not a FileNotFoundError, so the
+        # exception handler below would report it as a corrupt file.
+        raise _ffmpeg_error(
+            'Audio processing is unavailable on the server right now. '
+            'Please try again later, or contact support if it persists.')
+
     base_name = os.path.splitext(audio_file)[0]
     pattern = f'{base_name}_part_%03d.mp3'
     produced_glob = f'{base_name}_part_*.mp3'
+
+    # Never encode above the source's own rate: a 24 kbps feed re-encoded at 48
+    # would come out twice its input size, and MIN_FREE_DISK_BYTES is sized on
+    # the assumption that the parts are no larger than the source.
+    bitrate = min(WHISPER_AUDIO_BITRATE_KBPS,
+                  probe_audio_bitrate_kbps(audio_file) or WHISPER_AUDIO_BITRATE_KBPS)
 
     try:
         result = subprocess.run(
             ['nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y', '-i', audio_file,
              '-vn', '-ac', '1', '-ar', str(WHISPER_SAMPLE_RATE),
-             '-b:a', f'{WHISPER_AUDIO_BITRATE_KBPS}k', '-threads', '1',
+             '-b:a', f'{bitrate}k', '-threads', '1',
              '-f', 'segment', '-segment_time', str(SEGMENT_SECONDS),
              '-segment_format', 'mp3', '-reset_timestamps', '1', pattern],
-            capture_output=True, timeout=1800,
+            capture_output=True, timeout=FFMPEG_TIMEOUT_SECONDS,
         )
     except FileNotFoundError:
         raise _ffmpeg_error(
@@ -882,8 +924,8 @@ def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
     if len(parts) > 1:
         crumbs = [p for p in parts if os.path.getsize(p) < MIN_PART_BYTES]
         if crumbs:
-            app.logger.info('discarding %s sub-second part(s) from %s',
-                            len(crumbs), os.path.basename(audio_file))
+            app.logger.warning('discarding %s sub-second part(s) from %s',
+                               len(crumbs), os.path.basename(audio_file))
             for crumb in crumbs:
                 try:
                     os.remove(crumb)

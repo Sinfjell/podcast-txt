@@ -229,9 +229,14 @@ so exhausting its disk or CPU is their outage too.
 | `MIN_FREE_DISK_MB` | `4096` | Refuse to start below this much free space. |
 
 Audio is re-encoded to 16 kHz mono MP3 before upload — what Whisper resamples to
-internally anyway. ffmpeg streams it, so memory stays flat; the binding resources
-are **disk** (the source plus the parts) and **CPU** (the re-encode, which runs
-niced and single-threaded).
+internally anyway — in 15-minute parts. ffmpeg streams it, so memory stays flat;
+the binding resources are **disk** (the source plus the parts) and **CPU** (the
+re-encode, which runs niced and single-threaded). The output bitrate is capped at
+the source's, so re-encoding can never make a file larger than it started.
+
+Part length is also the granularity of two other things: how far the progress bar
+moves at a time, and how much a failed job is refunded. One part per episode would
+mean a job that dies after the first upload refunds nothing.
 
 `MAX_CONCURRENT_TRANSCRIPTIONS` is per worker, because a `threading.Semaphore`
 cannot span processes. With `--workers 2` the default admits 2 jobs at a time —

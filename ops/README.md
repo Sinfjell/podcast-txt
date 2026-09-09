@@ -52,7 +52,7 @@ systemctl start podskrift
 
 ## Runtime dependencies not in requirements.txt
 
-`ffmpeg` and `ffprobe` must be on PATH. `pydub` needs ffmpeg to split audio, and
+`ffmpeg` and `ffprobe` must be on PATH. ffmpeg and ffprobe are needed to inspect and re-encode audio, and
 `get_audio_duration()` shells out to ffprobe. If ffprobe is missing, duration
 falls back to a size estimate silently — worse ETAs, no error.
 

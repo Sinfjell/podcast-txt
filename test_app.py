@@ -2289,8 +2289,19 @@ def test_the_segmenters_rounding_crumb_is_discarded(tmp_path, monkeypatch):
         assert os.path.getsize(part) >= A.MIN_PART_BYTES
 
 
-def test_a_crumb_is_never_the_only_part(tmp_path):
-    """Dropping short parts must not be able to return nothing at all."""
+def test_crumb_dropping_can_never_return_nothing(tmp_path, monkeypatch):
+    """With the threshold above every part, the filter would empty the list.
+    Dropping short parts must not be able to discard the whole episode."""
+    monkeypatch.setattr(A, 'SEGMENT_SECONDS', 5)
+    monkeypatch.setattr(A, 'MIN_PART_BYTES', 10 ** 9)   # everything is a crumb
+    source = _make_audio(tmp_path / 'short.mp3', 12)
+    with pytest.raises(RuntimeError, match='could not be split'):
+        A.prepare_audio_for_whisper(source)
+    assert [f for f in os.listdir(tmp_path) if '_part_' in f] == []
+
+
+def test_a_single_part_is_kept_however_short(tmp_path):
+    """The crumb filter only runs when there is more than one part."""
     source = _make_audio(tmp_path / 'tiny.mp3', 1)
     parts = A.prepare_audio_for_whisper(source)
     assert len(parts) == 1
@@ -2326,15 +2337,15 @@ def test_a_failed_run_strands_nothing_even_though_ffmpeg_wrote_output(tmp_path, 
 
 
 def test_missing_ffmpeg_does_not_blame_the_users_file(tmp_path, monkeypatch):
-    """"The file may be corrupt" sent people to re-download a fine episode."""
-    import subprocess as sp
+    """"The file may be corrupt" sent people to re-download a fine episode.
+
+    Checked via shutil.which, not by catching FileNotFoundError: the nice(1)
+    wrapper turns a missing ffmpeg into exit 127, so the exception handler
+    never sees it and the user got the corrupt-file message anyway.
+    """
     source = tmp_path / 'ep.mp3'
     source.write_bytes(b'\0' * 2048)
-
-    def no_ffmpeg(cmd, **kw):
-        raise FileNotFoundError(2, 'No such file or directory', 'ffmpeg')
-
-    monkeypatch.setattr(A.subprocess, 'run', no_ffmpeg)
+    monkeypatch.setattr(A.shutil, 'which', lambda name: None)
     with pytest.raises(RuntimeError, match='unavailable on the server'):
         A.prepare_audio_for_whisper(str(source))
 
@@ -2348,9 +2359,39 @@ def test_the_disk_floor_clears_what_admission_control_admits(tmp_path):
     """
     workers = 2                      # gunicorn --workers 2 in production
     admitted = workers * A.MAX_CONCURRENT_TRANSCRIPTIONS
-    # A job holds its source plus the re-encoded parts before the source goes.
-    worst_case = admitted * (A.MAX_AUDIO_BYTES + A.WHISPER_MAX_UPLOAD_BYTES * 8)
+    # A job holds its source plus the parts, briefly, before the source goes.
+    # The parts can never exceed the source: prepare_audio_for_whisper caps the
+    # output bitrate at the input's, so a 24 kbps feed is not re-encoded up to
+    # 48 and doubled. That cap is what makes this bound 2x and not open-ended.
+    worst_case = admitted * A.MAX_AUDIO_BYTES * 2
     assert A.MIN_FREE_DISK_BYTES > worst_case, (
         f'floor {A.MIN_FREE_DISK_BYTES/1e9:.1f} GB does not clear '
         f'{worst_case/1e9:.1f} GB of admitted work'
     )
+
+def test_a_low_bitrate_source_is_never_re_encoded_larger(tmp_path):
+    """The disk floor assumes the parts never exceed the source. Encoding a
+    24 kbps feed at 48 would double it, and a 500 MB source would then need
+    1.5 GB, not 1 GB -- past what the floor was sized for."""
+    source = _make_audio(tmp_path / 'quiet.mp3', 60, bitrate='24k')
+    before = os.path.getsize(source)
+    parts = A.prepare_audio_for_whisper(source)
+    after = sum(os.path.getsize(p) for p in parts)
+    # Not "smaller": each part carries a few hundred bytes of container header,
+    # so a single-part re-encode at the same bitrate lands fractionally above.
+    # The claim the disk floor rests on is that it cannot MULTIPLY.
+    assert after < before * 1.1, f'{before} bytes in, {after} bytes out'
+
+
+def test_the_segment_length_fits_the_upload_limit(tmp_path):
+    """Raising the bitrate or the segment length without checking would fail
+    every episode longer than one part. Asserted at import; pinned here too."""
+    projected = A.SEGMENT_SECONDS * A.WHISPER_AUDIO_BITRATE_KBPS * 1000 / 8
+    assert projected < A.WHISPER_MAX_UPLOAD_BYTES * 0.9
+
+
+def test_ffmpeg_cannot_outlive_the_stale_task_window(tmp_path):
+    """Re-encoding writes no heartbeat, so a run longer than the stale floor
+    gets its own task swept out from under it and the user is told the server
+    restarted."""
+    assert A.FFMPEG_TIMEOUT_SECONDS < A.STALE_TASK_SECONDS
