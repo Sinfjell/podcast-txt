@@ -479,19 +479,115 @@
             .nav-links, .nav-scrim, .nav-toggle span { transition: none; }
         }
 
-        /* Live indicator for a transcription still running */
-        .pulse-dot {
-            width: 8px; height: 8px; border-radius: 50%;
+        /* Live job bar.
+           The pattern is the music-app mini player: a docked strip that follows
+           you across the app, showing artwork, what is playing, and one action,
+           with a hairline of progress along its edge. Podskrift's version says
+           "this is still running, here is how far, and you can stop it" -- which
+           is the thing the app never told anyone before.
+
+           Desktop docks it bottom-right like an upload tray; mobile takes the
+           full width, the way a now-playing bar does. */
+        .jobbar {
+            position: fixed;
+            z-index: 80;                 /* under the nav panel and its scrim */
+            right: 20px;
+            bottom: 20px;
+            width: 340px;
+            max-width: calc(100vw - 40px);
+            background: var(--surface);
+            border: 1px solid var(--border-light);
+            border-radius: var(--radius);
+            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+            overflow: hidden;
+            transform: translateY(12px);
+            opacity: 0;
+            transition: transform 0.22s ease, opacity 0.22s ease;
+        }
+        .jobbar[hidden] { display: none; }
+        /* Give the page back the space the bar sits on, or the last thing on it
+           is unreachable underneath. */
+        /* The bar grows with the number of jobs, so the space the page gives
+           back is measured from it, not guessed. The literal is only the value
+           before the first measurement lands. */
+        body.has-jobbar .container { padding-bottom: var(--jobbar-space, 140px); }
+        .jobbar.shown { transform: translateY(0); opacity: 1; }
+
+        .jobbar-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 14px;
+            text-decoration: none;
+            color: var(--text);
+            position: relative;
+        }
+        .jobbar-item + .jobbar-item { border-top: 1px solid var(--border); }
+        .jobbar-item:hover { background: var(--surface-hover); color: var(--text); }
+        .jobbar-art {
+            width: 40px; height: 40px;
+            border-radius: var(--radius-sm);
+            object-fit: cover;
+            background: var(--border);
+            flex-shrink: 0;
+        }
+        .jobbar-text { flex: 1; min-width: 0; }
+        .jobbar-title {
+            font-size: 13.5px; font-weight: 600;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .jobbar-meta {
+            font-size: 12px; color: var(--muted); margin-top: 2px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            font-variant-numeric: tabular-nums;
+        }
+        .jobbar-stop {
+            flex-shrink: 0;
+            background: none;
+            border: 1px solid var(--border-light);
+            color: var(--muted);
+            border-radius: var(--radius-sm);
+            /* 36px is as small as this can go and stay tappable next to a link
+               whose whole body is also a target. */
+            width: 36px; height: 36px;
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer;
+        }
+        .jobbar-stop:hover { color: var(--error); border-color: var(--error); }
+        .jobbar-stop:disabled { opacity: 0.4; cursor: default; }
+        /* Hairline of progress along the bottom edge of each row. */
+        .jobbar-progress {
+            position: absolute;
+            left: 0; bottom: 0; height: 2px;
             background: var(--accent-bright);
-            flex-shrink: 0; margin-right: 10px;
-            animation: pulse 1.6s ease-in-out infinite;
+            transition: width 0.4s ease;
         }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.35; transform: scale(0.8); }
+        .jobbar-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 8px 14px;
+            font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
+            color: var(--muted);
+            border-bottom: 1px solid var(--border);
+            background: var(--bg);
         }
+        .jobbar-collapse {
+            background: none; border: none; color: var(--muted);
+            cursor: pointer; padding: 2px 4px; line-height: 1;
+        }
+        .jobbar.collapsed .jobbar-list { display: none; }
+
+        @media (max-width: 640px) {
+            .jobbar {
+                right: 0; left: 0; bottom: 0;
+                width: auto; max-width: none;
+                border-radius: var(--radius) var(--radius) 0 0;
+                border-left: 0; border-right: 0; border-bottom: 0;
+                padding-bottom: env(safe-area-inset-bottom, 0px);
+            }
+        }
+
         @media (prefers-reduced-motion: reduce) {
-            .pulse-dot { animation: none; }
+            .jobbar, .jobbar-progress { transition: none; }
         }
 
         .btn:disabled, .btn[disabled] {
@@ -603,7 +699,7 @@
         .fade-in { animation: fadeIn 0.3s ease forwards; }
     </style>
 </head>
-<body>
+<body{% if current_user.is_authenticated %} data-authenticated="1"{% endif %}>
     <noscript><style>
         /* The panel is hidden and revealed by script. Without script there is
            nothing to reveal it, so fall back to a plain always-visible list and
@@ -690,6 +786,21 @@
          and let taps through to the controls behind the open panel. -->
     <div class="nav-scrim" id="navScrim" hidden></div>
 
+    <!-- Carried on every page: a transcription keeps running server-side when
+         you navigate away, and until this existed nothing said so. -->
+    <aside class="jobbar" id="jobBar" hidden aria-label="Transcriptions in progress">
+        <div class="jobbar-header">
+            <!-- The live region is the count only. On the list it would
+                 re-announce every job every four seconds, because the rows are
+                 cleared and rebuilt on each poll. -->
+            <span id="jobBarCount" aria-live="polite"></span>
+            <button type="button" class="jobbar-collapse" id="jobBarCollapse"
+                    aria-label="Collapse" aria-expanded="true"
+                    aria-controls="jobBarList">&minus;</button>
+        </div>
+        <div class="jobbar-list" id="jobBarList"></div>
+    </aside>
+
     <div class="container {% block container_class %}{% endblock %} fade-in">
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -713,6 +824,192 @@
 
     {% block scripts %}{% endblock %}
     <script>
+    // Live job bar. Polls a small endpoint so a transcription that keeps running
+    // server-side stays visible wherever you are in the app -- the mini-player
+    // pattern, applied to a background job.
+    (function () {
+        var bar = document.getElementById('jobBar');
+        var list = document.getElementById('jobBarList');
+        var count = document.getElementById('jobBarCount');
+        var collapse = document.getElementById('jobBarCollapse');
+        if (!bar || !list) return;
+        if (!document.body.dataset.authenticated) return;   // nothing to poll for
+
+        var ACTIVE_MS = 4000;
+        var IDLE_MS = 20000;
+        var timer = null;
+        var shownCount = 0;
+        // Which task's own page we are on -- the bar would just duplicate it.
+        var onTaskPage = (location.pathname.match(/^\/transcription\/(.+)$/) || [])[1];
+
+        try {
+            if (sessionStorage.getItem('podskrift_jobbar_collapsed') === '1') {
+                setCollapsed(true);
+            }
+        } catch (e) { /* private mode; the default is fine */ }
+
+        function setCollapsed(collapsed) {
+            bar.classList.toggle('collapsed', collapsed);
+            collapse.textContent = collapsed ? '+' : '\u2212';
+            // Restoring the saved state used to change only the glyph, so the
+            // button announced "Collapse" while it expanded.
+            collapse.setAttribute('aria-label', collapsed ? 'Expand' : 'Collapse');
+            collapse.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        }
+
+        collapse.addEventListener('click', function () {
+            var collapsed = !bar.classList.contains('collapsed');
+            setCollapsed(collapsed);
+            measure();
+            try {
+                sessionStorage.setItem('podskrift_jobbar_collapsed', collapsed ? '1' : '0');
+            } catch (e) { /* nothing to remember it with */ }
+        });
+
+        function humanEta(seconds) {
+            if (seconds === null || seconds === undefined) return null;
+            if (seconds < 60) return 'under a minute left';
+            return Math.round(seconds / 60) + ' min left';
+        }
+
+        function phaseLabel(phase) {
+            if (phase === 'downloading') return 'Downloading';
+            if (phase === 'splitting') return 'Preparing';
+            return 'Transcribing';
+        }
+
+        function render(jobs) {
+            var visible = jobs.filter(function (j) { return j.id !== onTaskPage; });
+            document.body.classList.toggle('has-jobbar', visible.length > 0);
+            shownCount = visible.length;
+            if (!visible.length) {
+                bar.classList.remove('shown');
+                bar.hidden = true;
+                list.textContent = '';
+                return;
+            }
+            count.textContent = visible.length === 1
+                ? '1 transcription running'
+                : visible.length + ' transcriptions running';
+
+            list.textContent = '';
+            visible.forEach(function (job) {
+                var row = document.createElement('a');
+                row.className = 'jobbar-item';
+                row.href = '/transcription/' + job.id;
+
+                if (job.artwork_url) {
+                    var art = document.createElement('img');
+                    art.className = 'jobbar-art';
+                    art.src = job.artwork_url;
+                    art.alt = '';
+                    row.appendChild(art);
+                }
+
+                var text = document.createElement('div');
+                text.className = 'jobbar-text';
+                var title = document.createElement('div');
+                title.className = 'jobbar-title';
+                title.textContent = job.title;
+                text.appendChild(title);
+
+                var meta = document.createElement('div');
+                meta.className = 'jobbar-meta';
+                var bits = [];
+                if (job.podcast_name) bits.push(job.podcast_name);
+                bits.push(phaseLabel(job.phase), job.percent + '%');
+                var eta = humanEta(job.eta_seconds);
+                if (eta) bits.push(eta);
+                meta.textContent = bits.join(' \u00B7 ');
+                text.appendChild(meta);
+                row.appendChild(text);
+
+                var stop = document.createElement('button');
+                stop.type = 'button';
+                stop.className = 'jobbar-stop';
+                stop.setAttribute('aria-label', 'Stop ' + job.title);
+                stop.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>';
+                stop.addEventListener('click', function (e) {
+                    // The row is a link; stopping must not also navigate.
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!confirm('Stop this transcription? The audio already sent has been paid for.')) return;
+                    stop.disabled = true;
+                    fetch('/cancel/' + job.id, { method: 'POST' })
+                        .then(function (r) { return r.json(); })
+                        .then(function (d) {
+                            // /cancel answers 409 when the job finished first.
+                            // Swallowing that leaves the user staring at a
+                            // button that did nothing.
+                            if (d && d.error) {
+                                stop.disabled = false;
+                                alert(d.error);
+                            }
+                            poll();
+                        })
+                        .catch(function () { stop.disabled = false; });
+                });
+                row.appendChild(stop);
+
+                var progress = document.createElement('div');
+                progress.className = 'jobbar-progress';
+                progress.style.width = Math.max(2, job.percent) + '%';
+                row.appendChild(progress);
+
+                list.appendChild(row);
+            });
+
+            bar.hidden = false;
+            // Reveal after the browser has the element laid out, or the
+            // transition has nothing to run from.
+            void bar.offsetHeight;
+            bar.classList.add('shown');
+            measure();
+        }
+
+        function measure() {
+            // Hand the page back exactly the space the bar occupies. A fixed
+            // number was wrong the moment a second job appeared -- and two
+            // gunicorn workers can each be running one.
+            document.body.style.setProperty(
+                '--jobbar-space',
+                shownCount ? (bar.offsetHeight + 24) + 'px' : '0px'
+            );
+        }
+
+        function schedule(delay) {
+            clearTimeout(timer);
+            timer = setTimeout(poll, delay);
+        }
+
+        function poll() {
+            // Nothing a hidden tab shows can be out of date, and this runs on
+            // every page of the app. Back off rather than re-checking every four
+            // seconds -- visibilitychange polls immediately when they look again.
+            if (document.hidden) { schedule(IDLE_MS); return; }
+            fetch('/active-jobs', { headers: { 'Accept': 'application/json' } })
+                .then(function (r) { return r.ok ? r.json() : { jobs: [] }; })
+                .then(function (d) {
+                    var jobs = d.jobs || [];
+                    render(jobs);
+                    // What is SHOWN, not what came back: on a job's own page the
+                    // bar filters that job out, so keying on d.jobs polled every
+                    // four seconds for a bar that never renders -- on the one
+                    // page that is already polling /status every two.
+                    schedule(shownCount ? ACTIVE_MS : IDLE_MS);
+                })
+                .catch(function () { schedule(IDLE_MS); });
+        }
+
+        document.addEventListener('visibilitychange', function () {
+            // clearTimeout inside schedule() keeps this to a single chain no
+            // matter how fast the user flips between tabs.
+            if (!document.hidden) schedule(0);
+        });
+        window.addEventListener('resize', measure);
+        poll();
+    })();
+
     // Mobile menu. The old version was a one-line onclick that toggled a class:
     // no way to close it except finding the toggle again, no keyboard escape,
     // and nothing told assistive tech it was a disclosure at all.
