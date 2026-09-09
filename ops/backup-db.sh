@@ -38,7 +38,7 @@ fi
 
 # `set -e` would abort here on a malformed backup and leave an uncompressed
 # orphan that the .gz retention sweep never removes.
-trap 'rm -f "$OUT" "$OUT-wal" "$OUT-shm"' EXIT
+trap 'rm -f "$OUT" "$OUT.gz" "$OUT-wal" "$OUT-shm"' EXIT
 
 SRC_USERS="$(sqlite3 "$DB" 'select count(*) from users;')"
 BAK_USERS="$(sqlite3 "$OUT" 'select count(*) from users;')"

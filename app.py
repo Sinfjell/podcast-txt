@@ -193,7 +193,9 @@ def _client_ip():
 
 
 def register_reserve_slot(ip):
-    """Atomically take one signup slot for this IP. False when none are left.
+    """Atomically take one signup slot for this IP.
+
+    Returns a release token, or None when no slots are left.
 
     Checking and recording must happen under one lock: with them split, a
     parallel burst from one address passed the check before any of it was
@@ -203,28 +205,38 @@ def register_reserve_slot(ip):
     now = time.time()
     with _register_lock:
         seen = [t for t in _register_attempts.get(ip, ())
-                if now - t < REGISTER_WINDOW_SECONDS]
+                if now - t[0] < REGISTER_WINDOW_SECONDS]
         if len(seen) >= REGISTER_MAX_PER_IP:
             _register_attempts[ip] = seen
-            return False
-        seen.append(now)
+            return None
+        # A unique token, so a release removes its OWN reservation rather than
+        # whichever is newest -- otherwise retained stamps skew older and the
+        # window expires early.
+        token = (now, uuid.uuid4().hex)
+        seen.append(token)
         _register_attempts[ip] = seen
         if len(_register_attempts) > 10000:
             stale = [k for k, v in list(_register_attempts.items())
-                     if not v or now - v[-1] > REGISTER_WINDOW_SECONDS]
+                     if not v or now - v[-1][0] > REGISTER_WINDOW_SECONDS]
             for k in stale:
                 _register_attempts.pop(k, None)
-        return True
+        return token
 
 
-def register_release_slot(ip):
-    """Give back a reserved slot, for any attempt that did not create an account."""
+def register_release_slot(ip, token):
+    """Give back a reservation, for any attempt that did not create an account."""
+    if token is None:
+        return
     with _register_lock:
         held = _register_attempts.get(ip)
-        if held:
-            held.pop()
-            if not held:
-                _register_attempts.pop(ip, None)
+        if not held:
+            return
+        try:
+            held.remove(token)
+        except ValueError:
+            return          # already pruned by the window
+        if not held:
+            _register_attempts.pop(ip, None)
 
 
 def is_disposable_email(email):
@@ -303,7 +315,8 @@ def verify_openai_key(key):
             # The key authenticated; the account is just out of credit or rate
             # limited. Refusing the save would leave them unable to store a
             # working key at all.
-            return True, describe_openai_error(e, context='verify')
+            return True, ('Key saved. Note: ' +
+                          describe_openai_error(e, context='verify'))
         return False, describe_openai_error(e, context='verify')
     return True, 'API key verified.'
 
@@ -831,7 +844,8 @@ def register():
         return render_template('register.html')
 
     ip = _client_ip()
-    if not register_reserve_slot(ip):
+    slot = register_reserve_slot(ip)
+    if slot is None:
         flash('Too many accounts created from this address. Try again later.', 'error')
         return render_template('register.html')
 
@@ -872,7 +886,7 @@ def register():
         return redirect(url_for('index'))
     finally:
         if not created:
-            register_release_slot(ip)
+            register_release_slot(ip, slot)
 
 
 @app.route('/login', methods=['GET', 'POST'])
