@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError, APITimeoutError
 from pydub import AudioSegment
 
-from sqlalchemy import event as sa_event, text
+from sqlalchemy import event as sa_event, text, update as sa_update
 from sqlalchemy.engine import Engine
 
 from models import (db, User, SavedFeed, TranscriptionTask,
@@ -331,8 +331,12 @@ def trial_reconcile_task(task_id, actual_seconds):
     spend. Raises TrialExhausted when the real length will not fit.
     """
     task = db.session.get(TranscriptionTask, task_id)
-    if not task or task.trial_seconds_charged is None:
-        return  # own-key task: nothing is metered
+    if not task or not task.trial_seconds_charged:
+        # NULL is an own-key task, nothing metered. Zero means the sweeper has
+        # already settled this one -- re-reserving here would charge the user
+        # for an episode that goes on to send nothing, and the TaskAbandoned
+        # path would not refund it.
+        return
     reserved = int(task.trial_seconds_charged)
     actual = int(math.ceil(max(0.0, actual_seconds or 0.0)))
     user_id = task.user_id
@@ -549,22 +553,16 @@ def _update_task(task_id, **kwargs):
     for free. Read the status straight from the database: the session may
     still hold our own last write.
     """
-    current_status = db.session.execute(
-        text('SELECT status FROM transcription_tasks WHERE id = :tid'),
-        {'tid': task_id},
-    ).scalar()
-    if current_status is None:
-        return False
-    if current_status == 'error' and kwargs.get('status') != 'error':
-        return False
-    task = db.session.get(TranscriptionTask, task_id)
-    if task:
-        for k, v in kwargs.items():
-            setattr(task, k, v)
-        task.heartbeat_at = datetime.now(timezone.utc)
-        db.session.commit()
-        return True
-    return False
+    stmt = (
+        sa_update(TranscriptionTask)
+        .where(TranscriptionTask.id == task_id)
+        .values(heartbeat_at=datetime.now(timezone.utc), **kwargs)
+    )
+    if kwargs.get('status') != 'error':
+        stmt = stmt.where(TranscriptionTask.status != 'error')
+    result = db.session.execute(stmt)
+    db.session.commit()
+    return result.rowcount == 1
 
 
 def download_audio(url, filename, task_id):
@@ -773,46 +771,50 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
     )
     audio_chunks = split_audio_if_needed(audio_file, max_size_mb=24)
 
-    # For the ETA, a measurement of the whole file beats everything. The feed's
-    # claim is only better than the size-based fallback, so it wins only when
-    # ffprobe could not read the file at all.
-    task = db.session.get(TranscriptionTask, task_id)
-    feed_duration = task.audio_duration if task and task.audio_duration else None
-    audio_duration = measured_duration or feed_duration or billable_duration
-
-    # _update_task refuses to move a task out of 'error', so a False here means
-    # the sweeper failed this task while we were splitting -- and settled its
-    # charge. Splitting is the widest window for that: pydub's export has no
-    # timeout. Stop rather than transcribe against a refunded allowance.
-    started = _update_task(
-        task_id,
-        status='transcribing',
-        phase='transcribing',
-        chunk_total=len(audio_chunks),
-        # Left unset on purpose: the loop writes chunk_index immediately
-        # before it uploads that chunk, so "unset" is the only honest way to
-        # say nothing has been sent yet. trial_refund_task() reads it as a
-        # billing signal, and a 0 here would charge for a chunk never sent.
-        chunk_index=None,
-        audio_duration=audio_duration,
-        progress=PHASE_SPANS['transcribing'][0],
-        phase_started_at=datetime.now(timezone.utc),
-    )
-    if not started:
-        raise TaskAbandoned(
-            'Task was marked failed while it was being split; stopping so it '
-            'cannot bill against an allowance already refunded.'
-        )
-
+    # split_audio_if_needed() removes the source file once it has split it, so
+    # EVERY exit from here on -- the abandonment raise included -- has to go
+    # through this cleanup, or temp_audio_<uuid>_chunk_N.mp3 stays on disk
+    # forever. The abandonment raise used to sit above this try and leaked up
+    # to MAX_AUDIO_BYTES per occurrence.
+    remaining = set(audio_chunks)
     upload_start = time.time()
     all_segments = []
     full_text = ""
-    # split_audio_if_needed() removes the source file once it has split it, so a
-    # failure part-way through the loop would otherwise leave the remaining
-    # temp_audio_<uuid>_chunk_N.mp3 files on disk forever.
-    remaining = set(audio_chunks)
 
     try:
+        # For the ETA, a measurement of the whole file beats everything. The
+        # feed's claim is only better than the size-based fallback, so it wins
+        # only when ffprobe could not read the file at all.
+        task = db.session.get(TranscriptionTask, task_id)
+        feed_duration = task.audio_duration if task and task.audio_duration else None
+        audio_duration = measured_duration or feed_duration or billable_duration
+
+        # _update_task refuses to move a task out of 'error', so a False here
+        # means the sweeper failed this task while we were splitting -- and
+        # settled its charge. Splitting is the widest window for that: pydub's
+        # export has no timeout. Stop rather than transcribe against an
+        # allowance already refunded.
+        started = _update_task(
+            task_id,
+            status='transcribing',
+            phase='transcribing',
+            chunk_total=len(audio_chunks),
+            # Left unset on purpose: the loop writes chunk_index immediately
+            # before it uploads that chunk, so "unset" is the only honest way
+            # to say nothing has been sent yet. trial_refund_task() reads it as
+            # a billing signal, and a 0 here would charge for a chunk never sent.
+            chunk_index=None,
+            audio_duration=audio_duration,
+            progress=PHASE_SPANS['transcribing'][0],
+            phase_started_at=datetime.now(timezone.utc),
+        )
+        if not started:
+            raise TaskAbandoned(
+                'Task was marked failed while it was being split; stopping so '
+                'it cannot bill against an allowance already refunded.'
+            )
+
+        upload_start = time.time()
         full_text, all_segments = _transcribe_chunks(
             audio_chunks, remaining, task_id, openai_client, language, audio_duration
         )
@@ -865,13 +867,20 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
                 'it cannot keep billing against an allowance already refunded.'
             )
 
-        _update_task(
+        # This write is the same terminal-'error' guard as the check above,
+        # one statement before the upload -- so acting on it closes the
+        # check-to-upload window almost entirely, for free.
+        if not _update_task(
             task_id,
             status=f'transcribing chunk {i + 1}/{len(audio_chunks)}',
             chunk_index=i,
             phase_started_at=datetime.now(timezone.utc),
             progress=_transcribe_checkpoint(i, len(audio_chunks)),
-        )
+        ):
+            raise TaskAbandoned(
+                'Task was marked failed between chunks; stopping so it cannot '
+                'keep billing against an allowance already refunded.'
+            )
 
         with open(chunk_file, 'rb') as f:
             create_kwargs = {
@@ -1434,7 +1443,10 @@ def start_transcription():
     # corrects it against the real audio before anything reaches Whisper.
     trial_charge = None
     if key_source == 'trial':
-        estimate = int((meta['duration_min'] or 0) * 60) or TRIAL_UNKNOWN_ESTIMATE_SECONDS
+        # Floored at a minute: trial_seconds_charged == 0 means "settled", so a
+        # zero reservation would quietly make the task unmetered.
+        estimate = max(60, int((meta['duration_min'] or 0) * 60)
+                       or TRIAL_UNKNOWN_ESTIMATE_SECONDS)
         if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
             return jsonify({'error': (
                 f'This episode runs {estimate // 60} minutes, past the '
@@ -1496,8 +1508,12 @@ def start_transcription():
                 download_audio(source_url, audio_filename, task_id)
                 transcribe_audio(audio_filename, task_id, openai_client, language=language)
             except TaskAbandoned:
-                # The sweeper already wrote the error and settled the charge.
-                pass
+                # The sweeper wrote the error and settled the charge. Refund
+                # anyway: it is idempotent, and it is the backstop if anything
+                # re-opened the charge between the sweep and our abort.
+                abandoned = db.session.get(TranscriptionTask, task_id)
+                if abandoned:
+                    trial_refund_task(abandoned)
             except Exception as e:
                 _update_task(task_id, status='error', phase='error',
                              error_message=describe_openai_error(e)
