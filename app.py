@@ -66,6 +66,11 @@ GLOBAL_OPENAI_KEY = os.getenv('OPENAI_API_KEY')
 # Whisper pricing, used for the cost estimates shown in the UI
 WHISPER_COST_PER_MINUTE = 0.006
 
+# Keep one Whisper call's worst case (timeout x attempts) inside the stale-task
+# window, so a hanging call is given up on before the task is presumed dead.
+WHISPER_TIMEOUT_SECONDS = 420.0
+WHISPER_MAX_RETRIES = 1
+
 # Caps on the audio we will pull down from a client-supplied URL.
 MAX_REDIRECTS = 5
 MAX_AUDIO_BYTES = 500 * 1024 * 1024
@@ -106,7 +111,11 @@ def get_openai_client(user=None):
         key = GLOBAL_OPENAI_KEY
     if not key:
         return None
-    return OpenAI(api_key=key)
+    return OpenAI(
+        api_key=key,
+        timeout=WHISPER_TIMEOUT_SECONDS,
+        max_retries=WHISPER_MAX_RETRIES,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -954,6 +963,10 @@ def _stale_after_seconds(task):
     if task.chunk_total and task.audio_duration:
         per_chunk = task.audio_duration / task.chunk_total / WHISPER_REALTIME_FACTOR
         return max(STALE_TASK_SECONDS, per_chunk * 8)
+    if task.audio_duration:
+        # Splitting sets no chunk_total yet, and pydub decoding plus re-exporting a
+        # large episode is silent work -- scale off the episode length instead.
+        return max(STALE_TASK_SECONDS, task.audio_duration / 5)
     return STALE_TASK_SECONDS
 
 

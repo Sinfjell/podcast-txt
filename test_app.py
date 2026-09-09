@@ -147,6 +147,22 @@ def test_stale_window_scales_with_chunk_length():
     assert A._stale_after_seconds(NoInfo()) == A.STALE_TASK_SECONDS
 
 
+def test_stale_window_covers_the_splitting_phase():
+    """chunk_total is not set yet while ffmpeg splits, so the window has to come
+    from the episode length or a large file gets declared dead mid-split."""
+    class Splitting:
+        chunk_total = None
+        audio_duration = 3 * 60 * 60      # a 3-hour episode
+
+    assert A._stale_after_seconds(Splitting()) > A.STALE_TASK_SECONDS
+
+
+def test_whisper_client_gives_up_before_the_task_is_presumed_dead():
+    """A hanging Whisper call must fail before _fail_if_stale() kills the task."""
+    worst_case = A.WHISPER_TIMEOUT_SECONDS * (A.WHISPER_MAX_RETRIES + 1)
+    assert worst_case < A.STALE_TASK_SECONDS
+
+
 def test_live_task_is_not_failed():
     from models import TranscriptionTask, db
 
