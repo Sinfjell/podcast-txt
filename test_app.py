@@ -993,7 +993,6 @@ def test_every_validation_failure_gives_the_slot_back(override, expect):
 
 
 def test_duplicate_email_gives_the_slot_back():
-    from models import db, User
     A._register_attempts.clear()
     _purge(['dupe@example.com'])
     client = _fresh_client()
@@ -1018,27 +1017,44 @@ def test_register_route_is_atomic_under_a_parallel_burst():
     A._register_attempts.clear()
     A.app.config['TESTING'] = True
 
-    barrier = threading.Barrier(len(emails))
+    # Timeouts everywhere: a thread dying before the barrier would otherwise
+    # hang the whole run, and pytest-timeout is not installed.
+    barrier = threading.Barrier(len(emails), timeout=30)
     results = []
+    errors = []
 
     def attempt(email):
-        client = A.app.test_client()
-        barrier.wait()
-        body = client.post('/register', data={
-            'email': email, 'password': 'abcdefgh1', 'password2': 'abcdefgh1',
-        }, follow_redirects=True).data.decode()
-        results.append('Add your OpenAI API key' in body)
+        try:
+            client = A.app.test_client()
+            barrier.wait()
+            body = client.post('/register', data={
+                'email': email, 'password': 'abcdefgh1', 'password2': 'abcdefgh1',
+            }, follow_redirects=True).data.decode()
+            results.append('Add your OpenAI API key' in body)
+        except Exception as exc:            # noqa: BLE001 - reported below
+            errors.append(f'{email}: {type(exc).__name__}: {exc}')
 
     threads = [threading.Thread(target=attempt, args=(e,)) for e in emails]
     for t in threads:
         t.start()
     for t in threads:
-        t.join()
+        t.join(30)
+    assert not any(t.is_alive() for t in threads), 'a request thread did not finish'
 
-    from models import db, User
+    from models import User
     with A.app.app_context():
         created = User.query.filter(User.email.like('burst%@example.com')).count()
     _purge(emails)
+
+    # Without these, a burst where most threads CRASHED is indistinguishable
+    # from one where most were correctly rate-limited.
+    assert not errors, f'threads raised: {errors}'
+    assert len(results) == len(emails), (
+        f'only {len(results)} of {len(emails)} requests completed'
+    )
+    assert sum(results) == A.REGISTER_MAX_PER_IP, (
+        f'{sum(results)} signups reported success, limit is {A.REGISTER_MAX_PER_IP}'
+    )
     assert created == A.REGISTER_MAX_PER_IP, (
         f'{created} of {len(emails)} concurrent signups committed, limit is '
         f'{A.REGISTER_MAX_PER_IP}'
