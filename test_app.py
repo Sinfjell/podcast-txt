@@ -135,10 +135,12 @@ def test_stale_window_scales_with_chunk_length():
     class T:
         chunk_total = 1
         audio_duration = 50 * 60      # one ~50-minute chunk (24 MB @ 64 kbps)
+        bytes_downloaded = None
 
     class NoInfo:
         chunk_total = None
         audio_duration = None
+        bytes_downloaded = None
 
     slow_chunk_runtime = (50 * 60) / A.WHISPER_REALTIME_FACTOR
     assert A._stale_after_seconds(T()) > slow_chunk_runtime * 4
@@ -153,14 +155,44 @@ def test_stale_window_covers_the_splitting_phase():
     class Splitting:
         chunk_total = None
         audio_duration = 3 * 60 * 60      # a 3-hour episode
+        bytes_downloaded = None
 
     assert A._stale_after_seconds(Splitting()) > A.STALE_TASK_SECONDS
 
 
-def test_whisper_client_gives_up_before_the_task_is_presumed_dead():
-    """A hanging Whisper call must fail before _fail_if_stale() kills the task."""
-    worst_case = A.WHISPER_TIMEOUT_SECONDS * (A.WHISPER_MAX_RETRIES + 1)
+def test_whisper_client_gives_up_before_the_task_is_presumed_dead(monkeypatch):
+    """A hanging Whisper call must fail before _fail_if_stale() kills the task.
+
+    Asserts the values on the constructed client, not just the constants -- an
+    earlier version of this test passed even with the timeout removed entirely.
+    """
+    monkeypatch.setattr(A, 'GLOBAL_OPENAI_KEY', 'sk-test-not-a-real-key')
+    client = A.get_openai_client()
+
+    assert client is not None
+    assert client.timeout == A.WHISPER_TIMEOUT_SECONDS
+    assert client.max_retries == A.WHISPER_MAX_RETRIES
+
+    # max_retries=N means N+1 total attempts
+    worst_case = client.timeout * (client.max_retries + 1)
     assert worst_case < A.STALE_TASK_SECONDS
+
+
+def test_stale_window_falls_back_to_downloaded_size_without_a_feed_duration():
+    """Not every feed publishes itunes:duration, and audio_duration is only
+    measured after splitting -- the phase the window is meant to cover."""
+    class NoDuration:
+        chunk_total = None
+        audio_duration = None
+        bytes_downloaded = 300 * 1024 * 1024   # a large episode already on disk
+
+    class Tiny:
+        chunk_total = None
+        audio_duration = None
+        bytes_downloaded = 2 * 1024 * 1024
+
+    assert A._stale_after_seconds(NoDuration()) > A.STALE_TASK_SECONDS
+    assert A._stale_after_seconds(Tiny()) == A.STALE_TASK_SECONDS
 
 
 def test_live_task_is_not_failed():

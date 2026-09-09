@@ -66,8 +66,13 @@ GLOBAL_OPENAI_KEY = os.getenv('OPENAI_API_KEY')
 # Whisper pricing, used for the cost estimates shown in the UI
 WHISPER_COST_PER_MINUTE = 0.006
 
-# Keep one Whisper call's worst case (timeout x attempts) inside the stale-task
-# window, so a hanging call is given up on before the task is presumed dead.
+# Keep a hanging Whisper call inside the stale-task window, so the client gives
+# up before _fail_if_stale() presumes the task dead. Sized against the 900s floor
+# rather than the (larger) per-task window, so it holds for every task: 420 x 2
+# attempts = 840s. Note httpx reads a bare float as a per-operation timeout, not
+# a wall-clock total, so this is a close approximation and not a hard ceiling --
+# retry backoff eats a few seconds of the margin. A steadily-progressing upload
+# never trips it: 24 MB (the chunk cap) over 420s is only 57 KB/s.
 WHISPER_TIMEOUT_SECONDS = 420.0
 WHISPER_MAX_RETRIES = 1
 
@@ -967,6 +972,12 @@ def _stale_after_seconds(task):
         # Splitting sets no chunk_total yet, and pydub decoding plus re-exporting a
         # large episode is silent work -- scale off the episode length instead.
         return max(STALE_TASK_SECONDS, task.audio_duration / 5)
+    if task.bytes_downloaded:
+        # Not every feed publishes itunes:duration, and audio_duration is only
+        # measured *after* splitting -- the phase this window has to cover. The
+        # bytes already on disk are the only signal left. ~1 MB per minute of
+        # spoken-word audio, same /5 factor as above.
+        return max(STALE_TASK_SECONDS, (task.bytes_downloaded / (1024 * 1024)) * 60 / 5)
     return STALE_TASK_SECONDS
 
 
