@@ -96,6 +96,32 @@ def load_user(user_id):
 # Global fallback OpenAI key
 GLOBAL_OPENAI_KEY = os.getenv('OPENAI_API_KEY')
 
+def _env_int(name, default):
+    """Read an integer env var, falling back to `default` on junk (with a warning).
+
+    Same reasoning as _env_minutes: a typo in a capacity limit must not silently
+    restore a value the operator was trying to lower.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        app.logger.warning('%s=%r is not a number; using the default of %s',
+                           name, raw, default)
+        return int(default)
+
+
+def free_disk_bytes(path='.'):
+    """Bytes free on the volume holding `path`, or None if it cannot be read."""
+    try:
+        stat = os.statvfs(path)
+        return stat.f_bavail * stat.f_frsize
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
 # Whisper pricing, used for the cost estimates shown in the UI
 WHISPER_COST_PER_MINUTE = 0.006
 
@@ -112,6 +138,26 @@ WHISPER_MAX_RETRIES = 1
 # Caps on the audio we will pull down from a client-supplied URL.
 MAX_REDIRECTS = 5
 MAX_AUDIO_BYTES = 500 * 1024 * 1024
+
+# How many transcriptions this PROCESS will run at once. Each in-flight job
+# holds up to MAX_AUDIO_BYTES on disk, and splitting decodes the whole episode
+# to raw PCM in memory (an hour of 44.1 kHz stereo is ~635 MB), so unbounded
+# concurrency is an out-of-disk or out-of-memory event, not a slow page.
+#
+# This is per gunicorn worker -- a threading.Semaphore cannot span processes --
+# so the real ceiling is this times the worker count. Prod runs 2 workers, so
+# the default of 2 admits at most 4 concurrent jobs: ~2 GB of disk against 24 GB
+# free, and ~2.5 GB of decode against 4.5 GB available.
+#
+# The box is a shared Plesk host with 50+ other services on it. Exhausting its
+# memory takes other sites down with us, which is why this is a hard refusal
+# rather than an unbounded queue.
+MAX_CONCURRENT_TRANSCRIPTIONS = max(1, int(_env_int('MAX_CONCURRENT_TRANSCRIPTIONS', 2)))
+_transcription_slots = threading.BoundedSemaphore(MAX_CONCURRENT_TRANSCRIPTIONS)
+
+# Refuse to start a job when the volume is this close to full. The database,
+# the backups and every co-tenant site live on the same disk.
+MIN_FREE_DISK_BYTES = _env_int('MIN_FREE_DISK_MB', 2048) * 1024 * 1024
 
 # Roughly how many seconds of audio Whisper gets through per second of wall clock.
 # Only used to interpolate progress between chunk checkpoints -- the API gives us
@@ -1481,103 +1527,136 @@ def start_transcription():
         }), 400
     openai_client = build_openai_client(api_key)
 
-    # Reserve the allowance BEFORE the job exists, so a refusal leaves nothing
-    # behind. The feed's duration is only an estimate; trial_reconcile_task()
-    # corrects it against the real audio before anything reaches Whisper.
-    trial_charge = None
-    if key_source == 'trial':
-        # Floored at a minute: trial_seconds_charged == 0 means "settled", so a
-        # zero reservation would quietly make the task unmetered.
-        estimate = max(60, int((meta['duration_min'] or 0) * 60)
-                       or TRIAL_UNKNOWN_ESTIMATE_SECONDS)
-        if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
-            return jsonify({'error': (
-                f'This episode runs {estimate // 60} minutes, past the '
-                f'{TRIAL_MAX_EPISODE_SECONDS // 60}-minute per-episode limit of the '
-                'free trial. Add your own OpenAI API key in Settings to transcribe it.'
-            )}), 402
-        if not trial_reserve(current_user.id, estimate):
-            _, _, remaining = trial_status(current_user)
-            if remaining < estimate:
-                message = (
-                    f'Your free trial has {remaining // 60} minutes left, and this '
-                    f'episode needs about {estimate // 60}. Add your own OpenAI API '
-                    'key in Settings to keep transcribing.'
-                )
-            else:
-                # The user still has room; the service as a whole does not.
-                # Saying "you have 60 minutes left" here would contradict itself.
-                message = (
-                    'Podskrift has handed out all the free minutes it has budgeted. '
-                    'Add your own OpenAI API key in Settings to keep transcribing.'
-                )
-            return jsonify({'error': message}), 402
-        trial_charge = estimate
-
-    task_id = str(uuid.uuid4())
+    # Admission control, before anything is reserved or written, so a refusal
+    # has nothing to unwind. Each job holds audio on disk and decodes it in
+    # memory; this box is shared with 50+ other services, so running out is
+    # their outage too.
+    free_bytes = free_disk_bytes(os.getcwd())
+    if free_bytes is not None and free_bytes < MIN_FREE_DISK_BYTES:
+        app.logger.error('refusing transcription: only %.1f GB free on the app volume',
+                         free_bytes / (1024 ** 3))
+        return jsonify({'error': (
+            'Podskrift is out of disk space right now. Please try again later.'
+        )}), 503
+    if not _transcription_slots.acquire(blocking=False):
+        return jsonify({'error': (
+            f'Podskrift is already transcribing {MAX_CONCURRENT_TRANSCRIPTIONS} '
+            'episodes right now. Please try again in a few minutes.'
+        )}), 503
+    slot_held = True
     try:
-        task = TranscriptionTask(
-            id=task_id,
-            user_id=current_user.id,
-            episode_title=meta['title'],
-            rss_url=rss_url,
-            status='downloading',
-            phase='downloading',
-            phase_started_at=datetime.now(timezone.utc),
-            podcast_name=meta.get('podcast_name'),
-            artwork_url=meta.get('artwork'),
-            episode_published=meta.get('published'),
-            # Feed duration is the best ETA source we have, and it is available
-            # before a single byte is downloaded.
-            audio_duration=(meta['duration_min'] * 60) if meta.get('duration_min') else None,
-            language=language or None,
-            trial_seconds_charged=trial_charge,
-        )
-        db.session.add(task)
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
-        if trial_charge:
-            trial_release(current_user.id, trial_charge)
-        raise
 
-    parsed_url = urlparse(meta['audio_url'])
-    audio_filename = f"temp_audio_{task_id}" + (os.path.splitext(parsed_url.path)[1] or '.mp3')
-    source_url = meta['audio_url']
+        # Reserve the allowance BEFORE the job exists, so a refusal leaves nothing
+        # behind. The feed's duration is only an estimate; trial_reconcile_task()
+        # corrects it against the real audio before anything reaches Whisper.
+        trial_charge = None
+        if key_source == 'trial':
+            # Floored at a minute: trial_seconds_charged == 0 means "settled", so a
+            # zero reservation would quietly make the task unmetered.
+            estimate = max(60, int((meta['duration_min'] or 0) * 60)
+                           or TRIAL_UNKNOWN_ESTIMATE_SECONDS)
+            if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
+                return jsonify({'error': (
+                    f'This episode runs {estimate // 60} minutes, past the '
+                    f'{TRIAL_MAX_EPISODE_SECONDS // 60}-minute per-episode limit of the '
+                    'free trial. Add your own OpenAI API key in Settings to transcribe it.'
+                )}), 402
+            if not trial_reserve(current_user.id, estimate):
+                _, _, remaining = trial_status(current_user)
+                if remaining < estimate:
+                    message = (
+                        f'Your free trial has {remaining // 60} minutes left, and this '
+                        f'episode needs about {estimate // 60}. Add your own OpenAI API '
+                        'key in Settings to keep transcribing.'
+                    )
+                else:
+                    # The user still has room; the service as a whole does not.
+                    # Saying "you have 60 minutes left" here would contradict itself.
+                    message = (
+                        'Podskrift has handed out all the free minutes it has budgeted. '
+                        'Add your own OpenAI API key in Settings to keep transcribing.'
+                    )
+                return jsonify({'error': message}), 402
+            trial_charge = estimate
 
-    def transcribe_thread():
-        with app.app_context():
-            try:
-                download_audio(source_url, audio_filename, task_id)
-                transcribe_audio(audio_filename, task_id, openai_client, language=language)
-            except TaskAbandoned:
-                # The sweeper wrote the error and settled the charge. Refund
-                # anyway: it is idempotent, and it is the backstop if anything
-                # re-opened the charge between the sweep and our abort.
-                abandoned = db.session.get(TranscriptionTask, task_id)
-                if abandoned:
-                    trial_refund_task(abandoned)
-            except Exception as e:
-                _update_task(task_id, status='error', phase='error',
-                             error_message=describe_openai_error(e)
-                             if _is_openai_error(e) else str(e))
-                # A job that never produced a transcript must not consume the
-                # trial allowance it reserved.
-                failed = db.session.get(TranscriptionTask, task_id)
-                if failed:
-                    trial_refund_task(failed)
-            finally:
-                if os.path.exists(audio_filename):
-                    try:
-                        os.remove(audio_filename)
-                    except OSError:
-                        pass
+        task_id = str(uuid.uuid4())
+        try:
+            task = TranscriptionTask(
+                id=task_id,
+                user_id=current_user.id,
+                episode_title=meta['title'],
+                rss_url=rss_url,
+                status='downloading',
+                phase='downloading',
+                phase_started_at=datetime.now(timezone.utc),
+                podcast_name=meta.get('podcast_name'),
+                artwork_url=meta.get('artwork'),
+                episode_published=meta.get('published'),
+                # Feed duration is the best ETA source we have, and it is available
+                # before a single byte is downloaded.
+                audio_duration=(meta['duration_min'] * 60) if meta.get('duration_min') else None,
+                language=language or None,
+                trial_seconds_charged=trial_charge,
+            )
+            db.session.add(task)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            if trial_charge:
+                trial_release(current_user.id, trial_charge)
+            raise
 
-    thread = threading.Thread(target=transcribe_thread)
-    thread.daemon = True
-    thread.start()
+        parsed_url = urlparse(meta['audio_url'])
+        audio_filename = f"temp_audio_{task_id}" + (os.path.splitext(parsed_url.path)[1] or '.mp3')
+        source_url = meta['audio_url']
 
-    return jsonify({'task_id': task_id})
+        def transcribe_thread():
+            with app.app_context():
+                try:
+                    download_audio(source_url, audio_filename, task_id)
+                    transcribe_audio(audio_filename, task_id, openai_client, language=language)
+                except TaskAbandoned:
+                    # The sweeper wrote the error and settled the charge. Refund
+                    # anyway: it is idempotent, and it is the backstop if anything
+                    # re-opened the charge between the sweep and our abort.
+                    abandoned = db.session.get(TranscriptionTask, task_id)
+                    if abandoned:
+                        trial_refund_task(abandoned)
+                except Exception as e:
+                    _update_task(task_id, status='error', phase='error',
+                                 error_message=describe_openai_error(e)
+                                 if _is_openai_error(e) else str(e))
+                    # A job that never produced a transcript must not consume the
+                    # trial allowance it reserved.
+                    failed = db.session.get(TranscriptionTask, task_id)
+                    if failed:
+                        trial_refund_task(failed)
+                finally:
+                    if os.path.exists(audio_filename):
+                        try:
+                            os.remove(audio_filename)
+                        except OSError:
+                            pass
+                    # Whatever happened, this job is done holding disk and
+                    # memory. Releasing here rather than in the request is the
+                    # whole point: the cap has to track work in flight, not
+                    # requests served.
+                    _transcription_slots.release()
+
+        thread = threading.Thread(target=transcribe_thread)
+        thread.daemon = True
+        thread.start()
+        # The thread's finally owns the slot from here on.
+        slot_held = False
+
+        return jsonify({'task_id': task_id})
+    finally:
+        # Handed to the worker thread on success (slot_held goes False just
+        # before it starts); returned here on every refusal and on any
+        # exception, so a rejected request cannot leak a slot for the life
+        # of the process.
+        if slot_held:
+            _transcription_slots.release()
 
 
 def _is_fetchable_url(raw):

@@ -217,6 +217,30 @@ UPDATE users SET trial_seconds_limit = 7200 WHERE email = 'someone@example.com';
 
 Run `ops/trial-usage.sh` to see what the trial has actually cost.
 
+### Capacity limits
+
+The trial ceiling caps what a surge can **cost**. These cap what it can **break**:
+each in-flight job holds up to 500 MB on disk, and splitting decodes the whole
+episode to raw PCM in memory (an hour of 44.1 kHz stereo is ~635 MB). Production
+is a shared Plesk host with 50+ other services on it, so exhausting its memory
+takes other sites down too.
+
+| Variable | Default | What it bounds |
+| --- | --- | --- |
+| `MAX_CONCURRENT_TRANSCRIPTIONS` | `2` | Jobs at once **per gunicorn worker**. |
+| `MIN_FREE_DISK_MB` | `2048` | Refuse to start below this much free space. |
+
+`MAX_CONCURRENT_TRANSCRIPTIONS` is per worker — a `threading.Semaphore` cannot
+span processes — so with `--workers 2` the real ceiling is 4 concurrent jobs:
+~2 GB of disk against 24 GB free, ~2.5 GB of decode against 4.5 GB available.
+Over the limit, requests get a 503 telling the user to try again shortly; they
+are not queued, because an unbounded queue is the same outage arriving later.
+
+### Also set a hard budget at OpenAI
+
+The ceilings above are enforced by this app. Set a monthly spend limit on the
+OpenAI account as well — that one still holds if this code has a bug.
+
 ### File Size Limits
 - **OpenAI Limit**: 25MB per audio file
 - **Auto-Splitting**: Files larger than 24MB are split automatically

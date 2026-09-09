@@ -27,6 +27,15 @@ before merging, regardless of how many files the diff has.
 - **A user with their own key is never metered** — `trial_seconds_charged` stays
   NULL.
 
+### Capacity — the box is shared
+- Production is a Plesk host with 50+ other services. An out-of-memory or
+  out-of-disk event here is their outage too, so transcription is admission-
+  controlled: `MAX_CONCURRENT_TRANSCRIPTIONS` per worker, plus a free-disk
+  floor, both checked **before** anything is reserved or written.
+- The capacity slot tracks work in flight, not requests served: the worker
+  thread releases it in a `finally`, and every refusal path hands it back. A
+  leaked slot is permanent for the life of the process.
+
 ### Counters and concurrency
 - Rate limits and allowances reserve under a single atomic step and release in a
   `finally`. A check-then-record split has shipped as a live hole here twice.

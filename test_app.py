@@ -1116,6 +1116,20 @@ def _used(user_id):
         return db.session.get(User, user_id).trial_seconds_used
 
 
+@pytest.fixture(autouse=True)
+def fresh_transcription_slots():
+    """Give every test its own capacity semaphore.
+
+    Tests that stub out threading.Thread hand the slot to a worker that never
+    runs, so it is never released. Without this the suite develops an
+    order-dependency: the third route test to ask for a slot gets a 503 from
+    the first two, and which tests those are depends on collection order.
+    """
+    import threading as _t
+    A._transcription_slots = _t.BoundedSemaphore(A.MAX_CONCURRENT_TRANSCRIPTIONS)
+    yield
+
+
 def _post_start(monkeypatch, user_id, data):
     """POST /start_transcription with the worker thread stubbed out.
 
@@ -2030,3 +2044,101 @@ def test_column_migrations_survive_two_workers_racing():
                 A.apply_column_migrations()
         finally:
             del A.TASK_COLUMN_MIGRATIONS['not_a_real_column']
+
+# --------------------------------------------------------------------------
+# Capacity limits
+#
+# Money is capped by the trial ceiling; this caps the box. Each in-flight job
+# holds up to MAX_AUDIO_BYTES on disk and decodes the whole episode to raw PCM
+# in memory. Prod is a shared Plesk host with 50+ other services on it.
+# --------------------------------------------------------------------------
+
+def test_concurrent_transcriptions_are_capped(trial_on, monkeypatch):
+    """Unbounded threads are an out-of-memory event, not a slow page."""
+    import threading as _t
+    monkeypatch.setattr(A, 'MAX_CONCURRENT_TRANSCRIPTIONS', 2)
+    monkeypatch.setattr(A, '_transcription_slots', _t.BoundedSemaphore(2))
+
+    uid = _make_user('cap@test.com', limit=36000)
+    data = {'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
+            'duration_min': '5', 'language': 'no'}
+
+    assert _post_start(monkeypatch, uid, data).status_code == 200
+    assert _post_start(monkeypatch, uid, data).status_code == 200
+    third = _post_start(monkeypatch, uid, data)
+    assert third.status_code == 503
+    assert 'try again' in third.get_json()['error'].lower()
+
+
+def test_a_refused_job_hands_its_slot_back(trial_on, monkeypatch):
+    """A refusal after the slot is taken -- an exhausted trial, say -- must not
+    leak the slot for the life of the process, or a few bad requests would
+    wedge the worker permanently."""
+    import threading as _t
+    monkeypatch.setattr(A, 'MAX_CONCURRENT_TRANSCRIPTIONS', 1)
+    monkeypatch.setattr(A, '_transcription_slots', _t.BoundedSemaphore(1))
+
+    broke = _make_user('slotleak@test.com', limit=600, used=600)
+    for _ in range(3):
+        resp = _post_start(monkeypatch, broke, {
+            'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
+            'duration_min': '30', 'language': 'no'})
+        assert resp.status_code == 402, 'expected the trial refusal, not a capacity one'
+
+    # The single slot is still available to someone who can use it.
+    ok = _make_user('slotok@test.com', limit=36000)
+    assert _post_start(monkeypatch, ok, {
+        'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
+        'duration_min': '5', 'language': 'no'}).status_code == 200
+
+
+def test_a_finished_job_hands_its_slot_back(trial_on, monkeypatch, tmp_path):
+    """The slot tracks work in flight, not requests served, so the worker
+    thread releases it -- through its finally, whatever the outcome."""
+    import threading as _t
+    monkeypatch.setattr(A, 'MAX_CONCURRENT_TRANSCRIPTIONS', 1)
+    slots = _t.BoundedSemaphore(1)
+    monkeypatch.setattr(A, '_transcription_slots', slots)
+
+    uid = _make_user('slotdone@test.com', limit=36000)
+    monkeypatch.setattr(A, 'download_audio',
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('404')))
+
+    A.app.config['TESTING'] = True
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    assert client.post('/start_transcription', data={
+        'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
+        'duration_min': '5', 'language': 'no'}).status_code == 200
+
+    for _ in range(100):
+        if slots.acquire(blocking=False):
+            slots.release()
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail('the worker thread never released its slot')
+
+
+def test_a_full_disk_refuses_before_anything_is_reserved(trial_on, monkeypatch):
+    """The database, the backups and 50+ co-tenant sites share this volume.
+    Filling it is their outage too."""
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda path='.': 10 * 1024 * 1024)
+    uid = _make_user('fulldisk@test.com', limit=36000)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
+        'duration_min': '5', 'language': 'no'})
+    assert resp.status_code == 503
+    assert 'disk space' in resp.get_json()['error'].lower()
+    assert _used(uid) == 0, 'allowance was reserved despite the refusal'
+
+
+def test_unreadable_disk_stats_do_not_block_transcription(trial_on, monkeypatch):
+    """statvfs can fail; that is not a reason to refuse every job."""
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda path='.': None)
+    uid = _make_user('nostat@test.com', limit=36000)
+    assert _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
+        'duration_min': '5', 'language': 'no'}).status_code == 200
