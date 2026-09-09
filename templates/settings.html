@@ -58,8 +58,10 @@
                 Your trial is used up. Add your own OpenAI API key above to keep transcribing —
                 it bills you directly at OpenAI's rate (about $0.36 per hour of audio).
                 {% else %}
-                Trial minutes run on our OpenAI key. Only completed transcriptions are counted;
-                a failed job is refunded automatically.
+                Trial minutes run on our OpenAI key, and are counted on the audio we
+                actually transcribed. A job that fails part-way keeps only the minutes
+                already sent for transcription; one that fails before it starts costs
+                you nothing.
                 {% endif %}
             </p>
             {% endif %}

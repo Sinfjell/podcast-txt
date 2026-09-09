@@ -168,7 +168,8 @@ def test_whisper_client_gives_up_before_the_task_is_presumed_dead(monkeypatch):
     earlier version of this test passed even with the timeout removed entirely.
     """
     monkeypatch.setattr(A, 'GLOBAL_OPENAI_KEY', 'sk-test-not-a-real-key')
-    client = A.get_openai_client()
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', True)
+    client = A.build_openai_client(A.resolve_openai_key(None)[0])
 
     assert client is not None
     assert client.timeout == A.WHISPER_TIMEOUT_SECONDS
@@ -1104,6 +1105,29 @@ def _used(user_id):
         return db.session.get(User, user_id).trial_seconds_used
 
 
+def _post_start(user_id, data, monkeypatch=None):
+    """POST /start_transcription with the worker thread stubbed out.
+
+    The reservation is what these tests assert on, and it is made before the
+    thread starts. Letting the real thread run makes the assertion a race with
+    a refund -- and fires a live HTTPS request from the test suite.
+    """
+    import types
+    import threading as _t
+    real_thread = _t.Thread
+    _t.Thread = lambda *a, **kw: types.SimpleNamespace(daemon=True,
+                                                       start=lambda: None)
+    try:
+        A.app.config['TESTING'] = True
+        client = A.app.test_client()
+        with client.session_transaction() as sess:
+            sess['_user_id'] = str(user_id)
+            sess['_fresh'] = True
+        return client.post('/start_transcription', data=data)
+    finally:
+        _t.Thread = real_thread
+
+
 @pytest.fixture
 def trial_on(monkeypatch):
     """Turn the trial on with a small, easy-to-reason-about allowance."""
@@ -1416,19 +1440,62 @@ def test_a_swept_task_stops_billing(trial_on, monkeypatch, tmp_path):
 
 def test_refund_keeps_what_was_already_spent(trial_on):
     """Chunks already sent to Whisper are billed to us whatever happens next.
-    Refunding them would hand back money that is gone."""
+    chunk_index is written BEFORE its chunk is uploaded, so index 1 of 4 means
+    two chunks are gone -- counting it as one refunded a chunk we had paid for.
+    """
     from models import db, TranscriptionTask
 
     uid = _make_user('prorata@test.com', limit=3600)
     with A.app.app_context():
-        A.trial_reserve(uid, 900)
+        A.trial_reserve(uid, 800)
         t = TranscriptionTask(id='trial-prorata', user_id=uid, episode_title='x',
-                              status='error', chunk_total=3, chunk_index=2,
-                              trial_seconds_charged=900)
+                              status='error', chunk_total=4, chunk_index=1,
+                              trial_seconds_charged=800)
         db.session.add(t)
         db.session.commit()
-        assert A.trial_refund_task(t) == 300      # one of three chunks unspent
+        assert A.trial_refund_task(t) == 400      # two of four chunks sent
+    assert _used(uid) == 400
+
+
+def test_a_swept_single_chunk_episode_is_not_free(trial_on):
+    """Every episode under 24 MB is one chunk, so chunk_index never leaves 0.
+    Counting "0 chunks done" refunded the whole episode after it had been
+    transcribed -- the common case, not an edge case."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('onechunk@test.com', limit=3600)
+    with A.app.app_context():
+        A.trial_reserve(uid, 600)
+        t = TranscriptionTask(id='trial-onechunk', user_id=uid, episode_title='x',
+                              status='error', chunk_total=1, chunk_index=0,
+                              trial_seconds_charged=600)
+        db.session.add(t)
+        db.session.commit()
+        assert A.trial_refund_task(t) == 0
     assert _used(uid) == 600
+
+
+def test_refund_survives_a_stale_caller_object(trial_on):
+    """/status hands _fail_if_stale a row loaded at the top of the request. If
+    the worker reconciled the charge in between, a claim against the stale
+    value matched nothing and the user forfeited the allowance for good."""
+    from models import db, TranscriptionTask
+    import types
+
+    uid = _make_user('stalecaller@test.com', limit=3600)
+    with A.app.app_context():
+        A.trial_reserve(uid, 900)
+        db.session.add(TranscriptionTask(id='trial-stale', user_id=uid,
+                                         episode_title='x', status='error',
+                                         trial_seconds_charged=900))
+        db.session.commit()
+        # Worker reconciled 900 -> 300 after the caller read the row.
+        A.trial_reconcile_task('trial-stale', 300)
+        stale = types.SimpleNamespace(id='trial-stale', user_id=uid,
+                                      trial_seconds_charged=900,
+                                      chunk_total=None, chunk_index=None)
+        assert A.trial_refund_task(stale) == 300
+    assert _used(uid) == 0
 
 
 def test_refund_returns_everything_before_the_first_chunk(trial_on):
@@ -1454,15 +1521,9 @@ def test_negative_duration_is_treated_as_unstated(trial_on):
     assert A._positive_float_or_none('12.5') == 12.5
 
     uid = _make_user('negative@test.com', limit=3600)
-    A.app.config['TESTING'] = True
-    client = A.app.test_client()
-    with client.session_transaction() as sess:
-        sess['_user_id'] = str(uid)
-        sess['_fresh'] = True
-    client.post('/start_transcription', data={
-        'audio_url': 'https://example.com/ep.mp3',
-        'episode_title': 'Ep', 'duration_min': '-500', 'language': 'no',
-    })
+    _post_start(uid, {'audio_url': 'https://example.com/ep.mp3',
+                      'episode_title': 'Ep', 'duration_min': '-500',
+                      'language': 'no'})
     # Falls back to the flat unknown-episode estimate rather than reserving 0.
     assert _used(uid) == A.TRIAL_UNKNOWN_ESTIMATE_SECONDS
 
@@ -1475,15 +1536,9 @@ def test_global_ceiling_message_does_not_contradict_itself(trial_on, monkeypatch
         db.session.commit()
     monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 60)
     uid = _make_user('ceiling@test.com', limit=36000)
-    A.app.config['TESTING'] = True
-    client = A.app.test_client()
-    with client.session_transaction() as sess:
-        sess['_user_id'] = str(uid)
-        sess['_fresh'] = True
-    resp = client.post('/start_transcription', data={
-        'audio_url': 'https://example.com/ep.mp3',
-        'episode_title': 'Ep', 'duration_min': '30', 'language': 'no',
-    })
+    resp = _post_start(uid, {'audio_url': 'https://example.com/ep.mp3',
+                             'episode_title': 'Ep', 'duration_min': '30',
+                             'language': 'no'})
     assert resp.status_code == 402
     error = resp.get_json()['error']
     assert 'budgeted' in error, error
@@ -1492,18 +1547,9 @@ def test_global_ceiling_message_does_not_contradict_itself(trial_on, monkeypatch
 
 def test_start_transcription_refuses_an_exhausted_trial(trial_on):
     uid = _make_user('exhausted@test.com', limit=600, used=600)
-    A.app.config['TESTING'] = True
-    client = A.app.test_client()
-    with client.session_transaction() as sess:
-        sess['_user_id'] = str(uid)
-        sess['_fresh'] = True
-
-    resp = client.post('/start_transcription', data={
-        'audio_url': 'https://example.com/ep.mp3',
-        'episode_title': 'Ep',
-        'duration_min': '30',
-        'language': 'no',
-    })
+    resp = _post_start(uid, {'audio_url': 'https://example.com/ep.mp3',
+                             'episode_title': 'Ep', 'duration_min': '30',
+                             'language': 'no'})
     assert resp.status_code == 402
     assert 'trial' in resp.get_json()['error'].lower()
 
@@ -1555,3 +1601,89 @@ def test_reservations_are_atomic_across_processes(trial_on):
     granted = outs.count('GRANTED')
     assert granted == 6, f'{granted} of 12 processes granted against a 6-slot cap'
     assert _used(uid) == 600
+
+def test_an_errored_task_cannot_be_resurrected(trial_on):
+    """_update_task used to happily write 'transcribing' over the sweeper's
+    verdict, which put the per-chunk abandonment check behind a status it
+    could never see."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('resurrect@test.com', limit=3600)
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='trial-resurrect', user_id=uid,
+                                         episode_title='x', status='error',
+                                         phase='error'))
+        db.session.commit()
+        assert A._update_task('trial-resurrect', status='transcribing') is False
+        assert A._update_task('trial-resurrect', progress=55) is False
+        assert db.session.get(TranscriptionTask, 'trial-resurrect').status == 'error'
+        # Writing 'error' again is still allowed -- that is not a resurrection.
+        assert A._update_task('trial-resurrect', status='error',
+                              error_message='later detail') is True
+
+
+def test_a_task_swept_during_splitting_never_reaches_whisper(trial_on, monkeypatch, tmp_path):
+    """The window the second review found: the sweeper fires while pydub is
+    exporting chunks (no timeout there), and the worker's post-split status
+    write erased the verdict before the per-chunk check ran."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('sweptsplit@test.com', limit=3600)
+    audio = tmp_path / 'ep.mp3'
+    audio.write_bytes(b'\0' * 2048)
+    sent = []
+
+    def sweep_during_split(f, **kw):
+        db.session.execute(A.text(
+            "UPDATE transcription_tasks SET status='error' WHERE id='trial-sweptsplit'"))
+        db.session.commit()
+        return [str(audio)]
+
+    monkeypatch.setattr(A, 'probe_audio_duration', lambda f: 600.0)
+    monkeypatch.setattr(A, 'split_audio_if_needed', sweep_during_split)
+    monkeypatch.setattr(A, '_transcribe_chunks',
+                        lambda *a, **kw: sent.append(a) or ('text', []))
+
+    with A.app.app_context():
+        A.trial_reserve(uid, 600)
+        db.session.add(TranscriptionTask(
+            id='trial-sweptsplit', user_id=uid, episode_title='x',
+            status='downloading', trial_seconds_charged=600))
+        db.session.commit()
+        with pytest.raises(A.TaskAbandoned):
+            A.transcribe_audio(str(audio), 'trial-sweptsplit', object(), language='no')
+        task = db.session.get(TranscriptionTask, 'trial-sweptsplit')
+        assert task.status == 'error', 'worker resurrected a swept task'
+
+    assert sent == [], 'audio was sent to Whisper after the task was swept'
+
+def test_a_job_that_dies_before_the_first_chunk_is_fully_refunded(trial_on, monkeypatch, tmp_path):
+    """transcribe_audio writes chunk_total and chunk_index together, before the
+    loop. Seeding chunk_index=0 there would read as "chunk 0 has been sent" and
+    charge for a chunk that never left the server."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('predeath@test.com', limit=3600)
+    audio = tmp_path / 'ep.mp3'
+    audio.write_bytes(b'\0' * 2048)
+
+    def die(*a, **kw):
+        raise RuntimeError('connection reset before the first upload')
+
+    monkeypatch.setattr(A, 'probe_audio_duration', lambda f: 600.0)
+    monkeypatch.setattr(A, 'split_audio_if_needed', lambda f, **kw: [str(audio)])
+    monkeypatch.setattr(A, '_transcribe_chunks', die)
+
+    with A.app.app_context():
+        A.trial_reserve(uid, 600)
+        db.session.add(TranscriptionTask(
+            id='trial-predeath', user_id=uid, episode_title='x',
+            status='downloading', trial_seconds_charged=600))
+        db.session.commit()
+        with pytest.raises(RuntimeError):
+            A.transcribe_audio(str(audio), 'trial-predeath', object(), language='no')
+
+        task = db.session.get(TranscriptionTask, 'trial-predeath')
+        assert task.chunk_total == 1
+        assert A.trial_refund_task(task) == 600, 'charged for a chunk never sent'
+    assert _used(uid) == 0

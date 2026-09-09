@@ -150,15 +150,6 @@ def build_openai_client(key):
     )
 
 
-def get_openai_client(user=None):
-    """Get an OpenAI client for `user`, falling back to the global trial key.
-
-    Callers that spend money must use resolve_openai_key() instead, so they
-    learn WHICH key they got and can meter the trial one.
-    """
-    return build_openai_client(resolve_openai_key(user)[0])
-
-
 # ---------------------------------------------------------------------------
 # Trial metering
 # ---------------------------------------------------------------------------
@@ -300,16 +291,31 @@ def trial_refund_task(task):
     chunk progress. Safe to call repeatedly: the conditional UPDATE on the
     task is what decides which caller may move the balance.
     """
-    charged = task.trial_seconds_charged
+    # Read the row rather than trusting the caller's copy. /status hands us an
+    # object loaded at the top of the request; if the worker reconciled the
+    # charge in between, a claim against the stale value silently matches
+    # nothing and the user forfeits the allowance with no path to get it back.
+    row = db.session.execute(text(
+        'SELECT user_id, trial_seconds_charged, chunk_total, chunk_index '
+        'FROM transcription_tasks WHERE id = :tid'
+    ), {'tid': task.id}).first()
+    if row is None:
+        return 0
+    user_id, charged, chunk_total, chunk_index = row
     if not charged or charged <= 0:
         return 0
-    user_id = task.user_id
-    chunk_total = task.chunk_total or 0
-    chunk_index = task.chunk_index or 0
-    if chunk_total > 0:
-        spent = int(charged * min(1.0, max(0, chunk_index) / chunk_total))
+
+    if (chunk_total or 0) > 0 and chunk_index is not None:
+        # chunk_index is written immediately BEFORE that chunk is uploaded, so
+        # index k means k+1 chunks have been sent and billed to us. Rounding
+        # toward charging is deliberate: refunding a chunk that did reach
+        # Whisper is exactly how a swept single-chunk episode -- every episode
+        # under 24 MB, so the common case -- came out free.
+        started = min(chunk_total, max(0, chunk_index) + 1)
+        spent = int(charged * started / chunk_total)
     else:
         spent = 0  # nothing reached Whisper yet
+
     if not _claim_task_charge(task.id, charged, spent):
         return 0
     refund = charged - spent
@@ -533,13 +539,32 @@ STALE_TASK_SECONDS = 15 * 60
 
 
 def _update_task(task_id, **kwargs):
-    """Update a TranscriptionTask row. Must be called within an app context."""
+    """Update a TranscriptionTask row. Must be called within an app context.
+
+    'error' is terminal. The stale sweeper runs in the other gunicorn worker
+    and may fail a task -- settling its trial charge -- while this worker is
+    still mid-episode. Letting the worker write 'transcribing' (and later
+    'completed') over that verdict resurrects a task whose allowance has
+    already been handed back, which is how a swept episode got transcribed
+    for free. Read the status straight from the database: the session may
+    still hold our own last write.
+    """
+    current_status = db.session.execute(
+        text('SELECT status FROM transcription_tasks WHERE id = :tid'),
+        {'tid': task_id},
+    ).scalar()
+    if current_status is None:
+        return False
+    if current_status == 'error' and kwargs.get('status') != 'error':
+        return False
     task = db.session.get(TranscriptionTask, task_id)
     if task:
         for k, v in kwargs.items():
             setattr(task, k, v)
         task.heartbeat_at = datetime.now(timezone.utc)
         db.session.commit()
+        return True
+    return False
 
 
 def download_audio(url, filename, task_id):
@@ -755,16 +780,29 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
     feed_duration = task.audio_duration if task and task.audio_duration else None
     audio_duration = measured_duration or feed_duration or billable_duration
 
-    _update_task(
+    # _update_task refuses to move a task out of 'error', so a False here means
+    # the sweeper failed this task while we were splitting -- and settled its
+    # charge. Splitting is the widest window for that: pydub's export has no
+    # timeout. Stop rather than transcribe against a refunded allowance.
+    started = _update_task(
         task_id,
         status='transcribing',
         phase='transcribing',
         chunk_total=len(audio_chunks),
-        chunk_index=0,
+        # Left unset on purpose: the loop writes chunk_index immediately
+        # before it uploads that chunk, so "unset" is the only honest way to
+        # say nothing has been sent yet. trial_refund_task() reads it as a
+        # billing signal, and a 0 here would charge for a chunk never sent.
+        chunk_index=None,
         audio_duration=audio_duration,
         progress=PHASE_SPANS['transcribing'][0],
         phase_started_at=datetime.now(timezone.utc),
     )
+    if not started:
+        raise TaskAbandoned(
+            'Task was marked failed while it was being split; stopping so it '
+            'cannot bill against an allowance already refunded.'
+        )
 
     upload_start = time.time()
     all_segments = []
@@ -1547,8 +1585,8 @@ def _stale_after_seconds(task):
         # large episode is silent work -- scale off the episode length instead.
         return max(STALE_TASK_SECONDS, task.audio_duration / 5)
     if task.bytes_downloaded:
-        # Not every feed publishes itunes:duration, and audio_duration is only
-        # measured *after* splitting -- the phase this window has to cover. The
+        # audio_duration is not written until the download has finished and the
+        # file has been probed -- the phase this window has to cover. The
         # bytes already on disk are the only signal left. ~1 MB per minute of
         # spoken-word audio, same /5 factor as above.
         return max(STALE_TASK_SECONDS, (task.bytes_downloaded / (1024 * 1024)) * 60 / 5)
