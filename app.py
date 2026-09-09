@@ -33,7 +33,8 @@ from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError, APITimeoutError
 from pydub import AudioSegment
 
-from sqlalchemy import event as sa_event, text, update as sa_update
+from sqlalchemy import (event as sa_event, inspect as sa_inspect, text,
+                        update as sa_update)
 from sqlalchemy.engine import Engine
 
 from models import (db, User, SavedFeed, TranscriptionTask,
@@ -1893,25 +1894,52 @@ def search_podcasts():
 # Init
 # ---------------------------------------------------------------------------
 
+def apply_column_migrations():
+    """Add columns missing from an existing database. Safe to run concurrently.
+
+    This module is imported by every gunicorn worker, and prod runs two of
+    them, so both race the same ALTER TABLE at boot. The inspector snapshot
+    says the column is missing for both; the loser's ALTER then fails with
+    "duplicate column name", which killed the worker -- and gunicorn treats a
+    worker that fails to boot as fatal and shuts the master down. The 2026-09-09
+    deploy survived only because systemd restarted the unit.
+
+    Losing that race means the other worker did our work, so it is a success.
+    Any other OperationalError is a real schema problem and still raises.
+
+    Returns the columns this process actually added.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    inspector = sa_inspect(db.engine)
+    added = []
+    for table, migrations in (('transcription_tasks', TASK_COLUMN_MIGRATIONS),
+                              ('users', USER_COLUMN_MIGRATIONS)):
+        existing = {c['name'] for c in inspector.get_columns(table)}
+        for column, ddl_type in migrations.items():
+            if column in existing:
+                continue
+            try:
+                db.session.execute(text(
+                    f'ALTER TABLE {table} ADD COLUMN {column} {ddl_type}'
+                ))
+                db.session.commit()
+                added.append(f'{table}.{column}')
+            except OperationalError as exc:
+                db.session.rollback()
+                if 'duplicate column name' not in str(exc).lower():
+                    raise
+                app.logger.info(
+                    '%s.%s was added by another worker; continuing', table, column)
+    return added
+
+
+
 with app.app_context():
     db.create_all()
 
-    # Add columns that may be missing on existing databases
-    from sqlalchemy import inspect
-    inspector = inspect(db.engine)
-    existing_cols = {c['name'] for c in inspector.get_columns('transcription_tasks')}
-    for column, ddl_type in TASK_COLUMN_MIGRATIONS.items():
-        if column not in existing_cols:
-            db.session.execute(text(
-                f'ALTER TABLE transcription_tasks ADD COLUMN {column} {ddl_type}'
-            ))
-    existing_user_cols = {c['name'] for c in inspector.get_columns('users')}
-    for column, ddl_type in USER_COLUMN_MIGRATIONS.items():
-        if column not in existing_user_cols:
-            db.session.execute(text(
-                f'ALTER TABLE users ADD COLUMN {column} {ddl_type}'
-            ))
-    db.session.commit()
+    apply_column_migrations()
+    inspector = sa_inspect(db.engine)
 
     # Transcription runs in a daemon thread, so a deploy or crash leaves tasks
     # stuck in a running state forever. Fail those at boot -- but only ones that
