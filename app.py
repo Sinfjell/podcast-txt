@@ -6,8 +6,11 @@ A Flask web application for transcribing podcast episodes from RSS feeds using O
 Supports user accounts, saved RSS feeds, and self-serve API keys.
 """
 
+import collections
 import math
 import os
+import sqlite3
+import subprocess
 import ssl
 import time
 import threading
@@ -27,8 +30,11 @@ from flask_login import LoginManager, login_user, logout_user, login_required, c
 from urllib.parse import urljoin, urlparse
 import uuid
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError, APITimeoutError
 from pydub import AudioSegment
+
+from sqlalchemy import event as sa_event
+from sqlalchemy.engine import Engine
 
 from models import db, User, SavedFeed, TranscriptionTask, TASK_COLUMN_MIGRATIONS
 
@@ -47,6 +53,31 @@ app.config['SQLALCHEMY_DATABASE_URI'] = (
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db.init_app(app)
+
+
+@sa_event.listens_for(Engine, 'connect')
+def _sqlite_pragmas(dbapi_connection, connection_record):
+    """WAL + a longer busy timeout.
+
+    Production ran journal_mode=delete under `gunicorn --workers 2 --threads 4`,
+    so every write blocked readers. WAL lets the status polls read while a
+    transcription writes its progress.
+    """
+    if not isinstance(dbapi_connection, sqlite3.Connection):
+        return
+    # synchronous stays at the default FULL: this is the only copy of user
+    # data, backups are nightly, and the write volume here is a handful of
+    # progress rows, so NORMAL would trade durability for nothing.
+    try:
+        cur = dbapi_connection.cursor()
+        cur.execute('PRAGMA journal_mode=WAL')
+        cur.execute('PRAGMA busy_timeout=15000')
+        cur.close()
+    except sqlite3.Error as exc:
+        # A read-only volume must degrade, not take the app down on every
+        # connect -- but say so: without WAL this runs with writers blocking
+        # readers, and ops/backup-db.sh assumes WAL is on.
+        app.logger.warning('Could not apply SQLite pragmas: %s', exc)
 
 # Login manager
 login_manager = LoginManager()
@@ -121,6 +152,173 @@ def get_openai_client(user=None):
         timeout=WHISPER_TIMEOUT_SECONDS,
         max_retries=WHISPER_MAX_RETRIES,
     )
+
+
+# ---------------------------------------------------------------------------
+# Abuse limits
+# ---------------------------------------------------------------------------
+
+#: Registrations allowed from one IP per window. 7 of 23 production accounts
+#: were bot signups on a single throwaway domain, two of them in the same
+#: second, because /register had no verification, rate limit or captcha.
+REGISTER_MAX_PER_IP = 3
+#: Peers whose X-Real-IP we trust. Plesk's nginx proxies over loopback and
+#: sets X-Real-IP to $remote_addr, overwriting anything the client sent.
+TRUSTED_PROXY_ADDRESSES = frozenset({'127.0.0.1', '::1'})
+REGISTER_WINDOW_SECONDS = 3600
+DISPOSABLE_EMAIL_DOMAINS = {
+    'immenseignite.info',
+}
+
+_register_attempts = collections.defaultdict(list)
+_register_lock = threading.Lock()
+
+
+def _client_ip():
+    """Real client IP, from a source the client cannot forge.
+
+    Deliberately does NOT read X-Forwarded-For[0]: Plesk nginx uses
+    $proxy_add_x_forwarded_for, which appends the real peer to whatever the
+    client sent, so an attacker-supplied value stays first and the rate limit
+    can be bypassed by rotating the header. X-Real-IP is set by nginx to
+    $remote_addr and overwrites any client-supplied value.
+    """
+    peer = request.remote_addr
+    # Only a request that actually came through the local proxy may present a
+    # forwarded address. Otherwise the header is just as attacker-controlled as
+    # X-Forwarded-For was, and swapping one for the other fixes nothing.
+    if peer in TRUSTED_PROXY_ADDRESSES:
+        return request.headers.get('X-Real-IP') or peer
+    return peer or 'unknown'
+
+
+def register_reserve_slot(ip):
+    """Atomically take one signup slot for this IP.
+
+    Returns a release token, or None when no slots are left.
+
+    Checking and recording must happen under one lock: with them split, a
+    parallel burst from one address passed the check before any of it was
+    recorded, and the limit did not bind at all. Callers MUST release the slot
+    again if no account gets created, so a mistyped password costs nothing.
+    """
+    now = time.time()
+    with _register_lock:
+        seen = [t for t in _register_attempts.get(ip, ())
+                if now - t[0] < REGISTER_WINDOW_SECONDS]
+        if len(seen) >= REGISTER_MAX_PER_IP:
+            _register_attempts[ip] = seen
+            return None
+        # A unique token, so a release removes its OWN reservation rather than
+        # whichever is newest -- otherwise retained stamps skew older and the
+        # window expires early.
+        token = (now, uuid.uuid4().hex)
+        seen.append(token)
+        _register_attempts[ip] = seen
+        if len(_register_attempts) > 10000:
+            stale = [k for k, v in list(_register_attempts.items())
+                     if not v or now - v[-1][0] > REGISTER_WINDOW_SECONDS]
+            for k in stale:
+                _register_attempts.pop(k, None)
+        return token
+
+
+def register_release_slot(ip, token):
+    """Give back a reservation, for any attempt that did not create an account."""
+    if token is None:
+        return
+    with _register_lock:
+        held = _register_attempts.get(ip)
+        if not held:
+            return
+        try:
+            held.remove(token)
+        except ValueError:
+            return          # already pruned by the window
+        if not held:
+            _register_attempts.pop(ip, None)
+
+
+def is_disposable_email(email):
+    return email.rsplit('@', 1)[-1].lower() in DISPOSABLE_EMAIL_DOMAINS
+
+
+# ---------------------------------------------------------------------------
+# API key handling
+# ---------------------------------------------------------------------------
+
+def _is_openai_error(exc):
+    """True for exceptions raised by the OpenAI SDK, which must never be shown raw."""
+    return type(exc).__module__.split('.')[0] == 'openai'
+
+
+def describe_openai_error(exc, context='transcription'):
+    """Turn an OpenAI SDK exception into something a human can act on.
+
+    Users were shown the raw error JSON, which is both unreadable and unsafe:
+    OpenAI echoes the submitted key back in 401s, and people paste passwords
+    into that field, so the raw text put a third party's password in our
+    database. Never surface the provider's message verbatim.
+    """
+    status = getattr(exc, 'status_code', None)
+    if status == 401:
+        return ('Your OpenAI API key was rejected. Check it in Settings — it should '
+                'start with "sk-" and come from platform.openai.com/api-keys.')
+    if status == 429:
+        return ('Your OpenAI account is out of credit, or you have hit its rate limit. '
+                'Add billing at platform.openai.com/account/billing, then try again.')
+    if status == 403:
+        return ('Your OpenAI key is not allowed to use the Whisper API. Check its '
+                'permissions at platform.openai.com.')
+    if status and 500 <= status < 600:
+        return 'OpenAI had a server error. Wait a moment and try again.'
+    if isinstance(exc, APITimeoutError):
+        if context == 'verify':
+            return 'OpenAI did not respond in time. Try again in a moment.'
+        return 'OpenAI did not respond in time. Try again, or pick a shorter episode.'
+    if isinstance(exc, APIConnectionError):
+        return 'Could not reach OpenAI. Check your connection and try again.'
+    if context == 'verify':
+        return 'Could not verify the key against OpenAI. Please try again.'
+    return 'Transcription failed. Please try again.'
+
+
+def looks_like_openai_key(key):
+    """Cheap shape check, so obvious non-keys never reach OpenAI at all."""
+    return bool(key) and key.startswith('sk-') and len(key) >= 20
+
+
+def verify_openai_key(key):
+    """Check a key against OpenAI. Returns (ok, message).
+
+    Done at save time rather than at transcription time: previously the first
+    signal that a key was wrong came minutes later, after picking an episode and
+    waiting through a download. 15 of 16 production failures were this.
+    """
+    if not looks_like_openai_key(key):
+        return False, ('That does not look like an OpenAI API key. Keys start with '
+                       '"sk-" and come from platform.openai.com/api-keys — it is not '
+                       'your OpenAI password.')
+    try:
+        OpenAI(api_key=key, timeout=15.0, max_retries=0).models.list()
+    except Exception as e:
+        status = getattr(e, 'status_code', None)
+        # A 5xx or a connection failure means we could not CHECK the key, not
+        # that OpenAI rejected it. Refusing the save there would make an OpenAI
+        # outage look like the user's key is broken.
+        unreachable = (status is not None and 500 <= status < 600) or isinstance(
+            e, (APIConnectionError, APITimeoutError))
+        if unreachable:
+            return True, ('Key saved, but OpenAI could not be reached to verify it. '
+                          'If transcription fails, re-check the key here.')
+        if status == 429:
+            # The key authenticated; the account is just out of credit or rate
+            # limited. Refusing the save would leave them unable to store a
+            # working key at all.
+            return True, ('Key saved. Note: ' +
+                          describe_openai_error(e, context='verify'))
+        return False, describe_openai_error(e, context='verify')
+    return True, 'API key verified.'
 
 
 # ---------------------------------------------------------------------------
@@ -240,13 +438,25 @@ def download_audio(url, filename, task_id):
 
 
 def get_audio_duration(audio_file):
-    """Get audio duration in seconds."""
+    """Get audio duration in seconds, falling back to a size estimate.
+
+    Uses ffprobe, which ships with the ffmpeg that pydub already requires.
+    This previously used librosa, which pulled in scipy, llvmlite, sklearn,
+    numba and numpy -- 398 MB of a 547 MB virtualenv for this one call.
+    """
     try:
-        import librosa
-        return librosa.get_duration(path=audio_file)
-    except Exception:
-        file_size_mb = os.path.getsize(audio_file) / (1024 * 1024)
-        return file_size_mb * 60
+        out = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'default=noprint_wrappers=1:nokey=1', audio_file],
+            capture_output=True, text=True, timeout=60, check=True,
+        )
+        duration = float(out.stdout.strip())
+        if duration > 0:
+            return duration
+    except (subprocess.SubprocessError, ValueError, OSError):
+        pass
+    # ~1 MB per minute of spoken-word audio
+    return (os.path.getsize(audio_file) / (1024 * 1024)) * 60
 
 
 def split_audio_if_needed(audio_file, max_size_mb=24):
@@ -622,13 +832,34 @@ def register():
     if current_user.is_authenticated:
         return redirect(url_for('index'))
 
-    if request.method == 'POST':
-        email = request.form.get('email', '').strip().lower()
-        password = request.form.get('password', '')
-        password2 = request.form.get('password2', '')
+    if request.method != 'POST':
+        return render_template('register.html')
 
-        if not email or not password:
-            flash('Email and password are required.', 'error')
+    email = request.form.get('email', '').strip().lower()
+    password = request.form.get('password', '')
+    password2 = request.form.get('password2', '')
+
+    if not email or not password:
+        flash('Email and password are required.', 'error')
+        return render_template('register.html')
+
+    ip = _client_ip()
+    slot = register_reserve_slot(ip)
+    if slot is None:
+        flash('Too many accounts created from this address. Try again later.', 'error')
+        return render_template('register.html')
+
+    # The slot is held for the rest of this request and released unless an
+    # account is actually created, so validation failures cost the user nothing
+    # while a parallel burst still cannot exceed the limit.
+    created = False
+    try:
+        if is_disposable_email(email):
+            flash('Please register with a real email address.', 'error')
+            return render_template('register.html')
+
+        if '@' not in email or '.' not in email.rsplit('@', 1)[-1]:
+            flash('Please enter a valid email address.', 'error')
             return render_template('register.html')
 
         if password != password2:
@@ -647,12 +878,15 @@ def register():
         user.set_password(password)
         db.session.add(user)
         db.session.commit()
+        created = True
 
         login_user(user)
-        flash('Account created! Add your OpenAI API key in Settings to use your own quota.', 'success')
+        flash('Account created! Add your OpenAI API key in Settings to use your own quota.',
+              'success')
         return redirect(url_for('index'))
-
-    return render_template('register.html')
+    finally:
+        if not created:
+            register_release_slot(ip, slot)
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -692,9 +926,24 @@ def logout():
 def settings():
     if request.method == 'POST':
         api_key = request.form.get('openai_api_key', '').strip()
-        current_user.openai_api_key = api_key if api_key else None
+
+        if not api_key:
+            current_user.openai_api_key = None
+            db.session.commit()
+            flash('API key removed.', 'success')
+            return redirect(url_for('settings'))
+
+        ok, message = verify_openai_key(api_key)
+        caveat = ok and not message.startswith('API key verified')
+        if not ok:
+            # Never store a rejected key: it is frequently a password, and it
+            # would otherwise sit in the database and fail again at transcribe time.
+            flash(message, 'error')
+            return redirect(url_for('settings'))
+
+        current_user.openai_api_key = api_key
         db.session.commit()
-        flash('Settings saved.', 'success')
+        flash(message, 'warning' if caveat else 'success')
         return redirect(url_for('settings'))
 
     return render_template('settings.html')
@@ -901,7 +1150,9 @@ def start_transcription():
                 download_audio(source_url, audio_filename, task_id)
                 transcribe_audio(audio_filename, task_id, openai_client, language=language)
             except Exception as e:
-                _update_task(task_id, status='error', phase='error', error_message=str(e))
+                _update_task(task_id, status='error', phase='error',
+                             error_message=describe_openai_error(e)
+                             if _is_openai_error(e) else str(e))
             finally:
                 if os.path.exists(audio_filename):
                     try:

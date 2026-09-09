@@ -49,3 +49,6 @@ Thumbs.db
 
 # Tooling scratch
 .playwright-mcp/
+
+# Local DB backups
+data/backups/

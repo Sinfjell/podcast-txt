@@ -1,0 +1,12 @@
+[Unit]
+Description=Podskrift database backup
+After=network.target
+
+# No mail relay configured on this host; failures surface via `systemctl status`
+# and the staleness check in ops/README.md. Wire OnFailure= to an alert unit when one exists.
+
+[Service]
+Type=oneshot
+User=podskrift
+WorkingDirectory=/var/www/vhosts/podskrift.nettsmed.dev/app
+ExecStart=/var/www/vhosts/podskrift.nettsmed.dev/app/ops/backup-db.sh
