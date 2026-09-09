@@ -487,16 +487,23 @@ def test_provider_text_is_never_echoed_back():
 # --------------------------------------------------------------------------
 
 def test_register_is_rate_limited_per_ip():
+    """Simulates the route: check, then record only when an account is created."""
     A._register_attempts.clear()
     ip = '203.0.113.7'
-    allowed = sum(0 if A.register_rate_limited(ip) else 1 for _ in range(10))
-    assert allowed == A.REGISTER_MAX_PER_IP
+    created = 0
+    for _ in range(10):
+        if A.register_rate_limited(ip):
+            continue
+        A.register_record_signup(ip)
+        created += 1
+    assert created == A.REGISTER_MAX_PER_IP
 
 
 def test_rate_limit_is_per_ip_not_global():
     A._register_attempts.clear()
     for _ in range(A.REGISTER_MAX_PER_IP):
-        A.register_rate_limited('198.51.100.1')
+        A.register_record_signup('198.51.100.1')
+    assert A.register_rate_limited('198.51.100.1') is True
     assert A.register_rate_limited('198.51.100.2') is False
 
 
@@ -520,11 +527,13 @@ def test_duration_falls_back_when_ffprobe_is_unavailable(tmp_path, monkeypatch):
     assert A.get_audio_duration(str(f)) == pytest.approx(120, abs=1)
 
 
-def test_librosa_is_not_imported_or_installed():
+def test_librosa_is_not_imported():
     """It dragged in 398 MB of a 547 MB venv for one call.
 
-    Checks real usage, not the word: the docstring in get_audio_duration
-    mentions librosa deliberately, to explain why it is gone.
+    Checks the import graph and requirements.txt, not the word: the docstring
+    in get_audio_duration mentions librosa deliberately, to explain why it is
+    gone. Reclaiming the disk needs a venv rebuild on the host -- see the
+    deploy notes; this test only guards the code and the manifest.
     """
     import ast as _ast
 
@@ -554,3 +563,105 @@ def test_duration_uses_ffprobe(monkeypatch, tmp_path):
     monkeypatch.setattr(A.subprocess, 'run', fake_run)
     assert A.get_audio_duration(str(f)) == pytest.approx(123.45)
     assert called['cmd'][0] == 'ffprobe' 
+
+
+# --------------------------------------------------------------------------
+# Regressions found in review of this change
+# --------------------------------------------------------------------------
+
+def test_client_ip_ignores_spoofable_forwarded_for():
+    """Plesk nginx appends the real peer to X-Forwarded-For, so element 0 is
+    whatever the client sent. Trusting it let one host create unlimited
+    accounts by rotating the header."""
+    with A.app.test_request_context(headers={
+        'X-Forwarded-For': '1.2.3.4, 203.0.113.9',
+        'X-Real-IP': '203.0.113.9',
+    }):
+        assert A._client_ip() == '203.0.113.9'
+
+    # Spoofed XFF with no X-Real-IP must fall back to the socket peer, never XFF
+    with A.app.test_request_context(
+        headers={'X-Forwarded-For': '1.2.3.4'},
+        environ_base={'REMOTE_ADDR': '203.0.113.9'},
+    ):
+        assert A._client_ip() == '203.0.113.9'
+
+
+def test_rate_limit_counts_created_accounts_not_failed_attempts():
+    """Three password typos must not burn the hourly quota."""
+    A._register_attempts.clear()
+    ip = '203.0.113.50'
+    for _ in range(5):
+        assert A.register_rate_limited(ip) is False   # checking never records
+    for _ in range(A.REGISTER_MAX_PER_IP):
+        A.register_record_signup(ip)
+    assert A.register_rate_limited(ip) is True
+
+
+def test_settings_never_persists_a_rejected_key(monkeypatch):
+    """The central claim of this change, previously verified only by reading."""
+    from models import db, User
+
+    with A.app.app_context():
+        db.session.query(User).filter_by(email='reject@test.com').delete()
+        db.session.commit()
+        u = User(email='reject@test.com')
+        u.set_password('password123')
+        db.session.add(u)
+        db.session.commit()
+        uid = u.id
+
+    A.app.config['TESTING'] = True
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+
+    for bad in ('Clashofc*ans1', 'hhhhhh123456'):
+        client.post('/settings', data={'openai_api_key': bad}, follow_redirects=True)
+        with A.app.app_context():
+            assert db.session.get(User, uid).openai_api_key is None
+
+    with A.app.app_context():
+        db.session.query(User).filter_by(id=uid).delete()
+        db.session.commit()
+
+
+def test_unreachable_openai_does_not_reject_the_key(monkeypatch):
+    """A 500 means we could not check the key, not that it is wrong -- an
+    OpenAI outage must not make the key unsaveable."""
+    class Down(Exception):
+        status_code = 503
+
+    def boom(*a, **kw):
+        raise Down()
+
+    monkeypatch.setattr(A, 'OpenAI', boom)
+    ok, msg = A.verify_openai_key('sk-' + 'a' * 40)
+    assert ok is True
+    assert 'could not be reached' in msg.lower()
+
+
+def test_real_openai_exception_is_recognised_and_translated():
+    """_is_openai_error must catch the SDK's own classes, not just anything
+    carrying a status_code."""
+    import openai
+
+    exc = openai.AuthenticationError.__new__(openai.AuthenticationError)
+    exc.status_code = 401
+    assert A._is_openai_error(exc) is True
+    assert 'rejected' in A.describe_openai_error(exc)
+
+    assert A._is_openai_error(ValueError('unrelated')) is False
+
+
+def test_verify_context_does_not_talk_about_episodes():
+    """describe_openai_error is now shared with the settings page."""
+    msg = A.describe_openai_error(A.APITimeoutError(request=None), context='verify')
+    assert 'episode' not in msg.lower()
+
+
+def test_403_message_has_no_stray_apostrophe():
+    class Forbidden(Exception):
+        status_code = 403
+    assert "key 's" not in A.describe_openai_error(Forbidden())

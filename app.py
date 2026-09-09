@@ -65,11 +65,17 @@ def _sqlite_pragmas(dbapi_connection, connection_record):
     """
     if not isinstance(dbapi_connection, sqlite3.Connection):
         return
-    cur = dbapi_connection.cursor()
-    cur.execute('PRAGMA journal_mode=WAL')
-    cur.execute('PRAGMA busy_timeout=15000')
-    cur.execute('PRAGMA synchronous=NORMAL')
-    cur.close()
+    # synchronous stays at the default FULL: this is the only copy of user
+    # data, backups are nightly, and the write volume here is a handful of
+    # progress rows, so NORMAL would trade durability for nothing.
+    try:
+        cur = dbapi_connection.cursor()
+        cur.execute('PRAGMA journal_mode=WAL')
+        cur.execute('PRAGMA busy_timeout=15000')
+        cur.close()
+    except sqlite3.Error:
+        # A read-only volume must degrade, not take the app down on every connect.
+        pass
 
 # Login manager
 login_manager = LoginManager()
@@ -164,28 +170,47 @@ _register_lock = threading.Lock()
 
 
 def _client_ip():
-    """Real client IP. The app sits behind Plesk's nginx proxy."""
-    forwarded = request.headers.get('X-Forwarded-For', '')
-    if forwarded:
-        return forwarded.split(',')[0].strip()
-    return request.remote_addr or 'unknown'
+    """Real client IP, from a source the client cannot forge.
+
+    Deliberately does NOT read X-Forwarded-For[0]: Plesk nginx uses
+    $proxy_add_x_forwarded_for, which appends the real peer to whatever the
+    client sent, so an attacker-supplied value stays first and the rate limit
+    can be bypassed by rotating the header. X-Real-IP is set by nginx to
+    $remote_addr and overwrites any client-supplied value.
+    """
+    return (request.headers.get('X-Real-IP')
+            or request.remote_addr
+            or 'unknown')
 
 
 def register_rate_limited(ip):
-    """True when this IP has used up its registrations for the window."""
+    """True when this IP has used up its registrations for the window.
+
+    Read-only. It counts accounts actually created, not form submissions, so
+    mistyping your password three times does not lock you out for an hour.
+    Call register_record_signup() once the account exists.
+    """
     now = time.time()
     with _register_lock:
-        seen = [t for t in _register_attempts[ip] if now - t < REGISTER_WINDOW_SECONDS]
-        _register_attempts[ip] = seen
-        if len(seen) >= REGISTER_MAX_PER_IP:
-            return True
-        seen.append(now)
-        # Keep the dict from growing without bound on a long-lived worker
+        seen = [t for t in _register_attempts.get(ip, ())
+                if now - t < REGISTER_WINDOW_SECONDS]
+        if seen:
+            _register_attempts[ip] = seen
+        else:
+            _register_attempts.pop(ip, None)
+        return len(seen) >= REGISTER_MAX_PER_IP
+
+
+def register_record_signup(ip):
+    """Record one successful account creation against this IP."""
+    now = time.time()
+    with _register_lock:
+        _register_attempts[ip].append(now)
         if len(_register_attempts) > 10000:
-            for k in [k for k, v in _register_attempts.items()
-                      if not v or now - v[-1] > REGISTER_WINDOW_SECONDS]:
+            stale = [k for k, v in list(_register_attempts.items())
+                     if not v or now - v[-1] > REGISTER_WINDOW_SECONDS]
+            for k in stale:
                 _register_attempts.pop(k, None)
-        return False
 
 
 def is_disposable_email(email):
@@ -198,10 +223,10 @@ def is_disposable_email(email):
 
 def _is_openai_error(exc):
     """True for exceptions raised by the OpenAI SDK, which must never be shown raw."""
-    return type(exc).__module__.split('.')[0] == 'openai' or hasattr(exc, 'status_code')
+    return type(exc).__module__.split('.')[0] == 'openai'
 
 
-def describe_openai_error(exc):
+def describe_openai_error(exc, context='transcription'):
     """Turn an OpenAI SDK exception into something a human can act on.
 
     Users were shown the raw error JSON, which is both unreadable and unsafe:
@@ -217,14 +242,18 @@ def describe_openai_error(exc):
         return ('Your OpenAI account is out of credit, or you have hit its rate limit. '
                 'Add billing at platform.openai.com/account/billing, then try again.')
     if status == 403:
-        return ('Your OpenAI key is not allowed to use the Whisper API. Check the key '
-                "'s permissions at platform.openai.com.")
+        return ('Your OpenAI key is not allowed to use the Whisper API. Check its '
+                'permissions at platform.openai.com.')
     if status and 500 <= status < 600:
         return 'OpenAI had a server error. Wait a moment and try again.'
     if isinstance(exc, APITimeoutError):
+        if context == 'verify':
+            return 'OpenAI did not respond in time. Try again in a moment.'
         return 'OpenAI did not respond in time. Try again, or pick a shorter episode.'
     if isinstance(exc, APIConnectionError):
         return 'Could not reach OpenAI. Check your connection and try again.'
+    if context == 'verify':
+        return 'Could not verify the key against OpenAI. Please try again.'
     return 'Transcription failed. Please try again.'
 
 
@@ -247,7 +276,16 @@ def verify_openai_key(key):
     try:
         OpenAI(api_key=key, timeout=15.0, max_retries=0).models.list()
     except Exception as e:
-        return False, describe_openai_error(e)
+        status = getattr(e, 'status_code', None)
+        # A 5xx or a connection failure means we could not CHECK the key, not
+        # that OpenAI rejected it. Refusing the save there would make an OpenAI
+        # outage look like the user's key is broken.
+        unreachable = (status is not None and 500 <= status < 600) or isinstance(
+            e, (APIConnectionError, APITimeoutError))
+        if unreachable:
+            return True, ('Key saved, but OpenAI could not be reached to verify it. '
+                          'If transcription fails, re-check the key here.')
+        return False, describe_openai_error(e, context='verify')
     return True, 'API key verified.'
 
 
@@ -799,6 +837,7 @@ def register():
         user.set_password(password)
         db.session.add(user)
         db.session.commit()
+        register_record_signup(_client_ip())
 
         login_user(user)
         flash('Account created! Add your OpenAI API key in Settings to use your own quota.', 'success')
