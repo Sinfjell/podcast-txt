@@ -22,7 +22,8 @@ class User(UserMixin, db.Model):
     # A NULL limit means "use the configured default", so raising TRIAL_MINUTES
     # lifts every account that has not been given an individual grant.
     trial_seconds_limit = db.Column(db.Integer, nullable=True)
-    trial_seconds_used = db.Column(db.Integer, nullable=False, default=0)
+    trial_seconds_used = db.Column(db.Integer, nullable=False, default=0,
+                                   server_default='0')
 
     feeds = db.relationship('SavedFeed', backref='user', lazy=True, cascade='all, delete-orphan')
     tasks = db.relationship('TranscriptionTask', backref='user', lazy=True, cascade='all, delete-orphan')
@@ -86,7 +87,10 @@ class TranscriptionTask(db.Model):
     # fraction OF trial_seconds_charged and then overwrites it, so a second
     # refund would re-apply the fraction to the already-reduced value and hand
     # back seconds that had been spent. Settling is the claim; the amount is not.
-    trial_settled = db.Column(db.Boolean, nullable=False, default=False)
+    # server_default matches the ALTER TABLE in USER/TASK_COLUMN_MIGRATIONS, so a
+    # freshly created database and a migrated one have the same schema.
+    trial_settled = db.Column(db.Boolean, nullable=False, default=False,
+                              server_default='0')
 
 
 #: Columns added after the first release, applied via ALTER TABLE on startup.

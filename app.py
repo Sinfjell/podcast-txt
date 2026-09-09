@@ -284,7 +284,7 @@ def _claim_task_charge(task_id, expected, new):
     result = db.session.execute(text("""
         UPDATE transcription_tasks
            SET trial_seconds_charged = :new
-         WHERE id = :tid AND trial_seconds_charged = :expected
+         WHERE id = :tid AND trial_settled = 0 AND trial_seconds_charged = :expected
     """), {'tid': task_id, 'new': int(new), 'expected': int(expected)})
     db.session.commit()
     return result.rowcount == 1
@@ -341,6 +341,24 @@ def trial_refund_task(task):
     refund = charged - spent
     trial_release(user_id, refund)
     return refund
+
+
+def settle_stranded_charges():
+    """Settle charges on tasks that failed without anyone refunding them.
+
+    A worker killed between reconciling a charge and settling it leaves a task
+    that is already 'error' with an unsettled charge. The orphan sweep never
+    revisits it -- that only looks at tasks still running -- so the user would
+    forfeit those minutes for good. Returns the number of tasks settled.
+    """
+    stranded = TranscriptionTask.query.filter(
+        TranscriptionTask.status == 'error',
+        TranscriptionTask.trial_settled == False,      # noqa: E712 - SQL, not Python
+        TranscriptionTask.trial_seconds_charged > 0,
+    ).all()
+    for task in stranded:
+        trial_refund_task(task)
+    return len(stranded)
 
 
 def trial_reconcile_task(task_id, actual_seconds):
@@ -1910,6 +1928,8 @@ with app.app_context():
         db.session.commit()
         for task in orphaned:
             trial_refund_task(task)
+
+    settle_stranded_charges()
 
     # One-time migration: move old transcriptions table to transcription_tasks
     if 'transcriptions' in inspector.get_table_names():

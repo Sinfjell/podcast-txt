@@ -1852,6 +1852,52 @@ def test_the_terminal_error_guard_holds_under_concurrency(trial_on):
     )
 
 
+def test_a_refused_chunk_write_stops_the_upload(trial_on, monkeypatch, tmp_path):
+    """The chunk_index write carries the same terminal-'error' guard and sits
+    one statement before create(). If its verdict is discarded, a sweep landing
+    in that window still gets a chunk uploaded -- and chunk_index stays behind,
+    so the refund under-counts it too."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('refusedwrite@test.com', limit=3600)
+    sent = []
+
+    class FakeClient:
+        class audio:
+            class transcriptions:
+                @staticmethod
+                def create(**kw):
+                    sent.append(kw)
+                    raise AssertionError('uploaded after the write was refused')
+
+    chunk = tmp_path / 'c0.mp3'
+    chunk.write_bytes(b'\0' * 16)
+
+    real_update = A._update_task
+
+    def sweep_just_before_the_write(task_id, **kw):
+        # Another worker fails the task in the instant before we claim it.
+        if str(kw.get('status', '')).startswith('transcribing chunk'):
+            db.session.execute(A.text(
+                "UPDATE transcription_tasks SET status='error' "
+                "WHERE id='trial-refusedwrite'"))
+            db.session.commit()
+        return real_update(task_id, **kw)
+
+    monkeypatch.setattr(A, '_update_task', sweep_just_before_the_write)
+
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='trial-refusedwrite', user_id=uid, episode_title='x',
+            status='transcribing', chunk_total=1, trial_seconds_charged=600))
+        db.session.commit()
+        with pytest.raises(A.TaskAbandoned):
+            A._transcribe_chunks([str(chunk)], {str(chunk)}, 'trial-refusedwrite',
+                                 FakeClient(), 'no', 600.0)
+
+    assert sent == [], 'chunk uploaded after its status write was refused'
+
+
 def test_update_task_round_trips_datetimes(trial_on):
     """_update_task moved from ORM setattr to a Core UPDATE to make the
     terminal-'error' guard atomic. SQLite stores DATETIME as text, so a
@@ -1897,3 +1943,45 @@ def test_a_zero_reservation_cannot_make_a_task_unmetered(trial_on, monkeypatch):
             'SELECT trial_seconds_charged FROM transcription_tasks '
             'WHERE user_id = :uid'), {'uid': uid}).scalar()
     assert charged and charged > 0, 'task was created unmetered'
+
+def test_boot_settles_an_error_task_left_unsettled(trial_on):
+    """A worker killed between reconciling a charge and settling it leaves
+    status='error' with an unsettled charge. The orphan sweep only looks at
+    tasks still running, so nothing ever revisited it and the user forfeited
+    those minutes permanently."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('bootsettle@test.com', limit=3600)
+    with A.app.app_context():
+        A.trial_reserve(uid, 900)
+        db.session.add(TranscriptionTask(
+            id='trial-bootsettle', user_id=uid, episode_title='x', status='error',
+            trial_seconds_charged=900, trial_settled=False))
+        db.session.commit()
+
+        assert A.settle_stranded_charges() >= 1
+
+        task = db.session.get(TranscriptionTask, 'trial-bootsettle')
+        assert task.trial_settled is True
+    assert _used(uid) == 0, 'the stranded charge was never handed back'
+
+
+def test_reconcile_cannot_move_a_settled_charge(trial_on):
+    """_claim_task_charge had no trial_settled check, so it still won against a
+    settled row whenever the refund settled without moving the amount (spent ==
+    charged -- the final chunk). Reconcile would then release spent seconds."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('claimsettled@test.com', limit=3600)
+    with A.app.app_context():
+        A.trial_reserve(uid, 800)
+        t = TranscriptionTask(id='trial-claimsettled', user_id=uid, episode_title='x',
+                              status='error', chunk_total=1, chunk_index=0,
+                              trial_seconds_charged=800)
+        db.session.add(t)
+        db.session.commit()
+        assert A.trial_refund_task(t) == 0            # settles at 800, amount unchanged
+        assert A._claim_task_charge('trial-claimsettled', 800, 400) is False
+        assert db.session.get(TranscriptionTask,
+                              'trial-claimsettled').trial_seconds_charged == 800
+    assert _used(uid) == 800
