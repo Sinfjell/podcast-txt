@@ -2589,6 +2589,10 @@ def test_another_users_running_task_is_not_offered(trial_on):
     assert [j['title'] for j in jobs] == []
 
 
+# --------------------------------------------------------------------------
+# Mobile navigation  (TSK-20393)
+# --------------------------------------------------------------------------
+
 def test_the_menu_toggle_is_a_real_disclosure_control(trial_on):
     """The old toggle was an onclick flipping a class: nothing told assistive
     tech it controlled anything, or whether it was open."""
@@ -3058,12 +3062,89 @@ def test_the_job_bar_is_on_every_page(trial_on):
 
 def test_the_job_bar_backs_off_when_nothing_is_running(trial_on):
     """It polls from every page of the app, so an idle tab must not keep asking
-    every four seconds."""
+    every four seconds.
+
+    Asserts the NUMBERS, not the source text. The first version of this test
+    checked that the string `IDLE_MS` appeared, which stayed green when the
+    interval itself was dropped to 1000ms -- a twentyfold load increase on a box
+    CLAUDE.md notes is shared with 50+ other services.
+    """
+    import re as _re
     body = A.app.test_client().get('/').data.decode()
-    assert 'var ACTIVE_MS = 4000;' in body
-    assert 'var IDLE_MS = 20000;' in body
-    assert 'jobs.length ? ACTIVE_MS : IDLE_MS' in body
+
+    def interval(name):
+        m = _re.search(r'var ' + name + r' = (\d+);', body)
+        assert m, f'{name} is gone'
+        return int(m.group(1))
+
+    active, idle = interval('ACTIVE_MS'), interval('IDLE_MS')
+    assert active >= 2000, f'polling every {active}ms while a job runs'
+    assert idle >= 15000, f'an idle tab polls every {idle}ms from every page'
+    assert idle > active * 3, 'the idle back-off is barely a back-off'
+
+    # Idle is the common case: most pages, most of the time, have no job.
+    assert 'shownCount ? ACTIVE_MS : IDLE_MS' in body, (
+        'the back-off keys on the response rather than on what is displayed, so '
+        "a job's own page polls at the active rate for a bar it never renders"
+    )
     assert 'if (document.hidden) { schedule(IDLE_MS); return; }' in body, (
         'a hidden tab re-checks on the active interval, which is a timer every '
         'four seconds for something nobody can see'
     )
+
+def test_active_jobs_refunds_a_dead_task_it_sweeps(trial_on):
+    """/active-jobs is a new caller into the refund path -- it runs the stale
+    check from every open tab. A job killed by a deploy must give its allowance
+    back, not just disappear from the list."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('jobbarrefund@test.com', limit=36000)
+    with A.app.app_context():
+        A.trial_reserve(uid, 900)
+        db.session.add(TranscriptionTask(
+            id='jb-refund', user_id=uid, status='transcribing',
+            episode_title='Killed mid-episode', chunk_total=4, chunk_index=1,
+            trial_seconds_charged=900,
+            heartbeat_at=datetime.now(timezone.utc) - timedelta(days=2)))
+        db.session.commit()
+
+    assert _login(uid).get('/active-jobs').get_json()['jobs'] == []
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'jb-refund')
+        assert task.status == 'error'
+        assert task.trial_settled is True
+    # Two of four chunks had been sent, so half the reservation stands.
+    assert _used(uid) == 450
+
+
+def test_sweeping_a_stale_task_cannot_clobber_one_that_just_finished(trial_on):
+    """_fail_if_stale was a read-check-write on a session-cached row -- the one
+    status write in the file that was not a conditional UPDATE. A task that
+    completed inside the window became "the server restarted, please try again"
+    while keeping the full charge, inviting a paid re-run. The job bar polls
+    this from every open tab, so it fires far more often than it used to.
+    """
+    from models import db, TranscriptionTask
+
+    uid = _make_user('sweeprace@test.com', limit=36000)
+    with A.app.app_context():
+        A.trial_reserve(uid, 600)
+        db.session.add(TranscriptionTask(
+            id='sweep-race', user_id=uid, status='transcribing',
+            episode_title='Finished just in time', chunk_total=1, chunk_index=0,
+            trial_seconds_charged=600,
+            heartbeat_at=datetime.now(timezone.utc) - timedelta(days=2)))
+        db.session.commit()
+
+        task = db.session.get(TranscriptionTask, 'sweep-race')   # our stale copy
+        # The worker completes it on another connection, leaving ours stale.
+        with db.engine.connect() as conn:
+            conn.execute(A.text(
+                "UPDATE transcription_tasks SET status='completed', "
+                "transcript_text='the goods' WHERE id='sweep-race'"))
+            conn.commit()
+
+        assert A._fail_if_stale(task) is False, 'the sweep clobbered a finished job'
+        fresh = db.session.get(TranscriptionTask, 'sweep-race')
+        assert fresh.status == 'completed'
+        assert fresh.transcript_text == 'the goods'

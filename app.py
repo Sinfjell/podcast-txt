@@ -1920,13 +1920,25 @@ def _fail_if_stale(task):
         return False
     if _seconds_since(task.heartbeat_at or task.started_at) <= _stale_after_seconds(task):
         return False
-    task.status = 'error'
-    task.phase = 'error'
-    task.error_message = (
-        'Transcription stopped making progress, most likely because the server '
-        'restarted. Please try again.'
-    )
+    # One conditional UPDATE, like every other status write here. This used to
+    # be a read-check-write on a session-cached row, and it is the one path that
+    # can clobber a task that finished inside the window -- turning a completed
+    # transcript into "the server restarted, please try again" while keeping the
+    # full charge, which invites a paid re-run. The live job bar polls this from
+    # every open tab, so it fires roughly 15x more often than it used to.
+    claimed = db.session.execute(text("""
+        UPDATE transcription_tasks
+           SET status = 'error', phase = 'error', error_message = :message
+         WHERE id = :tid AND status NOT IN ('completed', 'error', 'cancelled')
+    """), {
+        'tid': task.id,
+        'message': ('Transcription stopped making progress, most likely because '
+                    'the server restarted. Please try again.'),
+    }).rowcount == 1
     db.session.commit()
+    db.session.expire(task)
+    if not claimed:
+        return False
     trial_refund_task(task)
     return True
 

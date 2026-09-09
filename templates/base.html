@@ -507,7 +507,10 @@
         .jobbar[hidden] { display: none; }
         /* Give the page back the space the bar sits on, or the last thing on it
            is unreachable underneath. */
-        body.has-jobbar .container { padding-bottom: 140px; }
+        /* The bar grows with the number of jobs, so the space the page gives
+           back is measured from it, not guessed. The literal is only the value
+           before the first measurement lands. */
+        body.has-jobbar .container { padding-bottom: var(--jobbar-space, 140px); }
         .jobbar.shown { transform: translateY(0); opacity: 1; }
 
         .jobbar-item {
@@ -574,7 +577,6 @@
         .jobbar.collapsed .jobbar-list { display: none; }
 
         @media (max-width: 640px) {
-            body.has-jobbar .container { padding-bottom: 130px; }
             .jobbar {
                 right: 0; left: 0; bottom: 0;
                 width: auto; max-width: none;
@@ -586,21 +588,6 @@
 
         @media (prefers-reduced-motion: reduce) {
             .jobbar, .jobbar-progress { transition: none; }
-        }
-
-        /* Live indicator for a transcription still running */
-        .pulse-dot {
-            width: 8px; height: 8px; border-radius: 50%;
-            background: var(--accent-bright);
-            flex-shrink: 0; margin-right: 10px;
-            animation: pulse 1.6s ease-in-out infinite;
-        }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.35; transform: scale(0.8); }
-        }
-        @media (prefers-reduced-motion: reduce) {
-            .pulse-dot { animation: none; }
         }
 
         .btn:disabled, .btn[disabled] {
@@ -801,12 +788,15 @@
 
     <!-- Carried on every page: a transcription keeps running server-side when
          you navigate away, and until this existed nothing said so. -->
-    <aside class="jobbar" id="jobBar" hidden aria-live="polite"
-           aria-label="Transcriptions in progress">
+    <aside class="jobbar" id="jobBar" hidden aria-label="Transcriptions in progress">
         <div class="jobbar-header">
-            <span id="jobBarCount"></span>
+            <!-- The live region is the count only. On the list it would
+                 re-announce every job every four seconds, because the rows are
+                 cleared and rebuilt on each poll. -->
+            <span id="jobBarCount" aria-live="polite"></span>
             <button type="button" class="jobbar-collapse" id="jobBarCollapse"
-                    aria-label="Collapse">&minus;</button>
+                    aria-label="Collapse" aria-expanded="true"
+                    aria-controls="jobBarList">&minus;</button>
         </div>
         <div class="jobbar-list" id="jobBarList"></div>
     </aside>
@@ -848,20 +838,29 @@
         var ACTIVE_MS = 4000;
         var IDLE_MS = 20000;
         var timer = null;
+        var shownCount = 0;
         // Which task's own page we are on -- the bar would just duplicate it.
         var onTaskPage = (location.pathname.match(/^\/transcription\/(.+)$/) || [])[1];
 
         try {
             if (sessionStorage.getItem('podskrift_jobbar_collapsed') === '1') {
-                bar.classList.add('collapsed');
-                collapse.textContent = '+';
+                setCollapsed(true);
             }
         } catch (e) { /* private mode; the default is fine */ }
 
-        collapse.addEventListener('click', function () {
-            var collapsed = bar.classList.toggle('collapsed');
+        function setCollapsed(collapsed) {
+            bar.classList.toggle('collapsed', collapsed);
             collapse.textContent = collapsed ? '+' : '\u2212';
+            // Restoring the saved state used to change only the glyph, so the
+            // button announced "Collapse" while it expanded.
             collapse.setAttribute('aria-label', collapsed ? 'Expand' : 'Collapse');
+            collapse.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        }
+
+        collapse.addEventListener('click', function () {
+            var collapsed = !bar.classList.contains('collapsed');
+            setCollapsed(collapsed);
+            measure();
             try {
                 sessionStorage.setItem('podskrift_jobbar_collapsed', collapsed ? '1' : '0');
             } catch (e) { /* nothing to remember it with */ }
@@ -882,6 +881,7 @@
         function render(jobs) {
             var visible = jobs.filter(function (j) { return j.id !== onTaskPage; });
             document.body.classList.toggle('has-jobbar', visible.length > 0);
+            shownCount = visible.length;
             if (!visible.length) {
                 bar.classList.remove('shown');
                 bar.hidden = true;
@@ -915,7 +915,9 @@
 
                 var meta = document.createElement('div');
                 meta.className = 'jobbar-meta';
-                var bits = [phaseLabel(job.phase), job.percent + '%'];
+                var bits = [];
+                if (job.podcast_name) bits.push(job.podcast_name);
+                bits.push(phaseLabel(job.phase), job.percent + '%');
                 var eta = humanEta(job.eta_seconds);
                 if (eta) bits.push(eta);
                 meta.textContent = bits.join(' \u00B7 ');
@@ -934,7 +936,17 @@
                     if (!confirm('Stop this transcription? The audio already sent has been paid for.')) return;
                     stop.disabled = true;
                     fetch('/cancel/' + job.id, { method: 'POST' })
-                        .then(function () { poll(); })
+                        .then(function (r) { return r.json(); })
+                        .then(function (d) {
+                            // /cancel answers 409 when the job finished first.
+                            // Swallowing that leaves the user staring at a
+                            // button that did nothing.
+                            if (d && d.error) {
+                                stop.disabled = false;
+                                alert(d.error);
+                            }
+                            poll();
+                        })
                         .catch(function () { stop.disabled = false; });
                 });
                 row.appendChild(stop);
@@ -952,6 +964,17 @@
             // transition has nothing to run from.
             void bar.offsetHeight;
             bar.classList.add('shown');
+            measure();
+        }
+
+        function measure() {
+            // Hand the page back exactly the space the bar occupies. A fixed
+            // number was wrong the moment a second job appeared -- and two
+            // gunicorn workers can each be running one.
+            document.body.style.setProperty(
+                '--jobbar-space',
+                shownCount ? (bar.offsetHeight + 24) + 'px' : '0px'
+            );
         }
 
         function schedule(delay) {
@@ -969,14 +992,21 @@
                 .then(function (d) {
                     var jobs = d.jobs || [];
                     render(jobs);
-                    schedule(jobs.length ? ACTIVE_MS : IDLE_MS);
+                    // What is SHOWN, not what came back: on a job's own page the
+                    // bar filters that job out, so keying on d.jobs polled every
+                    // four seconds for a bar that never renders -- on the one
+                    // page that is already polling /status every two.
+                    schedule(shownCount ? ACTIVE_MS : IDLE_MS);
                 })
                 .catch(function () { schedule(IDLE_MS); });
         }
 
         document.addEventListener('visibilitychange', function () {
-            if (!document.hidden) poll();
+            // clearTimeout inside schedule() keeps this to a single chain no
+            // matter how fast the user flips between tabs.
+            if (!document.hidden) schedule(0);
         });
+        window.addEventListener('resize', measure);
         poll();
     })();
 
