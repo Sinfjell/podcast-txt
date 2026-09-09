@@ -113,7 +113,9 @@ def get_openai_client(user=None):
 # Audio helpers
 # ---------------------------------------------------------------------------
 
-#: A task with no progress write for this long is treated as abandoned.
+#: Floor for how long a task may go without a progress write before it counts
+#: as abandoned. The real window scales with the work in flight -- see
+#: _stale_after_seconds().
 STALE_TASK_SECONDS = 15 * 60
 
 
@@ -941,6 +943,20 @@ def _float_or_none(raw):
         return None
 
 
+def _stale_after_seconds(task):
+    """How long this particular task may stay quiet before it is presumed dead.
+
+    The heartbeat is written per chunk, so the window has to clear the slowest
+    plausible single chunk. A 24 MB chunk of 64 kbps audio is ~50 minutes long,
+    and if Whisper degrades to ~1.5x realtime that one chunk runs for over half
+    an hour -- a flat 15-minute window would kill a job that is very much alive.
+    """
+    if task.chunk_total and task.audio_duration:
+        per_chunk = task.audio_duration / task.chunk_total / WHISPER_REALTIME_FACTOR
+        return max(STALE_TASK_SECONDS, per_chunk * 8)
+    return STALE_TASK_SECONDS
+
+
 def _fail_if_stale(task):
     """Fail a task whose worker has stopped writing progress.
 
@@ -951,7 +967,7 @@ def _fail_if_stale(task):
     """
     if task.status in ('completed', 'error'):
         return False
-    if _seconds_since(task.heartbeat_at or task.started_at) <= STALE_TASK_SECONDS:
+    if _seconds_since(task.heartbeat_at or task.started_at) <= _stale_after_seconds(task):
         return False
     task.status = 'error'
     task.phase = 'error'
@@ -1204,7 +1220,7 @@ with app.app_context():
         t for t in TranscriptionTask.query.filter(
             ~TranscriptionTask.status.in_(['completed', 'error'])
         ).all()
-        if _seconds_since(t.heartbeat_at or t.started_at) > STALE_TASK_SECONDS
+        if _seconds_since(t.heartbeat_at or t.started_at) > _stale_after_seconds(t)
     ]
     for task in orphaned:
         task.status = 'error'

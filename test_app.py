@@ -129,6 +129,24 @@ def test_stale_task_is_failed_when_its_status_is_polled():
         assert 'restarted' in task.error_message
 
 
+def test_stale_window_scales_with_chunk_length():
+    """A 24 MB chunk of low-bitrate audio can legitimately run past 15 minutes;
+    a flat window would kill a job that is still working."""
+    class T:
+        chunk_total = 1
+        audio_duration = 50 * 60      # one ~50-minute chunk (24 MB @ 64 kbps)
+
+    class NoInfo:
+        chunk_total = None
+        audio_duration = None
+
+    slow_chunk_runtime = (50 * 60) / A.WHISPER_REALTIME_FACTOR
+    assert A._stale_after_seconds(T()) > slow_chunk_runtime * 4
+    assert A._stale_after_seconds(T()) > A.STALE_TASK_SECONDS
+    # With nothing to go on, fall back to the flat floor
+    assert A._stale_after_seconds(NoInfo()) == A.STALE_TASK_SECONDS
+
+
 def test_live_task_is_not_failed():
     from models import TranscriptionTask, db
 
