@@ -1985,3 +1985,48 @@ def test_reconcile_cannot_move_a_settled_charge(trial_on):
         assert db.session.get(TranscriptionTask,
                               'trial-claimsettled').trial_seconds_charged == 800
     assert _used(uid) == 800
+
+def test_column_migrations_survive_two_workers_racing():
+    """The 2026-09-09 deploy: both gunicorn workers ran the ALTER TABLE at
+    boot, the loser died on "duplicate column name", and gunicorn treats a
+    worker that fails to boot as fatal -- it shut the master down. Only
+    systemd's automatic restart kept podskrift.com up.
+
+    Losing that race means the other worker did our work, not that the schema
+    is wrong.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    with A.app.app_context():
+        # Everything is already applied, so a second pass adds nothing.
+        assert A.apply_column_migrations() == []
+
+        # Now force the race: the column is gone from the inspector's view but
+        # present in the table, which is exactly what the loser sees.
+        table = 'transcription_tasks'
+        column = next(iter(A.TASK_COLUMN_MIGRATIONS))
+        real_inspect = A.sa_inspect
+
+        class BlindInspector:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def get_columns(self, name):
+                cols = self._inner.get_columns(name)
+                if name == table:
+                    return [c for c in cols if c['name'] != column]
+                return cols
+
+        A.sa_inspect = lambda engine: BlindInspector(real_inspect(engine))
+        try:
+            assert A.apply_column_migrations() == [], 'the losing ALTER was not tolerated'
+        finally:
+            A.sa_inspect = real_inspect
+
+        # A genuinely broken migration still raises rather than being swallowed.
+        A.TASK_COLUMN_MIGRATIONS['not_a_real_column'] = 'NOT VALID SQL HERE'
+        try:
+            with pytest.raises(OperationalError):
+                A.apply_column_migrations()
+        finally:
+            del A.TASK_COLUMN_MIGRATIONS['not_a_real_column']
