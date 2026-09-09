@@ -1,15 +1,17 @@
 {% extends "base.html" %}
 {% block title %}Select Episode — Podskrift{% endblock %}
+{% block container_class %}container-wide{% endblock %}
 
 {% block content %}
 <div class="flex-between mb-2">
-    <div>
-        <h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em;">
-            Select Episode
-        </h2>
-        {% if feed_name %}
-        <p class="text-muted text-sm mt-1">{{ feed_name }}</p>
-        {% endif %}
+    <div class="episode-hero">
+        {% if artwork %}<img src="{{ artwork }}" alt="" style="width: 64px; height: 64px;">{% endif %}
+        <div class="episode-hero-info">
+            <h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em;">
+                Select Episode
+            </h2>
+            <p class="text-muted text-sm mt-1">{{ feed_name or podcast_name }}</p>
+        </div>
     </div>
     <div class="flex-center" style="gap: 8px;">
         {% if current_user.is_authenticated %}
@@ -19,10 +21,31 @@
     </div>
 </div>
 
+<div class="card mb-2">
+    <div class="card-body" style="display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-end;">
+        <div class="form-group" style="flex: 1; min-width: 220px; margin: 0;">
+            <label class="form-label" for="episodeFilter">Filter episodes</label>
+            <input type="text" class="form-input" id="episodeFilter" autocomplete="off"
+                   placeholder="Type to filter this feed...">
+        </div>
+        <div class="form-group" style="min-width: 180px; margin: 0;">
+            <label class="form-label" for="language">Spoken language</label>
+            <select class="form-input" id="language" name="language" form="episodeForm">
+                {% for code, label in languages %}
+                <option value="{{ code }}"{% if code == 'no' %} selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+</div>
+
 <form id="episodeForm" method="POST" action="{{ url_for('start_transcription') }}">
     <input type="hidden" name="rss_url" value="{{ rss_url }}">
     <input type="hidden" name="episode_index" id="episode_index" value="">
+    <input type="hidden" name="podcast_name" value="{{ feed_name or podcast_name }}">
+    <input type="hidden" name="artwork" value="{{ artwork }}">
 
+    <p class="text-muted text-sm mb-1 hidden" id="filterCount"></p>
     <div class="grid grid-2">
         {% for episode in episodes %}
         <div class="episode-card" data-episode-index="{{ episode.index }}" data-listener-attached="true">
@@ -96,25 +119,104 @@
 {% block scripts %}
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    var episodeCards = document.querySelectorAll('.episode-card');
+    var grid = document.querySelector('.grid');
     var transcribeBtn = document.getElementById('transcribeBtn');
     var episodeIndexInput = document.getElementById('episode_index');
+    var languageSelect = document.getElementById('language');
+    var filterInput = document.getElementById('episodeFilter');
+    var filterCount = document.getElementById('filterCount');
+    var loadMoreBtn = document.getElementById('loadMoreBtn');
+
+    var ALL_EPISODES = {{ all_episodes|tojson }};
+    var renderedCount = {{ episodes|length }};
+
+    // Remember the language across pages so episode search on the home page
+    // starts transcribing with the same choice.
+    var stored = localStorage.getItem('podskrift_language');
+    if (stored !== null && languageSelect.querySelector('option[value="' + stored + '"]')) {
+        languageSelect.value = stored;
+    }
+    languageSelect.addEventListener('change', function() {
+        localStorage.setItem('podskrift_language', languageSelect.value);
+    });
 
     function selectCard(card) {
-        episodeCards.forEach(function(c) { c.classList.remove('selected'); });
+        grid.querySelectorAll('.episode-card').forEach(function(c) { c.classList.remove('selected'); });
         card.classList.add('selected');
         card.querySelector('input[type="radio"]').checked = true;
         transcribeBtn.disabled = false;
         episodeIndexInput.value = card.dataset.episodeIndex;
     }
 
-    episodeCards.forEach(function(card) {
+    function attach(card) {
         card.addEventListener('click', function() { selectCard(this); });
+    }
+
+    grid.querySelectorAll('.episode-card').forEach(attach);
+
+    function renderEpisode(ep) {
+        var card = document.createElement('div');
+        card.className = 'episode-card';
+        card.dataset.episodeIndex = ep.index;
+
+        var radio = document.createElement('input');
+        radio.type = 'radio'; radio.name = 'episode'; radio.value = ep.index;
+        radio.style.display = 'none';
+        card.appendChild(radio);
+
+        var title = document.createElement('div');
+        title.className = 'episode-title';
+        title.textContent = ep.title;
+        card.appendChild(title);
+
+        var meta = document.createElement('div');
+        meta.className = 'episode-meta';
+        var metaText = ep.published;
+        if (ep.duration_min) metaText += ' \u00B7 ' + ep.duration_min + ' min';
+        if (ep.estimated_cost) metaText += ' \u00B7 ~$' + ep.estimated_cost.toFixed(3);
+        meta.textContent = metaText;
+        card.appendChild(meta);
+
+        if (ep.description) {
+            var desc = document.createElement('div');
+            desc.className = 'episode-desc';
+            desc.textContent = ep.description;
+            card.appendChild(desc);
+        }
+
+        attach(card);
+        grid.appendChild(card);
+    }
+
+    function renderAll() {
+        for (var i = renderedCount; i < ALL_EPISODES.length; i++) renderEpisode(ALL_EPISODES[i]);
+        renderedCount = ALL_EPISODES.length;
+        if (loadMoreBtn) loadMoreBtn.style.display = 'none';
+    }
+
+    if (loadMoreBtn) loadMoreBtn.addEventListener('click', renderAll);
+
+    // Filtering searches the whole feed, not just the first page, so the rest
+    // gets rendered on first keystroke.
+    filterInput.addEventListener('input', function() {
+        var q = filterInput.value.trim().toLowerCase();
+        if (q) renderAll();
+
+        var cards = grid.querySelectorAll('.episode-card');
+        var shown = 0;
+        cards.forEach(function(card) {
+            var match = !q || card.textContent.toLowerCase().indexOf(q) !== -1;
+            card.style.display = match ? '' : 'none';
+            if (match) shown++;
+        });
+
+        filterCount.textContent = shown + ' of ' + cards.length + ' episodes';
+        filterCount.classList.toggle('hidden', !q);
     });
 
     document.getElementById('episodeForm').addEventListener('submit', function(e) {
         e.preventDefault();
-        if (!document.querySelector('input[name="episode"]:checked')) return;
+        if (!grid.querySelector('input[name="episode"]:checked')) return;
         transcribeBtn.disabled = true;
         transcribeBtn.textContent = 'Starting...';
 
@@ -134,44 +236,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 transcribeBtn.textContent = 'Start Transcription';
             });
     });
-
-    // Load more
-    var loadMoreBtn = document.getElementById('loadMoreBtn');
-    if (loadMoreBtn) {
-        loadMoreBtn.addEventListener('click', function() {
-            var allEpisodes = {{ all_episodes|tojson }};
-            var currentCount = {{ episodes|length }};
-            var grid = document.querySelector('.grid');
-            for (var i = currentCount; i < allEpisodes.length; i++) {
-                var ep = allEpisodes[i];
-                var card = document.createElement('div');
-                card.className = 'episode-card';
-                card.dataset.episodeIndex = ep.index;
-                var radio = document.createElement('input');
-                radio.type = 'radio'; radio.name = 'episode'; radio.value = ep.index; radio.style.display = 'none';
-                card.appendChild(radio);
-                var title = document.createElement('div');
-                title.className = 'episode-title'; title.textContent = ep.title;
-                card.appendChild(title);
-                var meta = document.createElement('div');
-                meta.className = 'episode-meta';
-                var metaText = ep.published;
-                if (ep.duration_min) metaText += ' · ' + ep.duration_min + ' min';
-                if (ep.estimated_cost) metaText += ' · ~$' + ep.estimated_cost.toFixed(3);
-                meta.textContent = metaText;
-                card.appendChild(meta);
-                if (ep.description) {
-                    var desc = document.createElement('div');
-                    desc.className = 'episode-desc'; desc.textContent = ep.description;
-                    card.appendChild(desc);
-                }
-                card.addEventListener('click', function() { selectCard(this); });
-                grid.appendChild(card);
-            }
-            loadMoreBtn.style.display = 'none';
-            episodeCards = document.querySelectorAll('.episode-card');
-        });
-    }
 
     // Save feed dialog
     var saveBtn = document.getElementById('saveFeedBtn');

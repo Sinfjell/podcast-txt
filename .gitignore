@@ -46,3 +46,6 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Tooling scratch
+.playwright-mcp/
