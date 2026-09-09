@@ -2395,3 +2395,597 @@ def test_ffmpeg_cannot_outlive_the_stale_task_window(tmp_path):
     gets its own task swept out from under it and the user is told the server
     restarted."""
     assert A.FFMPEG_TIMEOUT_SECONDS < A.STALE_TASK_SECONDS
+
+# --------------------------------------------------------------------------
+# Cancelling and resuming  (TSK-20392, TSK-20394)
+# --------------------------------------------------------------------------
+
+def _login(user_id):
+    A.app.config['TESTING'] = True
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(user_id)
+        sess['_fresh'] = True
+    return client
+
+
+def test_cancelling_stops_the_worker_at_the_next_chunk(trial_on, monkeypatch, tmp_path):
+    """A daemon thread cannot be interrupted from outside, so cancel writes a
+    terminal status and the worker gives up at its next boundary. If it did not
+    check, Stop would be a lie that still spent the user's minutes."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('cancelworker@test.com', limit=36000)
+    sent = []
+
+    class FakeChunk:
+        text = 'hi'
+        segments = []
+        language = 'no'
+
+    class FakeClient:
+        class audio:
+            class transcriptions:
+                @staticmethod
+                def create(**kw):
+                    sent.append(kw)
+                    db.session.execute(A.text(
+                        "UPDATE transcription_tasks SET status='cancelled' "
+                        "WHERE id='cancel-worker'"))
+                    db.session.commit()
+                    return FakeChunk()
+
+    chunks = []
+    for i in range(3):
+        f = tmp_path / f'c{i}.mp3'
+        f.write_bytes(b'\0' * 16)
+        chunks.append(str(f))
+
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='cancel-worker', user_id=uid, episode_title='x',
+            status='transcribing', chunk_total=3, chunk_index=0,
+            trial_seconds_charged=900))
+        db.session.commit()
+        # _update_task would also refuse to write to a cancelled task, which
+        # would mask whether the loop's own check works. Neutralise that guard
+        # so only the check under test can stop the upload.
+        monkeypatch.setattr(A, '_update_task', lambda task_id, **kw: True)
+        with pytest.raises(A.TaskAbandoned):
+            A._transcribe_chunks(chunks, set(chunks), 'cancel-worker',
+                                 FakeClient(), 'no', 900.0)
+
+    assert len(sent) == 1, f'{len(sent)} chunks billed after cancelling'
+
+
+def test_cancel_refunds_only_what_was_not_sent(trial_on):
+    """Audio already uploaded is billed to us whatever the user clicks."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('cancelrefund@test.com', limit=36000)
+    with A.app.app_context():
+        A.trial_reserve(uid, 800)
+        db.session.add(TranscriptionTask(
+            id='cancel-refund', user_id=uid, episode_title='x',
+            status='transcribing', chunk_total=4, chunk_index=1,
+            trial_seconds_charged=800))
+        db.session.commit()
+
+    resp = _login(uid).post('/cancel/cancel-refund')
+    assert resp.status_code == 200
+    assert resp.get_json()['cancelled'] is True
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'cancel-refund')
+        assert task.status == 'cancelled'
+    assert _used(uid) == 400, 'two of four chunks were sent, so half stands'
+
+
+def test_a_cancelled_task_cannot_be_resurrected(trial_on):
+    """The same guard that stops the sweeper being overwritten. Without it the
+    worker would write 'completed' over the cancellation."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('cancelresurrect@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='cancel-res', user_id=uid,
+                                         episode_title='x', status='cancelled'))
+        db.session.commit()
+        assert A._update_task('cancel-res', status='completed', progress=100) is False
+        assert db.session.get(TranscriptionTask, 'cancel-res').status == 'cancelled'
+
+
+def test_cancelling_someone_elses_task_is_a_404(trial_on):
+    from models import db, TranscriptionTask
+
+    owner = _make_user('owner@test.com')
+    intruder = _make_user('intruder@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='cancel-owned', user_id=owner,
+                                         episode_title='x', status='transcribing'))
+        db.session.commit()
+
+    assert _login(intruder).post('/cancel/cancel-owned').status_code == 404
+    with A.app.app_context():
+        assert db.session.get(TranscriptionTask, 'cancel-owned').status == 'transcribing'
+
+
+def test_cancelling_a_finished_task_does_not_undo_it(trial_on):
+    from models import db, TranscriptionTask
+
+    uid = _make_user('cancelfinished@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='cancel-done', user_id=uid,
+                                         episode_title='x', status='completed',
+                                         transcript_text='the goods'))
+        db.session.commit()
+
+    assert _login(uid).post('/cancel/cancel-done').status_code == 409
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'cancel-done')
+        assert task.status == 'completed' and task.transcript_text == 'the goods'
+
+
+def test_cancelling_twice_is_not_an_error(trial_on):
+    """A double-click should not produce a scary message."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('canceltwice@test.com', limit=36000)
+    with A.app.app_context():
+        A.trial_reserve(uid, 600)
+        db.session.add(TranscriptionTask(id='cancel-twice', user_id=uid,
+                                         episode_title='x', status='downloading',
+                                         trial_seconds_charged=600))
+        db.session.commit()
+    client = _login(uid)
+    assert client.post('/cancel/cancel-twice').status_code == 200
+    assert client.post('/cancel/cancel-twice').status_code == 200
+    assert _used(uid) == 0, 'the second cancel refunded again'
+
+
+def test_running_transcriptions_are_offered_on_the_home_page(trial_on):
+    """The work survives leaving the page, but nothing said so -- so coming
+    back looked like it had vanished and people started it over."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('resume@test.com')
+    with A.app.app_context():
+        db.session.add_all([
+            TranscriptionTask(id='resume-live', user_id=uid, status='transcribing',
+                              episode_title='Still going', progress=42,
+                              heartbeat_at=datetime.now(timezone.utc)),
+            TranscriptionTask(id='resume-done', user_id=uid, status='completed',
+                              episode_title='Already finished'),
+        ])
+        db.session.commit()
+
+    body = _login(uid).get('/').data.decode()
+    assert 'Still going' in body, 'a running transcription was not offered'
+    assert '/transcription/resume-live' in body
+    assert 'Already finished' not in body, 'a finished task is history, not active'
+
+
+def test_another_users_running_task_is_not_offered(trial_on):
+    from models import db, TranscriptionTask
+
+    mine = _make_user('mine@test.com')
+    theirs = _make_user('theirs@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='resume-theirs', user_id=theirs,
+                                         status='transcribing',
+                                         episode_title='Not yours',
+                                         heartbeat_at=datetime.now(timezone.utc)))
+        db.session.commit()
+    assert 'Not yours' not in _login(mine).get('/').data.decode()
+
+
+def test_a_dead_task_is_not_offered_as_resumable(trial_on):
+    """A task whose worker died sits in a running state until something asks
+    about it. Offering it would invite the user to wait for nothing."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('deadresume@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='resume-dead', user_id=uid, status='transcribing',
+            episode_title='Long dead',
+            heartbeat_at=datetime.now(timezone.utc) - timedelta(days=2)))
+        db.session.commit()
+
+    body = _login(uid).get('/').data.decode()
+    assert 'Long dead' not in body
+    with A.app.app_context():
+        assert db.session.get(TranscriptionTask, 'resume-dead').status == 'error'
+
+# --------------------------------------------------------------------------
+# Mobile navigation  (TSK-20393)
+# --------------------------------------------------------------------------
+
+def test_the_menu_toggle_is_a_real_disclosure_control(trial_on):
+    """The old toggle was an onclick flipping a class: nothing told assistive
+    tech it controlled anything, or whether it was open."""
+    body = A.app.test_client().get('/').data.decode()
+    assert 'aria-expanded="false"' in body
+    assert 'aria-controls="navLinks"' in body
+    assert 'id="navLinks"' in body
+
+
+def test_the_scrim_is_not_inside_the_blurred_nav_bar(trial_on):
+    """.nav-bar sets backdrop-filter, which makes it the containing block for
+    position:fixed descendants. With the scrim inside it, `inset: 56px 0 0 0`
+    resolved against a 56px-tall box and collapsed to zero height -- an
+    invisible backdrop that closed nothing and let taps reach the controls
+    behind the open panel. Structure, not a string: this is the defect.
+    """
+    body = A.app.test_client().get('/').data.decode()
+    assert 'id="navScrim"' in body, 'no backdrop at all'
+    nav_open = body.index('<nav class="nav-bar">')
+    nav_close = body.index('</nav>', nav_open)
+    assert 'navScrim' not in body[nav_open:nav_close], (
+        'the scrim is inside <nav>, whose backdrop-filter collapses it to 0 height'
+    )
+
+
+def test_the_menu_panel_is_hidden_by_an_attribute_not_by_opacity(trial_on):
+    """Two browser-verified defects came from animating visibility: the panel
+    was still hidden when the script focused its first link (focus never moved),
+    and still visible after closing (five invisible links left in the tab
+    order). The script owns `hidden` now, and CSS must not animate visibility.
+
+    This asserts the mechanism, not the runtime behaviour -- there is no browser
+    harness in this repo, so "focus lands inside the panel" and "no links are
+    tabbable when closed" are verified by driving a real browser, and only the
+    code that produces them is pinned here.
+    """
+    body = A.app.test_client().get('/').data.decode()
+    assert '.nav-links[hidden] { display: none; }' in body
+    # Invisible is not gone: before the script runs on first paint, and for the
+    # 160ms of the close animation, the panel is opacity:0 but still fixed over
+    # the page. Taps meant for the hero were landing on unseen nav links.
+    mobile_nav = body[body.index('@media (max-width: 640px)'):]
+    mobile_nav = mobile_nav[:mobile_nav.index('@media (prefers-reduced-motion')]
+    assert 'pointer-events: none;' in mobile_nav, (
+        'the closed panel is hit-testable again -- .btn:disabled elsewhere in '
+        'the sheet is not what this is asking about'
+    )
+    assert '.nav-links.open { pointer-events: auto; }' in body
+    # The deferred hide specifically: hiding immediately would make the panel
+    # vanish instead of sliding out, and not hiding at all is the defect.
+    assert 'closeTimer = setTimeout(function () { panel.hidden = true; }' in body
+    assert 'panel.hidden = false;' in body, 'nothing reveals the panel on open'
+    # A declaration, not the word: the comments explaining this defect mention
+    # visibility, and matching those would make the test unfailable.
+    import re as _re
+    mobile = body[body.index('@media (max-width: 640px)'):]
+    panel_rules = mobile[:mobile.index('@media (prefers-reduced-motion')]
+    assert not _re.search(r'visibility\s*:', panel_rules), (
+        'visibility is declared in the mobile nav rules again, where animating '
+        'it broke focus on open and the tab order on close'
+    )
+
+
+def test_menu_links_do_not_transition_every_property(trial_on):
+    """`transition: all` on the links included the inherited `visibility`, so a
+    link stayed unfocusable for 150ms after its panel was already visible --
+    which is why focus silently stayed on the toggle."""
+    body = A.app.test_client().get('/').data.decode()
+    nav_css = body[body.index('.nav-links a {'):body.index('.nav-links a:hover')]
+    assert 'transition: all' not in nav_css, (
+        'the links transition `all` again, which includes visibility'
+    )
+
+
+def test_the_menu_degrades_without_javascript(trial_on):
+    """The panel is revealed by script, so with script off there is nothing to
+    reveal it -- and the toggle would do nothing."""
+    body = A.app.test_client().get('/').data.decode()
+    assert '<noscript>' in body
+    noscript = body[body.index('<noscript>'):body.index('</noscript>')]
+    assert '.nav-toggle, .nav-scrim { display: none !important; }' in noscript
+    # The column has to wrap onto its own line: dropped into .nav-inner (a 56px
+    # centred flex row) it overflowed above the viewport and took its first
+    # three links off-screen.
+    assert 'flex-wrap: wrap' in noscript and 'height: auto' in noscript
+    assert 'position: static' in noscript
+    # And it has to actually be visible: without these an in-flight transition
+    # holds the computed opacity at 0 and the whole menu stays invisible.
+    assert 'opacity: 1 !important' in noscript
+    assert 'transition: none !important' in noscript
+
+
+def test_the_stop_button_handler_is_reachable_from_its_onclick(trial_on):
+    """The whole script is an IIFE and the button uses an inline onclick, so a
+    plain `function cancelTranscription()` is invisible to it -- the button
+    threw ReferenceError and did nothing. copyTranscript is exported for
+    exactly this reason; this one was not.
+    """
+    uid = _make_user('stopbtn@test.com')
+    from models import db, TranscriptionTask
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='stop-btn', user_id=uid,
+                                         episode_title='x', status='transcribing'))
+        db.session.commit()
+    body = _login(uid).get('/transcription/stop-btn').data.decode()
+
+    import re as _re
+    handlers = _re.findall(r'onclick="(\w+)\(', body)
+    exported = set(_re.findall(r'window\.(\w+)\s*=', body))
+    for name in handlers:
+        assert name in exported, (
+            f'{name}() is called from an inline onclick but never reaches the '
+            'global scope -- clicking it throws ReferenceError'
+        )
+
+
+def test_a_cancelled_task_stops_being_polled(trial_on):
+    """'cancelled' is terminal, but the poll loop only knew about completed and
+    error, so it kept hitting /status forever -- and every hit runs the stale
+    sweeper."""
+    uid = _make_user('pollstop@test.com')
+    from models import db, TranscriptionTask
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='poll-stop', user_id=uid,
+                                         episode_title='x', status='cancelled'))
+        db.session.commit()
+    body = _login(uid).get('/transcription/poll-stop').data.decode()
+    assert 'function isTerminal(' in body
+    assert "status === 'cancelled'" in body
+    assert "d.status !== 'completed' && d.status !== 'error'" not in body, (
+        'the poll still has its own idea of terminal, which drifted from the UI'
+    )
+
+
+def test_the_mobile_menu_extras_are_hidden_on_desktop(trial_on):
+    """"Ingen regresjon på desktop-navigasjonen": icons, separator and the extra
+    home link are mobile affordances, so they are display:none outside the
+    breakpoint. Verified in a real browser at 1280x900 as well -- there is no
+    browser harness in this repo, so that half cannot run in CI."""
+    body = A.app.test_client().get('/').data.decode()
+    assert '.nav-icon, .nav-sep, .nav-mobile-only { display: none; }' in body
+    # And the rules that re-show them live only inside the mobile media query.
+    mobile = body[body.index('@media (max-width: 640px)'):]
+    assert '.nav-icon { display: block;' in mobile
+    assert '.nav-mobile-only { display: flex; }' in mobile
+
+
+def test_the_logged_in_menu_offers_the_account_pages(trial_on):
+    uid = _make_user('menu@test.com')
+    body = _login(uid).get('/').data.decode()
+    for label in ('New transcript', 'Feeds', 'History', 'Settings', 'Log out'):
+        assert label in body, f'{label} missing from the menu'
+    assert 'nav-sep' in body, 'log out is not separated from the rest'
+
+def test_cancelling_cannot_overwrite_a_finished_transcript(trial_on, monkeypatch):
+    """The race the review reproduced: cancel read the row, the worker completed
+    inside the window, and cancel stamped 'cancelled' over it -- keeping the
+    full charge while the transcript 404'd and fell out of history.
+
+    The worker's write goes through a SEPARATE connection on purpose. Committing
+    it through db.session would expire the identity map, so the request's copy
+    would refresh itself and the stale-read window would never open -- which is
+    how the first version of this test passed against the unfixed code.
+    """
+    from models import db, TranscriptionTask
+
+    uid = _make_user('cancelrace@test.com', limit=36000)
+    with A.app.app_context():
+        A.trial_reserve(uid, 600)
+        db.session.add(TranscriptionTask(
+            id='cancel-race', user_id=uid, episode_title='x',
+            status='transcribing', chunk_total=1, chunk_index=0,
+            trial_seconds_charged=600))
+        db.session.commit()
+
+    client = _login(uid)
+    real_get = db.session.get
+
+    def complete_it_behind_our_back(model, ident, *a, **kw):
+        obj = real_get(model, ident, *a, **kw)
+        if ident == 'cancel-race' and complete_it_behind_our_back.armed:
+            complete_it_behind_our_back.armed = False
+            with db.engine.connect() as conn:
+                conn.execute(A.text(
+                    "UPDATE transcription_tasks SET status='completed', "
+                    "transcript_text='the goods' WHERE id='cancel-race'"))
+                conn.commit()
+        return obj
+    complete_it_behind_our_back.armed = True
+
+    monkeypatch.setattr(db.session, 'get', complete_it_behind_our_back)
+    resp = client.post('/cancel/cancel-race')
+    monkeypatch.undo()
+
+    assert resp.status_code == 409, 'cancel won a race it should have lost'
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'cancel-race')
+        assert task.status == 'completed'
+        assert task.transcript_text == 'the goods'
+
+
+def test_cancelling_a_failed_task_reports_the_failure(trial_on):
+    """Clicking Stop a moment after it broke used to say "Transcription
+    stopped", hiding why it actually failed."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('cancelfailed@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='cancel-failed', user_id=uid, episode_title='x', status='error',
+            error_message='Your OpenAI API key was rejected.'))
+        db.session.commit()
+
+    resp = _login(uid).post('/cancel/cancel-failed')
+    assert resp.status_code == 409
+    body = resp.get_json()
+    assert body['cancelled'] is False
+    assert 'rejected' in body['error']
+
+
+def test_stopping_during_a_download_aborts_it(trial_on, monkeypatch, tmp_path):
+    """Stop during the download used to let the whole episode download AND
+    re-encode while the UI said it had stopped, holding a concurrency slot and
+    disk. Drives download_audio for real: asserting that _update_task returns
+    False proves nothing, because that was already true before the fix.
+    """
+    from models import db, TranscriptionTask
+
+    uid = _make_user('stopdownload@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='stop-dl', user_id=uid,
+                                         episode_title='x', status='downloading'))
+        db.session.commit()
+
+    delivered = []
+    closed = []
+
+    class FakeResponse:
+        headers = {'content-length': '400000'}
+        is_redirect = False
+        is_permanent_redirect = False
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, chunk_size=8192):
+            # 50 chunks x 20ms clears download_audio's hard-coded 1s write
+            # throttle, so the cancel check actually runs.
+            for i in range(50):
+                delivered.append(i)
+                if i == 1:
+                    # The user hits Stop two chunks in.
+                    with db.engine.connect() as conn:
+                        conn.execute(A.text(
+                            "UPDATE transcription_tasks SET status='cancelled' "
+                            "WHERE id='stop-dl'"))
+                        conn.commit()
+                time.sleep(0.02)      # clear the 1s write throttle
+                yield b'\0' * 8192
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda raw: True)
+    monkeypatch.setattr(A.requests, 'get', lambda *a, **kw: FakeResponse())
+    monkeypatch.setattr(A.requests, 'head', lambda *a, **kw: FakeResponse())
+
+    target = tmp_path / 'ep.mp3'
+    with A.app.app_context():
+        with pytest.raises(A.TaskAbandoned):
+            A.download_audio('https://example.com/ep.mp3', str(target), 'stop-dl')
+
+    assert len(delivered) < 50, 'the download ran to completion after cancelling'
+    assert closed, 'the streamed response was left open, leaking the connection'
+
+
+def test_stopping_before_the_split_aborts_it(trial_on, monkeypatch, tmp_path):
+    """Same for the re-encode, which is the CPU-hungry step."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('stopsplit@test.com')
+    audio = tmp_path / 'ep.mp3'
+    audio.write_bytes(b'\0' * 2048)
+    called = []
+    monkeypatch.setattr(A, 'probe_audio_duration', lambda f: 600.0)
+    monkeypatch.setattr(A, 'prepare_audio_for_whisper',
+                        lambda f, **kw: called.append(f) or [str(audio)])
+
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='stop-split', user_id=uid,
+                                         episode_title='x', status='cancelled'))
+        db.session.commit()
+        with pytest.raises(A.TaskAbandoned):
+            A.transcribe_audio(str(audio), 'stop-split', object(), language='no')
+
+    assert called == [], 'the episode was re-encoded after being cancelled'
+
+def test_a_cancelled_transcript_is_downloadable_but_only_as_text(trial_on):
+    """The user was charged pro-rata for what was transcribed before they
+    stopped, so it has to be reachable. Not .srt: segments_json is normally
+    NULL on a cancelled task, and an .srt built from nothing is a one-line
+    stub pretending to be a transcript."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('canceldl@test.com')
+    other = _make_user('canceldl-other@test.com')
+    with A.app.app_context():
+        db.session.add_all([
+            TranscriptionTask(id='dl-cancelled', user_id=uid, episode_title='Ep',
+                              status='cancelled', transcript_text='half a transcript'),
+            TranscriptionTask(id='dl-cancelled-empty', user_id=uid, episode_title='Ep',
+                              status='cancelled', transcript_text=None),
+        ])
+        db.session.commit()
+
+    mine = _login(uid)
+    ok = mine.get('/download/dl-cancelled/txt')
+    assert ok.status_code == 200
+    assert b'half a transcript' in ok.data
+    assert mine.get('/download/dl-cancelled/srt').status_code == 404, (
+        'an .srt with no segments is a stub, not a transcript'
+    )
+    assert mine.get('/download/dl-cancelled-empty/txt').status_code == 404
+    assert _login(other).get('/download/dl-cancelled/txt').status_code == 404, (
+        'another user could download it'
+    )
+
+
+def test_a_completed_transcript_download_is_unchanged(trial_on):
+    """The cancelled path must not narrow the completed one -- legacy rows
+    imported from the old transcriptions table can have no text at all."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('completeddl@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='dl-done', user_id=uid,
+                                         episode_title='Ep', status='completed',
+                                         transcript_text=None))
+        db.session.commit()
+    assert _login(uid).get('/download/dl-done/txt').status_code == 200
+
+
+def test_the_download_connection_closes_on_every_exit(trial_on, monkeypatch, tmp_path):
+    """Cancel and the size cap were covered; a write failing on a full disk --
+    the case the capacity limits exist for -- left the connection open."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('dlclose@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='dl-close', user_id=uid,
+                                         episode_title='x', status='downloading'))
+        db.session.commit()
+
+    closed = []
+
+    class FakeResponse:
+        headers = {'content-length': '80000'}
+        is_redirect = False
+        is_permanent_redirect = False
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, chunk_size=8192):
+            for _ in range(10):
+                yield b'\0' * 8192
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda raw: True)
+    monkeypatch.setattr(A.requests, 'get', lambda *a, **kw: FakeResponse())
+
+    real_open = open
+
+    def full_disk(path, mode='r', *a, **kw):
+        handle = real_open(path, mode, *a, **kw)
+        if 'w' in mode:
+            handle.write = lambda data: (_ for _ in ()).throw(OSError(28, 'No space left'))
+        return handle
+
+    monkeypatch.setattr('builtins.open', full_disk)
+    with A.app.app_context():
+        with pytest.raises(OSError):
+            A.download_audio('https://example.com/ep.mp3',
+                             str(tmp_path / 'ep.mp3'), 'dl-close')
+    assert closed, 'the connection was left open when the write failed'
