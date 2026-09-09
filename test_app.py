@@ -423,3 +423,134 @@ def test_every_model_column_added_after_release_has_a_migration():
     assert added == set(TASK_COLUMN_MIGRATIONS), (
         f'missing migrations for {added - set(TASK_COLUMN_MIGRATIONS)}'
     )
+
+
+# --------------------------------------------------------------------------
+# API key validation (the top production failure)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize('key', [
+    'Clashofc*ans1',        # a real password pasted into the key field
+    'hhhhhh123456',         # keyboard mash
+    'zemfyz-nonsense',      # wrong prefix
+    'sk-short',             # right prefix, too short
+    '', None,
+])
+def test_obvious_non_keys_are_rejected_without_calling_openai(key):
+    assert A.looks_like_openai_key(key) is False
+
+
+def test_plausible_key_shape_is_accepted():
+    assert A.looks_like_openai_key('sk-' + 'a' * 40) is True
+
+
+def test_bad_shape_never_reaches_the_network(monkeypatch):
+    def explode(*a, **kw):
+        raise AssertionError('OpenAI must not be called for an obvious non-key')
+    monkeypatch.setattr(A, 'OpenAI', explode)
+    ok, msg = A.verify_openai_key('Clashofc*ans1')
+    assert ok is False
+    assert 'sk-' in msg
+
+
+class _Status(Exception):
+    def __init__(self, status_code):
+        super().__init__('raw provider text with a secret in it')
+        self.status_code = status_code
+
+
+@pytest.mark.parametrize('status,expect', [
+    (401, 'rejected'),
+    (429, 'out of credit'),
+    (403, 'not allowed'),
+    (500, 'server error'),
+])
+def test_openai_errors_become_human_messages(status, expect):
+    msg = A.describe_openai_error(_Status(status))
+    assert expect in msg
+
+
+def test_provider_text_is_never_echoed_back():
+    """OpenAI echoes the submitted key in 401s, and users paste passwords there."""
+    secret = 'Clashofc*ans1'
+
+    class Leaky(Exception):
+        status_code = 401
+        def __str__(self):
+            return f"Incorrect API key provided: {secret}"
+
+    assert secret not in A.describe_openai_error(Leaky())
+
+
+# --------------------------------------------------------------------------
+# Registration abuse limits
+# --------------------------------------------------------------------------
+
+def test_register_is_rate_limited_per_ip():
+    A._register_attempts.clear()
+    ip = '203.0.113.7'
+    allowed = sum(0 if A.register_rate_limited(ip) else 1 for _ in range(10))
+    assert allowed == A.REGISTER_MAX_PER_IP
+
+
+def test_rate_limit_is_per_ip_not_global():
+    A._register_attempts.clear()
+    for _ in range(A.REGISTER_MAX_PER_IP):
+        A.register_rate_limited('198.51.100.1')
+    assert A.register_rate_limited('198.51.100.2') is False
+
+
+def test_the_domain_that_created_seven_bot_accounts_is_blocked():
+    assert A.is_disposable_email('mizhtxgh@immenseignite.info') is True
+    assert A.is_disposable_email('morten.slemdal@gmail.com') is False
+
+
+# --------------------------------------------------------------------------
+# Duration without librosa
+# --------------------------------------------------------------------------
+
+def test_duration_falls_back_when_ffprobe_is_unavailable(tmp_path, monkeypatch):
+    f = tmp_path / 'a.mp3'
+    f.write_bytes(b'\x00' * (2 * 1024 * 1024))
+
+    def boom(*a, **kw):
+        raise OSError('ffprobe not installed')
+
+    monkeypatch.setattr(A.subprocess, 'run', boom)
+    assert A.get_audio_duration(str(f)) == pytest.approx(120, abs=1)
+
+
+def test_librosa_is_not_imported_or_installed():
+    """It dragged in 398 MB of a 547 MB venv for one call.
+
+    Checks real usage, not the word: the docstring in get_audio_duration
+    mentions librosa deliberately, to explain why it is gone.
+    """
+    import ast as _ast
+
+    tree = _ast.parse(open('app.py').read())
+    imported = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Import):
+            imported.update(a.name.split('.')[0] for a in node.names)
+        elif isinstance(node, _ast.ImportFrom) and node.module:
+            imported.add(node.module.split('.')[0])
+    assert 'librosa' not in imported
+    assert 'librosa' not in open('requirements.txt').read()
+
+
+def test_duration_uses_ffprobe(monkeypatch, tmp_path):
+    f = tmp_path / 'a.mp3'
+    f.write_bytes(b'\x00' * 1024)
+    called = {}
+
+    class R:
+        stdout = '123.45\n'
+
+    def fake_run(cmd, **kw):
+        called['cmd'] = cmd
+        return R()
+
+    monkeypatch.setattr(A.subprocess, 'run', fake_run)
+    assert A.get_audio_duration(str(f)) == pytest.approx(123.45)
+    assert called['cmd'][0] == 'ffprobe' 

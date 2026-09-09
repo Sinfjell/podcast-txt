@@ -6,8 +6,11 @@ A Flask web application for transcribing podcast episodes from RSS feeds using O
 Supports user accounts, saved RSS feeds, and self-serve API keys.
 """
 
+import collections
 import math
 import os
+import sqlite3
+import subprocess
 import ssl
 import time
 import threading
@@ -27,8 +30,11 @@ from flask_login import LoginManager, login_user, logout_user, login_required, c
 from urllib.parse import urljoin, urlparse
 import uuid
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError, APITimeoutError
 from pydub import AudioSegment
+
+from sqlalchemy import event as sa_event
+from sqlalchemy.engine import Engine
 
 from models import db, User, SavedFeed, TranscriptionTask, TASK_COLUMN_MIGRATIONS
 
@@ -47,6 +53,23 @@ app.config['SQLALCHEMY_DATABASE_URI'] = (
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db.init_app(app)
+
+
+@sa_event.listens_for(Engine, 'connect')
+def _sqlite_pragmas(dbapi_connection, connection_record):
+    """WAL + a longer busy timeout.
+
+    Production ran journal_mode=delete under `gunicorn --workers 2 --threads 4`,
+    so every write blocked readers. WAL lets the status polls read while a
+    transcription writes its progress.
+    """
+    if not isinstance(dbapi_connection, sqlite3.Connection):
+        return
+    cur = dbapi_connection.cursor()
+    cur.execute('PRAGMA journal_mode=WAL')
+    cur.execute('PRAGMA busy_timeout=15000')
+    cur.execute('PRAGMA synchronous=NORMAL')
+    cur.close()
 
 # Login manager
 login_manager = LoginManager()
@@ -121,6 +144,111 @@ def get_openai_client(user=None):
         timeout=WHISPER_TIMEOUT_SECONDS,
         max_retries=WHISPER_MAX_RETRIES,
     )
+
+
+# ---------------------------------------------------------------------------
+# Abuse limits
+# ---------------------------------------------------------------------------
+
+#: Registrations allowed from one IP per window. 7 of 23 production accounts
+#: were bot signups on a single throwaway domain, two of them in the same
+#: second, because /register had no verification, rate limit or captcha.
+REGISTER_MAX_PER_IP = 3
+REGISTER_WINDOW_SECONDS = 3600
+DISPOSABLE_EMAIL_DOMAINS = {
+    'immenseignite.info',
+}
+
+_register_attempts = collections.defaultdict(list)
+_register_lock = threading.Lock()
+
+
+def _client_ip():
+    """Real client IP. The app sits behind Plesk's nginx proxy."""
+    forwarded = request.headers.get('X-Forwarded-For', '')
+    if forwarded:
+        return forwarded.split(',')[0].strip()
+    return request.remote_addr or 'unknown'
+
+
+def register_rate_limited(ip):
+    """True when this IP has used up its registrations for the window."""
+    now = time.time()
+    with _register_lock:
+        seen = [t for t in _register_attempts[ip] if now - t < REGISTER_WINDOW_SECONDS]
+        _register_attempts[ip] = seen
+        if len(seen) >= REGISTER_MAX_PER_IP:
+            return True
+        seen.append(now)
+        # Keep the dict from growing without bound on a long-lived worker
+        if len(_register_attempts) > 10000:
+            for k in [k for k, v in _register_attempts.items()
+                      if not v or now - v[-1] > REGISTER_WINDOW_SECONDS]:
+                _register_attempts.pop(k, None)
+        return False
+
+
+def is_disposable_email(email):
+    return email.rsplit('@', 1)[-1].lower() in DISPOSABLE_EMAIL_DOMAINS
+
+
+# ---------------------------------------------------------------------------
+# API key handling
+# ---------------------------------------------------------------------------
+
+def _is_openai_error(exc):
+    """True for exceptions raised by the OpenAI SDK, which must never be shown raw."""
+    return type(exc).__module__.split('.')[0] == 'openai' or hasattr(exc, 'status_code')
+
+
+def describe_openai_error(exc):
+    """Turn an OpenAI SDK exception into something a human can act on.
+
+    Users were shown the raw error JSON, which is both unreadable and unsafe:
+    OpenAI echoes the submitted key back in 401s, and people paste passwords
+    into that field, so the raw text put a third party's password in our
+    database. Never surface the provider's message verbatim.
+    """
+    status = getattr(exc, 'status_code', None)
+    if status == 401:
+        return ('Your OpenAI API key was rejected. Check it in Settings — it should '
+                'start with "sk-" and come from platform.openai.com/api-keys.')
+    if status == 429:
+        return ('Your OpenAI account is out of credit, or you have hit its rate limit. '
+                'Add billing at platform.openai.com/account/billing, then try again.')
+    if status == 403:
+        return ('Your OpenAI key is not allowed to use the Whisper API. Check the key '
+                "'s permissions at platform.openai.com.")
+    if status and 500 <= status < 600:
+        return 'OpenAI had a server error. Wait a moment and try again.'
+    if isinstance(exc, APITimeoutError):
+        return 'OpenAI did not respond in time. Try again, or pick a shorter episode.'
+    if isinstance(exc, APIConnectionError):
+        return 'Could not reach OpenAI. Check your connection and try again.'
+    return 'Transcription failed. Please try again.'
+
+
+def looks_like_openai_key(key):
+    """Cheap shape check, so obvious non-keys never reach OpenAI at all."""
+    return bool(key) and key.startswith('sk-') and len(key) >= 20
+
+
+def verify_openai_key(key):
+    """Check a key against OpenAI. Returns (ok, message).
+
+    Done at save time rather than at transcription time: previously the first
+    signal that a key was wrong came minutes later, after picking an episode and
+    waiting through a download. 15 of 16 production failures were this.
+    """
+    if not looks_like_openai_key(key):
+        return False, ('That does not look like an OpenAI API key. Keys start with '
+                       '"sk-" and come from platform.openai.com/api-keys — it is not '
+                       'your OpenAI password.')
+    try:
+        OpenAI(api_key=key, timeout=15.0, max_retries=0).models.list()
+    except Exception as e:
+        return False, describe_openai_error(e)
+    return True, 'API key verified.'
 
 
 # ---------------------------------------------------------------------------
@@ -240,13 +368,25 @@ def download_audio(url, filename, task_id):
 
 
 def get_audio_duration(audio_file):
-    """Get audio duration in seconds."""
+    """Get audio duration in seconds, falling back to a size estimate.
+
+    Uses ffprobe, which ships with the ffmpeg that pydub already requires.
+    This previously used librosa, which pulled in scipy, llvmlite, sklearn,
+    numba and numpy -- 398 MB of a 547 MB virtualenv for this one call.
+    """
     try:
-        import librosa
-        return librosa.get_duration(path=audio_file)
-    except Exception:
-        file_size_mb = os.path.getsize(audio_file) / (1024 * 1024)
-        return file_size_mb * 60
+        out = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'default=noprint_wrappers=1:nokey=1', audio_file],
+            capture_output=True, text=True, timeout=60, check=True,
+        )
+        duration = float(out.stdout.strip())
+        if duration > 0:
+            return duration
+    except (subprocess.SubprocessError, ValueError, OSError):
+        pass
+    # ~1 MB per minute of spoken-word audio
+    return (os.path.getsize(audio_file) / (1024 * 1024)) * 60
 
 
 def split_audio_if_needed(audio_file, max_size_mb=24):
@@ -631,6 +771,18 @@ def register():
             flash('Email and password are required.', 'error')
             return render_template('register.html')
 
+        if register_rate_limited(_client_ip()):
+            flash('Too many accounts created from this address. Try again later.', 'error')
+            return render_template('register.html')
+
+        if is_disposable_email(email):
+            flash('Please register with a real email address.', 'error')
+            return render_template('register.html')
+
+        if '@' not in email or '.' not in email.rsplit('@', 1)[-1]:
+            flash('Please enter a valid email address.', 'error')
+            return render_template('register.html')
+
         if password != password2:
             flash('Passwords do not match.', 'error')
             return render_template('register.html')
@@ -692,9 +844,23 @@ def logout():
 def settings():
     if request.method == 'POST':
         api_key = request.form.get('openai_api_key', '').strip()
-        current_user.openai_api_key = api_key if api_key else None
+
+        if not api_key:
+            current_user.openai_api_key = None
+            db.session.commit()
+            flash('API key removed.', 'success')
+            return redirect(url_for('settings'))
+
+        ok, message = verify_openai_key(api_key)
+        if not ok:
+            # Never store a rejected key: it is frequently a password, and it
+            # would otherwise sit in the database and fail again at transcribe time.
+            flash(message, 'error')
+            return redirect(url_for('settings'))
+
+        current_user.openai_api_key = api_key
         db.session.commit()
-        flash('Settings saved.', 'success')
+        flash(message, 'success')
         return redirect(url_for('settings'))
 
     return render_template('settings.html')
@@ -901,7 +1067,9 @@ def start_transcription():
                 download_audio(source_url, audio_filename, task_id)
                 transcribe_audio(audio_filename, task_id, openai_client, language=language)
             except Exception as e:
-                _update_task(task_id, status='error', phase='error', error_message=str(e))
+                _update_task(task_id, status='error', phase='error',
+                             error_message=describe_openai_error(e)
+                             if _is_openai_error(e) else str(e))
             finally:
                 if os.path.exists(audio_filename):
                     try:

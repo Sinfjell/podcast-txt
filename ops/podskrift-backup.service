@@ -1,0 +1,9 @@
+[Unit]
+Description=Podskrift database backup
+After=network.target
+
+[Service]
+Type=oneshot
+User=podskrift
+WorkingDirectory=/var/www/vhosts/podskrift.nettsmed.dev/app
+ExecStart=/var/www/vhosts/podskrift.nettsmed.dev/app/ops/backup-db.sh
