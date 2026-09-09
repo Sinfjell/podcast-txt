@@ -7,3 +7,6 @@ pydub>=0.25.1
 python-dotenv>=1.0.0
 openai>=1.0.0
 librosa>=0.10.0
+
+# Testing
+pytest>=8.0.0

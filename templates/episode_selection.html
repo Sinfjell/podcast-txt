@@ -207,7 +207,15 @@ document.addEventListener('DOMContentLoaded', function() {
         cards.forEach(function(card) {
             var match = !q || card.textContent.toLowerCase().indexOf(q) !== -1;
             card.style.display = match ? '' : 'none';
-            if (match) shown++;
+            if (match) {
+                shown++;
+            } else if (card.classList.contains('selected')) {
+                // Otherwise a filtered-away card stays selected and submittable
+                card.classList.remove('selected');
+                card.querySelector('input[type="radio"]').checked = false;
+                episodeIndexInput.value = '';
+                transcribeBtn.disabled = true;
+            }
         });
 
         filterCount.textContent = shown + ' of ' + cards.length + ' episodes';

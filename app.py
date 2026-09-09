@@ -23,7 +23,7 @@ if not os.path.exists(certifi.where()):
         os.environ.setdefault('SSL_CERT_FILE', _sys_ca)
 from flask import Flask, render_template, request, jsonify, send_file, flash, redirect, url_for
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 import uuid
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -61,6 +61,10 @@ GLOBAL_OPENAI_KEY = os.getenv('OPENAI_API_KEY')
 
 # Whisper pricing, used for the cost estimates shown in the UI
 WHISPER_COST_PER_MINUTE = 0.006
+
+# Caps on the audio we will pull down from a client-supplied URL.
+MAX_REDIRECTS = 5
+MAX_AUDIO_BYTES = 500 * 1024 * 1024
 
 # Roughly how many seconds of audio Whisper gets through per second of wall clock.
 # Only used to interpolate progress between chunk checkpoints -- the API gives us
@@ -132,15 +136,38 @@ def download_audio(url, filename, task_id):
         'Referer': 'https://podcasts.apple.com/'
     }
 
+    def _fetch(request_headers):
+        """GET the audio, revalidating the target on every redirect hop.
+
+        Redirects are followed manually: `requests` follows them itself, which
+        would let a public host 302 straight to a private address and slip past
+        the check done on the original URL.
+        """
+        current = url
+        for _ in range(MAX_REDIRECTS):
+            if not _is_fetchable_url(current):
+                raise Exception('Audio URL points somewhere that cannot be fetched.')
+            resp = requests.get(
+                current, stream=True, headers=request_headers,
+                timeout=30, allow_redirects=False,
+            )
+            if resp.is_redirect or resp.is_permanent_redirect:
+                location = resp.headers.get('location')
+                resp.close()
+                if not location:
+                    raise Exception('Redirect without a target while fetching audio.')
+                current = urljoin(current, location)
+                continue
+            resp.raise_for_status()
+            return resp
+        raise Exception('Too many redirects while fetching audio.')
+
     try:
-        response = requests.get(url, stream=True, headers=headers, timeout=30)
-        response.raise_for_status()
+        response = _fetch(headers)
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 403:
-            alt_headers = {'User-Agent': 'podcast-downloader/1.0', 'Accept': '*/*'}
+        if e.response is not None and e.response.status_code == 403:
             try:
-                response = requests.get(url, stream=True, headers=alt_headers, timeout=30)
-                response.raise_for_status()
+                response = _fetch({'User-Agent': 'podcast-downloader/1.0', 'Accept': '*/*'})
             except requests.exceptions.HTTPError as e2:
                 raise Exception(
                     f"Access denied ({e2.response.status_code}) for audio file. "
@@ -165,6 +192,10 @@ def download_audio(url, filename, task_id):
                 continue
             f.write(chunk)
             downloaded += len(chunk)
+            if downloaded > MAX_AUDIO_BYTES:
+                raise Exception(
+                    f'Audio file exceeds the {MAX_AUDIO_BYTES // (1024 * 1024)} MB limit.'
+                )
             now = time.time()
             if now - last_db_update >= 1:
                 fields = {'bytes_downloaded': downloaded}
@@ -268,6 +299,50 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
     upload_start = time.time()
     all_segments = []
     full_text = ""
+    # split_audio_if_needed() removes the source file once it has split it, so a
+    # failure part-way through the loop would otherwise leave the remaining
+    # temp_audio_<uuid>_chunk_N.mp3 files on disk forever.
+    remaining = set(audio_chunks)
+
+    try:
+        full_text, all_segments = _transcribe_chunks(
+            audio_chunks, remaining, task_id, openai_client, language, audio_duration
+        )
+    finally:
+        for leftover in remaining:
+            if os.path.exists(leftover):
+                try:
+                    os.remove(leftover)
+                except OSError:
+                    pass
+
+    elapsed = time.time() - upload_start
+
+    _update_task(
+        task_id,
+        status='completed',
+        phase='completed',
+        progress=100,
+        transcript_text=full_text,
+        segments_json=json.dumps(all_segments) if all_segments else None,
+        audio_duration=audio_duration,
+        transcription_time=elapsed,
+        completed_at=datetime.now(timezone.utc),
+    )
+
+    if os.path.exists(audio_file):
+        os.remove(audio_file)
+
+
+def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language,
+                       audio_duration):
+    """Send each chunk to Whisper, publishing partial text as it goes.
+
+    Returns (full_text, segments). `remaining` is mutated as chunks are consumed
+    so the caller can clean up whatever is left if this raises.
+    """
+    all_segments = []
+    full_text = ""
 
     for i, chunk_file in enumerate(audio_chunks):
         _update_task(
@@ -315,24 +390,9 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
         )
 
         os.remove(chunk_file)
+        remaining.discard(chunk_file)
 
-    full_text = full_text.strip()
-    elapsed = time.time() - upload_start
-
-    _update_task(
-        task_id,
-        status='completed',
-        phase='completed',
-        progress=100,
-        transcript_text=full_text,
-        segments_json=json.dumps(all_segments) if all_segments else None,
-        audio_duration=audio_duration,
-        transcription_time=elapsed,
-        completed_at=datetime.now(timezone.utc),
-    )
-
-    if os.path.exists(audio_file):
-        os.remove(audio_file)
+    return full_text.strip(), all_segments
 
 
 def _transcribe_checkpoint(chunks_done, chunk_total):
@@ -352,6 +412,22 @@ def _seconds_since(dt):
     return max(0.0, time.time() - dt.timestamp())
 
 
+def _asymptotic_fraction(elapsed, expected):
+    """How far through a step we probably are, as a fraction that never reaches 1.
+
+    Linear to 0.9 over the estimate, then asymptotic toward 0.99. A hard
+    `min(0.97, ...)` cap would park the bar at 97% whenever Whisper runs slower
+    than WHISPER_REALTIME_FACTOR -- the same frozen bar, just at a nicer number.
+    """
+    import math
+    if expected <= 0:
+        return 0.9
+    if elapsed <= expected:
+        return 0.9 * (elapsed / expected)
+    overrun = (elapsed - expected) / expected
+    return 0.9 + 0.09 * (1 - math.exp(-overrun))
+
+
 def compute_live_progress(task):
     """Interpolate a task's progress between its last two checkpoints.
 
@@ -369,11 +445,11 @@ def compute_live_progress(task):
         # Expected wall-clock seconds for the chunk currently in flight
         per_chunk = (task.audio_duration or 0) / task.chunk_total / WHISPER_REALTIME_FACTOR
         per_chunk = max(per_chunk, 8.0)
-        # Cap at 0.97 so a slow chunk never claims to be finished
-        within = min(0.97, phase_elapsed / per_chunk)
+        within = _asymptotic_fraction(phase_elapsed, per_chunk)
         done = ((task.chunk_index or 0) + within) / task.chunk_total
         percent = lo + done * (hi - lo)
-        eta = max(0.0, per_chunk * task.chunk_total * (1 - done))
+        remaining_chunks = task.chunk_total - (task.chunk_index or 0) - within
+        eta = max(0.0, per_chunk * remaining_chunks)
         return max(stored, int(percent)), eta
 
     if task.phase == 'downloading' and task.bytes_total:
@@ -385,8 +461,8 @@ def compute_live_progress(task):
 
     if task.phase == 'splitting':
         lo, hi = PHASE_SPANS['splitting']
-        # No measurable signal here; creep toward the top of the band over ~30s
-        return max(stored, int(lo + min(0.9, phase_elapsed / 30) * (hi - lo))), None
+        # No measurable signal here; creep toward the top of the band
+        return max(stored, int(lo + _asymptotic_fraction(phase_elapsed, 30) * (hi - lo))), None
 
     return stored, None
 
@@ -685,7 +761,8 @@ def index():
         saved_feeds = SavedFeed.query.filter_by(
             user_id=current_user.id
         ).order_by(SavedFeed.created_at.desc()).limit(5).all()
-    return render_template('index.html', saved_feeds=saved_feeds)
+    return render_template('index.html', saved_feeds=saved_feeds,
+                           languages=SUPPORTED_LANGUAGES)
 
 
 @app.route('/parse_rss', methods=['POST'])
@@ -963,7 +1040,7 @@ def history():
         user_id=current_user.id, status='completed'
     ).order_by(TranscriptionTask.completed_at.desc()).limit(50).all()
     total_cost = sum(
-        (t.audio_duration / 60) * 0.006
+        (t.audio_duration / 60) * WHISPER_COST_PER_MINUTE
         for t in tasks if t.audio_duration
     )
     return render_template('history.html', transcriptions=tasks, total_cost=total_cost)
@@ -1089,7 +1166,6 @@ with app.app_context():
     # stuck in a running state forever. Fail those at boot -- but only ones that
     # have gone quiet: this module is imported by every gunicorn worker, and a
     # worker respawning mid-life must not kill jobs another worker is running.
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=STALE_TASK_SECONDS)
     orphaned = [
         t for t in TranscriptionTask.query.filter(
             ~TranscriptionTask.status.in_(['completed', 'error'])

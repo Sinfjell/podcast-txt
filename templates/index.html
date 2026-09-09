@@ -48,6 +48,14 @@
             <button class="btn btn-primary" type="button" id="searchBtn">Search</button>
         </div>
         <p class="form-hint" id="searchHint">Works with any podcast — Spotify, Apple Podcasts, or any other platform.</p>
+        <div id="episodeLangRow" class="hidden" style="margin-top: 12px;">
+            <label class="form-label" for="searchLanguage">Spoken language</label>
+            <select class="form-input" id="searchLanguage" style="max-width: 220px;">
+                {% for code, label in languages %}
+                <option value="{{ code }}"{% if code == 'no' %} selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </div>
         <div id="searchResults"></div>
     </div>
 </div>
@@ -109,6 +117,16 @@
     var hint = document.getElementById('searchHint');
     var debounceTimer = null;
     var searchType = 'show';
+    var langRow = document.getElementById('episodeLangRow');
+    var langSelect = document.getElementById('searchLanguage');
+
+    var storedLang = localStorage.getItem('podskrift_language');
+    if (storedLang !== null && langSelect.querySelector('option[value="' + storedLang + '"]')) {
+        langSelect.value = storedLang;
+    }
+    langSelect.addEventListener('change', function() {
+        localStorage.setItem('podskrift_language', langSelect.value);
+    });
 
     var PARSE_RSS_URL = '{{ url_for("parse_rss") }}';
     var START_URL = '{{ url_for("start_transcription") }}';
@@ -199,7 +217,7 @@
             body.append('artwork', item.artwork || '');
             body.append('published', item.released || '');
             if (item.duration_min) body.append('duration_min', item.duration_min);
-            body.append('language', localStorage.getItem('podskrift_language') || 'no');
+            body.append('language', langSelect.value);
 
             fetch(START_URL, { method: 'POST', body: body })
                 .then(function(r) { return r.json(); })
@@ -258,6 +276,8 @@
         tabs.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
         tab.classList.add('active');
         searchType = tab.dataset.type;
+        // The picker only means anything on the episode tab, which transcribes directly
+        langRow.classList.toggle('hidden', searchType !== 'episode');
         searchInput.placeholder = searchType === 'episode'
             ? 'Search episodes by title or topic...'
             : 'Search podcasts by name...';
