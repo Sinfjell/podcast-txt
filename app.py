@@ -6,11 +6,12 @@ A Flask web application for transcribing podcast episodes from RSS feeds using O
 Supports user accounts, saved RSS feeds, and self-serve API keys.
 """
 
+import math
 import os
 import ssl
 import time
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import certifi
 import requests
 import feedparser
@@ -158,23 +159,29 @@ def download_audio(url, filename, task_id):
                     raise Exception('Redirect without a target while fetching audio.')
                 current = urljoin(current, location)
                 continue
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except requests.exceptions.HTTPError:
+                resp.close()   # streamed responses hold the connection open
+                raise
             return resp
         raise Exception('Too many redirects while fetching audio.')
 
     try:
         response = _fetch(headers)
     except requests.exceptions.HTTPError as e:
-        if e.response is not None and e.response.status_code == 403:
+        status = e.response.status_code if e.response is not None else None
+        if status == 403:
             try:
                 response = _fetch({'User-Agent': 'podcast-downloader/1.0', 'Accept': '*/*'})
             except requests.exceptions.HTTPError as e2:
+                status2 = e2.response.status_code if e2.response is not None else 'unknown'
                 raise Exception(
-                    f"Access denied ({e2.response.status_code}) for audio file. "
+                    f"Access denied ({status2}) for audio file. "
                     "This podcast may restrict direct downloads."
                 )
         else:
-            raise Exception(f"HTTP error {e.response.status_code}")
+            raise Exception(f"HTTP error {status}" if status else f"HTTP error: {e}")
     except requests.exceptions.RequestException as e:
         raise Exception(f"Failed to download audio: {e}")
 
@@ -419,7 +426,6 @@ def _asymptotic_fraction(elapsed, expected):
     `min(0.97, ...)` cap would park the bar at 97% whenever Whisper runs slower
     than WHISPER_REALTIME_FACTOR -- the same frozen bar, just at a nicer number.
     """
-    import math
     if expected <= 0:
         return 0.9
     if elapsed <= expected:

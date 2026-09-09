@@ -208,6 +208,25 @@ def test_public_redirect_chain_still_works(tmp_path):
     assert len(calls) == 2
 
 
+def test_http_error_without_a_response_is_reported_cleanly(tmp_path):
+    """A transport-level HTTPError has no .response; dereferencing it blindly
+    surfaced a raw AttributeError as the user's error message."""
+    import requests
+    from unittest import mock
+
+    def boom(url, **kwargs):
+        raise requests.exceptions.HTTPError('connection reset')
+
+    with mock.patch.object(A.requests, 'get', side_effect=boom), \
+            mock.patch.object(A, '_update_task'):
+        with pytest.raises(Exception) as exc:
+            A.download_audio(
+                'http://example.com/ep.mp3', str(tmp_path / 'a.mp3'), 'task-id'
+            )
+    assert not isinstance(exc.value, AttributeError)
+    assert 'HTTP error' in str(exc.value)
+
+
 def test_redirect_loop_is_bounded(tmp_path):
     calls, error = _download_with(
         lambda url: _FakeResponse(302, 'https://www.iana.org/next.mp3'), tmp_path
@@ -238,6 +257,23 @@ def test_best_artwork_prefers_largest_and_handles_episode_keys():
     assert A._best_artwork({'artworkUrl160': 'b', 'artworkUrl60': 'c'}) == 'b'
     assert A._best_artwork({'artworkUrl600': 'a', 'artworkUrl160': 'b'}) == 'a'
     assert A._best_artwork({}) == ''
+
+
+@pytest.mark.parametrize('elapsed,expected_lo,expected_hi', [
+    (0, 0.0, 0.01), (150, 0.44, 0.46), (300, 0.89, 0.91),
+])
+def test_asymptotic_fraction_is_linear_up_to_the_estimate(elapsed, expected_lo, expected_hi):
+    assert expected_lo <= A._asymptotic_fraction(elapsed, 300) <= expected_hi
+
+
+def test_asymptotic_fraction_keeps_climbing_past_the_estimate_without_reaching_one():
+    a = A._asymptotic_fraction(600, 300)
+    b = A._asymptotic_fraction(3000, 300)
+    assert 0.9 < a < b < 1.0
+
+
+def test_asymptotic_fraction_handles_zero_estimate():
+    assert A._asymptotic_fraction(10, 0) == 0.9
 
 
 def test_parse_duration_formats():
