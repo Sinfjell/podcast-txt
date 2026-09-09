@@ -2847,6 +2847,8 @@ def test_stopping_during_a_download_aborts_it(trial_on, monkeypatch, tmp_path):
             pass
 
         def iter_content(self, chunk_size=8192):
+            # 50 chunks x 20ms clears download_audio's hard-coded 1s write
+            # throttle, so the cancel check actually runs.
             for i in range(50):
                 delivered.append(i)
                 if i == 1:
@@ -2865,7 +2867,6 @@ def test_stopping_during_a_download_aborts_it(trial_on, monkeypatch, tmp_path):
     monkeypatch.setattr(A, '_is_fetchable_url', lambda raw: True)
     monkeypatch.setattr(A.requests, 'get', lambda *a, **kw: FakeResponse())
     monkeypatch.setattr(A.requests, 'head', lambda *a, **kw: FakeResponse())
-    monkeypatch.setattr(A, 'MIN_DOWNLOAD_WRITE_INTERVAL', 0, raising=False)
 
     target = tmp_path / 'ep.mp3'
     with A.app.app_context():
@@ -2896,3 +2897,95 @@ def test_stopping_before_the_split_aborts_it(trial_on, monkeypatch, tmp_path):
             A.transcribe_audio(str(audio), 'stop-split', object(), language='no')
 
     assert called == [], 'the episode was re-encoded after being cancelled'
+
+def test_a_cancelled_transcript_is_downloadable_but_only_as_text(trial_on):
+    """The user was charged pro-rata for what was transcribed before they
+    stopped, so it has to be reachable. Not .srt: segments_json is normally
+    NULL on a cancelled task, and an .srt built from nothing is a one-line
+    stub pretending to be a transcript."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('canceldl@test.com')
+    other = _make_user('canceldl-other@test.com')
+    with A.app.app_context():
+        db.session.add_all([
+            TranscriptionTask(id='dl-cancelled', user_id=uid, episode_title='Ep',
+                              status='cancelled', transcript_text='half a transcript'),
+            TranscriptionTask(id='dl-cancelled-empty', user_id=uid, episode_title='Ep',
+                              status='cancelled', transcript_text=None),
+        ])
+        db.session.commit()
+
+    mine = _login(uid)
+    ok = mine.get('/download/dl-cancelled/txt')
+    assert ok.status_code == 200
+    assert b'half a transcript' in ok.data
+    assert mine.get('/download/dl-cancelled/srt').status_code == 404, (
+        'an .srt with no segments is a stub, not a transcript'
+    )
+    assert mine.get('/download/dl-cancelled-empty/txt').status_code == 404
+    assert _login(other).get('/download/dl-cancelled/txt').status_code == 404, (
+        'another user could download it'
+    )
+
+
+def test_a_completed_transcript_download_is_unchanged(trial_on):
+    """The cancelled path must not narrow the completed one -- legacy rows
+    imported from the old transcriptions table can have no text at all."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('completeddl@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='dl-done', user_id=uid,
+                                         episode_title='Ep', status='completed',
+                                         transcript_text=None))
+        db.session.commit()
+    assert _login(uid).get('/download/dl-done/txt').status_code == 200
+
+
+def test_the_download_connection_closes_on_every_exit(trial_on, monkeypatch, tmp_path):
+    """Cancel and the size cap were covered; a write failing on a full disk --
+    the case the capacity limits exist for -- left the connection open."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('dlclose@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='dl-close', user_id=uid,
+                                         episode_title='x', status='downloading'))
+        db.session.commit()
+
+    closed = []
+
+    class FakeResponse:
+        headers = {'content-length': '80000'}
+        is_redirect = False
+        is_permanent_redirect = False
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, chunk_size=8192):
+            for _ in range(10):
+                yield b'\0' * 8192
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda raw: True)
+    monkeypatch.setattr(A.requests, 'get', lambda *a, **kw: FakeResponse())
+
+    real_open = open
+
+    def full_disk(path, mode='r', *a, **kw):
+        handle = real_open(path, mode, *a, **kw)
+        if 'w' in mode:
+            handle.write = lambda data: (_ for _ in ()).throw(OSError(28, 'No space left'))
+        return handle
+
+    monkeypatch.setattr('builtins.open', full_disk)
+    with A.app.app_context():
+        with pytest.raises(OSError):
+            A.download_audio('https://example.com/ep.mp3',
+                             str(tmp_path / 'ep.mp3'), 'dl-close')
+    assert closed, 'the connection was left open when the write failed'

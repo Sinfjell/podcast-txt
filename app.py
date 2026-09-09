@@ -737,32 +737,33 @@ def download_audio(url, filename, task_id):
     # sat at 0% for the whole download on every feed that doesn't send the header.
     _update_task(task_id, bytes_downloaded=0, bytes_total=total_size)
 
-    with open(filename, 'wb') as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            if not chunk:
-                continue
-            f.write(chunk)
-            downloaded += len(chunk)
-            if downloaded > MAX_AUDIO_BYTES:
-                response.close()
-                raise Exception(
-                    f'This episode is larger than the '
-                    f'{MAX_AUDIO_BYTES // (1024 * 1024)} MB limit Podskrift will download.'
-                )
-            now = time.time()
-            if now - last_db_update >= 1:
-                # The return value is the cancel signal: _update_task refuses to
-                # write to a task that has reached a terminal status. Without
-                # this, Stop during a download let the whole episode download and
-                # then re-encode while the UI said it had stopped -- holding a
-                # concurrency slot and disk on a shared box for nothing.
-                if not _update_task(task_id, bytes_downloaded=downloaded):
-                    # Close before raising: a streamed response holds the
-                    # connection open, and every Stop-during-download would
-                    # otherwise leak a socket on a box shared with 50+ services.
-                    response.close()
-                    raise TaskAbandoned('Task was cancelled during download.')
-                last_db_update = now
+    # A streamed response holds its connection open, so every exit from this
+    # loop has to close it -- the size cap, a cancellation, and a write failing
+    # on a full disk, which is exactly the case the capacity limits exist for.
+    try:
+        with open(filename, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                downloaded += len(chunk)
+                if downloaded > MAX_AUDIO_BYTES:
+                    raise Exception(
+                        f'This episode is larger than the '
+                        f'{MAX_AUDIO_BYTES // (1024 * 1024)} MB limit Podskrift will download.'
+                    )
+                now = time.time()
+                if now - last_db_update >= 1:
+                    # The return value is the cancel signal: _update_task refuses
+                    # to write to a task that has reached a terminal status.
+                    # Without this, Stop during a download let the whole episode
+                    # download and then re-encode while the UI said it had
+                    # stopped -- holding a concurrency slot and disk for nothing.
+                    if not _update_task(task_id, bytes_downloaded=downloaded):
+                        raise TaskAbandoned('Task was cancelled during download.')
+                    last_db_update = now
+    finally:
+        response.close()
 
     _update_task(
         task_id,
@@ -2061,9 +2062,16 @@ def download_file(task_id, file_type):
     task = db.session.get(TranscriptionTask, task_id)
     # A cancelled task keeps whatever was transcribed before it stopped, and the
     # user was charged pro-rata for exactly that -- so it has to be reachable.
-    if (not task or task.user_id != current_user.id
-            or task.status not in ('completed', 'cancelled')
-            or not task.transcript_text):
+    if not task or task.user_id != current_user.id:
+        return "File not found", 404
+    # A cancelled task keeps whatever was transcribed before it stopped, and the
+    # user was charged pro-rata for exactly that -- so it has to be reachable.
+    # Only .txt: segments_json is normally NULL on a cancelled task, and an .srt
+    # built from nothing is a one-line stub pretending to be a transcript.
+    if task.status == 'cancelled':
+        if file_type != 'txt' or not task.transcript_text:
+            return "File not found", 404
+    elif task.status != 'completed':
         return "File not found", 404
 
     safe_title = task.episode_title.replace(' ', '_')
