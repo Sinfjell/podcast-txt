@@ -2542,9 +2542,14 @@ def test_cancelling_twice_is_not_an_error(trial_on):
     assert _used(uid) == 0, 'the second cancel refunded again'
 
 
-def test_running_transcriptions_are_offered_on_the_home_page(trial_on):
+def test_running_transcriptions_are_offered_wherever_you_are(trial_on):
     """The work survives leaving the page, but nothing said so -- so coming
-    back looked like it had vanished and people started it over."""
+    back looked like it had vanished and people started it over.
+
+    This used to be a card on the home page. The job bar replaced it: the same
+    information, on every page, which is what "you navigated away" actually
+    means. Two views of it on one screen was just duplication.
+    """
     from models import db, TranscriptionTask
 
     uid = _make_user('resume@test.com')
@@ -2558,10 +2563,15 @@ def test_running_transcriptions_are_offered_on_the_home_page(trial_on):
         ])
         db.session.commit()
 
-    body = _login(uid).get('/').data.decode()
-    assert 'Still going' in body, 'a running transcription was not offered'
-    assert '/transcription/resume-live' in body
-    assert 'Already finished' not in body, 'a finished task is history, not active'
+    client = _login(uid)
+    jobs = client.get('/active-jobs').get_json()['jobs']
+    assert [j['title'] for j in jobs] == ['Still going']
+    assert jobs[0]['id'] == 'resume-live'
+
+    # And the home page no longer carries its own second copy of it.
+    home = client.get('/').data.decode()
+    assert 'Still going' not in home, 'the home page duplicates the job bar'
+    assert 'id="jobBar"' in home
 
 
 def test_another_users_running_task_is_not_offered(trial_on):
@@ -2575,30 +2585,9 @@ def test_another_users_running_task_is_not_offered(trial_on):
                                          episode_title='Not yours',
                                          heartbeat_at=datetime.now(timezone.utc)))
         db.session.commit()
-    assert 'Not yours' not in _login(mine).get('/').data.decode()
+    jobs = _login(mine).get('/active-jobs').get_json()['jobs']
+    assert [j['title'] for j in jobs] == []
 
-
-def test_a_dead_task_is_not_offered_as_resumable(trial_on):
-    """A task whose worker died sits in a running state until something asks
-    about it. Offering it would invite the user to wait for nothing."""
-    from models import db, TranscriptionTask
-
-    uid = _make_user('deadresume@test.com')
-    with A.app.app_context():
-        db.session.add(TranscriptionTask(
-            id='resume-dead', user_id=uid, status='transcribing',
-            episode_title='Long dead',
-            heartbeat_at=datetime.now(timezone.utc) - timedelta(days=2)))
-        db.session.commit()
-
-    body = _login(uid).get('/').data.decode()
-    assert 'Long dead' not in body
-    with A.app.app_context():
-        assert db.session.get(TranscriptionTask, 'resume-dead').status == 'error'
-
-# --------------------------------------------------------------------------
-# Mobile navigation  (TSK-20393)
-# --------------------------------------------------------------------------
 
 def test_the_menu_toggle_is_a_real_disclosure_control(trial_on):
     """The old toggle was an onclick flipping a class: nothing told assistive
@@ -2989,3 +2978,92 @@ def test_the_download_connection_closes_on_every_exit(trial_on, monkeypatch, tmp
             A.download_audio('https://example.com/ep.mp3',
                              str(tmp_path / 'ep.mp3'), 'dl-close')
     assert closed, 'the connection was left open when the write failed'
+
+# --------------------------------------------------------------------------
+# Live job bar
+# --------------------------------------------------------------------------
+
+def test_active_jobs_returns_only_your_own_running_work(trial_on):
+    """The bar is carried on every page, so this endpoint is the one thing that
+    could leak another user's episode titles."""
+    from models import db, TranscriptionTask
+
+    mine = _make_user('jobbar@test.com')
+    theirs = _make_user('jobbar-other@test.com')
+    with A.app.app_context():
+        db.session.add_all([
+            TranscriptionTask(id='jb-mine', user_id=mine, status='transcribing',
+                              episode_title='My episode', podcast_name='Pod',
+                              progress=42, heartbeat_at=datetime.now(timezone.utc)),
+            TranscriptionTask(id='jb-theirs', user_id=theirs, status='transcribing',
+                              episode_title='Their episode',
+                              heartbeat_at=datetime.now(timezone.utc)),
+            TranscriptionTask(id='jb-done', user_id=mine, status='completed',
+                              episode_title='Finished'),
+            TranscriptionTask(id='jb-cancelled', user_id=mine, status='cancelled',
+                              episode_title='Stopped'),
+        ])
+        db.session.commit()
+
+    jobs = _login(mine).get('/active-jobs').get_json()['jobs']
+    titles = [j['title'] for j in jobs]
+    assert titles == ['My episode'], titles
+    assert jobs[0]['percent'] >= 42
+    assert 'phase' in jobs[0]
+
+
+def test_active_jobs_needs_a_login(trial_on):
+    """Anonymous callers must not be able to probe it at all."""
+    resp = A.app.test_client().get('/active-jobs')
+    assert resp.status_code in (302, 401), resp.status_code
+
+
+def test_active_jobs_drops_a_task_whose_worker_died(trial_on):
+    """This endpoint is the only thing running the stale check while the user is
+    elsewhere in the app, so a job killed by a deploy stops claiming to be
+    alive even if nobody opens its page."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('jobbardead@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='jb-dead', user_id=uid, status='transcribing',
+            episode_title='Killed by a deploy',
+            heartbeat_at=datetime.now(timezone.utc) - timedelta(days=2)))
+        db.session.commit()
+
+    assert _login(uid).get('/active-jobs').get_json()['jobs'] == []
+    with A.app.app_context():
+        assert db.session.get(TranscriptionTask, 'jb-dead').status == 'error'
+
+
+def test_the_job_bar_only_polls_for_signed_in_visitors(trial_on):
+    """It runs on every page. An anonymous visitor would poll an endpoint that
+    can only ever redirect them to the login page."""
+    anon = A.app.test_client().get('/').data.decode()
+    assert 'data-authenticated' not in anon
+    uid = _make_user('jobbarauth@test.com')
+    assert 'data-authenticated="1"' in _login(uid).get('/').data.decode()
+
+
+def test_the_job_bar_is_on_every_page(trial_on):
+    """A mini player that only exists on the home page is not a mini player."""
+    uid = _make_user('jobbarpages@test.com')
+    client = _login(uid)
+    for path in ('/', '/settings', '/history', '/feeds', '/rss-help'):
+        body = client.get(path).data.decode()
+        assert 'id="jobBar"' in body, f'no job bar on {path}'
+        assert "fetch('/active-jobs'" in body, f'no polling on {path}'
+
+
+def test_the_job_bar_backs_off_when_nothing_is_running(trial_on):
+    """It polls from every page of the app, so an idle tab must not keep asking
+    every four seconds."""
+    body = A.app.test_client().get('/').data.decode()
+    assert 'var ACTIVE_MS = 4000;' in body
+    assert 'var IDLE_MS = 20000;' in body
+    assert 'jobs.length ? ACTIVE_MS : IDLE_MS' in body
+    assert 'if (document.hidden) { schedule(IDLE_MS); return; }' in body, (
+        'a hidden tab re-checks on the active interval, which is a timer every '
+        'four seconds for something nobody can see'
+    )

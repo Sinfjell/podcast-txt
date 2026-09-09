@@ -1599,8 +1599,7 @@ def index():
         ).order_by(SavedFeed.created_at.desc()).limit(5).all()
     return render_template('index.html', saved_feeds=saved_feeds,
                            languages=SUPPORTED_LANGUAGES,
-                           trial=_trial_context(),
-                           active_tasks=active_tasks_for(current_user))
+                           trial=_trial_context())
 
 
 @app.route('/parse_rss', methods=['POST'])
@@ -2051,6 +2050,31 @@ def active_tasks_for(user):
     # when something asks about that task. Ask here, or a dead job would sit in
     # this list forever inviting the user to wait for nothing.
     return [t for t in running if not _fail_if_stale(t)]
+
+
+@app.route('/active-jobs')
+@login_required
+def active_jobs():
+    """What this user has in flight, for the indicator carried on every page.
+
+    Deliberately small: this is polled from every page, so it returns only what
+    the bar draws. It is also the only thing that runs _fail_if_stale while the
+    user is somewhere else in the app, which is what makes a job killed by a
+    deploy stop claiming to be alive.
+    """
+    jobs = []
+    for task in active_tasks_for(current_user):
+        percent, eta = compute_live_progress(task)
+        jobs.append({
+            'id': task.id,
+            'title': task.episode_title,
+            'podcast_name': task.podcast_name,
+            'artwork_url': task.artwork_url,
+            'percent': percent,
+            'eta_seconds': int(eta) if eta is not None else None,
+            'phase': task.phase or task.status,
+        })
+    return jsonify({'jobs': jobs})
 
 
 @app.route('/download/<task_id>/<file_type>')
