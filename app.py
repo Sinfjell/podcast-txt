@@ -7,9 +7,11 @@ Supports user accounts, saved RSS feeds, and self-serve API keys.
 """
 
 import collections
+import glob
 import math
 import os
 import sqlite3
+import shutil
 import subprocess
 import ssl
 import time
@@ -31,7 +33,6 @@ from urllib.parse import urljoin, urlparse
 import uuid
 from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError, APITimeoutError
-from pydub import AudioSegment
 
 from sqlalchemy import (event as sa_event, inspect as sa_inspect, text,
                         update as sa_update)
@@ -96,6 +97,32 @@ def load_user(user_id):
 # Global fallback OpenAI key
 GLOBAL_OPENAI_KEY = os.getenv('OPENAI_API_KEY')
 
+def _env_int(name, default):
+    """Read an integer env var, falling back to `default` on junk (with a warning).
+
+    Same reasoning as _env_minutes: a typo in a capacity limit must not silently
+    restore a value the operator was trying to lower.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        app.logger.warning('%s=%r is not a number; using the default of %s',
+                           name, raw, default)
+        return int(default)
+
+
+def free_disk_bytes(path='.'):
+    """Bytes free on the volume holding `path`, or None if it cannot be read."""
+    try:
+        stat = os.statvfs(path)
+        return stat.f_bavail * stat.f_frsize
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
 # Whisper pricing, used for the cost estimates shown in the UI
 WHISPER_COST_PER_MINUTE = 0.006
 
@@ -111,7 +138,31 @@ WHISPER_MAX_RETRIES = 1
 
 # Caps on the audio we will pull down from a client-supplied URL.
 MAX_REDIRECTS = 5
+# The source ceiling. It is a term in the disk floor below, so raising it means
+# raising that too -- see the ## Invariants section in CLAUDE.md.
 MAX_AUDIO_BYTES = 500 * 1024 * 1024
+
+# How many transcriptions this PROCESS will run at once. A job in flight holds
+# its source plus the re-encoded parts, and re-encoding is the one CPU-hungry
+# step in the pipeline (niced and single-threaded, but still real work).
+#
+# This is per gunicorn worker -- a threading.Semaphore cannot span processes --
+# so the real ceiling is this times the worker count. Prod runs 2 workers, so
+# the default of 1 admits 2 jobs at a time. Deliberately conservative: the box
+# is a shared Plesk host with 50+ other services and 4 cores, so this is not
+# our capacity to spend. Raise it once there is traffic that needs it.
+#
+# Over the limit is a hard refusal, not a queue: an unbounded queue is the same
+# outage arriving later.
+MAX_CONCURRENT_TRANSCRIPTIONS = max(1, _env_int('MAX_CONCURRENT_TRANSCRIPTIONS', 1))
+_transcription_slots = threading.BoundedSemaphore(MAX_CONCURRENT_TRANSCRIPTIONS)
+
+# Refuse to start when the volume is this close to full. The check does not
+# reserve anything, so every concurrent request sees the same free space -- the
+# floor therefore has to exceed everything admission control will admit at once:
+# workers x MAX_CONCURRENT_TRANSCRIPTIONS x (MAX_AUDIO_BYTES + the parts), which
+# test_the_disk_floor_clears_what_admission_control_admits keeps honest.
+MIN_FREE_DISK_BYTES = max(0, _env_int('MIN_FREE_DISK_MB', 4096)) * 1024 * 1024
 
 # Roughly how many seconds of audio Whisper gets through per second of wall clock.
 # Only used to interpolate progress between chunk checkpoints -- the API gives us
@@ -707,7 +758,7 @@ def download_audio(url, filename, task_id):
 def probe_audio_duration(audio_file):
     """Measured duration in seconds, or None if ffprobe could not read the file.
 
-    Uses ffprobe, which ships with the ffmpeg that pydub already requires.
+    Uses ffprobe, which ships with the ffmpeg used for splitting.
     This previously used librosa, which pulled in scipy, llvmlite, sklearn,
     numba and numpy -- 398 MB of a 547 MB virtualenv for this one call.
 
@@ -749,32 +800,162 @@ def get_audio_duration(audio_file):
     return estimate_audio_duration(audio_file)
 
 
-def split_audio_if_needed(audio_file, max_size_mb=24):
-    """Split audio into chunks if it exceeds OpenAI's 25MB limit."""
-    file_size_mb = os.path.getsize(audio_file) / (1024 * 1024)
-    if file_size_mb <= max_size_mb:
-        return [audio_file]
+#: Whisper resamples to 16 kHz mono internally, so encoding to that throws away
+#: nothing it would have used -- and it makes chunk size proportional to
+#: duration, which stream-copying the source never was.
+WHISPER_SAMPLE_RATE = 16000
+WHISPER_AUDIO_BITRATE_KBPS = 48
+#: 15 minutes at 48 kbps is ~5.4 MB, well inside OpenAI's 25 MB limit. An hour
+#: per part would fit too, but parts are also the unit of two other things: the
+#: progress bar's granularity, and how much a failed job is refunded. One part
+#: means a job that dies after the first upload refunds nothing.
+SEGMENT_SECONDS = 900
+#: Hard check on what we actually produced. Belt to SEGMENT_SECONDS' braces.
+WHISPER_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+#: Re-encoding writes no heartbeat, so it has to finish inside the stale-task
+#: floor or a live job gets swept and the user is told the server restarted.
+#: ffmpeg runs at roughly 100x realtime here, so this is generous.
+FFMPEG_TIMEOUT_SECONDS = 600
+#: A part must fit the upload limit by construction, not by luck. Raising the
+#: bitrate or the segment length without checking this would fail every episode
+#: longer than one part with "could not be split into uploadable parts".
+assert (SEGMENT_SECONDS * WHISPER_AUDIO_BITRATE_KBPS * 1000 / 8
+        < WHISPER_MAX_UPLOAD_BYTES * 0.9), \
+    'SEGMENT_SECONDS x WHISPER_AUDIO_BITRATE_KBPS does not fit WHISPER_MAX_UPLOAD_BYTES'
 
-    num_chunks = int((file_size_mb / max_size_mb) + 1)
+#: Roughly one second at the bitrate above. ffmpeg's segmenter cuts on packet
+#: boundaries, so an episode that is an exact multiple of SEGMENT_SECONDS leaves
+#: a crumb behind -- an hour-long file came out as 3600.0s plus a 0.144s tail.
+#: Whisper rejects audio that short, and it would cost a whole extra request.
+MIN_PART_BYTES = WHISPER_AUDIO_BITRATE_KBPS * 1000 // 8
+
+
+def probe_audio_bitrate_kbps(audio_file):
+    """Source bitrate in kbps, or None if ffprobe cannot say."""
     try:
-        audio = AudioSegment.from_file(audio_file)
-        total_duration_ms = len(audio)
-        chunk_duration_ms = total_duration_ms // num_chunks
-        base_name = os.path.splitext(audio_file)[0]
-        chunk_files = []
+        out = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=bit_rate',
+             '-of', 'default=noprint_wrappers=1:nokey=1', audio_file],
+            capture_output=True, text=True, timeout=60, check=True,
+        )
+        kbps = int(float(out.stdout.strip())) // 1000
+        return kbps if kbps > 0 else None
+    except (subprocess.SubprocessError, ValueError, OSError):
+        return None
 
-        for i in range(num_chunks):
-            start = i * chunk_duration_ms
-            end = min((i + 1) * chunk_duration_ms, total_duration_ms)
-            chunk = audio[start:end]
-            chunk_file = f"{base_name}_chunk_{i + 1}.mp3"
-            chunk.export(chunk_file, format="mp3")
-            chunk_files.append(chunk_file)
 
-        os.remove(audio_file)
-        return chunk_files
-    except Exception:
-        return [audio_file]
+def _ffmpeg_error(message, stderr=b''):
+    """Log ffmpeg's own words, hand the user something they can act on."""
+    detail = (stderr or b'').decode('utf-8', 'replace').strip()
+    if detail:
+        app.logger.error('ffmpeg failed: %s', detail[:2000])
+    return RuntimeError(message)
+
+
+def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
+    """Re-encode to 16 kHz mono MP3, split into hour-long parts if still large.
+
+    Returns the parts and removes the source. One ffmpeg pass does both.
+
+    Three earlier approaches each failed differently, and this is the shape that
+    fixes all three at once rather than budgeting around them:
+
+    - pydub decoded the whole episode to raw PCM in memory and had ffmpeg write
+      a full WAV to TMPDIR first: ~1.9 GB of each for a three-hour episode, per
+      concurrent job. ffmpeg streams; memory here is flat and small.
+    - Stream-copying (`-c copy`) cut by time, but bytes are not proportional to
+      time in a VBR file -- a 39 MB episode with a dense first half produced a
+      27 MB part against a 24 MB target, over OpenAI's limit. A fixed output
+      bitrate makes size proportional to duration by construction.
+    - Stream-copying also derived coverage from ffprobe's duration and wrote
+      through the source's extension. A concatenated MP3 (how dynamic ad
+      insertion stitches segments) reports short, and 16 minutes of audio was
+      silently never sent. And `.../stream.php?id=9` picked a `.php` muxer.
+      `-f segment` walks the actual stream instead of trusting a duration, and
+      the output container is always MP3 whatever the source was called.
+
+    ffmpeg runs niced and single-threaded: production is a shared Plesk host
+    with 50+ other services, and re-encoding is the one CPU-hungry step here.
+    """
+    if shutil.which('ffmpeg') is None:
+        # Checked up front rather than caught: the nice(1) wrapper turns a
+        # missing ffmpeg into exit 127, not a FileNotFoundError, so the
+        # exception handler below would report it as a corrupt file.
+        raise _ffmpeg_error(
+            'Audio processing is unavailable on the server right now. '
+            'Please try again later, or contact support if it persists.')
+
+    base_name = os.path.splitext(audio_file)[0]
+    pattern = f'{base_name}_part_%03d.mp3'
+    produced_glob = f'{base_name}_part_*.mp3'
+
+    # Never encode above the source's own rate: a 24 kbps feed re-encoded at 48
+    # would come out twice its input size, and MIN_FREE_DISK_BYTES is sized on
+    # the assumption that the parts are no larger than the source.
+    bitrate = min(WHISPER_AUDIO_BITRATE_KBPS,
+                  probe_audio_bitrate_kbps(audio_file) or WHISPER_AUDIO_BITRATE_KBPS)
+
+    try:
+        result = subprocess.run(
+            ['nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y', '-i', audio_file,
+             '-vn', '-ac', '1', '-ar', str(WHISPER_SAMPLE_RATE),
+             '-b:a', f'{bitrate}k', '-threads', '1',
+             '-f', 'segment', '-segment_time', str(SEGMENT_SECONDS),
+             '-segment_format', 'mp3', '-reset_timestamps', '1', pattern],
+            capture_output=True, timeout=FFMPEG_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        raise _ffmpeg_error(
+            'Audio processing is unavailable on the server right now. '
+            'Please try again later, or contact support if it persists.')
+    except subprocess.TimeoutExpired:
+        _cleanup_glob(produced_glob)
+        raise _ffmpeg_error('This episode took too long to process. Please try a shorter one.')
+
+    parts = sorted(glob.glob(produced_glob))
+    if result.returncode != 0 or not parts:
+        _cleanup_glob(produced_glob)
+        raise _ffmpeg_error(
+            'This audio file could not be processed. It may be corrupt or in an '
+            'unsupported format.', result.stderr)
+
+    # Drop the segmenter's rounding crumb, but never the only part, and never
+    # silently: this is the one place content could go missing without an error.
+    if len(parts) > 1:
+        crumbs = [p for p in parts if os.path.getsize(p) < MIN_PART_BYTES]
+        if crumbs:
+            app.logger.warning('discarding %s sub-second part(s) from %s',
+                               len(crumbs), os.path.basename(audio_file))
+            for crumb in crumbs:
+                try:
+                    os.remove(crumb)
+                except OSError:
+                    pass
+            parts = [p for p in parts if p not in crumbs]
+
+    oversize = [p for p in parts if os.path.getsize(p) > max_bytes]
+    if oversize or not parts:
+        _cleanup_glob(produced_glob)
+        raise _ffmpeg_error(
+            'This episode could not be split into uploadable parts. '
+            'Please try a different one.')
+
+    os.remove(audio_file)
+    return parts
+
+
+def _cleanup_glob(pattern):
+    """Remove every file matching `pattern`, ignoring failures.
+
+    Globbed rather than tracked: `ffmpeg -y` creates and writes its output
+    before it fails, so the part in flight when it died is never in any list
+    we built. On a box whose whole constraint is disk, that leaked.
+    """
+    for path in glob.glob(pattern):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def transcribe_audio(audio_file, task_id, openai_client, language=None):
@@ -812,9 +993,9 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
         phase_started_at=datetime.now(timezone.utc),
         progress=PHASE_SPANS['splitting'][0],
     )
-    audio_chunks = split_audio_if_needed(audio_file, max_size_mb=24)
+    audio_chunks = prepare_audio_for_whisper(audio_file)
 
-    # split_audio_if_needed() removes the source file once it has split it, so
+    # prepare_audio_for_whisper() removes the source once it has re-encoded it, so
     # EVERY exit from here on -- the abandonment raise included -- has to go
     # through this cleanup, or temp_audio_<uuid>_chunk_N.mp3 stays on disk
     # forever. The abandonment raise used to sit above this try and leaked up
@@ -834,9 +1015,9 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
 
         # _update_task refuses to move a task out of 'error', so a False here
         # means the sweeper failed this task while we were splitting -- and
-        # settled its charge. Splitting is the widest window for that: pydub's
-        # export has no timeout. Stop rather than transcribe against an
-        # allowance already refunded.
+        # settled its charge. Splitting is still the widest window for that:
+        # a long episode means several ffmpeg calls. Stop rather than
+        # transcribe against an allowance already refunded.
         started = _update_task(
             task_id,
             status='transcribing',
@@ -1481,103 +1662,156 @@ def start_transcription():
         }), 400
     openai_client = build_openai_client(api_key)
 
-    # Reserve the allowance BEFORE the job exists, so a refusal leaves nothing
-    # behind. The feed's duration is only an estimate; trial_reconcile_task()
-    # corrects it against the real audio before anything reaches Whisper.
-    trial_charge = None
-    if key_source == 'trial':
-        # Floored at a minute: trial_seconds_charged == 0 means "settled", so a
-        # zero reservation would quietly make the task unmetered.
-        estimate = max(60, int((meta['duration_min'] or 0) * 60)
-                       or TRIAL_UNKNOWN_ESTIMATE_SECONDS)
-        if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
-            return jsonify({'error': (
-                f'This episode runs {estimate // 60} minutes, past the '
-                f'{TRIAL_MAX_EPISODE_SECONDS // 60}-minute per-episode limit of the '
-                'free trial. Add your own OpenAI API key in Settings to transcribe it.'
-            )}), 402
-        if not trial_reserve(current_user.id, estimate):
-            _, _, remaining = trial_status(current_user)
-            if remaining < estimate:
-                message = (
-                    f'Your free trial has {remaining // 60} minutes left, and this '
-                    f'episode needs about {estimate // 60}. Add your own OpenAI API '
-                    'key in Settings to keep transcribing.'
-                )
-            else:
-                # The user still has room; the service as a whole does not.
-                # Saying "you have 60 minutes left" here would contradict itself.
-                message = (
-                    'Podskrift has handed out all the free minutes it has budgeted. '
-                    'Add your own OpenAI API key in Settings to keep transcribing.'
-                )
-            return jsonify({'error': message}), 402
-        trial_charge = estimate
-
-    task_id = str(uuid.uuid4())
+    # Admission control, before anything is reserved or written, so a refusal
+    # has nothing to unwind. This box is shared with 50+ other services, so
+    # running it out of disk is their outage too.
+    #
+    # Own-key users are capped alongside trial users on purpose: the disk is
+    # ours either way, and paying with your own OpenAI key does not make the
+    # volume bigger. Revisit if paying customers start losing to free ones.
+    free_bytes = free_disk_bytes(os.path.dirname(os.path.abspath(__file__)))
+    if free_bytes is not None and free_bytes < MIN_FREE_DISK_BYTES:
+        app.logger.error('refusing transcription: only %.1f GB free on the app volume',
+                         free_bytes / (1024 ** 3))
+        return jsonify({'error': (
+            'Podskrift is out of disk space right now. Please try again later.'
+        )}), 503
+    if not _transcription_slots.acquire(blocking=False):
+        # Logged because this is the only way to learn the cap is being hit, or
+        # whether the default is the right number, short of user complaints.
+        app.logger.warning('refusing transcription: worker at its limit of %s',
+                           MAX_CONCURRENT_TRANSCRIPTIONS)
+        episodes = 'episode' if MAX_CONCURRENT_TRANSCRIPTIONS == 1 else 'episodes'
+        return jsonify({'error': (
+            f'Podskrift is already transcribing {MAX_CONCURRENT_TRANSCRIPTIONS} '
+            f'{episodes} right now. Please try again in a few minutes.'
+        )}), 503
+    slot_held = True
     try:
-        task = TranscriptionTask(
-            id=task_id,
-            user_id=current_user.id,
-            episode_title=meta['title'],
-            rss_url=rss_url,
-            status='downloading',
-            phase='downloading',
-            phase_started_at=datetime.now(timezone.utc),
-            podcast_name=meta.get('podcast_name'),
-            artwork_url=meta.get('artwork'),
-            episode_published=meta.get('published'),
-            # Feed duration is the best ETA source we have, and it is available
-            # before a single byte is downloaded.
-            audio_duration=(meta['duration_min'] * 60) if meta.get('duration_min') else None,
-            language=language or None,
-            trial_seconds_charged=trial_charge,
-        )
-        db.session.add(task)
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
-        if trial_charge:
-            trial_release(current_user.id, trial_charge)
-        raise
 
-    parsed_url = urlparse(meta['audio_url'])
-    audio_filename = f"temp_audio_{task_id}" + (os.path.splitext(parsed_url.path)[1] or '.mp3')
-    source_url = meta['audio_url']
+        # Reserve the allowance BEFORE the job exists, so a refusal leaves nothing
+        # behind. The feed's duration is only an estimate; trial_reconcile_task()
+        # corrects it against the real audio before anything reaches Whisper.
+        trial_charge = None
+        if key_source == 'trial':
+            # Floored at a minute: trial_seconds_charged == 0 means "settled", so a
+            # zero reservation would quietly make the task unmetered.
+            estimate = max(60, int((meta['duration_min'] or 0) * 60)
+                           or TRIAL_UNKNOWN_ESTIMATE_SECONDS)
+            if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
+                return jsonify({'error': (
+                    f'This episode runs {estimate // 60} minutes, past the '
+                    f'{TRIAL_MAX_EPISODE_SECONDS // 60}-minute per-episode limit of the '
+                    'free trial. Add your own OpenAI API key in Settings to transcribe it.'
+                )}), 402
+            if not trial_reserve(current_user.id, estimate):
+                _, _, remaining = trial_status(current_user)
+                if remaining < estimate:
+                    message = (
+                        f'Your free trial has {remaining // 60} minutes left, and this '
+                        f'episode needs about {estimate // 60}. Add your own OpenAI API '
+                        'key in Settings to keep transcribing.'
+                    )
+                else:
+                    # The user still has room; the service as a whole does not.
+                    # Saying "you have 60 minutes left" here would contradict itself.
+                    message = (
+                        'Podskrift has handed out all the free minutes it has budgeted. '
+                        'Add your own OpenAI API key in Settings to keep transcribing.'
+                    )
+                return jsonify({'error': message}), 402
+            trial_charge = estimate
 
-    def transcribe_thread():
-        with app.app_context():
+        task_id = str(uuid.uuid4())
+        try:
+            task = TranscriptionTask(
+                id=task_id,
+                user_id=current_user.id,
+                episode_title=meta['title'],
+                rss_url=rss_url,
+                status='downloading',
+                phase='downloading',
+                phase_started_at=datetime.now(timezone.utc),
+                podcast_name=meta.get('podcast_name'),
+                artwork_url=meta.get('artwork'),
+                episode_published=meta.get('published'),
+                # Feed duration is the best ETA source we have, and it is available
+                # before a single byte is downloaded.
+                audio_duration=(meta['duration_min'] * 60) if meta.get('duration_min') else None,
+                language=language or None,
+                trial_seconds_charged=trial_charge,
+            )
+            db.session.add(task)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            if trial_charge:
+                trial_release(current_user.id, trial_charge)
+            raise
+
+        parsed_url = urlparse(meta['audio_url'])
+        audio_filename = f"temp_audio_{task_id}" + (os.path.splitext(parsed_url.path)[1] or '.mp3')
+        source_url = meta['audio_url']
+
+        def transcribe_thread():
             try:
-                download_audio(source_url, audio_filename, task_id)
-                transcribe_audio(audio_filename, task_id, openai_client, language=language)
-            except TaskAbandoned:
-                # The sweeper wrote the error and settled the charge. Refund
-                # anyway: it is idempotent, and it is the backstop if anything
-                # re-opened the charge between the sweep and our abort.
-                abandoned = db.session.get(TranscriptionTask, task_id)
-                if abandoned:
-                    trial_refund_task(abandoned)
-            except Exception as e:
-                _update_task(task_id, status='error', phase='error',
-                             error_message=describe_openai_error(e)
-                             if _is_openai_error(e) else str(e))
-                # A job that never produced a transcript must not consume the
-                # trial allowance it reserved.
-                failed = db.session.get(TranscriptionTask, task_id)
-                if failed:
-                    trial_refund_task(failed)
-            finally:
-                if os.path.exists(audio_filename):
+                # The try/finally wraps the context, not the other way round: an
+                # error raised while entering app_context() -- a MemoryError under
+                # exactly the pressure this cap exists to prevent -- would otherwise
+                # skip the release and wedge this worker at 503 for good.
+                with app.app_context():
                     try:
-                        os.remove(audio_filename)
-                    except OSError:
-                        pass
+                        download_audio(source_url, audio_filename, task_id)
+                        transcribe_audio(audio_filename, task_id, openai_client, language=language)
+                    except TaskAbandoned:
+                        # The sweeper wrote the error and settled the charge. Refund
+                        # anyway: it is idempotent, and it is the backstop if anything
+                        # re-opened the charge between the sweep and our abort.
+                        abandoned = db.session.get(TranscriptionTask, task_id)
+                        if abandoned:
+                            trial_refund_task(abandoned)
+                    except Exception as e:
+                        _update_task(task_id, status='error', phase='error',
+                                     error_message=describe_openai_error(e)
+                                     if _is_openai_error(e) else str(e))
+                        # A job that never produced a transcript must not consume the
+                        # trial allowance it reserved.
+                        failed = db.session.get(TranscriptionTask, task_id)
+                        if failed:
+                            trial_refund_task(failed)
+                    finally:
+                        if os.path.exists(audio_filename):
+                            try:
+                                os.remove(audio_filename)
+                            except OSError:
+                                pass
+            except Exception:
+                # The context itself failed, so there is no way to record this
+                # on the task. The stale sweeper will fail it and refund the
+                # allowance; this log line is the only trace of why.
+                app.logger.exception(
+                    'transcription worker for %s died before it could start', task_id)
+            finally:
+                # Whatever happened, this job is done holding disk. Releasing here
+                # rather than in the request is the whole point: the cap tracks
+                # work in flight, not requests served.
+                _transcription_slots.release()
 
-    thread = threading.Thread(target=transcribe_thread)
-    thread.daemon = True
-    thread.start()
+        thread = threading.Thread(target=transcribe_thread)
+        thread.daemon = True
+        thread.start()
+        # The thread's finally owns the slot from here on.
+        slot_held = False
 
-    return jsonify({'task_id': task_id})
+        return jsonify({'task_id': task_id})
+    finally:
+        # Handed to the worker thread on success -- slot_held goes False only
+        # AFTER thread.start() returns, so a thread that fails to start (the
+        # box out of threads is exactly when this matters) still releases here.
+        # Returned here on every refusal and any exception too, so a rejected
+        # request cannot leak a slot for the life of the process.
+        if slot_held:
+            _transcription_slots.release()
 
 
 def _is_fetchable_url(raw):
@@ -1640,8 +1874,8 @@ def _stale_after_seconds(task):
         per_chunk = task.audio_duration / task.chunk_total / WHISPER_REALTIME_FACTOR
         return max(STALE_TASK_SECONDS, per_chunk * 8)
     if task.audio_duration:
-        # Splitting sets no chunk_total yet, and pydub decoding plus re-exporting a
-        # large episode is silent work -- scale off the episode length instead.
+        # Splitting sets no chunk_total yet, and cutting a large episode is
+        # silent work -- scale off the episode length instead.
         return max(STALE_TASK_SECONDS, task.audio_duration / 5)
     if task.bytes_downloaded:
         # audio_duration is not written until the download has finished and the

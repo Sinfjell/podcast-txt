@@ -217,6 +217,47 @@ UPDATE users SET trial_seconds_limit = 7200 WHERE email = 'someone@example.com';
 
 Run `ops/trial-usage.sh` to see what the trial has actually cost.
 
+### Capacity limits
+
+The trial ceiling caps what a surge can **cost**. These cap what it can
+**break**. Production is a shared Plesk host with 50+ other services and 4 cores,
+so exhausting its disk or CPU is their outage too.
+
+| Variable | Default | What it bounds |
+| --- | --- | --- |
+| `MAX_CONCURRENT_TRANSCRIPTIONS` | `1` | Jobs at once **per gunicorn worker**. |
+| `MIN_FREE_DISK_MB` | `4096` | Refuse to start below this much free space. |
+
+Audio is re-encoded to 16 kHz mono MP3 before upload — what Whisper resamples to
+internally anyway — in 15-minute parts. ffmpeg streams it, so memory stays flat;
+the binding resources are **disk** (the source plus the parts) and **CPU** (the
+re-encode, which runs niced and single-threaded). The output bitrate is capped at
+the source's, so re-encoding can never make a file larger than it started.
+
+Part length is also the granularity of two other things: how far the progress bar
+moves at a time, and how much a failed job is refunded. One part per episode would
+mean a job that dies after the first upload refunds nothing.
+
+`MAX_CONCURRENT_TRANSCRIPTIONS` is per worker, because a `threading.Semaphore`
+cannot span processes. With `--workers 2` the default admits 2 jobs at a time —
+deliberately conservative, since the box is not ours alone. Raise it when there
+is traffic that needs it.
+
+The disk floor must exceed everything admission control will admit at once: the
+check reserves nothing, so concurrent requests all see the same free space. A
+test (`test_the_disk_floor_clears_what_admission_control_admits`) keeps that
+relationship honest, so raising `MAX_AUDIO_BYTES` or the concurrency will fail
+the suite until the floor follows.
+
+Over the limit, requests get a 503 telling the user to try again shortly. They
+are not queued, because an unbounded queue is the same outage arriving later.
+Own-key users are capped alongside trial users — the disk is ours either way.
+
+### Also set a hard budget at OpenAI
+
+The ceilings above are enforced by this app. Set a monthly spend limit on the
+OpenAI account as well — that one still holds if this code has a bug.
+
 ### File Size Limits
 - **OpenAI Limit**: 25MB per audio file
 - **Auto-Splitting**: Files larger than 24MB are split automatically
@@ -250,7 +291,7 @@ Run `ops/trial-usage.sh` to see what the trial has actually cost.
 - `requests` - HTTP requests
 - `feedparser` - RSS feed parsing
 - `openai` - OpenAI Whisper API
-- `pydub` - Audio processing and splitting
+- `ffmpeg` / `ffprobe` - audio inspection, re-encoding and splitting (system binaries, not a Python package)
 - `python-dotenv` - Environment variable management
 
 ## License
