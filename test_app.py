@@ -9,6 +9,7 @@ Run: pytest test_app.py
 
 import os
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -768,8 +769,19 @@ def test_out_of_credit_key_is_still_saved(monkeypatch):
 # --------------------------------------------------------------------------
 
 def _fresh_client():
+    """A client with a cleared rate counter."""
     A.app.config['TESTING'] = True
     A._register_attempts.clear()
+    return A.app.test_client()
+
+
+def _new_session():
+    """A new session WITHOUT clearing the counter.
+
+    register() redirects authenticated users, and a successful signup logs you
+    in, so the next attempt needs a fresh session to reach the limiter at all.
+    """
+    A.app.config['TESTING'] = True
     return A.app.test_client()
 
 
@@ -799,15 +811,9 @@ def test_register_route_enforces_the_limit():
         body = _signup(client, e).data.decode()
         if 'Add your OpenAI API key' in body:
             created += 1
-            client = _fresh_client_keep_counter(client)
+            client = _new_session()
     _purge(emails)
     assert created == A.REGISTER_MAX_PER_IP, f'{created} accounts created, limit is 3'
-
-
-def _fresh_client_keep_counter(_old):
-    """New session (registering logs you in) without clearing the rate counter."""
-    A.app.config['TESTING'] = True
-    return A.app.test_client()
 
 
 def test_register_route_releases_the_slot_on_validation_failure():
@@ -826,7 +832,7 @@ def test_register_route_releases_the_slot_on_validation_failure():
         body = _signup(client, e).data.decode()
         if 'Add your OpenAI API key' in body:
             created += 1
-            client = _fresh_client_keep_counter(client)
+            client = _new_session()
     _purge(emails)
     assert created == A.REGISTER_MAX_PER_IP
 
@@ -932,3 +938,124 @@ def test_ipv6_loopback_is_also_a_trusted_proxy_peer():
         environ_base={'REMOTE_ADDR': '::1'},
     ):
         assert A._client_ip() == '203.0.113.9'
+
+
+# --------------------------------------------------------------------------
+# Pin the limiter's semantics, not just its outcomes
+# --------------------------------------------------------------------------
+
+def test_release_returns_your_own_reservation_not_the_newest():
+    """held.pop() kept the count right but discarded the wrong timestamp, so
+    the window expired early and freed several slots at once."""
+    A._register_attempts.clear()
+    ip = '203.0.113.90'
+    first = A.register_reserve_slot(ip)
+    second = A.register_reserve_slot(ip)
+    assert first is not None and second is not None
+
+    A.register_release_slot(ip, first)
+    assert A._register_attempts[ip] == [second], (
+        'release gave back the wrong reservation'
+    )
+
+
+def test_releasing_a_pruned_token_does_not_steal_a_live_reservation():
+    A._register_attempts.clear()
+    ip = '203.0.113.91'
+    stale = (time.time() - A.REGISTER_WINDOW_SECONDS - 10, 'gone')
+    live = A.register_reserve_slot(ip)
+    A.register_release_slot(ip, stale)          # must be a no-op
+    assert A._register_attempts[ip] == [live]
+
+
+@pytest.mark.parametrize('override,expect', [
+    ({'password2': 'MISMATCH'}, 'Passwords do not match'),
+    ({'password': 'short1', 'password2': 'short1'}, 'at least 8 characters'),
+    ({'email': 'not-an-email'}, 'valid email address'),
+    ({'email': 'x@immenseignite.info'}, 'real email address'),
+])
+def test_every_validation_failure_gives_the_slot_back(override, expect):
+    """Only the password-mismatch path was covered; the others would have
+    permanently burned a signup slot each."""
+    A._register_attempts.clear()
+    client = _fresh_client()
+    data = {'email': 'slot@example.com', 'password': 'abcdefgh1',
+            'password2': 'abcdefgh1'}
+    data.update(override)
+
+    for _ in range(A.REGISTER_MAX_PER_IP + 2):
+        body = client.post('/register', data=data, follow_redirects=True).data.decode()
+        assert expect in body
+
+    assert A._register_attempts.get('127.0.0.1', []) == [], (
+        'a failed validation kept its reservation'
+    )
+
+
+def test_duplicate_email_gives_the_slot_back():
+    from models import db, User
+    A._register_attempts.clear()
+    _purge(['dupe@example.com'])
+    client = _fresh_client()
+    assert 'Add your OpenAI API key' in _signup(client, 'dupe@example.com').data.decode()
+
+    client = _new_session()
+    for _ in range(4):
+        body = _signup(client, 'dupe@example.com').data.decode()
+        assert 'already exists' in body
+    _purge(['dupe@example.com'])
+    # one slot for the account that was created, none for the duplicates
+    assert len(A._register_attempts.get('127.0.0.1', [])) == 1
+
+
+def test_register_route_is_atomic_under_a_parallel_burst():
+    """Drives the ROUTE, not the helper: the non-atomic check-then-record
+    design passes every serial test but let 20 concurrent signups through."""
+    import threading
+
+    emails = [f'burst{i}@example.com' for i in range(12)]
+    _purge(emails)
+    A._register_attempts.clear()
+    A.app.config['TESTING'] = True
+
+    barrier = threading.Barrier(len(emails))
+    results = []
+
+    def attempt(email):
+        client = A.app.test_client()
+        barrier.wait()
+        body = client.post('/register', data={
+            'email': email, 'password': 'abcdefgh1', 'password2': 'abcdefgh1',
+        }, follow_redirects=True).data.decode()
+        results.append('Add your OpenAI API key' in body)
+
+    threads = [threading.Thread(target=attempt, args=(e,)) for e in emails]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    from models import db, User
+    with A.app.app_context():
+        created = User.query.filter(User.email.like('burst%@example.com')).count()
+    _purge(emails)
+    assert created == A.REGISTER_MAX_PER_IP, (
+        f'{created} of {len(emails)} concurrent signups committed, limit is '
+        f'{A.REGISTER_MAX_PER_IP}'
+    )
+
+
+def test_limiter_constants_are_what_production_expects():
+    """Every other assert compares against the constant, so changing it here
+    would silently move the limit or disable the window."""
+    assert A.REGISTER_MAX_PER_IP == 3
+    assert A.REGISTER_WINDOW_SECONDS == 3600
+
+
+def test_window_actually_expires_reservations():
+    """Deleting the window filter would lock a user out permanently."""
+    A._register_attempts.clear()
+    ip = '203.0.113.92'
+    old = time.time() - A.REGISTER_WINDOW_SECONDS - 1
+    A._register_attempts[ip] = [(old, f'n{i}') for i in range(A.REGISTER_MAX_PER_IP)]
+    assert A.register_reserve_slot(ip) is not None, 'expired reservations never freed'
