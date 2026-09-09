@@ -36,6 +36,10 @@ if ! sqlite3 "$OUT" 'PRAGMA integrity_check;' | grep -qx 'ok'; then
     exit 1
 fi
 
+# `set -e` would abort here on a malformed backup and leave an uncompressed
+# orphan that the .gz retention sweep never removes.
+trap 'rm -f "$OUT" "$OUT-wal" "$OUT-shm"' EXIT
+
 SRC_USERS="$(sqlite3 "$DB" 'select count(*) from users;')"
 BAK_USERS="$(sqlite3 "$OUT" 'select count(*) from users;')"
 if [ "$BAK_USERS" -lt "$SRC_USERS" ]; then
@@ -48,6 +52,7 @@ fi
 rm -f "$OUT-wal" "$OUT-shm"
 
 gzip -f "$OUT"
+trap - EXIT   # the backup is complete and compressed; keep it
 find "$DEST" -name 'podcast-*.db.gz' -mtime "+$KEEP_DAYS" -delete
 
 echo "backup ok: $OUT.gz ($(du -h "$OUT.gz" | cut -f1)), $SRC_USERS users, $(ls -1 "$DEST"/*.gz | wc -l) kept"

@@ -490,21 +490,16 @@ def test_register_is_rate_limited_per_ip():
     """Simulates the route: check, then record only when an account is created."""
     A._register_attempts.clear()
     ip = '203.0.113.7'
-    created = 0
-    for _ in range(10):
-        if A.register_rate_limited(ip):
-            continue
-        A.register_record_signup(ip)
-        created += 1
+    created = sum(1 for _ in range(10) if A.register_reserve_slot(ip))
     assert created == A.REGISTER_MAX_PER_IP
 
 
 def test_rate_limit_is_per_ip_not_global():
     A._register_attempts.clear()
     for _ in range(A.REGISTER_MAX_PER_IP):
-        A.register_record_signup('198.51.100.1')
-    assert A.register_rate_limited('198.51.100.1') is True
-    assert A.register_rate_limited('198.51.100.2') is False
+        assert A.register_reserve_slot('198.51.100.1') is True
+    assert A.register_reserve_slot('198.51.100.1') is False
+    assert A.register_reserve_slot('198.51.100.2') is True
 
 
 def test_the_domain_that_created_seven_bot_accounts_is_blocked():
@@ -573,29 +568,40 @@ def test_client_ip_ignores_spoofable_forwarded_for():
     """Plesk nginx appends the real peer to X-Forwarded-For, so element 0 is
     whatever the client sent. Trusting it let one host create unlimited
     accounts by rotating the header."""
-    with A.app.test_request_context(headers={
-        'X-Forwarded-For': '1.2.3.4, 203.0.113.9',
-        'X-Real-IP': '203.0.113.9',
-    }):
+    with A.app.test_request_context(
+        headers={'X-Forwarded-For': '1.2.3.4, 203.0.113.9', 'X-Real-IP': '203.0.113.9'},
+        environ_base={'REMOTE_ADDR': '127.0.0.1'},
+    ):
         assert A._client_ip() == '203.0.113.9'
 
-    # Spoofed XFF with no X-Real-IP must fall back to the socket peer, never XFF
+
+def test_proxy_headers_are_only_trusted_from_the_proxy():
+    """Swapping X-Forwarded-For for X-Real-IP fixes nothing if the header is
+    trusted from any peer -- it is equally attacker-controlled."""
+    # Direct connection: the client's own X-Real-IP must be ignored
     with A.app.test_request_context(
-        headers={'X-Forwarded-For': '1.2.3.4'},
+        headers={'X-Real-IP': '1.2.3.4', 'X-Forwarded-For': '5.6.7.8'},
         environ_base={'REMOTE_ADDR': '203.0.113.9'},
     ):
         assert A._client_ip() == '203.0.113.9'
+
+    # Via the local proxy, with no header set: fall back to the peer
+    with A.app.test_request_context(environ_base={'REMOTE_ADDR': '127.0.0.1'}):
+        assert A._client_ip() == '127.0.0.1'
 
 
 def test_rate_limit_counts_created_accounts_not_failed_attempts():
     """Three password typos must not burn the hourly quota."""
     A._register_attempts.clear()
     ip = '203.0.113.50'
+    # Five failed attempts: each reserves, then releases because no account was made
     for _ in range(5):
-        assert A.register_rate_limited(ip) is False   # checking never records
+        assert A.register_reserve_slot(ip) is True
+        A.register_release_slot(ip)
+    # The full quota is still available
     for _ in range(A.REGISTER_MAX_PER_IP):
-        A.register_record_signup(ip)
-    assert A.register_rate_limited(ip) is True
+        assert A.register_reserve_slot(ip) is True
+    assert A.register_reserve_slot(ip) is False
 
 
 def test_settings_never_persists_a_rejected_key(monkeypatch):
@@ -665,3 +671,89 @@ def test_403_message_has_no_stray_apostrophe():
     class Forbidden(Exception):
         status_code = 403
     assert "key 's" not in A.describe_openai_error(Forbidden())
+
+
+def test_parallel_burst_from_one_ip_cannot_exceed_the_limit():
+    """The regression that split check-from-record introduced: 20 concurrent
+    signups all passed the check before any of them recorded."""
+    import threading
+
+    A._register_attempts.clear()
+    ip = '203.0.113.77'
+    granted = []
+    barrier = threading.Barrier(20)
+
+    def attempt():
+        barrier.wait()          # maximise overlap
+        if A.register_reserve_slot(ip):
+            granted.append(1)
+
+    threads = [threading.Thread(target=attempt) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(granted) == A.REGISTER_MAX_PER_IP, (
+        f'{len(granted)} of 20 concurrent signups granted, '
+        f'limit is {A.REGISTER_MAX_PER_IP}'
+    )
+
+
+def test_non_openai_exception_with_status_code_is_not_treated_as_openai():
+    """Guards the narrowing: hasattr(exc, 'status_code') would have given a
+    future non-OpenAI error OpenAI-flavoured text."""
+    class ThirdPartyError(Exception):
+        status_code = 401
+
+    assert A._is_openai_error(ThirdPartyError()) is False
+
+
+def test_sk_shaped_key_rejected_by_openai_is_not_persisted(monkeypatch):
+    """The higher-risk path: shape check passes, OpenAI returns 401."""
+    from models import db, User
+
+    class Unauthorized(Exception):
+        status_code = 401
+
+    def reject(*a, **kw):
+        raise Unauthorized()
+
+    monkeypatch.setattr(A, 'OpenAI', reject)
+
+    with A.app.app_context():
+        db.session.query(User).filter_by(email='sk401@test.com').delete()
+        db.session.commit()
+        u = User(email='sk401@test.com')
+        u.set_password('password123')
+        db.session.add(u)
+        db.session.commit()
+        uid = u.id
+
+    A.app.config['TESTING'] = True
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+
+    client.post('/settings', data={'openai_api_key': 'sk-' + 'b' * 40},
+                follow_redirects=True)
+    with A.app.app_context():
+        assert db.session.get(User, uid).openai_api_key is None
+        db.session.query(User).filter_by(id=uid).delete()
+        db.session.commit()
+
+
+def test_out_of_credit_key_is_still_saved(monkeypatch):
+    """429 means the key authenticated but the account has no credit. Refusing
+    the save would leave that user unable to store a working key at all."""
+    class RateLimited(Exception):
+        status_code = 429
+
+    def limited(*a, **kw):
+        raise RateLimited()
+
+    monkeypatch.setattr(A, 'OpenAI', limited)
+    ok, msg = A.verify_openai_key('sk-' + 'c' * 40)
+    assert ok is True
+    assert 'credit' in msg.lower()

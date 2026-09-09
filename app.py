@@ -73,9 +73,11 @@ def _sqlite_pragmas(dbapi_connection, connection_record):
         cur.execute('PRAGMA journal_mode=WAL')
         cur.execute('PRAGMA busy_timeout=15000')
         cur.close()
-    except sqlite3.Error:
-        # A read-only volume must degrade, not take the app down on every connect.
-        pass
+    except sqlite3.Error as exc:
+        # A read-only volume must degrade, not take the app down on every
+        # connect -- but say so: without WAL this runs with writers blocking
+        # readers, and ops/backup-db.sh assumes WAL is on.
+        app.logger.warning('Could not apply SQLite pragmas: %s', exc)
 
 # Login manager
 login_manager = LoginManager()
@@ -160,6 +162,9 @@ def get_openai_client(user=None):
 #: were bot signups on a single throwaway domain, two of them in the same
 #: second, because /register had no verification, rate limit or captcha.
 REGISTER_MAX_PER_IP = 3
+#: Peers whose X-Real-IP we trust. Plesk's nginx proxies over loopback and
+#: sets X-Real-IP to $remote_addr, overwriting anything the client sent.
+TRUSTED_PROXY_ADDRESSES = frozenset({'127.0.0.1', '::1'})
 REGISTER_WINDOW_SECONDS = 3600
 DISPOSABLE_EMAIL_DOMAINS = {
     'immenseignite.info',
@@ -178,39 +183,48 @@ def _client_ip():
     can be bypassed by rotating the header. X-Real-IP is set by nginx to
     $remote_addr and overwrites any client-supplied value.
     """
-    return (request.headers.get('X-Real-IP')
-            or request.remote_addr
-            or 'unknown')
+    peer = request.remote_addr
+    # Only a request that actually came through the local proxy may present a
+    # forwarded address. Otherwise the header is just as attacker-controlled as
+    # X-Forwarded-For was, and swapping one for the other fixes nothing.
+    if peer in TRUSTED_PROXY_ADDRESSES:
+        return request.headers.get('X-Real-IP') or peer
+    return peer or 'unknown'
 
 
-def register_rate_limited(ip):
-    """True when this IP has used up its registrations for the window.
+def register_reserve_slot(ip):
+    """Atomically take one signup slot for this IP. False when none are left.
 
-    Read-only. It counts accounts actually created, not form submissions, so
-    mistyping your password three times does not lock you out for an hour.
-    Call register_record_signup() once the account exists.
+    Checking and recording must happen under one lock: with them split, a
+    parallel burst from one address passed the check before any of it was
+    recorded, and the limit did not bind at all. Callers MUST release the slot
+    again if no account gets created, so a mistyped password costs nothing.
     """
     now = time.time()
     with _register_lock:
         seen = [t for t in _register_attempts.get(ip, ())
                 if now - t < REGISTER_WINDOW_SECONDS]
-        if seen:
+        if len(seen) >= REGISTER_MAX_PER_IP:
             _register_attempts[ip] = seen
-        else:
-            _register_attempts.pop(ip, None)
-        return len(seen) >= REGISTER_MAX_PER_IP
-
-
-def register_record_signup(ip):
-    """Record one successful account creation against this IP."""
-    now = time.time()
-    with _register_lock:
-        _register_attempts[ip].append(now)
+            return False
+        seen.append(now)
+        _register_attempts[ip] = seen
         if len(_register_attempts) > 10000:
             stale = [k for k, v in list(_register_attempts.items())
                      if not v or now - v[-1] > REGISTER_WINDOW_SECONDS]
             for k in stale:
                 _register_attempts.pop(k, None)
+        return True
+
+
+def register_release_slot(ip):
+    """Give back a reserved slot, for any attempt that did not create an account."""
+    with _register_lock:
+        held = _register_attempts.get(ip)
+        if held:
+            held.pop()
+            if not held:
+                _register_attempts.pop(ip, None)
 
 
 def is_disposable_email(email):
@@ -285,6 +299,11 @@ def verify_openai_key(key):
         if unreachable:
             return True, ('Key saved, but OpenAI could not be reached to verify it. '
                           'If transcription fails, re-check the key here.')
+        if status == 429:
+            # The key authenticated; the account is just out of credit or rate
+            # limited. Refusing the save would leave them unable to store a
+            # working key at all.
+            return True, describe_openai_error(e, context='verify')
         return False, describe_openai_error(e, context='verify')
     return True, 'API key verified.'
 
@@ -800,19 +819,27 @@ def register():
     if current_user.is_authenticated:
         return redirect(url_for('index'))
 
-    if request.method == 'POST':
-        email = request.form.get('email', '').strip().lower()
-        password = request.form.get('password', '')
-        password2 = request.form.get('password2', '')
+    if request.method != 'POST':
+        return render_template('register.html')
 
-        if not email or not password:
-            flash('Email and password are required.', 'error')
-            return render_template('register.html')
+    email = request.form.get('email', '').strip().lower()
+    password = request.form.get('password', '')
+    password2 = request.form.get('password2', '')
 
-        if register_rate_limited(_client_ip()):
-            flash('Too many accounts created from this address. Try again later.', 'error')
-            return render_template('register.html')
+    if not email or not password:
+        flash('Email and password are required.', 'error')
+        return render_template('register.html')
 
+    ip = _client_ip()
+    if not register_reserve_slot(ip):
+        flash('Too many accounts created from this address. Try again later.', 'error')
+        return render_template('register.html')
+
+    # The slot is held for the rest of this request and released unless an
+    # account is actually created, so validation failures cost the user nothing
+    # while a parallel burst still cannot exceed the limit.
+    created = False
+    try:
         if is_disposable_email(email):
             flash('Please register with a real email address.', 'error')
             return render_template('register.html')
@@ -837,13 +864,15 @@ def register():
         user.set_password(password)
         db.session.add(user)
         db.session.commit()
-        register_record_signup(_client_ip())
+        created = True
 
         login_user(user)
-        flash('Account created! Add your OpenAI API key in Settings to use your own quota.', 'success')
+        flash('Account created! Add your OpenAI API key in Settings to use your own quota.',
+              'success')
         return redirect(url_for('index'))
-
-    return render_template('register.html')
+    finally:
+        if not created:
+            register_release_slot(ip)
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -891,6 +920,7 @@ def settings():
             return redirect(url_for('settings'))
 
         ok, message = verify_openai_key(api_key)
+        caveat = ok and not message.startswith('API key verified')
         if not ok:
             # Never store a rejected key: it is frequently a password, and it
             # would otherwise sit in the database and fail again at transcribe time.
@@ -899,7 +929,7 @@ def settings():
 
         current_user.openai_api_key = api_key
         db.session.commit()
-        flash(message, 'success')
+        flash(message, 'warning' if caveat else 'success')
         return redirect(url_for('settings'))
 
     return render_template('settings.html')
