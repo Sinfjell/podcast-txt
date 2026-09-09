@@ -64,6 +64,25 @@
             </div>
         </div>
         <p class="text-sm text-muted mt-1" id="phaseDetail"></p>
+
+        <div class="flex-between mt-2" id="runningControls">
+            <span class="text-sm text-muted">
+                This keeps running if you close the page.
+            </span>
+            <button type="button" class="btn btn-sm btn-ghost" id="cancelBtn"
+                    onclick="cancelTranscription()">Stop</button>
+        </div>
+    </div>
+</div>
+
+<!-- Cancelled -->
+<div id="cancelledContainer" class="hidden">
+    <div class="alert alert-warning">
+        <strong>Transcription stopped.</strong>
+        <span id="cancelledInfo" class="text-sm" style="margin-top: 4px;"></span>
+    </div>
+    <div class="flex-between mb-2">
+        <a href="{{ url_for('index') }}" class="btn btn-ghost">Start over</a>
     </div>
 </div>
 
@@ -184,6 +203,19 @@
 
     function updateUI(d) {
         renderHeader(d);
+        // Only offer Stop while there is something to stop.
+        var running = d.status !== 'completed' && d.status !== 'error'
+                      && d.status !== 'cancelled';
+        show(el('runningControls'), running);
+
+        if (d.status === 'cancelled') {
+            show(el('progressCard'), false);
+            show(el('cancelledContainer'), true);
+            el('cancelledInfo').textContent = transcriptText
+                ? 'The text transcribed before you stopped is below.'
+                : '';
+            return;
+        }
 
         if (d.status === 'error') {
             show(el('progressCard'), false);
@@ -233,6 +265,30 @@
             pane.appendChild(cursor);
             pane.scrollTop = pane.scrollHeight;
         }
+    }
+
+    function cancelTranscription() {
+        if (!confirm('Stop this transcription? The audio already sent has been paid for.')) return;
+        var btn = el('cancelBtn');
+        btn.disabled = true;
+        btn.textContent = 'Stopping…';
+        fetch('/cancel/' + taskId, { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                if (d.error) {
+                    btn.disabled = false;
+                    btn.textContent = 'Stop';
+                    alert(d.error);
+                    return;
+                }
+                // The worker stops at its next chunk boundary; the poll below
+                // is what actually renders the new state, so let it.
+                poll();
+            })
+            .catch(function () {
+                btn.disabled = false;
+                btn.textContent = 'Stop';
+            });
     }
 
     function poll() {

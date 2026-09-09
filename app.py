@@ -409,7 +409,7 @@ def settle_stranded_charges():
     The count is for logging and tests; nothing branches on it.
     """
     stranded = TranscriptionTask.query.filter(
-        TranscriptionTask.status == 'error',
+        TranscriptionTask.status.in_(TERMINAL_STATUSES),
         TranscriptionTask.trial_settled == False,      # noqa: E712 - SQL, not Python
         TranscriptionTask.trial_seconds_charged > 0,
     ).all()
@@ -630,6 +630,12 @@ def verify_openai_key(key):
 # Audio helpers
 # ---------------------------------------------------------------------------
 
+#: Statuses a task never leaves. The worker checks for these between chunks and
+#: stops, which is what makes cancelling possible without killing a thread: a
+#: daemon thread cannot be interrupted from outside, but it can be told to give
+#: up at the next boundary it reaches.
+TERMINAL_STATUSES = frozenset({'error', 'cancelled'})
+
 #: Floor for how long a task may go without a progress write before it counts
 #: as abandoned. The real window scales with the work in flight -- see
 #: _stale_after_seconds().
@@ -639,12 +645,13 @@ STALE_TASK_SECONDS = 15 * 60
 def _update_task(task_id, **kwargs):
     """Update a TranscriptionTask row. Must be called within an app context.
 
-    'error' is terminal. The stale sweeper runs in the other gunicorn worker
-    and may fail a task -- settling its trial charge -- while this worker is
-    still mid-episode. Letting the worker write 'transcribing' (and later
-    'completed') over that verdict resurrects a task whose allowance has
-    already been handed back, which is how a swept episode got transcribed
-    for free. Read the status straight from the database: the session may
+    TERMINAL_STATUSES are terminal. The stale sweeper runs in the other gunicorn
+    worker and may fail a task -- settling its trial charge -- while this worker
+    is still mid-episode, and a user may cancel one from their browser. Letting
+    the worker write 'transcribing' (and later 'completed') over either verdict
+    resurrects a task whose allowance has already been handed back, which is how
+    a swept episode got transcribed for free -- and it is also what would make a
+    cancel button lie. Read the status straight from the database: the session may
     still hold our own last write.
     """
     stmt = (
@@ -652,8 +659,8 @@ def _update_task(task_id, **kwargs):
         .where(TranscriptionTask.id == task_id)
         .values(heartbeat_at=datetime.now(timezone.utc), **kwargs)
     )
-    if kwargs.get('status') != 'error':
-        stmt = stmt.where(TranscriptionTask.status != 'error')
+    if kwargs.get('status') not in TERMINAL_STATUSES:
+        stmt = stmt.where(TranscriptionTask.status.notin_(TERMINAL_STATUSES))
     result = db.session.execute(stmt)
     db.session.commit()
     return result.rowcount == 1
@@ -1085,10 +1092,11 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
         if db.session.execute(
             text('SELECT status FROM transcription_tasks WHERE id = :tid'),
             {'tid': task_id},
-        ).scalar() == 'error':
+        ).scalar() in TERMINAL_STATUSES:
             raise TaskAbandoned(
-                'Task was marked failed while it was still running; stopping so '
-                'it cannot keep billing against an allowance already refunded.'
+                'Task reached a terminal state while it was still running '
+                '(cancelled, or swept as stale); stopping so it cannot keep '
+                'billing against an allowance already handed back.'
             )
 
         # This write is the same terminal-'error' guard as the check above,
@@ -1187,8 +1195,10 @@ def compute_live_progress(task):
     treated as a floor so the bar can never travel backwards between polls.
     """
     stored = task.progress or 0
-    if task.status in ('completed', 'error'):
-        return (100 if task.status == 'completed' else stored), None
+    if task.status == 'completed':
+        return 100, None
+    if task.status in TERMINAL_STATUSES:
+        return stored, None
 
     phase_elapsed = _seconds_since(task.phase_started_at)
 
@@ -1577,7 +1587,8 @@ def index():
         ).order_by(SavedFeed.created_at.desc()).limit(5).all()
     return render_template('index.html', saved_feeds=saved_feeds,
                            languages=SUPPORTED_LANGUAGES,
-                           trial=_trial_context())
+                           trial=_trial_context(),
+                           active_tasks=active_tasks_for(current_user))
 
 
 @app.route('/parse_rss', methods=['POST'])
@@ -1894,7 +1905,7 @@ def _fail_if_stale(task):
     nothing runs again afterwards. Checking here means the page polling the
     task is what notices, which is exactly where the user is waiting.
     """
-    if task.status in ('completed', 'error'):
+    if task.status == 'completed' or task.status in TERMINAL_STATUSES:
         return False
     if _seconds_since(task.heartbeat_at or task.started_at) <= _stale_after_seconds(task):
         return False
@@ -1941,7 +1952,9 @@ def get_status(task_id):
         ),
     }
 
-    if task.status == 'error':
+    if task.status == 'cancelled':
+        result['cancelled'] = True
+    elif task.status == 'error':
         result['error'] = task.error_message or 'Unknown error'
 
     # Partial text so the page fills in as chunks land, rather than staying empty
@@ -1958,6 +1971,56 @@ def get_status(task_id):
             result['language'] = task.language
 
     return jsonify(result)
+
+
+@app.route('/cancel/<task_id>', methods=['POST'])
+@login_required
+def cancel_transcription(task_id):
+    """Cancel a running transcription.
+
+    A daemon thread cannot be interrupted from outside, so this does not try:
+    it writes a terminal status and lets the worker notice at its next chunk
+    boundary. _update_task refuses to move a task out of a terminal status, so
+    the worker cannot resurrect it in the meantime -- and the refund is settled
+    here, immediately, rather than whenever the thread gets around to stopping.
+    """
+    task = db.session.get(TranscriptionTask, task_id)
+    if not task or task.user_id != current_user.id:
+        return jsonify({'error': 'Task not found'}), 404
+    if task.status == 'completed':
+        return jsonify({'error': 'That transcription already finished.'}), 409
+    if task.status in TERMINAL_STATUSES:
+        # Already cancelled or failed: nothing to do, and saying so beats an
+        # error for a user who double-clicked.
+        return jsonify({'status': task.status, 'cancelled': True})
+
+    task.status = 'cancelled'
+    task.phase = 'cancelled'
+    task.error_message = 'Cancelled.'
+    db.session.commit()
+    refunded = trial_refund_task(task)
+    app.logger.info('task %s cancelled by user %s', task_id, current_user.id)
+    return jsonify({'status': 'cancelled', 'cancelled': True,
+                    'refunded_minutes': refunded // 60})
+
+
+def active_tasks_for(user):
+    """Transcriptions this user has in flight, newest first.
+
+    The work survives leaving the page -- it runs server-side and is written to
+    SQLite -- but nothing in the UI said so, so coming back looked like the job
+    had vanished and people started it again.
+    """
+    if not user.is_authenticated:
+        return []
+    running = TranscriptionTask.query.filter(
+        TranscriptionTask.user_id == user.id,
+        ~TranscriptionTask.status.in_(['completed', *TERMINAL_STATUSES]),
+    ).order_by(TranscriptionTask.started_at.desc()).limit(5).all()
+    # _fail_if_stale is what notices a task whose worker died, and it only runs
+    # when something asks about that task. Ask here, or a dead job would sit in
+    # this list forever inviting the user to wait for nothing.
+    return [t for t in running if not _fail_if_stale(t)]
 
 
 @app.route('/download/<task_id>/<file_type>')
@@ -2181,7 +2244,7 @@ with app.app_context():
     # worker respawning mid-life must not kill jobs another worker is running.
     orphaned = [
         t for t in TranscriptionTask.query.filter(
-            ~TranscriptionTask.status.in_(['completed', 'error'])
+            ~TranscriptionTask.status.in_(['completed', *TERMINAL_STATUSES])
         ).all()
         if _seconds_since(t.heartbeat_at or t.started_at) > _stale_after_seconds(t)
     ]

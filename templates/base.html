@@ -86,7 +86,54 @@
             transition: all var(--transition);
         }
         .nav-links a:hover { color: var(--text); background: var(--surface); }
-        .nav-toggle { display: none; background: none; border: none; color: var(--muted); cursor: pointer; padding: 8px; }
+        /* Mobile-only affordances. The desktop bar is deliberately unchanged --
+           icons and a home link earn their space in a full-width panel, not in
+           a row where the brand already links home. */
+        .nav-icon, .nav-sep, .nav-mobile-only { display: none; }
+        .nav-toggle {
+            display: none;
+            background: none;
+            border: none;
+            color: var(--text);
+            cursor: pointer;
+            /* 44px is the smallest reliable touch target; the old 20px icon with
+               8px of padding was 36px and easy to miss. */
+            width: 44px; height: 44px;
+            margin-right: -10px;
+            align-items: center;
+            justify-content: center;
+            border-radius: var(--radius-sm);
+        }
+        .nav-toggle:active { background: var(--surface); }
+        /* Three lines that become an X, so the control shows its own state. */
+        .nav-toggle span {
+            display: block;
+            position: absolute;
+            width: 20px; height: 2px;
+            background: currentColor;
+            border-radius: 2px;
+            transition: transform var(--transition), opacity var(--transition);
+        }
+        .nav-toggle span:nth-child(1) { transform: translateY(-6px); }
+        .nav-toggle span:nth-child(3) { transform: translateY(6px); }
+        .nav-toggle[aria-expanded="true"] span:nth-child(1) { transform: rotate(45deg); }
+        .nav-toggle[aria-expanded="true"] span:nth-child(2) { opacity: 0; }
+        .nav-toggle[aria-expanded="true"] span:nth-child(3) { transform: rotate(-45deg); }
+
+        /* Tap anywhere outside to close -- the old menu could only be dismissed
+           by finding the toggle again. */
+        .nav-scrim {
+            display: none;
+            position: fixed;
+            inset: 56px 0 0 0;
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(2px);
+            -webkit-backdrop-filter: blur(2px);
+            z-index: 90;
+            opacity: 0;
+            transition: opacity var(--transition);
+        }
+        .nav-scrim.open { display: block; opacity: 1; }
 
         /* Layout */
         .container {
@@ -353,20 +400,85 @@
 
         /* Mobile nav */
         @media (max-width: 640px) {
-            .nav-links { display: none; }
-            .nav-links.open {
-                display: flex;
-                flex-direction: column;
-                position: absolute;
+            .nav-toggle { display: flex; }
+            .container { padding: 20px 16px; }
+
+            /* A panel that slides down from under the bar, rather than a list
+               that blinks into existence. Always in the DOM so it can animate
+               and so its links stay focusable in source order; visibility is
+               what actually hides it from assistive tech. */
+            .nav-links {
+                position: fixed;
                 top: 56px;
                 left: 0;
                 right: 0;
+                z-index: 95;
+                flex-direction: column;
+                align-items: stretch;
+                gap: 2px;
+                padding: 8px 12px calc(12px + env(safe-area-inset-bottom, 0px));
                 background: var(--surface);
-                border-bottom: 1px solid var(--border);
-                padding: 8px;
+                border-bottom: 1px solid var(--border-light);
+                box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+                transform: translateY(-8px);
+                opacity: 0;
+                visibility: hidden;
+                transition: transform var(--transition), opacity var(--transition),
+                            visibility var(--transition);
             }
-            .nav-toggle { display: block; }
-            .container { padding: 20px 16px; }
+            .nav-links.open {
+                transform: translateY(0);
+                opacity: 1;
+                visibility: visible;
+            }
+            .nav-links a {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                /* 48px tall: the old links were 33.6px, under every platform's
+                   minimum touch target. */
+                min-height: 48px;
+                padding: 0 12px;
+                font-size: 16px;
+                color: var(--text);
+                border-radius: var(--radius-sm);
+            }
+            .nav-links a:active { background: var(--surface-hover); }
+            .nav-icon { display: block; color: var(--muted); flex-shrink: 0; }
+            .nav-mobile-only { display: flex; }
+            .nav-links a.nav-cta {
+                margin-top: 6px;
+                justify-content: center;
+                background: var(--accent);
+                color: #fff;
+                font-weight: 600;
+            }
+            .nav-links a.nav-cta svg { color: #fff; }
+            .nav-links .nav-sep {
+                display: block;
+                height: 1px;
+                background: var(--border);
+                margin: 6px 4px;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .nav-links, .nav-scrim, .nav-toggle span { transition: none; }
+        }
+
+        /* Live indicator for a transcription still running */
+        .pulse-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: var(--accent-bright);
+            flex-shrink: 0; margin-right: 10px;
+            animation: pulse 1.6s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.35; transform: scale(0.8); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .pulse-dot { animation: none; }
         }
 
         .btn:disabled, .btn[disabled] {
@@ -490,21 +602,46 @@
                 </svg>
                 Podskrift
             </a>
-            <button class="nav-toggle" onclick="document.querySelector('.nav-links').classList.toggle('open')" aria-label="Menu">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+            <button class="nav-toggle" id="navToggle" type="button"
+                    aria-label="Menu" aria-expanded="false" aria-controls="navLinks">
+                <span></span><span></span><span></span>
             </button>
-            <div class="nav-links">
+            <div class="nav-links" id="navLinks">
                 {% if current_user.is_authenticated %}
-                <a href="{{ url_for('feeds') }}">Feeds</a>
-                <a href="{{ url_for('history') }}">History</a>
-                <a href="{{ url_for('settings') }}">Settings</a>
-                <a href="{{ url_for('logout') }}">Log out</a>
+                <a href="{{ url_for('index') }}" class="nav-mobile-only">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                    New transcript
+                </a>
+                <a href="{{ url_for('feeds') }}">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/></svg>
+                    Feeds
+                </a>
+                <a href="{{ url_for('history') }}">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                    History
+                </a>
+                <a href="{{ url_for('settings') }}">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                    Settings
+                </a>
+                <div class="nav-sep" aria-hidden="true"></div>
+                <a href="{{ url_for('logout') }}">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                    Log out
+                </a>
                 {% else %}
-                <a href="{{ url_for('rss_help') }}">Help</a>
-                <a href="{{ url_for('login') }}">Log in</a>
-                <a href="{{ url_for('register') }}" class="btn btn-sm btn-ghost">Sign up</a>
+                <a href="{{ url_for('rss_help') }}">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                    Help
+                </a>
+                <a href="{{ url_for('login') }}">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+                    Log in
+                </a>
+                <a href="{{ url_for('register') }}" class="btn btn-sm btn-ghost nav-cta">Sign up</a>
                 {% endif %}
             </div>
+            <div class="nav-scrim" id="navScrim" hidden></div>
         </div>
     </nav>
 
@@ -530,5 +667,45 @@
     </footer>
 
     {% block scripts %}{% endblock %}
+    <script>
+    // Mobile menu. The old version was a one-line onclick that toggled a class:
+    // no way to close it except finding the toggle again, no keyboard escape,
+    // and nothing told assistive tech it was a disclosure at all.
+    (function () {
+        var toggle = document.getElementById('navToggle');
+        var panel = document.getElementById('navLinks');
+        var scrim = document.getElementById('navScrim');
+        if (!toggle || !panel || !scrim) return;
+
+        function setOpen(open) {
+            panel.classList.toggle('open', open);
+            scrim.classList.toggle('open', open);
+            scrim.hidden = !open;
+            toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+            // Stops the page scrolling behind the panel on iOS.
+            document.body.style.overflow = open ? 'hidden' : '';
+            if (open) {
+                var first = panel.querySelector('a');
+                if (first) first.focus({ preventScroll: true });
+            }
+        }
+
+        toggle.addEventListener('click', function () {
+            setOpen(toggle.getAttribute('aria-expanded') !== 'true');
+        });
+        scrim.addEventListener('click', function () { setOpen(false); });
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && toggle.getAttribute('aria-expanded') === 'true') {
+                setOpen(false);
+                toggle.focus();
+            }
+        });
+        // Resizing past the breakpoint leaves the panel open but invisible, and
+        // body scroll locked with it.
+        window.addEventListener('resize', function () {
+            if (window.innerWidth > 640) setOpen(false);
+        });
+    })();
+    </script>
 </body>
 </html>

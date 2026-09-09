@@ -2395,3 +2395,239 @@ def test_ffmpeg_cannot_outlive_the_stale_task_window(tmp_path):
     gets its own task swept out from under it and the user is told the server
     restarted."""
     assert A.FFMPEG_TIMEOUT_SECONDS < A.STALE_TASK_SECONDS
+
+# --------------------------------------------------------------------------
+# Cancelling and resuming  (TSK-20392, TSK-20394)
+# --------------------------------------------------------------------------
+
+def _login(user_id):
+    A.app.config['TESTING'] = True
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(user_id)
+        sess['_fresh'] = True
+    return client
+
+
+def test_cancelling_stops_the_worker_at_the_next_chunk(trial_on, monkeypatch, tmp_path):
+    """A daemon thread cannot be interrupted from outside, so cancel writes a
+    terminal status and the worker gives up at its next boundary. If it did not
+    check, Stop would be a lie that still spent the user's minutes."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('cancelworker@test.com', limit=36000)
+    sent = []
+
+    class FakeChunk:
+        text = 'hi'
+        segments = []
+        language = 'no'
+
+    class FakeClient:
+        class audio:
+            class transcriptions:
+                @staticmethod
+                def create(**kw):
+                    sent.append(kw)
+                    db.session.execute(A.text(
+                        "UPDATE transcription_tasks SET status='cancelled' "
+                        "WHERE id='cancel-worker'"))
+                    db.session.commit()
+                    return FakeChunk()
+
+    chunks = []
+    for i in range(3):
+        f = tmp_path / f'c{i}.mp3'
+        f.write_bytes(b'\0' * 16)
+        chunks.append(str(f))
+
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='cancel-worker', user_id=uid, episode_title='x',
+            status='transcribing', chunk_total=3, chunk_index=0,
+            trial_seconds_charged=900))
+        db.session.commit()
+        with pytest.raises(A.TaskAbandoned):
+            A._transcribe_chunks(chunks, set(chunks), 'cancel-worker',
+                                 FakeClient(), 'no', 900.0)
+
+    assert len(sent) == 1, f'{len(sent)} chunks billed after cancelling'
+
+
+def test_cancel_refunds_only_what_was_not_sent(trial_on):
+    """Audio already uploaded is billed to us whatever the user clicks."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('cancelrefund@test.com', limit=36000)
+    with A.app.app_context():
+        A.trial_reserve(uid, 800)
+        db.session.add(TranscriptionTask(
+            id='cancel-refund', user_id=uid, episode_title='x',
+            status='transcribing', chunk_total=4, chunk_index=1,
+            trial_seconds_charged=800))
+        db.session.commit()
+
+    resp = _login(uid).post('/cancel/cancel-refund')
+    assert resp.status_code == 200
+    assert resp.get_json()['cancelled'] is True
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'cancel-refund')
+        assert task.status == 'cancelled'
+    assert _used(uid) == 400, 'two of four chunks were sent, so half stands'
+
+
+def test_a_cancelled_task_cannot_be_resurrected(trial_on):
+    """The same guard that stops the sweeper being overwritten. Without it the
+    worker would write 'completed' over the cancellation."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('cancelresurrect@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='cancel-res', user_id=uid,
+                                         episode_title='x', status='cancelled'))
+        db.session.commit()
+        assert A._update_task('cancel-res', status='completed', progress=100) is False
+        assert db.session.get(TranscriptionTask, 'cancel-res').status == 'cancelled'
+
+
+def test_cancelling_someone_elses_task_is_a_404(trial_on):
+    from models import db, TranscriptionTask
+
+    owner = _make_user('owner@test.com')
+    intruder = _make_user('intruder@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='cancel-owned', user_id=owner,
+                                         episode_title='x', status='transcribing'))
+        db.session.commit()
+
+    assert _login(intruder).post('/cancel/cancel-owned').status_code == 404
+    with A.app.app_context():
+        assert db.session.get(TranscriptionTask, 'cancel-owned').status == 'transcribing'
+
+
+def test_cancelling_a_finished_task_does_not_undo_it(trial_on):
+    from models import db, TranscriptionTask
+
+    uid = _make_user('cancelfinished@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='cancel-done', user_id=uid,
+                                         episode_title='x', status='completed',
+                                         transcript_text='the goods'))
+        db.session.commit()
+
+    assert _login(uid).post('/cancel/cancel-done').status_code == 409
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'cancel-done')
+        assert task.status == 'completed' and task.transcript_text == 'the goods'
+
+
+def test_cancelling_twice_is_not_an_error(trial_on):
+    """A double-click should not produce a scary message."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('canceltwice@test.com', limit=36000)
+    with A.app.app_context():
+        A.trial_reserve(uid, 600)
+        db.session.add(TranscriptionTask(id='cancel-twice', user_id=uid,
+                                         episode_title='x', status='downloading',
+                                         trial_seconds_charged=600))
+        db.session.commit()
+    client = _login(uid)
+    assert client.post('/cancel/cancel-twice').status_code == 200
+    assert client.post('/cancel/cancel-twice').status_code == 200
+    assert _used(uid) == 0, 'the second cancel refunded again'
+
+
+def test_running_transcriptions_are_offered_on_the_home_page(trial_on):
+    """The work survives leaving the page, but nothing said so -- so coming
+    back looked like it had vanished and people started it over."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('resume@test.com')
+    with A.app.app_context():
+        db.session.add_all([
+            TranscriptionTask(id='resume-live', user_id=uid, status='transcribing',
+                              episode_title='Still going', progress=42,
+                              heartbeat_at=datetime.now(timezone.utc)),
+            TranscriptionTask(id='resume-done', user_id=uid, status='completed',
+                              episode_title='Already finished'),
+        ])
+        db.session.commit()
+
+    body = _login(uid).get('/').data.decode()
+    assert 'Still going' in body, 'a running transcription was not offered'
+    assert '/transcription/resume-live' in body
+    assert 'Already finished' not in body, 'a finished task is history, not active'
+
+
+def test_another_users_running_task_is_not_offered(trial_on):
+    from models import db, TranscriptionTask
+
+    mine = _make_user('mine@test.com')
+    theirs = _make_user('theirs@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='resume-theirs', user_id=theirs,
+                                         status='transcribing',
+                                         episode_title='Not yours',
+                                         heartbeat_at=datetime.now(timezone.utc)))
+        db.session.commit()
+    assert 'Not yours' not in _login(mine).get('/').data.decode()
+
+
+def test_a_dead_task_is_not_offered_as_resumable(trial_on):
+    """A task whose worker died sits in a running state until something asks
+    about it. Offering it would invite the user to wait for nothing."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('deadresume@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='resume-dead', user_id=uid, status='transcribing',
+            episode_title='Long dead',
+            heartbeat_at=datetime.now(timezone.utc) - timedelta(days=2)))
+        db.session.commit()
+
+    body = _login(uid).get('/').data.decode()
+    assert 'Long dead' not in body
+    with A.app.app_context():
+        assert db.session.get(TranscriptionTask, 'resume-dead').status == 'error'
+
+# --------------------------------------------------------------------------
+# Mobile navigation  (TSK-20393)
+# --------------------------------------------------------------------------
+
+def test_the_menu_toggle_is_a_real_disclosure_control(trial_on):
+    """The old toggle was an onclick that flipped a class: nothing told
+    assistive tech it controlled anything, or whether it was open."""
+    body = A.app.test_client().get('/').data.decode()
+    assert 'aria-expanded="false"' in body
+    assert 'aria-controls="navLinks"' in body
+    assert 'id="navLinks"' in body
+    assert 'id="navScrim"' in body, 'no backdrop to tap outside'
+
+
+def test_the_menu_is_dismissable_without_finding_the_toggle_again(trial_on):
+    """Backdrop click and Escape. The old menu could only be closed by hitting
+    the same small target that opened it."""
+    body = A.app.test_client().get('/').data.decode()
+    assert "scrim.addEventListener('click'" in body
+    assert "e.key === 'Escape'" in body
+    assert "window.addEventListener('resize'" in body, (
+        'resizing past the breakpoint would strand the scroll lock'
+    )
+
+
+def test_the_mobile_menu_extras_are_hidden_on_desktop(trial_on):
+    """"Ingen regresjon på desktop-navigasjonen": the icons, the separator and
+    the extra home link are mobile affordances, so they must be display:none
+    outside the breakpoint."""
+    body = A.app.test_client().get('/').data.decode()
+    assert '.nav-icon, .nav-sep, .nav-mobile-only { display: none; }' in body
+
+
+def test_the_logged_in_menu_offers_the_account_pages(trial_on):
+    uid = _make_user('menu@test.com')
+    body = _login(uid).get('/').data.decode()
+    for label in ('New transcript', 'Feeds', 'History', 'Settings', 'Log out'):
+        assert label in body, f'{label} missing from the menu'
+    assert 'nav-sep' in body, 'log out is not separated from the rest'

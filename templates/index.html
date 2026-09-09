@@ -26,6 +26,28 @@
 </div>
 {% endif %}
 
+{% if active_tasks %}
+<div class="card" style="margin-bottom: 16px; border-color: var(--accent-border);">
+    <div class="card-header">
+        <h5>Still running</h5>
+        <span class="text-sm text-muted">keeps going if you close this page</span>
+    </div>
+    {% for task in active_tasks %}
+    <a href="{{ url_for('transcription_page', task_id=task.id) }}" class="list-item"
+       style="text-decoration: none; color: var(--text);">
+        <span class="pulse-dot" aria-hidden="true"></span>
+        <div class="list-item-text">
+            <div class="list-item-title">{{ task.episode_title }}</div>
+            <div class="text-sm text-muted">
+                {% if task.podcast_name %}{{ task.podcast_name }} · {% endif %}{{ task.progress or 0 }}%
+            </div>
+        </div>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--muted);"><polyline points="9 18 15 12 9 6"/></svg>
+    </a>
+    {% endfor %}
+</div>
+{% endif %}
+
 <!-- Saved feeds quick access -->
 {% if current_user.is_authenticated and saved_feeds %}
 <div class="card" style="margin-bottom: 16px;">
