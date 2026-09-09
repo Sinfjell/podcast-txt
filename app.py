@@ -7,6 +7,7 @@ Supports user accounts, saved RSS feeds, and self-serve API keys.
 """
 
 import collections
+import glob
 import math
 import os
 import sqlite3
@@ -136,30 +137,30 @@ WHISPER_MAX_RETRIES = 1
 
 # Caps on the audio we will pull down from a client-supplied URL.
 MAX_REDIRECTS = 5
-# ~4 hours at 128 kbps, comfortably past TRIAL_MAX_EPISODE_MINUTES. This is the
-# term the disk floor is sized against, so it is not a number to raise casually.
-MAX_AUDIO_BYTES = 250 * 1024 * 1024
+# The source ceiling. It is a term in the disk floor below, so raising it means
+# raising that too -- see the ## Invariants section in CLAUDE.md.
+MAX_AUDIO_BYTES = 500 * 1024 * 1024
 
-# How many transcriptions this PROCESS will run at once. Splitting no longer
-# decodes anything (see split_audio_if_needed), so the binding resource is disk:
-# a job in flight holds the source plus its chunks, ~2x MAX_AUDIO_BYTES at the
-# moment before the source is removed.
+# How many transcriptions this PROCESS will run at once. A job in flight holds
+# its source plus the re-encoded parts, and re-encoding is the one CPU-hungry
+# step in the pipeline (niced and single-threaded, but still real work).
 #
 # This is per gunicorn worker -- a threading.Semaphore cannot span processes --
 # so the real ceiling is this times the worker count. Prod runs 2 workers, so
-# the default of 2 admits at most 4 jobs: 4 x 2 x 250 MB = 2 GB worst case,
-# against a 4 GB floor and 24 GB free.
+# the default of 1 admits 2 jobs at a time. Deliberately conservative: the box
+# is a shared Plesk host with 50+ other services and 4 cores, so this is not
+# our capacity to spend. Raise it once there is traffic that needs it.
 #
-# The box is a shared Plesk host with 50+ other services on it. Filling its disk
-# is their outage too, which is why this is a hard refusal rather than an
-# unbounded queue -- a queue is the same outage arriving later.
-MAX_CONCURRENT_TRANSCRIPTIONS = max(1, _env_int('MAX_CONCURRENT_TRANSCRIPTIONS', 2))
+# Over the limit is a hard refusal, not a queue: an unbounded queue is the same
+# outage arriving later.
+MAX_CONCURRENT_TRANSCRIPTIONS = max(1, _env_int('MAX_CONCURRENT_TRANSCRIPTIONS', 1))
 _transcription_slots = threading.BoundedSemaphore(MAX_CONCURRENT_TRANSCRIPTIONS)
 
 # Refuse to start when the volume is this close to full. The check does not
 # reserve anything, so every concurrent request sees the same free space -- the
-# floor therefore has to exceed what admission control will admit all at once:
-# workers x MAX_CONCURRENT_TRANSCRIPTIONS x 2 x MAX_AUDIO_BYTES = 2 GB today.
+# floor therefore has to exceed everything admission control will admit at once:
+# workers x MAX_CONCURRENT_TRANSCRIPTIONS x (MAX_AUDIO_BYTES + the parts), which
+# test_the_disk_floor_clears_what_admission_control_admits keeps honest.
 MIN_FREE_DISK_BYTES = max(0, _env_int('MIN_FREE_DISK_MB', 4096)) * 1024 * 1024
 
 # Roughly how many seconds of audio Whisper gets through per second of wall clock.
@@ -798,62 +799,121 @@ def get_audio_duration(audio_file):
     return estimate_audio_duration(audio_file)
 
 
-def split_audio_if_needed(audio_file, max_size_mb=24):
-    """Split audio into chunks under OpenAI's 25 MB limit, without decoding it.
+#: Whisper resamples to 16 kHz mono internally, so encoding to that throws away
+#: nothing it would have used -- and it makes chunk size proportional to
+#: duration, which stream-copying the source never was.
+WHISPER_SAMPLE_RATE = 16000
+WHISPER_AUDIO_BITRATE_KBPS = 48
+#: One hour at 48 kbps is ~21.6 MB, inside OpenAI's 25 MB limit with room for
+#: the container overhead. Most episodes come out as a single part.
+SEGMENT_SECONDS = 3600
+#: Hard check on what we actually produced. Belt to SEGMENT_SECONDS' braces.
+WHISPER_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+#: Roughly one second at the bitrate above. ffmpeg's segmenter cuts on packet
+#: boundaries, so an episode that is an exact multiple of SEGMENT_SECONDS leaves
+#: a crumb behind -- an hour-long file came out as 3600.0s plus a 0.144s tail.
+#: Whisper rejects audio that short, and it would cost a whole extra request.
+MIN_PART_BYTES = WHISPER_AUDIO_BITRATE_KBPS * 1000 // 8
 
-    This used to load the episode with pydub, which decodes the whole thing to
-    raw PCM in memory AND has ffmpeg write a full WAV to TMPDIR first. For a
-    three-hour episode that is ~1.9 GB of each, per concurrent job -- so the
-    concurrency cap was budgeting against the wrong number entirely, and the
-    real memory ceiling was set by episode length rather than by job count.
 
-    ffmpeg's stream copy cuts on frame boundaries without decoding, so a chunk
-    costs its own size and nothing else. Cut points can drift by a frame
-    (~26 ms), which does not matter for transcription.
+def _ffmpeg_error(message, stderr=b''):
+    """Log ffmpeg's own words, hand the user something they can act on."""
+    detail = (stderr or b'').decode('utf-8', 'replace').strip()
+    if detail:
+        app.logger.error('ffmpeg failed: %s', detail[:2000])
+    return RuntimeError(message)
+
+
+def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
+    """Re-encode to 16 kHz mono MP3, split into hour-long parts if still large.
+
+    Returns the parts and removes the source. One ffmpeg pass does both.
+
+    Three earlier approaches each failed differently, and this is the shape that
+    fixes all three at once rather than budgeting around them:
+
+    - pydub decoded the whole episode to raw PCM in memory and had ffmpeg write
+      a full WAV to TMPDIR first: ~1.9 GB of each for a three-hour episode, per
+      concurrent job. ffmpeg streams; memory here is flat and small.
+    - Stream-copying (`-c copy`) cut by time, but bytes are not proportional to
+      time in a VBR file -- a 39 MB episode with a dense first half produced a
+      27 MB part against a 24 MB target, over OpenAI's limit. A fixed output
+      bitrate makes size proportional to duration by construction.
+    - Stream-copying also derived coverage from ffprobe's duration and wrote
+      through the source's extension. A concatenated MP3 (how dynamic ad
+      insertion stitches segments) reports short, and 16 minutes of audio was
+      silently never sent. And `.../stream.php?id=9` picked a `.php` muxer.
+      `-f segment` walks the actual stream instead of trusting a duration, and
+      the output container is always MP3 whatever the source was called.
+
+    ffmpeg runs niced and single-threaded: production is a shared Plesk host
+    with 50+ other services, and re-encoding is the one CPU-hungry step here.
     """
-    file_size_mb = os.path.getsize(audio_file) / (1024 * 1024)
-    if file_size_mb <= max_size_mb:
-        return [audio_file]
-
-    duration = probe_audio_duration(audio_file)
-    if not duration:
-        # Without a duration there is no safe place to cut, and uploading the
-        # whole file would fail at OpenAI's 25 MB limit with a confusing error.
-        raise RuntimeError(
-            'This audio file is too large to transcribe and its length could not '
-            'be read, so it cannot be split. The file may be corrupt.'
-        )
-
-    num_chunks = int(file_size_mb / max_size_mb) + 1
-    chunk_seconds = duration / num_chunks
-    base_name, ext = os.path.splitext(audio_file)
-    ext = ext or '.mp3'
-    chunk_files = []
+    base_name = os.path.splitext(audio_file)[0]
+    pattern = f'{base_name}_part_%03d.mp3'
+    produced_glob = f'{base_name}_part_*.mp3'
 
     try:
-        for i in range(num_chunks):
-            chunk_file = f"{base_name}_chunk_{i + 1}{ext}"
-            subprocess.run(
-                ['ffmpeg', '-v', 'error', '-y',
-                 '-ss', f'{i * chunk_seconds:.3f}', '-t', f'{chunk_seconds:.3f}',
-                 '-i', audio_file, '-c', 'copy', chunk_file],
-                capture_output=True, timeout=300, check=True,
-            )
-            if not os.path.exists(chunk_file) or os.path.getsize(chunk_file) == 0:
-                raise RuntimeError(f'ffmpeg produced no data for chunk {i + 1}')
-            chunk_files.append(chunk_file)
-    except Exception:
-        # The caller only cleans up chunks we actually return, so a partial
-        # split has to tidy after itself or it strands them for good.
-        for leftover in chunk_files:
-            try:
-                os.remove(leftover)
-            except OSError:
-                pass
-        raise
+        result = subprocess.run(
+            ['nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y', '-i', audio_file,
+             '-vn', '-ac', '1', '-ar', str(WHISPER_SAMPLE_RATE),
+             '-b:a', f'{WHISPER_AUDIO_BITRATE_KBPS}k', '-threads', '1',
+             '-f', 'segment', '-segment_time', str(SEGMENT_SECONDS),
+             '-segment_format', 'mp3', '-reset_timestamps', '1', pattern],
+            capture_output=True, timeout=1800,
+        )
+    except FileNotFoundError:
+        raise _ffmpeg_error(
+            'Audio processing is unavailable on the server right now. '
+            'Please try again later, or contact support if it persists.')
+    except subprocess.TimeoutExpired:
+        _cleanup_glob(produced_glob)
+        raise _ffmpeg_error('This episode took too long to process. Please try a shorter one.')
+
+    parts = sorted(glob.glob(produced_glob))
+    if result.returncode != 0 or not parts:
+        _cleanup_glob(produced_glob)
+        raise _ffmpeg_error(
+            'This audio file could not be processed. It may be corrupt or in an '
+            'unsupported format.', result.stderr)
+
+    # Drop the segmenter's rounding crumb, but never the only part, and never
+    # silently: this is the one place content could go missing without an error.
+    if len(parts) > 1:
+        crumbs = [p for p in parts if os.path.getsize(p) < MIN_PART_BYTES]
+        if crumbs:
+            app.logger.info('discarding %s sub-second part(s) from %s',
+                            len(crumbs), os.path.basename(audio_file))
+            for crumb in crumbs:
+                try:
+                    os.remove(crumb)
+                except OSError:
+                    pass
+            parts = [p for p in parts if p not in crumbs]
+
+    oversize = [p for p in parts if os.path.getsize(p) > max_bytes]
+    if oversize or not parts:
+        _cleanup_glob(produced_glob)
+        raise _ffmpeg_error(
+            'This episode could not be split into uploadable parts. '
+            'Please try a different one.')
 
     os.remove(audio_file)
-    return chunk_files
+    return parts
+
+
+def _cleanup_glob(pattern):
+    """Remove every file matching `pattern`, ignoring failures.
+
+    Globbed rather than tracked: `ffmpeg -y` creates and writes its output
+    before it fails, so the part in flight when it died is never in any list
+    we built. On a box whose whole constraint is disk, that leaked.
+    """
+    for path in glob.glob(pattern):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def transcribe_audio(audio_file, task_id, openai_client, language=None):
@@ -891,9 +951,9 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
         phase_started_at=datetime.now(timezone.utc),
         progress=PHASE_SPANS['splitting'][0],
     )
-    audio_chunks = split_audio_if_needed(audio_file, max_size_mb=24)
+    audio_chunks = prepare_audio_for_whisper(audio_file)
 
-    # split_audio_if_needed() removes the source file once it has split it, so
+    # prepare_audio_for_whisper() removes the source once it has re-encoded it, so
     # EVERY exit from here on -- the abandonment raise included -- has to go
     # through this cleanup, or temp_audio_<uuid>_chunk_N.mp3 stays on disk
     # forever. The abandonment raise used to sit above this try and leaked up

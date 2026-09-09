@@ -219,27 +219,30 @@ Run `ops/trial-usage.sh` to see what the trial has actually cost.
 
 ### Capacity limits
 
-The trial ceiling caps what a surge can **cost**. These cap what it can **break**:
-each in-flight job holds up to 500 MB on disk, and splitting decodes the whole
-episode to raw PCM in memory (an hour of 44.1 kHz stereo is ~635 MB). Production
-is a shared Plesk host with 50+ other services on it, so exhausting its memory
-takes other sites down too.
+The trial ceiling caps what a surge can **cost**. These cap what it can
+**break**. Production is a shared Plesk host with 50+ other services and 4 cores,
+so exhausting its disk or CPU is their outage too.
 
 | Variable | Default | What it bounds |
 | --- | --- | --- |
-| `MAX_CONCURRENT_TRANSCRIPTIONS` | `2` | Jobs at once **per gunicorn worker**. |
+| `MAX_CONCURRENT_TRANSCRIPTIONS` | `1` | Jobs at once **per gunicorn worker**. |
 | `MIN_FREE_DISK_MB` | `4096` | Refuse to start below this much free space. |
 
-Splitting does not decode the audio — `ffmpeg -c copy` cuts on frame boundaries
-— so memory is not the binding resource; **disk is.** A job in flight holds the
-source plus its chunks, about `2 x MAX_AUDIO_BYTES` (250 MB) at the moment before
-the source is deleted.
+Audio is re-encoded to 16 kHz mono MP3 before upload — what Whisper resamples to
+internally anyway. ffmpeg streams it, so memory stays flat; the binding resources
+are **disk** (the source plus the parts) and **CPU** (the re-encode, which runs
+niced and single-threaded).
 
 `MAX_CONCURRENT_TRANSCRIPTIONS` is per worker, because a `threading.Semaphore`
-cannot span processes. With `--workers 2` the real ceiling is 4 concurrent jobs
-= **2 GB worst case**, which is why the floor is 4 GB: the disk check reserves
-nothing, so every concurrent request sees the same free space and the floor has
-to exceed everything admission control will admit at once.
+cannot span processes. With `--workers 2` the default admits 2 jobs at a time —
+deliberately conservative, since the box is not ours alone. Raise it when there
+is traffic that needs it.
+
+The disk floor must exceed everything admission control will admit at once: the
+check reserves nothing, so concurrent requests all see the same free space. A
+test (`test_the_disk_floor_clears_what_admission_control_admits`) keeps that
+relationship honest, so raising `MAX_AUDIO_BYTES` or the concurrency will fail
+the suite until the floor follows.
 
 Over the limit, requests get a 503 telling the user to try again shortly. They
 are not queued, because an unbounded queue is the same outage arriving later.
@@ -283,7 +286,7 @@ OpenAI account as well — that one still holds if this code has a bug.
 - `requests` - HTTP requests
 - `feedparser` - RSS feed parsing
 - `openai` - OpenAI Whisper API
-- `pydub` - Audio processing and splitting
+- `ffmpeg` / `ffprobe` - audio inspection, re-encoding and splitting (system binaries, not a Python package)
 - `python-dotenv` - Environment variable management
 
 ## License

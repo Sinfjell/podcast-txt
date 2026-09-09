@@ -1423,7 +1423,7 @@ def test_billing_ignores_the_duration_the_client_claimed(trial_on, monkeypatch, 
     calls = []
     # The file really is four hours long; the client said one minute.
     monkeypatch.setattr(A, 'probe_audio_duration', lambda f: 14400.0)
-    monkeypatch.setattr(A, 'split_audio_if_needed', lambda f, **kw: [str(audio)])
+    monkeypatch.setattr(A, 'prepare_audio_for_whisper', lambda f, **kw: [str(audio)])
     monkeypatch.setattr(A, '_transcribe_chunks',
                         lambda *a, **kw: calls.append(a) or ('text', []))
 
@@ -1448,7 +1448,7 @@ def test_billing_uses_the_size_estimate_when_ffprobe_fails(trial_on, monkeypatch
     audio = tmp_path / 'ep.mp3'
     audio.write_bytes(b'\0' * (40 * 1024 * 1024))   # ~40 min at 1 MB/min
     monkeypatch.setattr(A, 'probe_audio_duration', lambda f: None)
-    monkeypatch.setattr(A, 'split_audio_if_needed', lambda f, **kw: [str(audio)])
+    monkeypatch.setattr(A, 'prepare_audio_for_whisper', lambda f, **kw: [str(audio)])
     monkeypatch.setattr(A, '_transcribe_chunks', lambda *a, **kw: ('text', []))
 
     with A.app.app_context():
@@ -1693,9 +1693,9 @@ def test_an_errored_task_cannot_be_resurrected(trial_on):
 
 
 def test_a_task_swept_during_splitting_never_reaches_whisper(trial_on, monkeypatch, tmp_path):
-    """The window the second review found: the sweeper fires while pydub is
-    exporting chunks (no timeout there), and the worker's post-split status
-    write erased the verdict before the per-chunk check ran."""
+    """The window the second review found: the sweeper fires while the audio
+    is being re-encoded, and the worker's post-split status write erased the
+    verdict before the per-chunk check ran."""
     from models import db, TranscriptionTask
 
     uid = _make_user('sweptsplit@test.com', limit=3600)
@@ -1710,7 +1710,7 @@ def test_a_task_swept_during_splitting_never_reaches_whisper(trial_on, monkeypat
         return [str(audio)]
 
     monkeypatch.setattr(A, 'probe_audio_duration', lambda f: 600.0)
-    monkeypatch.setattr(A, 'split_audio_if_needed', sweep_during_split)
+    monkeypatch.setattr(A, 'prepare_audio_for_whisper', sweep_during_split)
     monkeypatch.setattr(A, '_transcribe_chunks',
                         lambda *a, **kw: sent.append(a) or ('text', []))
 
@@ -1741,7 +1741,7 @@ def test_a_job_that_dies_before_the_first_chunk_is_fully_refunded(trial_on, monk
         raise RuntimeError('connection reset before the first upload')
 
     monkeypatch.setattr(A, 'probe_audio_duration', lambda f: 600.0)
-    monkeypatch.setattr(A, 'split_audio_if_needed', lambda f, **kw: [str(audio)])
+    monkeypatch.setattr(A, 'prepare_audio_for_whisper', lambda f, **kw: [str(audio)])
     monkeypatch.setattr(A, '_transcribe_chunks', die)
 
     with A.app.app_context():
@@ -1759,7 +1759,7 @@ def test_a_job_that_dies_before_the_first_chunk_is_fully_refunded(trial_on, monk
     assert _used(uid) == 0
 
 def test_abandoning_a_task_does_not_leak_its_chunks(trial_on, monkeypatch, tmp_path):
-    """split_audio_if_needed() deletes the source, so the chunks are the only
+    """prepare_audio_for_whisper() deletes the source, so the parts are the only
     copy left. The abandonment raise once sat above the cleanup try/finally and
     stranded up to MAX_AUDIO_BYTES per occurrence."""
     from models import db, TranscriptionTask
@@ -1780,7 +1780,7 @@ def test_abandoning_a_task_does_not_leak_its_chunks(trial_on, monkeypatch, tmp_p
         return chunks
 
     monkeypatch.setattr(A, 'probe_audio_duration', lambda f: 600.0)
-    monkeypatch.setattr(A, 'split_audio_if_needed', sweep_during_split)
+    monkeypatch.setattr(A, 'prepare_audio_for_whisper', sweep_during_split)
 
     with A.app.app_context():
         A.trial_reserve(uid, 600)
@@ -2192,68 +2192,165 @@ def test_the_worker_releases_its_slot_even_if_the_app_context_fails(trial_on, mo
 
 
 # --------------------------------------------------------------------------
-# Splitting
+# Audio preparation
 # --------------------------------------------------------------------------
 
-def test_splitting_does_not_decode_the_episode(tmp_path):
-    """pydub decoded the whole file to PCM in memory and wrote a full WAV to
-    TMPDIR first -- ~1.9 GB of each for a three-hour episode, per concurrent
-    job. ffmpeg's stream copy cuts on frame boundaries and costs the chunk."""
+def _make_audio(path, seconds, bitrate='128k', frequency=440):
+    """Synthesise a real MP3 with ffmpeg. Generated rather than committed: the
+    only sample episode in the tree is untracked AND matched by .gitignore's
+    `temp_audio_*.mp3`, so a test depending on it skips everywhere but the
+    laptop it was written on."""
     import shutil
     import subprocess as sp
-
-    source = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          'temp_audio_fc603a76-8625-49bb-905e-40aa4e1a91b0.mp3')
-    if not os.path.exists(source) or not shutil.which('ffmpeg'):
-        pytest.skip('needs ffmpeg and the sample episode')
-
-    audio = tmp_path / 'ep.mp3'
-    shutil.copy(source, audio)
-    total = A.probe_audio_duration(str(audio))
-
-    chunks = A.split_audio_if_needed(str(audio), max_size_mb=2)
-    assert len(chunks) > 1, 'a 7.8 MB file was not split at a 2 MB limit'
-    assert not os.path.exists(audio), 'the source was left behind'
-    for c in chunks:
-        assert os.path.getsize(c) < 25 * 1024 * 1024
-
-    # The cut is lossless: the chunks account for the whole episode.
-    summed = sum(A.probe_audio_duration(c) or 0 for c in chunks)
-    assert abs(summed - total) < 1.0, f'{summed:.1f}s of chunks vs {total:.1f}s source'
+    if not shutil.which('ffmpeg'):
+        pytest.skip('needs ffmpeg')
+    sp.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi',
+            '-i', f'sine=frequency={frequency}:duration={seconds}',
+            '-b:a', bitrate, str(path)], check=True)
+    return str(path)
 
 
-def test_an_unreadable_oversize_file_says_what_went_wrong(monkeypatch, tmp_path):
-    """Uploading it anyway would fail at OpenAI's 25 MB limit with an error
-    that points at the wrong thing."""
-    audio = tmp_path / 'big.mp3'
-    audio.write_bytes(b'\0' * (30 * 1024 * 1024))
-    monkeypatch.setattr(A, 'probe_audio_duration', lambda f: None)
-    with pytest.raises(RuntimeError, match='cannot be split'):
-        A.split_audio_if_needed(str(audio), max_size_mb=24)
+def test_preparing_audio_shrinks_it_and_keeps_every_second(tmp_path):
+    """Whisper resamples to 16 kHz mono anyway, so re-encoding to that costs
+    nothing it would have used and makes most episodes a single upload."""
+    source = _make_audio(tmp_path / 'ep.mp3', 300, bitrate='192k')
+    before = os.path.getsize(source)
+    duration = A.probe_audio_duration(source)
+
+    parts = A.prepare_audio_for_whisper(source)
+
+    assert len(parts) == 1, 'a five-minute episode should not be split'
+    assert not os.path.exists(source), 'the source was left behind'
+    assert os.path.getsize(parts[0]) < before, 'output was not smaller than input'
+    assert abs(A.probe_audio_duration(parts[0]) - duration) < 1.0
 
 
-def test_a_failed_split_strands_no_chunks(monkeypatch, tmp_path):
-    """The caller only cleans up the chunks it is handed back."""
+def test_variable_input_bitrate_gives_evenly_sized_parts(tmp_path, monkeypatch):
+    """The defect stream-copying had: bytes are not proportional to time in a
+    VBR file, so time-equal cuts were not byte-equal -- a dense first half
+    produced a 27 MB part against a 24 MB target, over OpenAI's limit.
+    Re-encoding at a fixed bitrate makes size track duration by construction.
+    """
     import subprocess as sp
-    audio = tmp_path / 'big.mp3'
-    audio.write_bytes(b'\0' * (30 * 1024 * 1024))
-    monkeypatch.setattr(A, 'probe_audio_duration', lambda f: 600.0)
+    monkeypatch.setattr(A, 'SEGMENT_SECONDS', 60)
+    dense = _make_audio(tmp_path / 'dense.mp3', 60, bitrate='320k', frequency=440)
+    sparse = _make_audio(tmp_path / 'sparse.mp3', 60, bitrate='32k', frequency=200)
+    listing = tmp_path / 'list.txt'
+    listing.write_text(f"file '{dense}'\nfile '{sparse}'\n")
+    vbr = tmp_path / 'vbr.mp3'
+    sp.run(['ffmpeg', '-v', 'error', '-y', '-f', 'concat', '-safe', '0',
+            '-i', str(listing), '-c', 'copy', str(vbr)], check=True)
+    # The input really is skewed: one half is ten times the bitrate of the other.
+    assert os.path.getsize(dense) > 5 * os.path.getsize(sparse)
 
-    calls = {'n': 0}
-    real_run = sp.run
+    parts = A.prepare_audio_for_whisper(str(vbr))
+    assert len(parts) == 2, f'expected two 60s parts, got {len(parts)}'
+    sizes = sorted(os.path.getsize(p) for p in parts)
+    assert sizes[1] <= sizes[0] * 1.2, (
+        f'parts are {sizes[0]} and {sizes[1]} bytes -- output still tracks the '
+        'input bitrate, so a dense stretch can still overflow'
+    )
+    for part in parts:
+        assert os.path.getsize(part) <= A.WHISPER_MAX_UPLOAD_BYTES
 
-    def fail_on_the_second(cmd, **kw):
-        if cmd[0] == 'ffmpeg':
-            calls['n'] += 1
-            if calls['n'] == 1:
-                open(cmd[-1], 'wb').write(b'\0' * 1024)
-                return sp.CompletedProcess(cmd, 0, b'', b'')
-            raise sp.CalledProcessError(1, cmd)
-        return real_run(cmd, **kw)
 
-    monkeypatch.setattr(A.subprocess, 'run', fail_on_the_second)
-    with pytest.raises(sp.CalledProcessError):
-        A.split_audio_if_needed(str(audio), max_size_mb=24)
+def test_a_short_ffprobe_duration_does_not_drop_the_tail(tmp_path):
+    """Byte-concatenated MP3s -- how dynamic ad insertion stitches segments --
+    make ffprobe report only the first file's duration. Deriving coverage from
+    that number silently never sent the rest: 16 minutes, no error, the
+    transcript just ended."""
+    a = _make_audio(tmp_path / 'a.mp3', 120, bitrate='320k', frequency=440)
+    b = _make_audio(tmp_path / 'b.mp3', 120, bitrate='32k', frequency=200)
+    joined = tmp_path / 'joined.mp3'
+    joined.write_bytes(open(a, 'rb').read() + open(b, 'rb').read())
 
-    leftovers = [f for f in os.listdir(tmp_path) if '_chunk_' in f]
-    assert leftovers == [], f'stranded chunks: {leftovers}'
+    # ffprobe extrapolates the whole file from the leading bitrate, so it only
+    # reads short when the rate changes part-way -- exactly what stitched ad
+    # segments do.
+    reported = A.probe_audio_duration(str(joined))
+    assert reported < 200, f'fixture does not reproduce the short reading ({reported:.0f}s)'
+
+    parts = A.prepare_audio_for_whisper(str(joined))
+    covered = sum(A.probe_audio_duration(p) or 0 for p in parts)
+    assert covered > 230, (
+        f'only {covered:.0f}s of ~240s survived; ffprobe had said {reported:.0f}s'
+    )
+
+
+def test_the_segmenters_rounding_crumb_is_discarded(tmp_path, monkeypatch):
+    """An episode that is an exact multiple of the segment length leaves a
+    sub-second tail. Whisper rejects audio that short, and it would cost an
+    extra request and a phantom chunk on the progress bar."""
+    monkeypatch.setattr(A, 'SEGMENT_SECONDS', 60)
+    source = _make_audio(tmp_path / 'exact.mp3', 120)
+    parts = A.prepare_audio_for_whisper(source)
+    assert len(parts) == 2, f'expected two 60s parts, got {len(parts)}'
+    for part in parts:
+        assert os.path.getsize(part) >= A.MIN_PART_BYTES
+
+
+def test_a_crumb_is_never_the_only_part(tmp_path):
+    """Dropping short parts must not be able to return nothing at all."""
+    source = _make_audio(tmp_path / 'tiny.mp3', 1)
+    parts = A.prepare_audio_for_whisper(source)
+    assert len(parts) == 1
+
+
+def test_an_unprocessable_file_says_so_and_strands_nothing(tmp_path, monkeypatch):
+    """The old code swallowed everything and returned the source, which then
+    failed at OpenAI's 25 MB limit with an error pointing at the wrong thing."""
+    junk = tmp_path / 'junk.mp3'
+    junk.write_bytes(b'this is not audio' * 1000)
+    with pytest.raises(RuntimeError, match='could not be processed'):
+        A.prepare_audio_for_whisper(str(junk))
+    assert [f for f in os.listdir(tmp_path) if '_part_' in f] == []
+
+
+def test_a_failed_run_strands_nothing_even_though_ffmpeg_wrote_output(tmp_path, monkeypatch):
+    """`ffmpeg -y` creates and writes its output before it fails, so the part
+    in flight is never in any list we built. Cleanup has to glob."""
+    import subprocess as sp
+    source = tmp_path / 'ep.mp3'
+    source.write_bytes(b'\0' * 2048)
+    base = str(tmp_path / 'ep')
+
+    def write_then_fail(cmd, **kw):
+        open(f'{base}_part_000.mp3', 'wb').write(b'\0' * (12 * 1024 * 1024))
+        return sp.CompletedProcess(cmd, 1, b'', b'ffmpeg died mid-write')
+
+    monkeypatch.setattr(A.subprocess, 'run', write_then_fail)
+    with pytest.raises(RuntimeError):
+        A.prepare_audio_for_whisper(str(source))
+    leftovers = [f for f in os.listdir(tmp_path) if '_part_' in f]
+    assert leftovers == [], f'stranded parts: {leftovers}'
+
+
+def test_missing_ffmpeg_does_not_blame_the_users_file(tmp_path, monkeypatch):
+    """"The file may be corrupt" sent people to re-download a fine episode."""
+    import subprocess as sp
+    source = tmp_path / 'ep.mp3'
+    source.write_bytes(b'\0' * 2048)
+
+    def no_ffmpeg(cmd, **kw):
+        raise FileNotFoundError(2, 'No such file or directory', 'ffmpeg')
+
+    monkeypatch.setattr(A.subprocess, 'run', no_ffmpeg)
+    with pytest.raises(RuntimeError, match='unavailable on the server'):
+        A.prepare_audio_for_whisper(str(source))
+
+
+def test_the_disk_floor_clears_what_admission_control_admits(tmp_path):
+    """CLAUDE.md states this as a rule; a rule with no test is a comment.
+
+    The disk check reserves nothing, so every concurrent request sees the same
+    free space -- the floor has to exceed everything that can be admitted at
+    once, or four requests all pass at 2.1 GB free and then need 2 GB.
+    """
+    workers = 2                      # gunicorn --workers 2 in production
+    admitted = workers * A.MAX_CONCURRENT_TRANSCRIPTIONS
+    # A job holds its source plus the re-encoded parts before the source goes.
+    worst_case = admitted * (A.MAX_AUDIO_BYTES + A.WHISPER_MAX_UPLOAD_BYTES * 8)
+    assert A.MIN_FREE_DISK_BYTES > worst_case, (
+        f'floor {A.MIN_FREE_DISK_BYTES/1e9:.1f} GB does not clear '
+        f'{worst_case/1e9:.1f} GB of admitted work'
+    )

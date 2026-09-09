@@ -32,21 +32,13 @@ before merging, regardless of how many files the diff has.
   their outage too, so transcription is admission-controlled:
   `MAX_CONCURRENT_TRANSCRIPTIONS` per worker plus a free-disk floor, both
   checked **before** anything is reserved or written.
-- **Audio preparation must stream, never hold the episode in memory.** pydub's
-  `AudioSegment` held the whole thing as raw PCM *and* wrote a full WAV to
-  `TMPDIR` — ~1.9 GB of each for a three-hour episode, per concurrent job, on a
-  box with 4.5 GB free. ffmpeg streams; keep it that way.
-- **Part size must be proportional to duration.** `ffmpeg -c copy` cut by time,
-  but bytes are not proportional to time in a VBR file, so a dense first half
-  produced a 27 MB part against a 24 MB target. Re-encoding at a fixed bitrate
-  is what makes the size predictable — do not "optimise" it back to a copy.
-- **Never derive coverage from ffprobe's duration.** Concatenated MP3s (dynamic
-  ad insertion) report short, and 16 minutes went silently untranscribed.
-  `-f segment` walks the real stream.
-- The disk floor must exceed `workers x MAX_CONCURRENT_TRANSCRIPTIONS x
-  (MAX_AUDIO_BYTES + parts)`: the check reserves nothing, so concurrent requests
-  all see the same free space. `test_the_disk_floor_clears_what_admission_
-  control_admits` enforces it.
+- **Splitting must never decode the audio.** `ffmpeg -c copy` cuts without
+  decoding; pydub's `AudioSegment` held the whole episode as raw PCM in memory
+  *and* wrote a full WAV to `TMPDIR` — ~1.9 GB of each for a three-hour
+  episode, per concurrent job, on a box with 4.5 GB free.
+- The disk floor must exceed `workers x MAX_CONCURRENT_TRANSCRIPTIONS x 2 x
+  MAX_AUDIO_BYTES`: the check reserves nothing, so concurrent requests all see
+  the same free space. Raising `MAX_AUDIO_BYTES` means raising the floor.
 - The capacity slot tracks work in flight, not requests served: the worker
   thread releases it in a `finally`, and every refusal path hands it back. A
   leaked slot is permanent for the life of the process.
@@ -73,9 +65,9 @@ before merging, regardless of how many files the diff has.
 python -m pytest test_app.py -q
 ```
 
-Needs a venv with `requirements.txt` + `requirements-dev.txt`, and `ffmpeg` /
-`ffprobe` on PATH — several tests synthesise real audio with them. Production
-runs Python 3.12.
+Needs a venv with `requirements.txt` + `requirements-dev.txt`. On Python 3.13+
+also install `audioop-lts` — `pydub` imports the `audioop` module the stdlib
+dropped. Production runs Python 3.12.
 
 Money-path changes are expected to come with a mutation check: revert the fix,
 confirm the suite goes red. A test that stays green without the fix is not a test.
