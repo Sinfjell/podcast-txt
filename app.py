@@ -349,7 +349,12 @@ def settle_stranded_charges():
     A worker killed between reconciling a charge and settling it leaves a task
     that is already 'error' with an unsettled charge. The orphan sweep never
     revisits it -- that only looks at tasks still running -- so the user would
-    forfeit those minutes for good. Returns the number of tasks settled.
+    forfeit those minutes for good.
+
+    Returns how many stranded tasks it found, not how many it settled: both
+    gunicorn workers run this at boot and see the same rows, and the
+    conditional UPDATE inside trial_refund_task decides which one wins each.
+    The count is for logging and tests; nothing branches on it.
     """
     stranded = TranscriptionTask.query.filter(
         TranscriptionTask.status == 'error',
