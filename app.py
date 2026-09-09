@@ -162,10 +162,19 @@ def build_openai_client(key):
 
 
 def _env_minutes(name, default):
-    """Read a minutes-valued env var, falling back to `default` on junk."""
+    """Read a minutes-valued env var, falling back to `default` on junk.
+
+    Warns loudly: a typo in a spend ceiling otherwise silently restores the
+    default, which is the permissive direction if the operator meant to lower it.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
     try:
-        return max(0, int(float(os.getenv(name, default))))
+        return max(0, int(float(raw)))
     except (TypeError, ValueError):
+        app.logger.warning('%s=%r is not a number; using the default of %s minutes',
+                           name, raw, default)
         return int(default)
 
 
@@ -296,13 +305,13 @@ def trial_refund_task(task):
     # charge in between, a claim against the stale value silently matches
     # nothing and the user forfeits the allowance with no path to get it back.
     row = db.session.execute(text(
-        'SELECT user_id, trial_seconds_charged, chunk_total, chunk_index '
+        'SELECT user_id, trial_seconds_charged, chunk_total, chunk_index, trial_settled '
         'FROM transcription_tasks WHERE id = :tid'
     ), {'tid': task.id}).first()
     if row is None:
         return 0
-    user_id, charged, chunk_total, chunk_index = row
-    if not charged or charged <= 0:
+    user_id, charged, chunk_total, chunk_index, settled = row
+    if settled or not charged or charged <= 0:
         return 0
 
     if (chunk_total or 0) > 0 and chunk_index is not None:
@@ -316,7 +325,18 @@ def trial_refund_task(task):
     else:
         spent = 0  # nothing reached Whisper yet
 
-    if not _claim_task_charge(task.id, charged, spent):
+    # Settling is the claim, and it also pins the amount we read: a row whose
+    # charge moved under us (reconcile) or that someone else already settled
+    # does not match, so only one caller ever moves the balance -- and never
+    # twice, which a claim on the amount alone could not guarantee once the
+    # refund became pro-rata.
+    claimed = db.session.execute(text("""
+        UPDATE transcription_tasks
+           SET trial_seconds_charged = :spent, trial_settled = 1
+         WHERE id = :tid AND trial_settled = 0 AND trial_seconds_charged = :charged
+    """), {'tid': task.id, 'spent': spent, 'charged': charged}).rowcount == 1
+    db.session.commit()
+    if not claimed:
         return 0
     refund = charged - spent
     trial_release(user_id, refund)
@@ -331,11 +351,10 @@ def trial_reconcile_task(task_id, actual_seconds):
     spend. Raises TrialExhausted when the real length will not fit.
     """
     task = db.session.get(TranscriptionTask, task_id)
-    if not task or not task.trial_seconds_charged:
-        # NULL is an own-key task, nothing metered. Zero means the sweeper has
-        # already settled this one -- re-reserving here would charge the user
-        # for an episode that goes on to send nothing, and the TaskAbandoned
-        # path would not refund it.
+    if not task or task.trial_settled or not task.trial_seconds_charged:
+        # NULL is an own-key task, nothing metered. Settled means the sweeper
+        # got here first -- re-opening the charge would bill the user for an
+        # episode that goes on to send nothing.
         return
     reserved = int(task.trial_seconds_charged)
     actual = int(math.ceil(max(0.0, actual_seconds or 0.0)))

@@ -198,10 +198,12 @@ claims, which a caller controls.
 | `TRIAL_MAX_EPISODE_MINUTES` | `180` | Longest single episode the trial accepts. |
 | `TRIAL_UNKNOWN_ESTIMATE_MINUTES` | `30` | Reserved when a feed states no duration. |
 
-`TRIAL_GLOBAL_MINUTES` is a **lifetime ratchet, not a monthly budget** — nothing
-resets `users.trial_seconds_used`. That is deliberate: it is a hard ceiling on
-total spend, so the failure mode is "the trial stops working", never "the bill
-kept growing". At the defaults, ten accounts using their full grant exhaust it.
+`TRIAL_GLOBAL_MINUTES` is a **lifetime ceiling, not a monthly budget** — nothing
+resets it on a schedule. It counts minutes actually *spent*: a job that fails
+before transcribing gives its reservation back, so the ceiling tracks the bill
+rather than the attempts. That is deliberate — the failure mode is "the trial
+stops working", never "the bill kept growing". At the defaults, ten accounts
+using their full grant exhaust it.
 Raising the env var re-opens it.
 
 `TRIAL_MINUTES` is the default only. A per-account override lives in

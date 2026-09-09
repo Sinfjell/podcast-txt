@@ -80,9 +80,13 @@ class TranscriptionTask(db.Model):
     heartbeat_at = db.Column(db.DateTime, nullable=True)
 
     # Seconds of audio currently reserved against the owner's trial allowance.
-    # NULL for tasks run on the user's own key; 0 once a failed task has been
-    # refunded, which is also what makes the refund idempotent.
+    # NULL for tasks run on the user's own key.
     trial_seconds_charged = db.Column(db.Integer, nullable=True)
+    # Set once the charge above is final. The pro-rata refund computes a
+    # fraction OF trial_seconds_charged and then overwrites it, so a second
+    # refund would re-apply the fraction to the already-reduced value and hand
+    # back seconds that had been spent. Settling is the claim; the amount is not.
+    trial_settled = db.Column(db.Boolean, nullable=False, default=False)
 
 
 #: Columns added after the first release, applied via ALTER TABLE on startup.
@@ -100,6 +104,7 @@ TASK_COLUMN_MIGRATIONS = {
     'bytes_total': 'BIGINT',
     'heartbeat_at': 'DATETIME',
     'trial_seconds_charged': 'INTEGER',
+    'trial_settled': 'BOOLEAN NOT NULL DEFAULT 0',
 }
 
 #: Same, for the users table.

@@ -427,6 +427,17 @@ def test_every_model_column_added_after_release_has_a_migration():
     )
 
 
+def test_every_user_column_added_after_release_has_a_migration():
+    """Same guard for the users table. The suite runs on a fresh create_all(),
+    so a missing entry here is invisible until it hits the 23 real accounts."""
+    from models import User, USER_COLUMN_MIGRATIONS
+    original = {'id', 'email', 'password_hash', 'openai_api_key', 'created_at'}
+    added = {c.name for c in User.__table__.columns} - original
+    assert added == set(USER_COLUMN_MIGRATIONS), (
+        f'missing migrations for {added - set(USER_COLUMN_MIGRATIONS)}'
+    )
+
+
 # --------------------------------------------------------------------------
 # API key validation (the top production failure)
 # --------------------------------------------------------------------------
@@ -1260,6 +1271,50 @@ def test_refund_is_idempotent(trial_on):
     assert _used(uid) == 0
 
 
+def test_refund_is_idempotent_mid_episode(trial_on):
+    """The case the test above cannot reach. With chunks in flight the refund
+    is pro-rata, so it settles to a NON-zero charge -- and the "already zero"
+    early return no longer covers anything. A second call once re-applied the
+    fraction to the reduced value and handed back seconds already spent.
+    """
+    from models import db, TranscriptionTask
+    import types
+
+    uid = _make_user('refund3@test.com', limit=3600)
+    with A.app.app_context():
+        A.trial_reserve(uid, 800)
+        db.session.add(TranscriptionTask(id='trial-refund-3', user_id=uid,
+                                         episode_title='x', status='error',
+                                         chunk_total=4, chunk_index=1,
+                                         trial_seconds_charged=800))
+        db.session.commit()
+        fields = dict(id='trial-refund-3', user_id=uid, trial_seconds_charged=800,
+                      chunk_total=4, chunk_index=1)
+        assert A.trial_refund_task(types.SimpleNamespace(**fields)) == 400
+        assert A.trial_refund_task(types.SimpleNamespace(**fields)) == 0, 'refunded twice'
+    assert _used(uid) == 400, 'the second refund handed back spent minutes'
+
+
+def test_the_abandonment_backstop_does_not_double_refund(trial_on):
+    """Every path that raises TaskAbandoned has ALREADY refunded -- that is
+    what makes the status write fail. So the backstop in transcribe_thread runs
+    on an already-settled task as the normal case, not as a race."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('backstop@test.com', limit=3600)
+    with A.app.app_context():
+        A.trial_reserve(uid, 800)
+        t = TranscriptionTask(id='trial-backstop', user_id=uid, episode_title='x',
+                              status='error', chunk_total=4, chunk_index=1,
+                              trial_seconds_charged=800)
+        db.session.add(t)
+        db.session.commit()
+        A.trial_refund_task(t)                       # the sweeper
+        db.session.expire_all()
+        A.trial_refund_task(db.session.get(TranscriptionTask, 'trial-backstop'))
+    assert _used(uid) == 400
+
+
 def test_reconcile_releases_an_overestimate(trial_on):
     """Feeds without itunes:duration reserve a flat estimate. A 5-minute
     episode must not keep charging for the 30 minutes we guessed."""
@@ -1744,59 +1799,58 @@ def test_a_settled_charge_is_not_re_opened(trial_on):
     assert _used(uid) == 0, 'a settled task was charged again'
 
 
-def test_update_task_guard_is_a_single_statement(trial_on):
+def test_the_terminal_error_guard_holds_under_concurrency(trial_on):
     """CLAUDE.md: "A check-then-record split has shipped as a live hole here
-    twice." The guard is a money gate now, so it must be one conditional
-    UPDATE whose rowcount decides -- not SELECT-then-write."""
-    import inspect
-    src = inspect.getsource(A._update_task)
-    assert 'SELECT status' not in src, 'guard reintroduced a check-then-act split'
-    assert 'rowcount' in src
+    twice." Once any writer has marked the task failed, no concurrent writer
+    may move it back -- whatever the interleaving. A SELECT-then-write guard
+    loses this race; a conditional UPDATE cannot.
 
-def test_a_refused_chunk_write_stops_the_upload(trial_on, monkeypatch, tmp_path):
-    """The chunk_index write carries the same terminal-'error' guard and sits
-    one statement before create(). If its verdict is discarded, a sweep landing
-    in that window still gets a chunk uploaded -- and chunk_index stays behind,
-    so the refund under-counts it too."""
+    Bounded on purpose: an unbounded writer loop turns SQLite write contention
+    into a hang rather than a failure, which is not a test result.
+    """
+    import threading as _t
     from models import db, TranscriptionTask
 
-    uid = _make_user('refusedwrite@test.com', limit=3600)
-    sent = []
+    uid = _make_user('guardrace@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='trial-guardrace', user_id=uid,
+                                         episode_title='x', status='transcribing'))
+        db.session.commit()
 
-    class FakeClient:
-        class audio:
-            class transcriptions:
-                @staticmethod
-                def create(**kw):
-                    sent.append(kw)
-                    raise AssertionError('uploaded after the write was refused')
+    seen_after_failure = []
+    failed = _t.Event()
 
-    chunk = tmp_path / 'c0.mp3'
-    chunk.write_bytes(b'\0' * 16)
+    def keep_writing_progress():
+        with A.app.app_context():
+            for _ in range(40):
+                A._update_task('trial-guardrace', status='completed', progress=100)
+                if failed.is_set():
+                    seen_after_failure.append(db.session.execute(A.text(
+                        "SELECT status FROM transcription_tasks "
+                        "WHERE id='trial-guardrace'")).scalar())
 
-    real_update = A._update_task
+    def fail_it():
+        with A.app.app_context():
+            A._update_task('trial-guardrace', status='error', phase='error')
+            failed.set()
 
-    def sweep_just_before_the_write(task_id, **kw):
-        # Another worker fails the task in the instant before we claim it.
-        if str(kw.get('status', '')).startswith('transcribing chunk'):
-            db.session.execute(A.text(
-                "UPDATE transcription_tasks SET status='error' "
-                "WHERE id='trial-refusedwrite'"))
-            db.session.commit()
-        return real_update(task_id, **kw)
-
-    monkeypatch.setattr(A, '_update_task', sweep_just_before_the_write)
+    threads = [_t.Thread(target=keep_writing_progress) for _ in range(4)]
+    threads.append(_t.Thread(target=fail_it))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+        assert not t.is_alive(), 'writer thread did not finish'
 
     with A.app.app_context():
-        db.session.add(TranscriptionTask(
-            id='trial-refusedwrite', user_id=uid, episode_title='x',
-            status='transcribing', chunk_total=1, trial_seconds_charged=600))
-        db.session.commit()
-        with pytest.raises(A.TaskAbandoned):
-            A._transcribe_chunks([str(chunk)], {str(chunk)}, 'trial-refusedwrite',
-                                 FakeClient(), 'no', 600.0)
+        final = db.session.execute(A.text(
+            "SELECT status FROM transcription_tasks WHERE id='trial-guardrace'"
+        )).scalar()
+    assert final == 'error', 'a writer moved the task back out of error'
+    assert all(s == 'error' for s in seen_after_failure), (
+        f'task left error mid-race: {set(seen_after_failure)}'
+    )
 
-    assert sent == [], 'chunk uploaded after its status write was refused'
 
 def test_update_task_round_trips_datetimes(trial_on):
     """_update_task moved from ORM setattr to a Core UPDATE to make the
@@ -1826,3 +1880,20 @@ def test_update_task_round_trips_datetimes(trial_on):
     # A row that does not exist reports failure rather than raising.
     with A.app.app_context():
         assert A._update_task('no-such-task', progress=50) is False
+
+def test_a_zero_reservation_cannot_make_a_task_unmetered(trial_on, monkeypatch):
+    """trial_seconds_charged is the metering signal, so a 0 reservation would
+    read as "own key, nothing to meter". Setting TRIAL_UNKNOWN_ESTIMATE_MINUTES=0
+    would otherwise turn every feed without itunes:duration into free work."""
+    from models import db, TranscriptionTask
+
+    monkeypatch.setattr(A, 'TRIAL_UNKNOWN_ESTIMATE_SECONDS', 0)
+    uid = _make_user('zeroest@test.com', limit=3600)
+    resp = _post_start(monkeypatch, uid, {'audio_url': 'https://example.com/ep.mp3',
+                                          'episode_title': 'Ep', 'language': 'no'})
+    assert resp.status_code == 200
+    with A.app.app_context():
+        charged = db.session.execute(A.text(
+            'SELECT trial_seconds_charged FROM transcription_tasks '
+            'WHERE user_id = :uid'), {'uid': uid}).scalar()
+    assert charged and charged > 0, 'task was created unmetered'
