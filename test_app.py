@@ -7,11 +7,25 @@ unvalidated server-side fetch of a client-supplied URL.
 Run: pytest test_app.py
 """
 
+import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-import app as A
+# Importing app.py executes its module-level app_context block: db.create_all,
+# the ALTER TABLE migrations, the orphan sweep and a DROP TABLE. Point it at a
+# throwaway file BEFORE the import so running the suite can never touch real data.
+_TEST_DB = os.path.join(tempfile.mkdtemp(prefix='podskrift-test-'), 'test.db')
+os.environ['DATABASE_URL'] = f'sqlite:///{_TEST_DB}'
+
+import app as A  # noqa: E402 - must follow the DATABASE_URL assignment
+
+
+def test_suite_runs_against_a_throwaway_database():
+    """Guards the isolation above: a regression here silently mutates real data."""
+    assert A.app.config['SQLALCHEMY_DATABASE_URI'].endswith('test.db')
+    assert 'data/podcast.db' not in A.app.config['SQLALCHEMY_DATABASE_URI']
 
 
 class FakeTask:
@@ -88,6 +102,52 @@ def test_eta_shrinks_as_work_progresses():
     _, early = progress_at(FakeTask(chunk_total=2), 10)
     _, later = progress_at(FakeTask(chunk_total=2, chunk_index=1, progress=65), 10)
     assert later < early
+
+
+def test_stale_task_is_failed_when_its_status_is_polled():
+    """A task orphaned by a restart has a fresh heartbeat, so the boot sweep skips
+    it. The poll the waiting page makes is what must notice."""
+    from models import TranscriptionTask
+
+    with A.app.app_context():
+        from models import db
+        stale_id = 'stale-poll-test'
+        old = db.session.get(TranscriptionTask, stale_id)
+        if old:
+            db.session.delete(old)
+            db.session.commit()
+        now = datetime.now(timezone.utc)
+        db.session.add(TranscriptionTask(
+            id=stale_id, user_id=1, episode_title='x', status='transcribing',
+            phase='transcribing', progress=53, started_at=now - timedelta(hours=2),
+            heartbeat_at=now - timedelta(hours=2),
+        ))
+        db.session.commit()
+        task = db.session.get(TranscriptionTask, stale_id)
+        assert A._fail_if_stale(task) is True
+        assert task.status == 'error'
+        assert 'restarted' in task.error_message
+
+
+def test_live_task_is_not_failed():
+    from models import TranscriptionTask, db
+
+    with A.app.app_context():
+        live_id = 'live-poll-test'
+        old = db.session.get(TranscriptionTask, live_id)
+        if old:
+            db.session.delete(old)
+            db.session.commit()
+        now = datetime.now(timezone.utc)
+        db.session.add(TranscriptionTask(
+            id=live_id, user_id=1, episode_title='x', status='transcribing',
+            phase='transcribing', progress=53, started_at=now - timedelta(hours=2),
+            heartbeat_at=now,
+        ))
+        db.session.commit()
+        task = db.session.get(TranscriptionTask, live_id)
+        assert A._fail_if_stale(task) is False
+        assert task.status == 'transcribing'
 
 
 # --------------------------------------------------------------------------

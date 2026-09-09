@@ -37,10 +37,13 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'change-me-in-production')
 
-# Database
+# Database. DATABASE_URL lets tests point at a throwaway file -- importing this
+# module runs migrations and the orphan sweep, which must never touch real data.
 db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 os.makedirs(db_path, exist_ok=True)
-app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(db_path, 'podcast.db')}"
+app.config['SQLALCHEMY_DATABASE_URI'] = (
+    os.getenv('DATABASE_URL') or f"sqlite:///{os.path.join(db_path, 'podcast.db')}"
+)
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db.init_app(app)
@@ -180,6 +183,8 @@ def download_audio(url, filename, task_id):
                     f"Access denied ({status2}) for audio file. "
                     "This podcast may restrict direct downloads."
                 )
+            except requests.exceptions.RequestException as e2:
+                raise Exception(f"Failed to download audio: {e2}")
         else:
             raise Exception(f"HTTP error {status}" if status else f"HTTP error: {e}")
     except requests.exceptions.RequestException as e:
@@ -200,22 +205,20 @@ def download_audio(url, filename, task_id):
             f.write(chunk)
             downloaded += len(chunk)
             if downloaded > MAX_AUDIO_BYTES:
+                response.close()
                 raise Exception(
-                    f'Audio file exceeds the {MAX_AUDIO_BYTES // (1024 * 1024)} MB limit.'
+                    f'This episode is larger than the '
+                    f'{MAX_AUDIO_BYTES // (1024 * 1024)} MB limit Podskrift will download.'
                 )
             now = time.time()
             if now - last_db_update >= 1:
-                fields = {'bytes_downloaded': downloaded}
-                if total_size > 0:
-                    fields['download_progress'] = int((downloaded / total_size) * 100)
-                _update_task(task_id, **fields)
+                _update_task(task_id, bytes_downloaded=downloaded)
                 last_db_update = now
 
     _update_task(
         task_id,
         bytes_downloaded=downloaded,
         bytes_total=total_size or downloaded,
-        download_progress=100,
     )
     return filename
 
@@ -938,6 +941,28 @@ def _float_or_none(raw):
         return None
 
 
+def _fail_if_stale(task):
+    """Fail a task whose worker has stopped writing progress.
+
+    The boot sweep alone is not enough: a task orphaned by a restart has a
+    heartbeat only seconds old, so the sweep on that same boot skips it and
+    nothing runs again afterwards. Checking here means the page polling the
+    task is what notices, which is exactly where the user is waiting.
+    """
+    if task.status in ('completed', 'error'):
+        return False
+    if _seconds_since(task.heartbeat_at or task.started_at) <= STALE_TASK_SECONDS:
+        return False
+    task.status = 'error'
+    task.phase = 'error'
+    task.error_message = (
+        'Transcription stopped making progress, most likely because the server '
+        'restarted. Please try again.'
+    )
+    db.session.commit()
+    return True
+
+
 @app.route('/status/<task_id>')
 @login_required
 def get_status(task_id):
@@ -945,6 +970,7 @@ def get_status(task_id):
     if not task or task.user_id != current_user.id:
         return jsonify({'error': 'Task not found'}), 404
 
+    _fail_if_stale(task)
     percent, eta = compute_live_progress(task)
     elapsed = _seconds_since(task.started_at)
 
@@ -1049,7 +1075,9 @@ def history():
         (t.audio_duration / 60) * WHISPER_COST_PER_MINUTE
         for t in tasks if t.audio_duration
     )
-    return render_template('history.html', transcriptions=tasks, total_cost=total_cost)
+    return render_template('history.html', transcriptions=tasks,
+                           total_cost=total_cost,
+                           cost_per_minute=WHISPER_COST_PER_MINUTE)
 
 
 @app.route('/rss-help')
