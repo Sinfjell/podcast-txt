@@ -83,7 +83,11 @@
             font-weight: 400;
             padding: 6px 12px;
             border-radius: var(--radius-sm);
-            transition: all var(--transition);
+            /* Named, not `all`: `all` includes the inherited `visibility`, so a
+               link stayed hidden for the transition's duration after its panel
+               had already become visible -- and an element the browser considers
+               hidden cannot be focused. Focus silently stayed on the toggle. */
+            transition: color var(--transition), background var(--transition);
         }
         .nav-links a:hover { color: var(--text); background: var(--surface); }
         /* Mobile-only affordances. The desktop bar is deliberately unchanged --
@@ -422,14 +426,17 @@
                 box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
                 transform: translateY(-8px);
                 opacity: 0;
-                visibility: hidden;
-                transition: transform var(--transition), opacity var(--transition),
-                            visibility var(--transition);
+                /* Visibility is NOT transitioned and NOT set here: the script
+                   owns it. Animating it left the panel unfocusable at open (so
+                   focus never entered) and still `visible` at close (so five
+                   invisible links stayed in the tab order). The script sets it
+                   before the open transition and after the close one. */
+                transition: transform var(--transition), opacity var(--transition);
             }
+            .nav-links[hidden] { display: none; }
             .nav-links.open {
                 transform: translateY(0);
                 opacity: 1;
-                visibility: visible;
             }
             .nav-links a {
                 display: flex;
@@ -591,6 +598,15 @@
     </style>
 </head>
 <body>
+    <noscript><style>
+        /* The panel is hidden and revealed by script. Without script there is
+           nothing to reveal it, so fall back to a plain always-visible list and
+           drop the toggle that would do nothing. */
+        @media (max-width: 640px) {
+            .nav-links { position: static; opacity: 1; transform: none; padding: 8px 0; }
+            .nav-toggle, .nav-scrim { display: none !important; }
+        }
+    </style></noscript>
     <nav class="nav-bar">
         <div class="nav-inner">
             <a href="{{ url_for('index') }}" class="nav-brand">
@@ -641,9 +657,14 @@
                 <a href="{{ url_for('register') }}" class="btn btn-sm btn-ghost nav-cta">Sign up</a>
                 {% endif %}
             </div>
-            <div class="nav-scrim" id="navScrim" hidden></div>
         </div>
     </nav>
+    <!-- Outside <nav> on purpose: .nav-bar sets backdrop-filter, which makes it
+         the containing block for position:fixed descendants. Inside it, this
+         element's `inset: 56px 0 0 0` resolved against a 56px-tall box and
+         collapsed to zero height -- an invisible backdrop that closed nothing
+         and let taps through to the controls behind the open panel. -->
+    <div class="nav-scrim" id="navScrim" hidden></div>
 
     <div class="container {% block container_class %}{% endblock %} fade-in">
         {% with messages = get_flashed_messages(with_categories=true) %}
@@ -677,18 +698,49 @@
         var scrim = document.getElementById('navScrim');
         if (!toggle || !panel || !scrim) return;
 
+        var closeTimer = null;
+
+        function isMobile() {
+            return window.matchMedia('(max-width: 640px)').matches;
+        }
+
         function setOpen(open) {
+            clearTimeout(closeTimer);
+            if (open) {
+                // Reveal before animating, so the panel is focusable by the time
+                // we move focus into it -- and so the slide has something to run
+                // on. `hidden` is what keeps the links out of the tab order and
+                // out of the accessibility tree while the menu is closed.
+                panel.hidden = false;
+                void panel.offsetHeight;
+            }
             panel.classList.toggle('open', open);
             scrim.classList.toggle('open', open);
             scrim.hidden = !open;
             toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
             // Stops the page scrolling behind the panel on iOS.
             document.body.style.overflow = open ? 'hidden' : '';
+
             if (open) {
                 var first = panel.querySelector('a');
                 if (first) first.focus({ preventScroll: true });
+            } else if (isMobile()) {
+                // Hide only once the slide has finished, or it would vanish
+                // rather than animate out.
+                closeTimer = setTimeout(function () { panel.hidden = true; }, 160);
             }
         }
+
+        // Closed to begin with, but only on mobile: the desktop bar is this same
+        // element laid out in a row, and hiding it there would empty the nav.
+        function syncToViewport() {
+            if (isMobile()) {
+                if (!panel.classList.contains('open')) panel.hidden = true;
+            } else {
+                panel.hidden = false;
+            }
+        }
+        syncToViewport();
 
         toggle.addEventListener('click', function () {
             setOpen(toggle.getAttribute('aria-expanded') !== 'true');
@@ -703,7 +755,8 @@
         // Resizing past the breakpoint leaves the panel open but invisible, and
         // body scroll locked with it.
         window.addEventListener('resize', function () {
-            if (window.innerWidth > 640) setOpen(false);
+            if (!isMobile()) setOpen(false);
+            syncToViewport();
         });
     })();
     </script>

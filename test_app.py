@@ -2447,6 +2447,10 @@ def test_cancelling_stops_the_worker_at_the_next_chunk(trial_on, monkeypatch, tm
             status='transcribing', chunk_total=3, chunk_index=0,
             trial_seconds_charged=900))
         db.session.commit()
+        # _update_task would also refuse to write to a cancelled task, which
+        # would mask whether the loop's own check works. Neutralise that guard
+        # so only the check under test can stop the upload.
+        monkeypatch.setattr(A, '_update_task', lambda task_id, **kw: True)
         with pytest.raises(A.TaskAbandoned):
             A._transcribe_chunks(chunks, set(chunks), 'cancel-worker',
                                  FakeClient(), 'no', 900.0)
@@ -2597,32 +2601,132 @@ def test_a_dead_task_is_not_offered_as_resumable(trial_on):
 # --------------------------------------------------------------------------
 
 def test_the_menu_toggle_is_a_real_disclosure_control(trial_on):
-    """The old toggle was an onclick that flipped a class: nothing told
-    assistive tech it controlled anything, or whether it was open."""
+    """The old toggle was an onclick flipping a class: nothing told assistive
+    tech it controlled anything, or whether it was open."""
     body = A.app.test_client().get('/').data.decode()
     assert 'aria-expanded="false"' in body
     assert 'aria-controls="navLinks"' in body
     assert 'id="navLinks"' in body
-    assert 'id="navScrim"' in body, 'no backdrop to tap outside'
 
 
-def test_the_menu_is_dismissable_without_finding_the_toggle_again(trial_on):
-    """Backdrop click and Escape. The old menu could only be closed by hitting
-    the same small target that opened it."""
+def test_the_scrim_is_not_inside_the_blurred_nav_bar(trial_on):
+    """.nav-bar sets backdrop-filter, which makes it the containing block for
+    position:fixed descendants. With the scrim inside it, `inset: 56px 0 0 0`
+    resolved against a 56px-tall box and collapsed to zero height -- an
+    invisible backdrop that closed nothing and let taps reach the controls
+    behind the open panel. Structure, not a string: this is the defect.
+    """
     body = A.app.test_client().get('/').data.decode()
-    assert "scrim.addEventListener('click'" in body
-    assert "e.key === 'Escape'" in body
-    assert "window.addEventListener('resize'" in body, (
-        'resizing past the breakpoint would strand the scroll lock'
+    assert 'id="navScrim"' in body, 'no backdrop at all'
+    nav_open = body.index('<nav class="nav-bar">')
+    nav_close = body.index('</nav>', nav_open)
+    assert 'navScrim' not in body[nav_open:nav_close], (
+        'the scrim is inside <nav>, whose backdrop-filter collapses it to 0 height'
+    )
+
+
+def test_the_menu_panel_is_hidden_by_an_attribute_not_by_opacity(trial_on):
+    """Two browser-verified defects came from animating visibility: the panel
+    was still hidden when the script focused its first link (focus never moved),
+    and still visible after closing (five invisible links left in the tab
+    order). The script owns `hidden` now, and CSS must not animate visibility.
+
+    This asserts the mechanism, not the runtime behaviour -- there is no browser
+    harness in this repo, so "focus lands inside the panel" and "no links are
+    tabbable when closed" are verified by driving a real browser, and only the
+    code that produces them is pinned here.
+    """
+    body = A.app.test_client().get('/').data.decode()
+    assert '.nav-links[hidden] { display: none; }' in body
+    # The deferred hide specifically: hiding immediately would make the panel
+    # vanish instead of sliding out, and not hiding at all is the defect.
+    assert 'closeTimer = setTimeout(function () { panel.hidden = true; }' in body
+    assert 'panel.hidden = false;' in body, 'nothing reveals the panel on open'
+    # A declaration, not the word: the comments explaining this defect mention
+    # visibility, and matching those would make the test unfailable.
+    import re as _re
+    mobile = body[body.index('@media (max-width: 640px)'):]
+    panel_rules = mobile[:mobile.index('@media (prefers-reduced-motion')]
+    assert not _re.search(r'visibility\s*:', panel_rules), (
+        'visibility is declared in the mobile nav rules again, where animating '
+        'it broke focus on open and the tab order on close'
+    )
+
+
+def test_menu_links_do_not_transition_every_property(trial_on):
+    """`transition: all` on the links included the inherited `visibility`, so a
+    link stayed unfocusable for 150ms after its panel was already visible --
+    which is why focus silently stayed on the toggle."""
+    body = A.app.test_client().get('/').data.decode()
+    nav_css = body[body.index('.nav-links a {'):body.index('.nav-links a:hover')]
+    assert 'transition: all' not in nav_css, (
+        'the links transition `all` again, which includes visibility'
+    )
+
+
+def test_the_menu_degrades_without_javascript(trial_on):
+    """The panel is revealed by script, so with script off there is nothing to
+    reveal it -- and the toggle would do nothing."""
+    body = A.app.test_client().get('/').data.decode()
+    assert '<noscript>' in body
+    noscript = body[body.index('<noscript>'):body.index('</noscript>')]
+    assert 'position: static' in noscript
+    assert '.nav-toggle, .nav-scrim { display: none !important; }' in noscript
+
+
+def test_the_stop_button_handler_is_reachable_from_its_onclick(trial_on):
+    """The whole script is an IIFE and the button uses an inline onclick, so a
+    plain `function cancelTranscription()` is invisible to it -- the button
+    threw ReferenceError and did nothing. copyTranscript is exported for
+    exactly this reason; this one was not.
+    """
+    uid = _make_user('stopbtn@test.com')
+    from models import db, TranscriptionTask
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='stop-btn', user_id=uid,
+                                         episode_title='x', status='transcribing'))
+        db.session.commit()
+    body = _login(uid).get('/transcription/stop-btn').data.decode()
+
+    import re as _re
+    handlers = _re.findall(r'onclick="(\w+)\(', body)
+    exported = set(_re.findall(r'window\.(\w+)\s*=', body))
+    for name in handlers:
+        assert name in exported, (
+            f'{name}() is called from an inline onclick but never reaches the '
+            'global scope -- clicking it throws ReferenceError'
+        )
+
+
+def test_a_cancelled_task_stops_being_polled(trial_on):
+    """'cancelled' is terminal, but the poll loop only knew about completed and
+    error, so it kept hitting /status forever -- and every hit runs the stale
+    sweeper."""
+    uid = _make_user('pollstop@test.com')
+    from models import db, TranscriptionTask
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='poll-stop', user_id=uid,
+                                         episode_title='x', status='cancelled'))
+        db.session.commit()
+    body = _login(uid).get('/transcription/poll-stop').data.decode()
+    assert 'function isTerminal(' in body
+    assert "status === 'cancelled'" in body
+    assert "d.status !== 'completed' && d.status !== 'error'" not in body, (
+        'the poll still has its own idea of terminal, which drifted from the UI'
     )
 
 
 def test_the_mobile_menu_extras_are_hidden_on_desktop(trial_on):
-    """"Ingen regresjon på desktop-navigasjonen": the icons, the separator and
-    the extra home link are mobile affordances, so they must be display:none
-    outside the breakpoint."""
+    """"Ingen regresjon på desktop-navigasjonen": icons, separator and the extra
+    home link are mobile affordances, so they are display:none outside the
+    breakpoint. Verified in a real browser at 1280x900 as well -- there is no
+    browser harness in this repo, so that half cannot run in CI."""
     body = A.app.test_client().get('/').data.decode()
     assert '.nav-icon, .nav-sep, .nav-mobile-only { display: none; }' in body
+    # And the rules that re-show them live only inside the mobile media query.
+    mobile = body[body.index('@media (max-width: 640px)'):]
+    assert '.nav-icon { display: block;' in mobile
+    assert '.nav-mobile-only { display: flex; }' in mobile
 
 
 def test_the_logged_in_menu_offers_the_account_pages(trial_on):
@@ -2631,3 +2735,104 @@ def test_the_logged_in_menu_offers_the_account_pages(trial_on):
     for label in ('New transcript', 'Feeds', 'History', 'Settings', 'Log out'):
         assert label in body, f'{label} missing from the menu'
     assert 'nav-sep' in body, 'log out is not separated from the rest'
+
+def test_cancelling_cannot_overwrite_a_finished_transcript(trial_on, monkeypatch):
+    """The race the review reproduced: cancel read the row, the worker completed
+    inside the window, and cancel stamped 'cancelled' over it. The transcript
+    then 404'd on download and was absent from history -- paid for, unreachable.
+    """
+    from models import db, TranscriptionTask
+
+    uid = _make_user('cancelrace@test.com', limit=36000)
+    with A.app.app_context():
+        A.trial_reserve(uid, 600)
+        db.session.add(TranscriptionTask(
+            id='cancel-race', user_id=uid, episode_title='x',
+            status='transcribing', chunk_total=1, chunk_index=0,
+            trial_seconds_charged=600))
+        db.session.commit()
+
+    client = _login(uid)
+    real_get = db.session.get
+
+    def complete_it_mid_request(model, ident, *a, **kw):
+        obj = real_get(model, ident, *a, **kw)
+        if ident == 'cancel-race' and complete_it_mid_request.armed:
+            complete_it_mid_request.armed = False
+            db.session.execute(A.text(
+                "UPDATE transcription_tasks SET status='completed', "
+                "transcript_text='the goods' WHERE id='cancel-race'"))
+            db.session.commit()
+        return obj
+    complete_it_mid_request.armed = True
+
+    monkeypatch.setattr(db.session, 'get', complete_it_mid_request)
+    resp = client.post('/cancel/cancel-race')
+    monkeypatch.undo()
+
+    assert resp.status_code == 409, 'cancel won a race it should have lost'
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'cancel-race')
+        assert task.status == 'completed'
+        assert task.transcript_text == 'the goods'
+
+
+def test_cancelling_a_failed_task_reports_the_failure(trial_on):
+    """Clicking Stop a moment after it broke used to say "Transcription
+    stopped", hiding why it actually failed."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('cancelfailed@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='cancel-failed', user_id=uid, episode_title='x', status='error',
+            error_message='Your OpenAI API key was rejected.'))
+        db.session.commit()
+
+    resp = _login(uid).post('/cancel/cancel-failed')
+    assert resp.status_code == 409
+    body = resp.get_json()
+    assert body['cancelled'] is False
+    assert 'rejected' in body['error']
+
+
+def test_stopping_during_a_download_aborts_it(trial_on, monkeypatch, tmp_path):
+    """Stop during the download let the whole episode download AND re-encode
+    while the UI said it had stopped -- holding a concurrency slot and disk on
+    a shared box for work nobody was waiting for."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('stopdownload@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='stop-dl', user_id=uid,
+                                         episode_title='x', status='downloading'))
+        db.session.commit()
+        # A download in progress on a task that has since been cancelled.
+        db.session.execute(A.text(
+            "UPDATE transcription_tasks SET status='cancelled' WHERE id='stop-dl'"))
+        db.session.commit()
+        assert A._update_task('stop-dl', bytes_downloaded=1024) is False, (
+            'the write that carries the cancel signal succeeded anyway'
+        )
+
+
+def test_stopping_before_the_split_aborts_it(trial_on, monkeypatch, tmp_path):
+    """Same for the re-encode, which is the CPU-hungry step."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('stopsplit@test.com')
+    audio = tmp_path / 'ep.mp3'
+    audio.write_bytes(b'\0' * 2048)
+    called = []
+    monkeypatch.setattr(A, 'probe_audio_duration', lambda f: 600.0)
+    monkeypatch.setattr(A, 'prepare_audio_for_whisper',
+                        lambda f, **kw: called.append(f) or [str(audio)])
+
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(id='stop-split', user_id=uid,
+                                         episode_title='x', status='cancelled'))
+        db.session.commit()
+        with pytest.raises(A.TaskAbandoned):
+            A.transcribe_audio(str(audio), 'stop-split', object(), language='no')
+
+    assert called == [], 'the episode was re-encoded after being cancelled'

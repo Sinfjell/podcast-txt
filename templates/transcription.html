@@ -201,19 +201,32 @@
         return ['Working', ''];
     }
 
+    function isTerminal(status) {
+        return status === 'completed' || status === 'error' || status === 'cancelled';
+    }
+
     function updateUI(d) {
         renderHeader(d);
         // Only offer Stop while there is something to stop.
-        var running = d.status !== 'completed' && d.status !== 'error'
-                      && d.status !== 'cancelled';
-        show(el('runningControls'), running);
+        show(el('runningControls'), !isTerminal(d.status));
 
         if (d.status === 'cancelled') {
             show(el('progressCard'), false);
             show(el('cancelledContainer'), true);
-            el('cancelledInfo').textContent = transcriptText
-                ? 'The text transcribed before you stopped is below.'
-                : '';
+            // Whatever was transcribed before stopping has already been paid
+            // for, so it has to be reachable -- including after a reload,
+            // where partial_text is the only place it exists.
+            var partial = d.transcript_text || d.partial_text || transcriptText || '';
+            transcriptText = partial;
+            el('transcriptPane').textContent = partial;
+            el('cancelledInfo').textContent = partial
+                ? 'The text transcribed before you stopped is below — you were only charged for that much.'
+                : 'Nothing had been transcribed yet, so nothing was charged.';
+            show(el('copyBtn'), !!partial);
+            if (partial && d.download_txt) {
+                el('downloadTxt').href = d.download_txt;
+                show(el('downloadTxt'), true);
+            }
             return;
         }
 
@@ -267,7 +280,9 @@
         }
     }
 
-    function cancelTranscription() {
+    // Exported: the button uses an inline onclick, and everything in this file
+    // lives inside an IIFE. copyTranscript below is exported for the same reason.
+    window.cancelTranscription = function () {
         if (!confirm('Stop this transcription? The audio already sent has been paid for.')) return;
         var btn = el('cancelBtn');
         btn.disabled = true;
@@ -289,7 +304,7 @@
                 btn.disabled = false;
                 btn.textContent = 'Stop';
             });
-    }
+    };
 
     function poll() {
         fetch('/status/' + taskId)
@@ -310,7 +325,7 @@
                     return;
                 }
                 updateUI(d);
-                if (d.status !== 'completed' && d.status !== 'error') {
+                if (!isTerminal(d.status)) {
                     setTimeout(poll, 2000);
                 }
             })

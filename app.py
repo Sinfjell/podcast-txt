@@ -751,7 +751,13 @@ def download_audio(url, filename, task_id):
                 )
             now = time.time()
             if now - last_db_update >= 1:
-                _update_task(task_id, bytes_downloaded=downloaded)
+                # The return value is the cancel signal: _update_task refuses to
+                # write to a task that has reached a terminal status. Without
+                # this, Stop during a download let the whole episode download and
+                # then re-encode while the UI said it had stopped -- holding a
+                # concurrency slot and disk on a shared box for nothing.
+                if not _update_task(task_id, bytes_downloaded=downloaded):
+                    raise TaskAbandoned('Task was cancelled during download.')
                 last_db_update = now
 
     _update_task(
@@ -993,13 +999,14 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
     # bills OpenAI.
     trial_reconcile_task(task_id, billable_duration)
 
-    _update_task(
+    if not _update_task(
         task_id,
         status='splitting',
         phase='splitting',
         phase_started_at=datetime.now(timezone.utc),
         progress=PHASE_SPANS['splitting'][0],
-    )
+    ):
+        raise TaskAbandoned('Task was cancelled before it could be prepared.')
     audio_chunks = prepare_audio_for_whisper(audio_file)
 
     # prepare_audio_for_whisper() removes the source once it has re-encoded it, so
@@ -1987,21 +1994,35 @@ def cancel_transcription(task_id):
     task = db.session.get(TranscriptionTask, task_id)
     if not task or task.user_id != current_user.id:
         return jsonify({'error': 'Task not found'}), 404
-    if task.status == 'completed':
-        return jsonify({'error': 'That transcription already finished.'}), 409
-    if task.status in TERMINAL_STATUSES:
-        # Already cancelled or failed: nothing to do, and saying so beats an
-        # error for a user who double-clicked.
-        return jsonify({'status': task.status, 'cancelled': True})
 
-    task.status = 'cancelled'
-    task.phase = 'cancelled'
-    task.error_message = 'Cancelled.'
+    # One conditional UPDATE, not read-then-write. A job that finished inside
+    # that window was being stamped 'cancelled' -- keeping the full charge while
+    # its transcript fell out of history and its download 404'd. Every other
+    # status write in this file has the same shape for the same reason.
+    claimed = db.session.execute(text("""
+        UPDATE transcription_tasks
+           SET status = 'cancelled', phase = 'cancelled', error_message = 'Cancelled.'
+         WHERE id = :tid AND status NOT IN ('completed', 'error', 'cancelled')
+    """), {'tid': task_id}).rowcount == 1
     db.session.commit()
+    db.session.expire(task)
+
+    if not claimed:
+        status = task.status
+        if status == 'completed':
+            return jsonify({'error': 'That transcription already finished.'}), 409
+        if status == 'error':
+            # It failed on its own. Reporting that as a cancellation would hide
+            # the reason from someone who clicked Stop a moment too late.
+            return jsonify({'status': 'error', 'cancelled': False,
+                            'error': task.error_message or 'Transcription failed.'}), 409
+        # Already cancelled -- a double-click, not an error.
+        return jsonify({'status': 'cancelled', 'cancelled': True, 'refunded_seconds': 0})
+
     refunded = trial_refund_task(task)
     app.logger.info('task %s cancelled by user %s', task_id, current_user.id)
     return jsonify({'status': 'cancelled', 'cancelled': True,
-                    'refunded_minutes': refunded // 60})
+                    'refunded_seconds': refunded})
 
 
 def active_tasks_for(user):
