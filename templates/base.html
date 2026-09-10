@@ -4,6 +4,22 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Podskrift{% endblock %}</title>
+    {% if structured_data %}<script type="application/ld+json">{{ structured_data | safe }}</script>{% endif %}
+    <meta name="description" content="{% block meta_description %}Transcribe any podcast episode to text with OpenAI Whisper. Built for Norwegian, Danish, Swedish and German podcasts, where English-first tools do worst. Search by podcast or episode, get .txt and .srt.{% endblock %}">
+    <link rel="canonical" href="{{ request.base_url }}">
+
+    {# Open Graph and Twitter cards: what a link preview shows, and what an
+       assistant reads when it is handed a bare URL with no other context. #}
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Podskrift">
+    <meta property="og:title" content="{% block og_title %}Podskrift — podcast to text{% endblock %}">
+    <meta property="og:description" content="{% block og_description %}Transcribe podcast episodes to text with OpenAI Whisper. Strong on Norwegian, Danish, Swedish and German.{% endblock %}">
+    <meta property="og:url" content="{{ request.base_url }}">
+    <meta property="og:locale" content="nb_NO">
+    <meta property="og:locale:alternate" content="en_US">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="Podskrift — podcast to text">
+    <meta name="twitter:description" content="Transcribe podcast episodes to text. Strong on Norwegian, Danish, Swedish and German.">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -813,7 +829,9 @@
             {% endif %}
         {% endwith %}
 
-        {% block content %}{% endblock %}
+        <main id="content">
+            {% block content %}{% endblock %}
+        </main>
     </div>
 
     <footer class="footer">

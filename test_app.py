@@ -3148,3 +3148,120 @@ def test_sweeping_a_stale_task_cannot_clobber_one_that_just_finished(trial_on):
         fresh = db.session.get(TranscriptionTask, 'sweep-race')
         assert fresh.status == 'completed'
         assert fresh.transcript_text == 'the goods'
+
+# --------------------------------------------------------------------------
+# AI readability
+#
+# ~25 visits a month arrive from ChatGPT with nothing on the site written for
+# an assistant. These files and this markup are what it has to read.
+# --------------------------------------------------------------------------
+
+def test_robots_txt_names_the_assistants_that_send_traffic(trial_on):
+    """There was no robots.txt at all, which leaves every crawler guessing."""
+    resp = A.app.test_client().get('/robots.txt')
+    assert resp.status_code == 200
+    assert resp.mimetype == 'text/plain'
+    body = resp.data.decode()
+    for agent in ('GPTBot', 'OAI-SearchBot', 'ChatGPT-User', 'ClaudeBot',
+                  'PerplexityBot', 'Google-Extended'):
+        assert f'User-agent: {agent}' in body, f'{agent} not addressed'
+    assert 'Sitemap: http' in body
+
+
+def test_robots_txt_keeps_crawlers_out_of_session_only_pages(trial_on):
+    """Nothing behind a login is useful to a crawler, and some of it is
+    personal -- a transcript is the user's, not the index's."""
+    body = A.app.test_client().get('/robots.txt').data.decode()
+    for path in ('/settings', '/history', '/transcription/', '/download/',
+                 '/active-jobs', '/cancel/'):
+        assert f'Disallow: {path}' in body, f'{path} is crawlable'
+
+
+def test_llms_txt_states_what_the_tool_is_for(trial_on):
+    """An assistant asked "how do I transcribe a Norwegian podcast" has to
+    infer everything from a page that is mostly a search box."""
+    resp = A.app.test_client().get('/llms.txt')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert body.startswith('# Podskrift')
+    assert '>' in body.split('\n')[2], 'no one-line summary blockquote'
+    for claim in ('Norwegian', 'Danish', 'Swedish', 'German', 'Whisper', '.srt'):
+        assert claim in body, f'{claim} missing from llms.txt'
+    # The trial length is generated, not typed, so it cannot drift from the code.
+    # Asserting the right number is present is not enough -- the FAQ is embedded
+    # in this file too, so a hardcoded figure in the prose above hid behind the
+    # generated one in the FAQ. Every figure in the file has to agree.
+    import re as _re
+    figures = {int(n) for n in _re.findall(r'(\d+) minutes of audio free', body)}
+    assert figures == {A.TRIAL_DEFAULT_SECONDS // 60}, (
+        f'llms.txt quotes {sorted(figures)} free minutes; the configured grant is '
+        f'{A.TRIAL_DEFAULT_SECONDS // 60}'
+    )
+
+
+def test_llms_txt_and_the_page_answer_the_same_questions(trial_on):
+    """If the file says one thing and the page another, the quote and the
+    visit disagree."""
+    llms = A.app.test_client().get('/llms.txt').data.decode()
+    home = A.app.test_client().get('/').data.decode()
+    for question, _ in A.faq_entries():
+        assert question in llms, f'{question!r} missing from llms.txt'
+        assert question in home, f'{question!r} missing from the page'
+
+
+def test_the_home_page_carries_structured_data(trial_on):
+    """WebApplication, not Organization: nobody asks an assistant what
+    Podskrift is. They ask how to transcribe a podcast."""
+    import json as _json
+    import re as _re
+    body = A.app.test_client().get('/').data.decode()
+    m = _re.search(r'<script type="application/ld\+json">(.*?)</script>', body, _re.S)
+    assert m, 'no JSON-LD on the home page'
+    data = _json.loads(m.group(1))          # must be valid JSON, not just present
+    types = {node['@type'] for node in data['@graph']}
+    assert types == {'WebApplication', 'FAQPage'}, types
+
+    app_node = next(n for n in data['@graph'] if n['@type'] == 'WebApplication')
+    assert 'no' in app_node['inLanguage'], 'Norwegian missing from inLanguage'
+    assert app_node['offers']['price'] == '0'
+
+    faq_node = next(n for n in data['@graph'] if n['@type'] == 'FAQPage')
+    assert len(faq_node['mainEntity']) == len(A.faq_entries())
+
+    # Every answer in the schema is one a visitor can actually read. Compared
+    # against the page WITHOUT the JSON-LD block: the schema lives in the same
+    # document, so checking it against the whole body compared it to itself.
+    visible = body[:m.start()] + body[m.end():]
+    for entry in faq_node['mainEntity']:
+        assert entry['acceptedAnswer']['text'] in visible, (
+            f'the schema answers {entry["name"]!r} with text that is nowhere on the page'
+        )
+
+
+def test_the_sitemap_lists_the_public_pages(trial_on):
+    resp = A.app.test_client().get('/sitemap.xml')
+    assert resp.status_code == 200
+    assert resp.mimetype == 'application/xml'
+    from xml.etree import ElementTree
+    root = ElementTree.fromstring(resp.data)          # must parse
+    locs = [e.text for e in root.iter('{http://www.sitemaps.org/schemas/sitemap/0.9}loc')]
+    assert any(u.endswith('/') for u in locs)
+    assert any(u.endswith('/rss-help') for u in locs)
+    assert any(u.endswith('/register') for u in locs)
+    assert not any('/settings' in u or '/history' in u for u in locs), (
+        'a session-only page is in the sitemap'
+    )
+
+
+def test_the_page_says_what_it_is_before_asking_for_anything(trial_on):
+    """The hero used to lead with "bring your own API key" -- a credential
+    request before any value was shown, and 99.4% of visitors left."""
+    body = A.app.test_client().get('/').data.decode()
+    assert 'bring your own API key, completely free' not in body
+    assert 'Paste your OpenAI API key' not in body, (
+        'the how-it-works steps still describe the pre-trial flow'
+    )
+    assert 'Norwegian, Danish, Swedish and German' in body
+    assert 'meta name="description"' in body
+    assert 'og:title' in body
+    assert '<main id="content">' in body, 'no main landmark for anything to orient on'

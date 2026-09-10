@@ -27,7 +27,8 @@ if not os.path.exists(certifi.where()):
     if _sys_ca and os.path.exists(_sys_ca):
         os.environ.setdefault('REQUESTS_CA_BUNDLE', _sys_ca)
         os.environ.setdefault('SSL_CERT_FILE', _sys_ca)
-from flask import Flask, render_template, request, jsonify, send_file, flash, redirect, url_for
+from flask import (Flask, render_template, request, jsonify, send_file, flash,
+                   redirect, url_for, Response)
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from urllib.parse import urljoin, urlparse
 import uuid
@@ -1599,7 +1600,9 @@ def index():
         ).order_by(SavedFeed.created_at.desc()).limit(5).all()
     return render_template('index.html', saved_feeds=saved_feeds,
                            languages=SUPPORTED_LANGUAGES,
-                           trial=_trial_context())
+                           trial=_trial_context(),
+                           faq=faq_entries(),
+                           structured_data=_structured_data())
 
 
 @app.route('/parse_rss', methods=['POST'])
@@ -2164,6 +2167,236 @@ def history():
     return render_template('history.html', transcriptions=tasks,
                            total_cost=total_cost,
                            cost_per_minute=WHISPER_COST_PER_MINUTE)
+
+
+#: The languages the wedge is built on. Every transcription that has ever
+#: succeeded here was Norwegian, Danish or German -- Whisper is strong on them
+#: and the English-first tooling is not. Stated in one place so the page copy,
+#: the schema and llms.txt cannot drift apart.
+SUPPORTED_LANGUAGE_NAMES = [
+    ('Norwegian', 'norsk'),
+    ('Danish', 'dansk'),
+    ('Swedish', 'svenska'),
+    ('German', 'Deutsch'),
+    ('Dutch', 'Nederlands'),
+    ('French', 'français'),
+    ('Spanish', 'español'),
+    ('English', 'English'),
+]
+
+def faq_entries():
+    """Answered on the page, in the schema and in llms.txt.
+
+    These are the questions people actually put to a search box or an assistant
+    -- "hvordan transkribere en podcast" is the query, not "what is Podskrift".
+
+    Built at call time, not as a constant, so the trial length always matches
+    TRIAL_DEFAULT_SECONDS. A first version hardcoded 60 minutes and would have
+    kept saying so after the grant changed.
+    """
+    minutes = TRIAL_DEFAULT_SECONDS // 60
+    hourly = f'${60 * WHISPER_COST_PER_MINUTE:.2f}'
+    return [
+        ('How do I transcribe a podcast episode to text?',
+         'Search for the podcast or the episode by name, pick the episode, and Podskrift '
+         'downloads the audio and transcribes it with OpenAI Whisper. You get the full text '
+         'plus an .srt subtitle file. No file to upload and no feed URL to find first.'),
+        ('Hvordan transkriberer jeg en norsk podcast til tekst?',
+         'Søk opp podkasten eller episoden på navn, velg episoden, og Podskrift laster ned '
+         'lyden og transkriberer den med OpenAI Whisper. Du får hele teksten og en .srt-fil '
+         'med teksting. Norsk, dansk og svensk er det den er bygget for.'),
+        ('Which languages does it handle well?',
+         'Norwegian, Danish, Swedish and German are the ones it is built around, and you can '
+         'pick the language explicitly so Whisper does not guess wrong on a short clip. Dutch, '
+         'French, Spanish and English work too. Auto-detect is available.'),
+        ('Is it free?',
+         f'New accounts get {minutes} minutes of audio free, on our OpenAI key. After that '
+         'you add your own OpenAI API key and pay OpenAI directly at their rate -- about '
+         f'{hourly} per hour of audio. There is no subscription.'),
+        ('Do I need an OpenAI API key?',
+         'Not to start. The free trial runs on ours. Add your own key when the trial runs out '
+         'and there is no limit beyond what you spend at OpenAI.'),
+        ('What file formats do I get?',
+         'Plain text (.txt) and SubRip subtitles (.srt) with timestamps.'),
+        ('Can I transcribe a podcast that is not in the search index?',
+         'Yes. Paste the RSS feed URL instead and pick the episode from the feed.'),
+    ]
+
+
+def _structured_data():
+    """JSON-LD for the home page.
+
+    WebApplication rather than Organization: nobody asks an assistant "what is
+    Podskrift". They ask how to transcribe a Norwegian podcast, and the answer
+    is a tool. FAQPage carries the same answers the page shows, so what gets
+    quoted is what a visitor actually reads.
+    """
+    import json as _json
+    home = url_for('index', _external=True)
+    data = {
+        '@context': 'https://schema.org',
+        '@graph': [
+            {
+                '@type': 'WebApplication',
+                '@id': home + '#app',
+                'name': 'Podskrift',
+                'url': home,
+                'applicationCategory': 'MultimediaApplication',
+                'operatingSystem': 'Any (web browser)',
+                'description': (
+                    'Transcribes podcast episodes to text using OpenAI Whisper. Built for '
+                    'Nordic and German-language podcasts, which English-first transcription '
+                    'tools handle worst. Search a podcast or episode by name, pick the '
+                    'episode, and get plain text and timestamped subtitles.'
+                ),
+                'inLanguage': [code for code in VALID_LANGUAGE_CODES if code],
+                'featureList': [
+                    'Search podcasts and individual episodes by name',
+                    'Transcribe to plain text (.txt)',
+                    'Transcribe to SubRip subtitles (.srt) with timestamps',
+                    'Choose the spoken language or auto-detect',
+                    'Transcription continues after you leave the page',
+                ],
+                'offers': {
+                    '@type': 'Offer',
+                    'price': '0',
+                    'priceCurrency': 'USD',
+                    'description': (
+                        f'{TRIAL_DEFAULT_SECONDS // 60} minutes of audio free on signup. '
+                        'After that, bring your own OpenAI API key and pay OpenAI directly '
+                        'at their rate. No subscription.'
+                    ),
+                },
+                'provider': {
+                    '@type': 'Organization',
+                    'name': 'Nettsmed',
+                    'url': 'https://nettsmed.no',
+                },
+            },
+            {
+                '@type': 'FAQPage',
+                '@id': home + '#faq',
+                'mainEntity': [
+                    {
+                        '@type': 'Question',
+                        'name': question,
+                        'acceptedAnswer': {'@type': 'Answer', 'text': answer},
+                    }
+                    for question, answer in faq_entries()
+                ],
+            },
+        ],
+    }
+    return _json.dumps(data, ensure_ascii=False, indent=2)
+
+
+@app.route('/robots.txt')
+def robots_txt():
+    """Explicit crawler policy.
+
+    There was no robots.txt at all, which leaves every crawler guessing. The
+    assistant referrals are a real channel here -- roughly 25 visits a month
+    arrive from ChatGPT with nothing on the site written for them -- so the
+    bots behind that channel are allowed by name rather than by omission.
+    """
+    lines = [
+        '# Podskrift -- podcast transcription',
+        '# Full policy and a plain-language summary of the site: /llms.txt',
+        '',
+        'User-agent: *',
+        'Allow: /',
+        '',
+        '# Nothing here is useful without a session, and some of it is personal.',
+        'Disallow: /settings',
+        'Disallow: /history',
+        'Disallow: /feeds',
+        'Disallow: /transcription/',
+        'Disallow: /download/',
+        'Disallow: /status/',
+        'Disallow: /active-jobs',
+        'Disallow: /cancel/',
+        '',
+        '# Assistants that send real traffic, allowed explicitly.',
+    ]
+    for agent in ('GPTBot', 'OAI-SearchBot', 'ChatGPT-User', 'ClaudeBot', 'Claude-Web',
+                  'anthropic-ai', 'PerplexityBot', 'Perplexity-User', 'Google-Extended',
+                  'Applebot-Extended', 'CCBot'):
+        lines += [f'User-agent: {agent}', 'Allow: /', '']
+    lines.append(f'Sitemap: {url_for("sitemap_xml", _external=True)}')
+    return Response('\n'.join(lines) + '\n', mimetype='text/plain')
+
+
+@app.route('/llms.txt')
+def llms_txt():
+    """A plain-Markdown description of the site for language models.
+
+    The homepage is a search box: it says almost nothing about what the tool
+    does, which languages it is good at, or what it costs. An assistant asked
+    "how do I transcribe a Norwegian podcast" has to infer all of that. This
+    states it.
+    """
+    languages = ', '.join(f'{en} ({native})' if en != native else en
+                          for en, native in SUPPORTED_LANGUAGE_NAMES)
+    faq = '\n\n'.join(f'**{q}**\n\n{a}' for q, a in faq_entries())
+    body = f"""# Podskrift
+
+> Transcribes podcast episodes to text using OpenAI Whisper. Built for Nordic
+> and German-language podcasts, which English-first transcription tools handle
+> worst.
+
+Podskrift is a free web tool. You search for a podcast or an individual episode
+by name, pick the episode, and it downloads the audio and returns the full
+transcript plus timestamped subtitles. There is no file to upload and no RSS
+feed to track down first -- though you can paste a feed URL if the podcast is
+not in the search index.
+
+Made by Nettsmed (Fjellestad AS), Kristiansand, Norway.
+
+## What it does
+- Search podcast catalogues by show name or by individual episode title
+- Transcribe an episode to plain text (.txt) and SubRip subtitles (.srt)
+- Pick the spoken language explicitly, or let Whisper detect it
+- Follow progress live; the job keeps running if you close the page
+
+## Languages
+{languages}
+
+Norwegian, Danish, Swedish and German are what it is built around.
+
+## What it costs
+New accounts get {TRIAL_DEFAULT_SECONDS // 60} minutes of audio free on Podskrift's own OpenAI key.
+After that you add your own OpenAI API key and pay OpenAI directly -- roughly
+USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscription and no per-seat pricing.
+
+## Pages
+- [Home]({url_for('index', _external=True)}): search, pick an episode, transcribe
+- [How to find an RSS feed]({url_for('rss_help', _external=True)}): for podcasts outside the search index
+- [Sign up]({url_for('register', _external=True)}): free account, 60 trial minutes
+
+## Frequently asked
+
+{faq}
+
+## Contact
+Nettsmed -- https://nettsmed.no
+"""
+    return Response(body, mimetype='text/plain; charset=utf-8')
+
+
+@app.route('/sitemap.xml')
+def sitemap_xml():
+    """The three pages worth indexing. Everything else needs a session."""
+    from xml.sax.saxutils import escape
+    pages = [url_for('index', _external=True),
+             url_for('rss_help', _external=True),
+             url_for('register', _external=True)]
+    today = datetime.now(timezone.utc).date().isoformat()
+    urls = '\n'.join(
+        f'  <url><loc>{escape(u)}</loc><lastmod>{today}</lastmod></url>' for u in pages)
+    xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+           '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+           f'{urls}\n</urlset>\n')
+    return Response(xml, mimetype='application/xml')
 
 
 @app.route('/rss-help')
