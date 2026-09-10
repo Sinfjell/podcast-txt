@@ -3262,7 +3262,14 @@ def test_the_page_says_what_it_is_before_asking_for_anything(trial_on):
     assert 'Paste your OpenAI API key' not in body, (
         'the how-it-works steps still describe the pre-trial flow'
     )
-    assert 'Norwegian, Danish, Swedish and German' in body
+    # The page leads with what it does for anyone, not with a language fence.
+    # An earlier version read "Built for Norwegian, Danish, Swedish and German",
+    # which was survivorship bias: the three transcriptions that succeeded were
+    # Nordic/German because those three users happened to have a working API
+    # key. Every failure -- Norwegian, German and English alike -- was a 401 or
+    # a 429. Language never came into it.
+    assert 'Built for\n        Norwegian, Danish, Swedish and German' not in body
+    assert f'{len(A.SUPPORTED_LANGUAGES) - 1} languages' in body
     assert 'meta name="description"' in body
     assert 'og:title' in body
     assert '<main id="content">' in body, 'no main landmark for anything to orient on'
@@ -3379,3 +3386,41 @@ def test_structured_data_cannot_break_out_of_its_script_tag(trial_on, monkeypatc
     assert '<' not in raw and '>' not in raw
     import json as _json
     _json.loads(raw)          # still valid JSON after escaping
+
+def test_the_language_picker_is_not_limited_to_the_founders_market(trial_on):
+    """Whisper handles far more than the nine languages that shipped first --
+    a list chosen from whoever happened to have signed up. The product is for
+    anyone with a podcast in any language."""
+    codes = {code for code, _ in A.SUPPORTED_LANGUAGES if code}
+    assert len(codes) >= 25, f'only {len(codes)} languages offered'
+    # The biggest podcast markets in the world, plus the ones nobody else does well.
+    for code in ('en', 'es', 'pt', 'zh', 'hi', 'ar', 'ja', 'de', 'fr', 'ru',
+                 'no', 'uk', 'vi', 'id', 'tr'):
+        assert code in codes, f'{code} missing from the picker'
+    assert '' == A.SUPPORTED_LANGUAGES[0][0], 'auto-detect is not first'
+
+
+def test_every_offered_language_has_an_english_name(trial_on):
+    """llms.txt and the schema render English names; a code with no name would
+    silently drop out of both."""
+    codes = {code for code, _ in A.SUPPORTED_LANGUAGES if code}
+    assert set(A.LANGUAGE_ENGLISH_NAMES) == codes
+    # Derived from one list, so the picker and the machine-readable copy cannot
+    # disagree about what is on offer.
+    llms = A.app.test_client().get('/llms.txt').data.decode()
+    for name in ('Norwegian', 'Ukrainian', 'Vietnamese', 'Japanese'):
+        assert name in llms, f'{name} missing from llms.txt'
+
+
+def test_the_picker_is_ordered_so_a_long_list_stays_findable(trial_on):
+    """Twenty-eight options ordered by who signed up first is a list nobody can
+    use. Alphabetical by English name, after auto-detect."""
+    named = [(code, english) for code, _, english in A.SUPPORTED_LANGUAGES_FULL if code]
+    assert [e for _, e in named] == sorted(e for _, e in named)
+
+
+def test_the_page_does_not_claim_a_single_home_market(trial_on):
+    """og:locale said nb_NO on an English-language page for a worldwide tool."""
+    body = A.app.test_client().get('/').data.decode()
+    assert 'og:locale" content="en_US"' in body
+    assert 'nb_NO' not in body

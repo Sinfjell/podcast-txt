@@ -10,9 +10,10 @@
         <span style="color: var(--accent-bright);">in minutes</span>
     </h1>
     <p style="color: var(--muted); font-size: 16px; margin-top: 10px; max-width: 520px; line-height: 1.6;">
-        Search for a podcast, pick an episode, get the full transcript. Built for
-        Norwegian, Danish, Swedish and German — the languages English-first tools
-        do worst. Powered by OpenAI Whisper.{% if trial_minutes %} First {{ trial_minutes }} minutes free.{% endif %}
+        Search for a podcast, pick an episode, get the full transcript.
+        {{ languages | length - 1 }} languages, powered by OpenAI Whisper — and unusually
+        good on the ones English-first tools handle worst.{% if trial_minutes %}
+        First {{ trial_minutes }} minutes free.{% endif %}
     </p>
 </div>
 

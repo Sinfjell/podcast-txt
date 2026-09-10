@@ -194,17 +194,50 @@ PHASE_SPANS = {
 }
 
 # Languages offered in the UI. '' means let Whisper auto-detect.
-SUPPORTED_LANGUAGES = [
-    ('', 'Auto-detect'),
-    ('no', 'Norsk'),
-    ('en', 'English'),
-    ('sv', 'Svenska'),
-    ('da', 'Dansk'),
-    ('de', 'Deutsch'),
-    ('fr', 'Fran\u00e7ais'),
-    ('es', 'Espa\u00f1ol'),
-    ('nl', 'Nederlands'),
+#: Languages offered in the picker. Whisper handles far more than this, but
+#: naming a language beats auto-detect on short or accented audio, so the list
+#: is what people can actually choose from.
+#:
+#: (code, native name, English name). Alphabetical by English name after
+#: auto-detect -- a long list is only usable if it is findable, and the earlier
+#: nine-language list was ordered by who happened to have signed up.
+SUPPORTED_LANGUAGES_FULL = [
+    ('', 'Auto-detect', 'Auto-detect'),
+    ('ar', '\u0627\u0644\u0639\u0631\u0628\u064a\u0629', 'Arabic'),
+    ('zh', '\u4e2d\u6587', 'Chinese'),
+    ('cs', '\u010ce\u0161tina', 'Czech'),
+    ('da', 'Dansk', 'Danish'),
+    ('nl', 'Nederlands', 'Dutch'),
+    ('en', 'English', 'English'),
+    ('fi', 'Suomi', 'Finnish'),
+    ('fr', 'Fran\u00e7ais', 'French'),
+    ('de', 'Deutsch', 'German'),
+    ('el', '\u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac', 'Greek'),
+    ('he', '\u05e2\u05d1\u05e8\u05d9\u05ea', 'Hebrew'),
+    ('hi', '\u0939\u093f\u0928\u094d\u0926\u0940', 'Hindi'),
+    ('hu', 'Magyar', 'Hungarian'),
+    ('id', 'Bahasa Indonesia', 'Indonesian'),
+    ('it', 'Italiano', 'Italian'),
+    ('ja', '\u65e5\u672c\u8a9e', 'Japanese'),
+    ('ko', '\ud55c\uad6d\uc5b4', 'Korean'),
+    ('no', 'Norsk', 'Norwegian'),
+    ('pl', 'Polski', 'Polish'),
+    ('pt', 'Portugu\u00eas', 'Portuguese'),
+    ('ro', 'Rom\u00e2n\u0103', 'Romanian'),
+    ('ru', '\u0420\u0443\u0441\u0441\u043a\u0438\u0439', 'Russian'),
+    ('es', 'Espa\u00f1ol', 'Spanish'),
+    ('sv', 'Svenska', 'Swedish'),
+    ('th', '\u0e44\u0e17\u0e22', 'Thai'),
+    ('tr', 'T\u00fcrk\u00e7e', 'Turkish'),
+    ('uk', '\u0423\u043a\u0440\u0430\u0457\u043d\u0441\u044c\u043a\u0430', 'Ukrainian'),
+    ('vi', 'Ti\u1ebfng Vi\u1ec7t', 'Vietnamese'),
 ]
+
+#: (code, native name) -- what the picker renders.
+SUPPORTED_LANGUAGES = [(code, native) for code, native, _ in SUPPORTED_LANGUAGES_FULL]
+#: code -> English name, for llms.txt and the schema. Derived, so the two
+#: cannot drift: an earlier version kept a second hand-written list.
+LANGUAGE_ENGLISH_NAMES = {code: english for code, _, english in SUPPORTED_LANGUAGES_FULL if code}
 VALID_LANGUAGE_CODES = {code for code, _ in SUPPORTED_LANGUAGES}
 
 
@@ -2187,17 +2220,6 @@ def history():
                            cost_per_minute=WHISPER_COST_PER_MINUTE)
 
 
-#: The languages the wedge is built on. Every transcription that has ever
-#: succeeded here was Norwegian, Danish or German -- Whisper is strong on them
-#: and the English-first tooling is not. Stated in one place so the page copy,
-#: the schema and llms.txt cannot drift apart.
-#: English name for each code in SUPPORTED_LANGUAGES. Keyed off that list so
-#: the two cannot drift -- a previous version duplicated the whole thing.
-LANGUAGE_ENGLISH_NAMES = {
-    'no': 'Norwegian', 'da': 'Danish', 'sv': 'Swedish', 'de': 'German',
-    'nl': 'Dutch', 'fr': 'French', 'es': 'Spanish', 'en': 'English',
-}
-
 def faq_entries():
     """Answered on the page, in the schema and in llms.txt.
 
@@ -2233,11 +2255,12 @@ def faq_entries():
         ('Hvordan transkriberer jeg en norsk podcast til tekst?',
          'Søk opp podkasten eller episoden på navn, velg episoden, og Podskrift laster ned '
          'lyden og transkriberer den med OpenAI Whisper. Du får hele teksten og en .srt-fil '
-         'med teksting. Norsk, dansk og svensk er det den er bygget for.'),
+         'med teksting. Velg norsk i språkvelgeren, så slipper du at den gjetter feil.'),
         ('Which languages does it handle well?',
-         'Norwegian, Danish, Swedish and German are the ones it is built around, and you can '
-         'pick the language explicitly so Whisper does not guess wrong on a short clip. Dutch, '
-         'French, Spanish and English work too. Auto-detect is available.'),
+         f'{len(LANGUAGE_ENGLISH_NAMES)} languages, from English, Spanish and Mandarin to '
+         'Norwegian, Ukrainian and Vietnamese. You can name the language rather than relying '
+         'on auto-detect, which matters on short or accented audio. It does especially well '
+         'on Nordic and Central European languages, where English-first tools do worst.'),
         ('Is it free?', free),
         ('Do I need an OpenAI API key?', need_key),
         ('What file formats do I get?',
@@ -2268,10 +2291,11 @@ def _structured_data():
                 'applicationCategory': 'MultimediaApplication',
                 'operatingSystem': 'Any (web browser)',
                 'description': (
-                    'Transcribes podcast episodes to text using OpenAI Whisper. Built for '
-                    'Nordic and German-language podcasts, which English-first transcription '
-                    'tools handle worst. Search a podcast or episode by name, pick the '
-                    'episode, and get plain text and timestamped subtitles.'
+                    f'Transcribes podcast episodes to text using OpenAI Whisper, in '
+                    f'{len(LANGUAGE_ENGLISH_NAMES)} languages. Search any podcast or '
+                    'episode by name, pick the episode, and get plain text and timestamped '
+                    'subtitles. Unusually good on the languages English-first transcription '
+                    'tools handle worst.'
                 ),
                 # From the ordered list, not the set: iterating a set gave two
                 # gunicorn workers two different JSON-LD bodies for one URL.
@@ -2380,9 +2404,9 @@ def llms_txt():
             if trial_available() else 'You')
     body = f"""# Podskrift
 
-> Transcribes podcast episodes to text using OpenAI Whisper. Built for Nordic
-> and German-language podcasts, which English-first transcription tools handle
-> worst.
+> Transcribes podcast episodes to text using OpenAI Whisper, in {len(LANGUAGE_ENGLISH_NAMES)}
+> languages. Works with any podcast, anywhere -- and is unusually good on the
+> languages English-first transcription tools handle worst.
 
 Podskrift is a free web tool. You search for a podcast or an individual episode
 by name, pick the episode, and it downloads the audio and returns the full
@@ -2401,7 +2425,9 @@ Made by Nettsmed (Fjellestad AS), Kristiansand, Norway.
 ## Languages
 {languages}
 
-Norwegian, Danish, Swedish and German are what it is built around.
+Auto-detect is available, but naming the language beats it on short or accented
+audio. Nordic and Central European languages are where this does best relative
+to English-first tools -- not the only ones it handles.
 
 ## What it costs
 {cost} add your own OpenAI API key and pay OpenAI directly -- roughly
