@@ -182,6 +182,12 @@ The app includes a comprehensive help guide for finding RSS feeds from:
   trial is off; users must add their own key. See "Free trial" below.
 - `SECRET_KEY` — Flask session key. Set it in production.
 - `DATABASE_URL` — SQLAlchemy URL. Defaults to `sqlite:///data/podcast.db`.
+- `PUBLIC_BASE_URL` — the canonical public origin, e.g. `https://podskrift.com`.
+  **Set this in production.** Without it, absolute URLs are built from the
+  request, which behind Plesk's nginx means `http://` on an `https` site — so
+  the canonical link, the sitemap and the JSON-LD would all point at URLs that
+  redirect. Deliberately not derived from `X-Forwarded-Proto`: those headers are
+  only as trustworthy as the proxy stripping them.
 
 ### Free trial
 
@@ -262,6 +268,19 @@ OpenAI account as well — that one still holds if this code has a bug.
 - **OpenAI Limit**: 25MB per audio file
 - **Auto-Splitting**: Files larger than 24MB are split automatically
 - **Chunk Size**: Optimal chunk duration for best transcription quality
+
+### Discoverability
+
+`/robots.txt`, `/llms.txt` and `/sitemap.xml` are generated, not static files.
+The trial length and the hourly rate in them come from `TRIAL_MINUTES` and the
+Whisper price constant, and the copy switches off with `trial_available()` — so
+the site never advertises a grant the app would refuse.
+
+`robots.txt` names the assistants that actually send traffic (GPTBot,
+ChatGPT-User, ClaudeBot, PerplexityBot and friends). Each named group repeats
+the full rule set: per RFC 9309 a crawler obeys **only** its most specific
+matching group and ignores `User-agent: *`, so a named group listing only
+`Allow: /` would grant those bots more access than the wildcard, not less.
 
 ## Troubleshooting
 

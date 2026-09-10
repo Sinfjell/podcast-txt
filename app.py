@@ -95,6 +95,22 @@ def load_user(user_id):
     return db.session.get(User, int(user_id))
 
 
+#: Canonical public origin. url_for(_external=True) builds from the request,
+#: which behind Plesk's nginx is http:// on an https site -- so the canonical
+#: link, the sitemap and the JSON-LD @id all pointed at URLs that 301 away.
+#: Set explicitly rather than trusting X-Forwarded-*: those headers are only as
+#: trustworthy as the proxy stripping them, and this needs no such assumption.
+PUBLIC_BASE_URL = (os.getenv('PUBLIC_BASE_URL') or '').rstrip('/')
+
+
+def public_url(endpoint, **values):
+    """Absolute URL for `endpoint`, on the configured public origin."""
+    path = url_for(endpoint, **values)
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL + path
+    return url_for(endpoint, _external=True, **values)
+
+
 # Global fallback OpenAI key
 GLOBAL_OPENAI_KEY = os.getenv('OPENAI_API_KEY')
 
@@ -1602,6 +1618,8 @@ def index():
                            languages=SUPPORTED_LANGUAGES,
                            trial=_trial_context(),
                            faq=faq_entries(),
+                           trial_minutes=(TRIAL_DEFAULT_SECONDS // 60
+                                          if trial_available() else None),
                            structured_data=_structured_data())
 
 
@@ -2173,16 +2191,12 @@ def history():
 #: succeeded here was Norwegian, Danish or German -- Whisper is strong on them
 #: and the English-first tooling is not. Stated in one place so the page copy,
 #: the schema and llms.txt cannot drift apart.
-SUPPORTED_LANGUAGE_NAMES = [
-    ('Norwegian', 'norsk'),
-    ('Danish', 'dansk'),
-    ('Swedish', 'svenska'),
-    ('German', 'Deutsch'),
-    ('Dutch', 'Nederlands'),
-    ('French', 'français'),
-    ('Spanish', 'español'),
-    ('English', 'English'),
-]
+#: English name for each code in SUPPORTED_LANGUAGES. Keyed off that list so
+#: the two cannot drift -- a previous version duplicated the whole thing.
+LANGUAGE_ENGLISH_NAMES = {
+    'no': 'Norwegian', 'da': 'Danish', 'sv': 'Swedish', 'de': 'German',
+    'nl': 'Dutch', 'fr': 'French', 'es': 'Spanish', 'en': 'English',
+}
 
 def faq_entries():
     """Answered on the page, in the schema and in llms.txt.
@@ -2196,6 +2210,21 @@ def faq_entries():
     """
     minutes = TRIAL_DEFAULT_SECONDS // 60
     hourly = f'${60 * WHISPER_COST_PER_MINUTE:.2f}'
+    # trial_available() is the predicate the code actually enforces. Copy that
+    # promises free minutes while the kill switch is on is a promise the app
+    # then refuses at /start_transcription.
+    if trial_available():
+        free = (f'New accounts get {minutes} minutes of audio free, on our OpenAI key. '
+                'After that you add your own OpenAI API key and pay OpenAI directly at '
+                f'their rate -- about {hourly} per hour of audio. There is no subscription.')
+        need_key = ('Not to start. The free trial runs on ours. Add your own key when the '
+                    'trial runs out and there is no limit beyond what you spend at OpenAI.')
+    else:
+        free = ('Podskrift itself is free. You add your own OpenAI API key and pay OpenAI '
+                f'directly at their rate -- about {hourly} per hour of audio. There is no '
+                'subscription.')
+        need_key = ('Yes. Add it in Settings; it is stored on your account and used only '
+                    'for your own transcriptions.')
     return [
         ('How do I transcribe a podcast episode to text?',
          'Search for the podcast or the episode by name, pick the episode, and Podskrift '
@@ -2209,13 +2238,8 @@ def faq_entries():
          'Norwegian, Danish, Swedish and German are the ones it is built around, and you can '
          'pick the language explicitly so Whisper does not guess wrong on a short clip. Dutch, '
          'French, Spanish and English work too. Auto-detect is available.'),
-        ('Is it free?',
-         f'New accounts get {minutes} minutes of audio free, on our OpenAI key. After that '
-         'you add your own OpenAI API key and pay OpenAI directly at their rate -- about '
-         f'{hourly} per hour of audio. There is no subscription.'),
-        ('Do I need an OpenAI API key?',
-         'Not to start. The free trial runs on ours. Add your own key when the trial runs out '
-         'and there is no limit beyond what you spend at OpenAI.'),
+        ('Is it free?', free),
+        ('Do I need an OpenAI API key?', need_key),
         ('What file formats do I get?',
          'Plain text (.txt) and SubRip subtitles (.srt) with timestamps.'),
         ('Can I transcribe a podcast that is not in the search index?',
@@ -2232,7 +2256,7 @@ def _structured_data():
     quoted is what a visitor actually reads.
     """
     import json as _json
-    home = url_for('index', _external=True)
+    home = public_url('index')
     data = {
         '@context': 'https://schema.org',
         '@graph': [
@@ -2249,7 +2273,9 @@ def _structured_data():
                     'tools handle worst. Search a podcast or episode by name, pick the '
                     'episode, and get plain text and timestamped subtitles.'
                 ),
-                'inLanguage': [code for code in VALID_LANGUAGE_CODES if code],
+                # From the ordered list, not the set: iterating a set gave two
+                # gunicorn workers two different JSON-LD bodies for one URL.
+                'inLanguage': [code for code, _ in SUPPORTED_LANGUAGES if code],
                 'featureList': [
                     'Search podcasts and individual episodes by name',
                     'Transcribe to plain text (.txt)',
@@ -2262,9 +2288,10 @@ def _structured_data():
                     'price': '0',
                     'priceCurrency': 'USD',
                     'description': (
-                        f'{TRIAL_DEFAULT_SECONDS // 60} minutes of audio free on signup. '
-                        'After that, bring your own OpenAI API key and pay OpenAI directly '
-                        'at their rate. No subscription.'
+                        (f'{TRIAL_DEFAULT_SECONDS // 60} minutes of audio free on signup. '
+                         'After that, bring ' if trial_available() else 'Bring ')
+                        + 'your own OpenAI API key and pay OpenAI directly at their rate. '
+                          'No subscription.'
                     ),
                 },
                 'provider': {
@@ -2287,7 +2314,11 @@ def _structured_data():
             },
         ],
     }
-    return _json.dumps(data, ensure_ascii=False, indent=2)
+    # json.dumps does not escape '<', so the first dynamic value to reach this
+    # -- a podcast title from RSS, say -- would break out of the <script> block.
+    # Everything here is a constant today; this costs nothing and stops that.
+    return (_json.dumps(data, ensure_ascii=False, indent=2)
+            .replace('<', '\\u003c').replace('>', '\\u003e'))
 
 
 @app.route('/robots.txt')
@@ -2299,6 +2330,10 @@ def robots_txt():
     arrive from ChatGPT with nothing on the site written for them -- so the
     bots behind that channel are allowed by name rather than by omission.
     """
+    disallow = ['Disallow: ' + path for path in (
+        '/settings', '/history', '/feeds', '/transcription/', '/download/',
+        '/status/', '/active-jobs', '/cancel/',
+    )]
     lines = [
         '# Podskrift -- podcast transcription',
         '# Full policy and a plain-language summary of the site: /llms.txt',
@@ -2307,22 +2342,20 @@ def robots_txt():
         'Allow: /',
         '',
         '# Nothing here is useful without a session, and some of it is personal.',
-        'Disallow: /settings',
-        'Disallow: /history',
-        'Disallow: /feeds',
-        'Disallow: /transcription/',
-        'Disallow: /download/',
-        'Disallow: /status/',
-        'Disallow: /active-jobs',
-        'Disallow: /cancel/',
+    ] + disallow + [
         '',
         '# Assistants that send real traffic, allowed explicitly.',
     ]
     for agent in ('GPTBot', 'OAI-SearchBot', 'ChatGPT-User', 'ClaudeBot', 'Claude-Web',
                   'anthropic-ai', 'PerplexityBot', 'Perplexity-User', 'Google-Extended',
                   'Applebot-Extended', 'CCBot'):
-        lines += [f'User-agent: {agent}', 'Allow: /', '']
-    lines.append(f'Sitemap: {url_for("sitemap_xml", _external=True)}')
+        # RFC 9309: a crawler obeys ONLY its most specific matching group and
+        # ignores `User-agent: *` entirely. A named group containing just
+        # `Allow: /` therefore told exactly the bots this file exists for that
+        # /history and /download/ were fair game -- strictly worse than not
+        # naming them. Every group repeats the rules.
+        lines += [f'User-agent: {agent}', 'Allow: /'] + disallow + ['']
+    lines.append(f'Sitemap: {public_url('sitemap_xml')}')
     return Response('\n'.join(lines) + '\n', mimetype='text/plain')
 
 
@@ -2335,9 +2368,16 @@ def llms_txt():
     "how do I transcribe a Norwegian podcast" has to infer all of that. This
     states it.
     """
-    languages = ', '.join(f'{en} ({native})' if en != native else en
-                          for en, native in SUPPORTED_LANGUAGE_NAMES)
+    languages = ', '.join(
+        f'{LANGUAGE_ENGLISH_NAMES[code]} ({native})'
+        if LANGUAGE_ENGLISH_NAMES.get(code, native) != native else native
+        for code, native in SUPPORTED_LANGUAGES if code)
     faq = '\n\n'.join(f'**{q}**\n\n{a}' for q, a in faq_entries())
+    signup_blurb = (f'free account, {TRIAL_DEFAULT_SECONDS // 60} trial minutes'
+                    if trial_available() else 'free account, bring your own OpenAI key')
+    cost = (f'New accounts get {TRIAL_DEFAULT_SECONDS // 60} minutes of audio free on '
+            "Podskrift's own OpenAI key.\nAfter that you"
+            if trial_available() else 'You')
     body = f"""# Podskrift
 
 > Transcribes podcast episodes to text using OpenAI Whisper. Built for Nordic
@@ -2364,14 +2404,13 @@ Made by Nettsmed (Fjellestad AS), Kristiansand, Norway.
 Norwegian, Danish, Swedish and German are what it is built around.
 
 ## What it costs
-New accounts get {TRIAL_DEFAULT_SECONDS // 60} minutes of audio free on Podskrift's own OpenAI key.
-After that you add your own OpenAI API key and pay OpenAI directly -- roughly
+{cost} add your own OpenAI API key and pay OpenAI directly -- roughly
 USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscription and no per-seat pricing.
 
 ## Pages
-- [Home]({url_for('index', _external=True)}): search, pick an episode, transcribe
-- [How to find an RSS feed]({url_for('rss_help', _external=True)}): for podcasts outside the search index
-- [Sign up]({url_for('register', _external=True)}): free account, 60 trial minutes
+- [Home]({public_url('index')}): search, pick an episode, transcribe
+- [How to find an RSS feed]({public_url('rss_help')}): for podcasts outside the search index
+- [Sign up]({public_url('register')}): {signup_blurb}
 
 ## Frequently asked
 
@@ -2380,19 +2419,19 @@ USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscripti
 ## Contact
 Nettsmed -- https://nettsmed.no
 """
-    return Response(body, mimetype='text/plain; charset=utf-8')
+    return Response(body, mimetype='text/plain')
 
 
 @app.route('/sitemap.xml')
 def sitemap_xml():
     """The three pages worth indexing. Everything else needs a session."""
     from xml.sax.saxutils import escape
-    pages = [url_for('index', _external=True),
-             url_for('rss_help', _external=True),
-             url_for('register', _external=True)]
-    today = datetime.now(timezone.utc).date().isoformat()
-    urls = '\n'.join(
-        f'  <url><loc>{escape(u)}</loc><lastmod>{today}</lastmod></url>' for u in pages)
+    pages = [public_url('index'),
+             public_url('rss_help'),
+             public_url('register')]
+    # No lastmod: it was emitting today's date on every fetch, which claims all
+    # three pages change daily. That is a discount signal, not a freshness one.
+    urls = '\n'.join(f'  <url><loc>{escape(u)}</loc></url>' for u in pages)
     xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
            f'{urls}\n</urlset>\n')
