@@ -3148,3 +3148,234 @@ def test_sweeping_a_stale_task_cannot_clobber_one_that_just_finished(trial_on):
         fresh = db.session.get(TranscriptionTask, 'sweep-race')
         assert fresh.status == 'completed'
         assert fresh.transcript_text == 'the goods'
+
+# --------------------------------------------------------------------------
+# AI readability
+#
+# ~25 visits a month arrive from ChatGPT with nothing on the site written for
+# an assistant. These files and this markup are what it has to read.
+# --------------------------------------------------------------------------
+
+def test_robots_txt_names_the_assistants_that_send_traffic(trial_on):
+    """There was no robots.txt at all, which leaves every crawler guessing."""
+    resp = A.app.test_client().get('/robots.txt')
+    assert resp.status_code == 200
+    assert resp.mimetype == 'text/plain'
+    body = resp.data.decode()
+    for agent in ('GPTBot', 'OAI-SearchBot', 'ChatGPT-User', 'ClaudeBot',
+                  'PerplexityBot', 'Google-Extended'):
+        assert f'User-agent: {agent}' in body, f'{agent} not addressed'
+    assert 'Sitemap: http' in body
+
+
+def test_robots_txt_keeps_crawlers_out_of_session_only_pages(trial_on):
+    """Nothing behind a login is useful to a crawler, and some of it is
+    personal -- a transcript is the user's, not the index's."""
+    body = A.app.test_client().get('/robots.txt').data.decode()
+    for path in ('/settings', '/history', '/transcription/', '/download/',
+                 '/active-jobs', '/cancel/'):
+        assert f'Disallow: {path}' in body, f'{path} is crawlable'
+
+
+def test_llms_txt_states_what_the_tool_is_for(trial_on):
+    """An assistant asked "how do I transcribe a Norwegian podcast" has to
+    infer everything from a page that is mostly a search box."""
+    resp = A.app.test_client().get('/llms.txt')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert body.startswith('# Podskrift')
+    assert '>' in body.split('\n')[2], 'no one-line summary blockquote'
+    for claim in ('Norwegian', 'Danish', 'Swedish', 'German', 'Whisper', '.srt'):
+        assert claim in body, f'{claim} missing from llms.txt'
+    # The trial length is generated, not typed, so it cannot drift from the code.
+    # Asserting the right number is present is not enough -- the FAQ is embedded
+    # in this file too, so a hardcoded figure in the prose above hid behind the
+    # generated one in the FAQ. Every figure in the file has to agree.
+    import re as _re
+    figures = {int(n) for n in _re.findall(r'(\d+) minutes of audio free', body)}
+    assert figures == {A.TRIAL_DEFAULT_SECONDS // 60}, (
+        f'llms.txt quotes {sorted(figures)} free minutes; the configured grant is '
+        f'{A.TRIAL_DEFAULT_SECONDS // 60}'
+    )
+
+
+def test_llms_txt_and_the_page_answer_the_same_questions(trial_on):
+    """If the file says one thing and the page another, the quote and the
+    visit disagree."""
+    llms = A.app.test_client().get('/llms.txt').data.decode()
+    home = A.app.test_client().get('/').data.decode()
+    for question, _ in A.faq_entries():
+        assert question in llms, f'{question!r} missing from llms.txt'
+        assert question in home, f'{question!r} missing from the page'
+
+
+def test_the_home_page_carries_structured_data(trial_on):
+    """WebApplication, not Organization: nobody asks an assistant what
+    Podskrift is. They ask how to transcribe a podcast."""
+    import json as _json
+    import re as _re
+    body = A.app.test_client().get('/').data.decode()
+    m = _re.search(r'<script type="application/ld\+json">(.*?)</script>', body, _re.S)
+    assert m, 'no JSON-LD on the home page'
+    data = _json.loads(m.group(1))          # must be valid JSON, not just present
+    types = {node['@type'] for node in data['@graph']}
+    assert types == {'WebApplication', 'FAQPage'}, types
+
+    app_node = next(n for n in data['@graph'] if n['@type'] == 'WebApplication')
+    assert 'no' in app_node['inLanguage'], 'Norwegian missing from inLanguage'
+    assert app_node['offers']['price'] == '0'
+
+    faq_node = next(n for n in data['@graph'] if n['@type'] == 'FAQPage')
+    assert len(faq_node['mainEntity']) == len(A.faq_entries())
+
+    # Every answer in the schema is one a visitor can actually read. Compared
+    # against the page WITHOUT the JSON-LD block: the schema lives in the same
+    # document, so checking it against the whole body compared it to itself.
+    import html as _html
+    visible = _html.unescape(body[:m.start()] + body[m.end():])
+    for entry in faq_node['mainEntity']:
+        assert entry['acceptedAnswer']['text'] in visible, (
+            f'the schema answers {entry["name"]!r} with text that is nowhere on the page'
+        )
+
+
+def test_the_sitemap_lists_the_public_pages(trial_on):
+    resp = A.app.test_client().get('/sitemap.xml')
+    assert resp.status_code == 200
+    assert resp.mimetype == 'application/xml'
+    from xml.etree import ElementTree
+    root = ElementTree.fromstring(resp.data)          # must parse
+    locs = [e.text for e in root.iter('{http://www.sitemaps.org/schemas/sitemap/0.9}loc')]
+    assert any(u.endswith('/') for u in locs)
+    assert any(u.endswith('/rss-help') for u in locs)
+    assert any(u.endswith('/register') for u in locs)
+    assert not any('/settings' in u or '/history' in u for u in locs), (
+        'a session-only page is in the sitemap'
+    )
+
+
+def test_the_page_says_what_it_is_before_asking_for_anything(trial_on):
+    """The hero used to lead with "bring your own API key" -- a credential
+    request before any value was shown, and 99.4% of visitors left."""
+    body = A.app.test_client().get('/').data.decode()
+    assert 'bring your own API key, completely free' not in body
+    assert 'Paste your OpenAI API key' not in body, (
+        'the how-it-works steps still describe the pre-trial flow'
+    )
+    assert 'Norwegian, Danish, Swedish and German' in body
+    assert 'meta name="description"' in body
+    assert 'og:title' in body
+    assert '<main id="content">' in body, 'no main landmark for anything to orient on'
+
+def test_every_named_crawler_group_repeats_the_rules(trial_on):
+    """RFC 9309: a crawler obeys ONLY its most specific matching group and
+    ignores `User-agent: *`. A named group containing just `Allow: /` therefore
+    told exactly the assistants this file exists for that /history and
+    /download/ were fair game -- strictly worse than not naming them.
+    """
+    body = A.app.test_client().get('/robots.txt').data.decode()
+
+    groups, current = {}, None
+    for line in body.splitlines():
+        line = line.split('#')[0].strip()
+        if not line:
+            continue
+        if line.lower().startswith('user-agent:'):
+            current = line.split(':', 1)[1].strip()
+            groups.setdefault(current, [])
+        elif current and line.lower().startswith('disallow:'):
+            groups[current].append(line.split(':', 1)[1].strip())
+
+    assert len(groups) > 1, 'no named groups at all'
+    baseline = set(groups['*'])
+    assert baseline, 'the wildcard group disallows nothing'
+    for agent, rules in groups.items():
+        assert set(rules) >= baseline, (
+            f'{agent} is granted access to {sorted(baseline - set(rules))} because its '
+            'group does not repeat the rules'
+        )
+
+
+def test_public_urls_use_the_configured_origin(trial_on, monkeypatch):
+    """url_for(_external=True) builds from the request, which behind Plesk's
+    nginx is http:// on an https site -- so the canonical link, the sitemap and
+    the JSON-LD @id all pointed at URLs that 301 away."""
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    client = A.app.test_client()
+
+    sitemap = client.get('/sitemap.xml').data.decode()
+    assert 'https://podskrift.com/' in sitemap
+    assert 'http://localhost' not in sitemap and 'http://podskrift' not in sitemap
+
+    llms = client.get('/llms.txt').data.decode()
+    assert 'http://localhost' not in llms
+
+    robots = client.get('/robots.txt').data.decode()
+    assert 'Sitemap: https://podskrift.com/sitemap.xml' in robots
+
+    import json as _json, re as _re
+    body = client.get('/').data.decode()
+    raw = _re.search(r'<script type="application/ld\+json">(.*?)</script>', body, _re.S).group(1)
+    data = _json.loads(raw.replace('\\u003c', '<').replace('\\u003e', '>'))
+    for node in data['@graph']:
+        assert node['@id'].startswith('https://podskrift.com/'), node['@id']
+
+
+def test_llms_txt_is_served_as_plain_utf8_text(trial_on):
+    """It carries the Norwegian FAQ, so the charset is the one header that
+    matters here. Passing 'text/plain; charset=utf-8' as the mimetype made
+    Werkzeug emit the charset twice."""
+    resp = A.app.test_client().get('/llms.txt')
+    assert resp.mimetype == 'text/plain'
+    assert resp.headers['Content-Type'].lower().count('charset') == 1, (
+        resp.headers['Content-Type']
+    )
+    assert 'transkriberer' in resp.data.decode('utf-8')
+
+
+def test_no_page_quotes_a_trial_length_the_code_does_not_grant(trial_on):
+    """The regex in the llms.txt test was anchored to one phrasing and stepped
+    straight over a hardcoded "60 trial minutes" in the same file and a
+    hardcoded "First 60 minutes free" in the hero."""
+    import re as _re
+    client = A.app.test_client()
+    granted = A.TRIAL_DEFAULT_SECONDS // 60
+    for path in ('/', '/llms.txt'):
+        text = client.get(path).data.decode()
+        figures = {int(n) for n in _re.findall(r'(\d+)\s+(?:trial\s+)?minutes', text)}
+        assert figures <= {granted}, (
+            f'{path} quotes {sorted(figures - {granted})} minutes; the configured '
+            f'grant is {granted}'
+        )
+
+
+def test_the_copy_does_not_promise_a_trial_that_is_switched_off(trial_on, monkeypatch):
+    """TRIAL_ENABLED=0, or no global key, and the app refuses at
+    /start_transcription -- while the hero, the FAQ and the schema all
+    advertised free minutes anyway."""
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
+    assert A.trial_available() is False
+    client = A.app.test_client()
+
+    home = client.get('/').data.decode()
+    assert 'minutes free' not in home
+    llms = client.get('/llms.txt').data.decode()
+    assert 'minutes of audio free' not in llms
+    assert 'trial minutes' not in llms
+    # And the FAQ answers the question honestly instead.
+    answers = dict(A.faq_entries())
+    assert 'free trial' not in answers['Do I need an OpenAI API key?'].lower()
+
+
+def test_structured_data_cannot_break_out_of_its_script_tag(trial_on, monkeypatch):
+    """json.dumps does not escape '<'. Everything in the graph is a constant
+    today, but the first dynamic value -- a podcast title from RSS -- would
+    close the tag."""
+    monkeypatch.setattr(A, 'faq_entries',
+                        lambda: [('</script><img src=x onerror=alert(1)>', 'x')])
+    with A.app.test_request_context('/'):
+        raw = A._structured_data()
+    assert '</script>' not in raw
+    assert '<' not in raw and '>' not in raw
+    import json as _json
+    _json.loads(raw)          # still valid JSON after escaping

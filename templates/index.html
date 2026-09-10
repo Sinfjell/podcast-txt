@@ -10,7 +10,9 @@
         <span style="color: var(--accent-bright);">in minutes</span>
     </h1>
     <p style="color: var(--muted); font-size: 16px; margin-top: 10px; max-width: 520px; line-height: 1.6;">
-        Search for a podcast, pick an episode, and get a full transcript. Powered by OpenAI Whisper — bring your own API key, completely free.
+        Search for a podcast, pick an episode, get the full transcript. Built for
+        Norwegian, Danish, Swedish and German — the languages English-first tools
+        do worst. Powered by OpenAI Whisper.{% if trial_minutes %} First {{ trial_minutes }} minutes free.{% endif %}
     </p>
 </div>
 
@@ -115,13 +117,31 @@
             <span style="color: var(--accent-bright); font-weight: 600;">2.</span> Select the episode to transcribe
         </div>
         <div style="font-size: 13.5px; color: var(--muted); padding: 8px 0;">
-            <span style="color: var(--accent-bright); font-weight: 600;">3.</span> Paste your OpenAI API key
+            <span style="color: var(--accent-bright); font-weight: 600;">3.</span> Watch it run — it keeps going if you close the page
         </div>
         <div style="font-size: 13.5px; color: var(--muted); padding: 8px 0;">
             <span style="color: var(--accent-bright); font-weight: 600;">4.</span> Download .txt or .srt transcript
         </div>
     </div>
 </div>
+
+{% if faq %}
+<section class="mt-3" style="padding: 0 4px;" aria-labelledby="faqHeading">
+    <p class="section-label" id="faqHeading">Questions</p>
+    <div style="border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden;">
+        {% for question, answer in faq %}
+        <details style="border-bottom: 1px solid var(--border);">
+            <summary style="padding: 14px 16px; cursor: pointer; font-size: 14px; font-weight: 600;">
+                {{ question }}
+            </summary>
+            <p style="padding: 0 16px 14px; margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.7;">
+                {{ answer }}
+            </p>
+        </details>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
