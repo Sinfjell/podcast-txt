@@ -10,9 +10,9 @@
         <span style="color: var(--accent-bright);">in minutes</span>
     </h1>
     <p style="color: var(--muted); font-size: 16px; margin-top: 10px; max-width: 520px; line-height: 1.6;">
-        Search for a podcast, pick an episode, get the full transcript. Built for
-        Norwegian, Danish, Swedish and German — the languages English-first tools
-        do worst. Powered by OpenAI Whisper.{% if trial_minutes %} First {{ trial_minutes }} minutes free.{% endif %}
+        Search for a podcast, pick an episode, get the full transcript.
+        {{ language_count }} languages, powered by OpenAI Whisper.{% if trial_minutes %}
+        First {{ trial_minutes }} minutes free.{% endif %}
     </p>
 </div>
 
@@ -71,7 +71,7 @@
             <label class="form-label" for="searchLanguage">Spoken language</label>
             <select class="form-input" id="searchLanguage" style="max-width: 220px;">
                 {% for code, label in languages %}
-                <option value="{{ code }}"{% if code == 'no' %} selected{% endif %}>{{ label }}</option>
+                <option value="{{ code }}">{{ label }}</option>
                 {% endfor %}
             </select>
         </div>

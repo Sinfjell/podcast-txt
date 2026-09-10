@@ -32,7 +32,7 @@
             <label class="form-label" for="language">Spoken language</label>
             <select class="form-input" id="language" name="language" form="episodeForm">
                 {% for code, label in languages %}
-                <option value="{{ code }}"{% if code == 'no' %} selected{% endif %}>{{ label }}</option>
+                <option value="{{ code }}">{{ label }}</option>
                 {% endfor %}
             </select>
         </div>
