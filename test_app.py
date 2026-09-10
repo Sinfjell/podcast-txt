@@ -3268,8 +3268,27 @@ def test_the_page_says_what_it_is_before_asking_for_anything(trial_on):
     # Nordic/German because those three users happened to have a working API
     # key. Every failure -- Norwegian, German and English alike -- was a 401 or
     # a 429. Language never came into it.
-    assert 'Built for\n        Norwegian, Danish, Swedish and German' not in body
-    assert f'{len(A.SUPPORTED_LANGUAGES) - 1} languages' in body
+    #
+    # Asserted on the HERO, not on the document: the first version of this
+    # checked the whole page for "N languages", which the meta tags satisfied,
+    # so restoring the entire Nordic-fence hero left the suite green.
+    import re as _re
+    hero = _re.search(r'<h1[^>]*>.*?</p>', body, _re.S)
+    assert hero, 'no hero to check'
+    hero = hero.group(0)
+    assert 'Built for' not in hero, 'the hero fences the product to a language group'
+    assert 'English-first' not in hero, 'the hero still claims an edge we cannot evidence'
+    assert f'{len(A.LANGUAGE_ENGLISH_NAMES)} languages' in hero
+
+    # And nowhere quotes a count it typed by hand. It was hardcoded in three
+    # meta tags next to a comment claiming the derived form existed so they
+    # could not drift; language 29 would leave every link preview lying.
+    import re as _re
+    counts = {int(n) for n in _re.findall(r'(\d+) languages', body)}
+    assert counts == {len(A.LANGUAGE_ENGLISH_NAMES)}, (
+        f'the page quotes {sorted(counts)} languages; there are '
+        f'{len(A.LANGUAGE_ENGLISH_NAMES)}'
+    )
     assert 'meta name="description"' in body
     assert 'og:title' in body
     assert '<main id="content">' in body, 'no main landmark for anything to orient on'
@@ -3403,13 +3422,14 @@ def test_the_language_picker_is_not_limited_to_the_founders_market(trial_on):
 def test_every_offered_language_has_an_english_name(trial_on):
     """llms.txt and the schema render English names; a code with no name would
     silently drop out of both."""
-    codes = {code for code, _ in A.SUPPORTED_LANGUAGES if code}
-    assert set(A.LANGUAGE_ENGLISH_NAMES) == codes
-    # Derived from one list, so the picker and the machine-readable copy cannot
-    # disagree about what is on offer.
+    # Not `set(LANGUAGE_ENGLISH_NAMES) == codes` -- both sides were
+    # comprehensions over the same list, so it could not fail by construction.
+    # Check what actually reaches a reader instead.
     llms = A.app.test_client().get('/llms.txt').data.decode()
-    for name in ('Norwegian', 'Ukrainian', 'Vietnamese', 'Japanese'):
-        assert name in llms, f'{name} missing from llms.txt'
+    for code, _, english in A.SUPPORTED_LANGUAGES_FULL:
+        if code:
+            assert english in llms, f'{code} has no English name in llms.txt'
+    assert 'Japanese' in llms and 'Ukrainian' in llms
 
 
 def test_the_picker_is_ordered_so_a_long_list_stays_findable(trial_on):
@@ -3418,9 +3438,104 @@ def test_the_picker_is_ordered_so_a_long_list_stays_findable(trial_on):
     named = [(code, english) for code, _, english in A.SUPPORTED_LANGUAGES_FULL if code]
     assert [e for _, e in named] == sorted(e for _, e in named)
 
+    # And the order has to be visible: sorting on English names while rendering
+    # only native ones (العربية, 中文, Čeština, Dansk...) looks random to the
+    # person reading the list, which is the opposite of findable.
+    labels = [label for code, label in A.language_choices() if code]
+    assert labels == sorted(labels), 'the rendered labels are not in the sorted order'
+
 
 def test_the_page_does_not_claim_a_single_home_market(trial_on):
     """og:locale said nb_NO on an English-language page for a worldwide tool."""
     body = A.app.test_client().get('/').data.decode()
-    assert 'og:locale" content="en_US"' in body
-    assert 'nb_NO' not in body
+    assert 'og:locale" content="en_US"' in body, 'the page claims a Norwegian locale'
+    # The alternate stays: a Norwegian FAQ answer really is on the page. Pinning
+    # nb_NO shut was itself a fence -- the opposite one.
+    assert 'og:locale:alternate" content="nb_NO"' in body
+
+def test_taking_the_default_does_not_assert_a_language(trial_on, monkeypatch):
+    """The real fence, and the one the copy change missed. /start_transcription
+    defaulted to 'no' and fell back to 'no' on anything unrecognised -- so a
+    Japanese listener who took the default had Whisper TOLD the audio was
+    Norwegian. Whisper obeys that as a constraint, not a hint, so the result is
+    phonetic nonsense we still paid for.
+    """
+    from models import db, TranscriptionTask
+
+    # _post_start stubs the worker thread, so its slot is never handed back;
+    # two starts in one test need more than the production cap of one.
+    import threading as _t
+    monkeypatch.setattr(A, 'MAX_CONCURRENT_TRANSCRIPTIONS', 4)
+    monkeypatch.setattr(A, '_transcription_slots', _t.BoundedSemaphore(4))
+
+    uid = _make_user('deflang@test.com', limit=36000)
+    for data in ({'audio_url': 'https://example.com/a.mp3', 'episode_title': 'A',
+                  'duration_min': '5'},                                   # no language sent
+                 {'audio_url': 'https://example.com/b.mp3', 'episode_title': 'B',
+                  'duration_min': '5', 'language': 'klingon'}):           # unrecognised
+        resp = _post_start(monkeypatch, uid, data)
+        assert resp.status_code == 200, resp.get_json()
+
+    with A.app.app_context():
+        langs = [t.language for t in
+                 TranscriptionTask.query.filter_by(user_id=uid).all()]
+    assert langs == [None, None], f'a language was asserted on the user: {langs}'
+
+
+def test_a_chosen_language_is_honoured(trial_on, monkeypatch):
+    """The flip side: naming a language must still reach the task, because that
+    is what makes it beat auto-detect on short or accented audio."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('pickedlang@test.com', limit=36000)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/ja.mp3', 'episode_title': 'Ep',
+        'duration_min': '5', 'language': 'ja'})
+    assert resp.status_code == 200
+    with A.app.app_context():
+        task = TranscriptionTask.query.filter_by(user_id=uid).first()
+    assert task.language == 'ja'
+
+
+def test_the_picker_does_not_preselect_a_language(trial_on):
+    """"Norsk" was hard-selected in the markup. Widening the list to 28 moved it
+    from visible position 2 to position 19, so the pre-selection became
+    invisible while still being what got submitted."""
+    uid = _make_user('preselect@test.com')
+    body = _login(uid).get('/').data.decode()
+    import re as _re
+    options = _re.findall(r'<option value="([^"]*)"([^>]*)>', body)
+    assert options, 'no language picker on the page'
+    selected = [code for code, attrs in options if 'selected' in attrs]
+    assert selected in ([], ['']), f'the picker pre-selects {selected}'
+    assert options[0][0] == '', 'auto-detect is not the first option'
+
+
+def test_no_surface_claims_an_edge_we_cannot_evidence(trial_on):
+    """"Unusually good on the languages English-first tools handle worst" was
+    published on five surfaces. This is a plain whisper-1 wrapper -- no
+    fine-tune, no custom decoding -- and the evidence for it was three
+    successful transcriptions that happened to be Nordic because those three
+    users happened to have a working API key.
+    """
+    client = A.app.test_client()
+    surfaces = {path: client.get(path).data.decode() for path in ('/', '/llms.txt')}
+    surfaces['schema'] = A.app.test_client().get('/').data.decode()
+    for path, text in surfaces.items():
+        low = text.lower()
+        assert 'english-first' not in low, f'{path} still claims it'
+        assert 'unusually good' not in low, f'{path} still claims it'
+
+def test_the_language_count_follows_the_list(trial_on, monkeypatch):
+    """Checking that the page says the right number is not enough while the
+    right number happens to be the one someone typed. Change the list and the
+    page has to follow -- otherwise a hardcoded literal passes for as long as
+    it stays accidentally correct, which is exactly how three meta tags ended
+    up quoting 28 next to a comment claiming they were derived.
+    """
+    import re as _re
+    monkeypatch.setattr(A, 'LANGUAGE_ENGLISH_NAMES',
+                        {'en': 'English', 'no': 'Norwegian', 'ja': 'Japanese'})
+    body = A.app.test_client().get('/').data.decode()
+    counts = {int(n) for n in _re.findall(r'(\d+) languages', body)}
+    assert counts == {3}, f'the page still quotes {sorted(counts)} languages'

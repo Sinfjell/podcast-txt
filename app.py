@@ -233,7 +233,25 @@ SUPPORTED_LANGUAGES_FULL = [
     ('vi', 'Ti\u1ebfng Vi\u1ec7t', 'Vietnamese'),
 ]
 
-#: (code, native name) -- what the picker renders.
+def language_choices():
+    """(code, label) for the picker, labelled so the sort order is visible.
+
+    The list is alphabetical by English name, but rendering only native names
+    made that look random -- العربية, 中文, Čeština, Dansk, Nederlands. Showing
+    "English (native)" is what makes a 28-item list scannable.
+    """
+    choices = []
+    for code, native, english in SUPPORTED_LANGUAGES_FULL:
+        if not code:
+            choices.append((code, native))
+        elif native == english:
+            choices.append((code, english))
+        else:
+            choices.append((code, f'{english} ({native})'))
+    return choices
+
+
+#: (code, native name) -- kept for llms.txt, which lists native names.
 SUPPORTED_LANGUAGES = [(code, native) for code, native, _ in SUPPORTED_LANGUAGES_FULL]
 #: code -> English name, for llms.txt and the schema. Derived, so the two
 #: cannot drift: an earlier version kept a second hand-written list.
@@ -1602,7 +1620,7 @@ def use_feed(feed_id):
         needs_api_key=not _user_has_api_key(),
         podcast_name=episodes[0].get('podcast_name') or feed.name,
         artwork=episodes[0].get('artwork') or '',
-        languages=SUPPORTED_LANGUAGES,
+        languages=language_choices(),
     )
 
 
@@ -1648,7 +1666,7 @@ def index():
             user_id=current_user.id
         ).order_by(SavedFeed.created_at.desc()).limit(5).all()
     return render_template('index.html', saved_feeds=saved_feeds,
-                           languages=SUPPORTED_LANGUAGES,
+                           languages=language_choices(),
                            trial=_trial_context(),
                            faq=faq_entries(),
                            trial_minutes=(TRIAL_DEFAULT_SECONDS // 60
@@ -1679,7 +1697,7 @@ def parse_rss():
         needs_api_key=not _user_has_api_key(),
         podcast_name=episodes[0].get('podcast_name') or '',
         artwork=episodes[0].get('artwork') or '',
-        languages=SUPPORTED_LANGUAGES,
+        languages=language_choices(),
     )
 
 
@@ -1691,9 +1709,14 @@ def start_transcription():
     The direct form is what episode search results post, so an episode found by
     name never has to be located a second time inside its feed.
     """
-    language = request.form.get('language', 'no')
+    # Auto-detect, not Norwegian. Defaulting to 'no' meant a Japanese listener
+    # who took the default had Whisper TOLD the audio was Norwegian -- which it
+    # obeys as a hard constraint, so the result is phonetic nonsense that we
+    # still paid for. The same reasoning makes it the right fallback for an
+    # unrecognised value: guessing beats asserting something we cannot know.
+    language = request.form.get('language', '')
     if language not in VALID_LANGUAGE_CODES:
-        language = 'no'
+        language = ''
 
     audio_url = request.form.get('audio_url')
     rss_url = request.form.get('rss_url')
@@ -2259,8 +2282,8 @@ def faq_entries():
         ('Which languages does it handle well?',
          f'{len(LANGUAGE_ENGLISH_NAMES)} languages, from English, Spanish and Mandarin to '
          'Norwegian, Ukrainian and Vietnamese. You can name the language rather than relying '
-         'on auto-detect, which matters on short or accented audio. It does especially well '
-         'on Nordic and Central European languages, where English-first tools do worst.'),
+         'on auto-detect, which matters on short or accented audio: Whisper treats the '
+         'choice as a constraint rather than a hint.'),
         ('Is it free?', free),
         ('Do I need an OpenAI API key?', need_key),
         ('What file formats do I get?',
@@ -2268,6 +2291,14 @@ def faq_entries():
         ('Can I transcribe a podcast that is not in the search index?',
          'Yes. Paste the RSS feed URL instead and pick the episode from the feed.'),
     ]
+
+
+@app.context_processor
+def inject_language_count():
+    """One number for every surface that quotes it. It was hardcoded in three
+    meta tags beside a comment claiming the derived form existed so they could
+    not drift."""
+    return {'language_count': len(LANGUAGE_ENGLISH_NAMES)}
 
 
 def _structured_data():
@@ -2294,8 +2325,8 @@ def _structured_data():
                     f'Transcribes podcast episodes to text using OpenAI Whisper, in '
                     f'{len(LANGUAGE_ENGLISH_NAMES)} languages. Search any podcast or '
                     'episode by name, pick the episode, and get plain text and timestamped '
-                    'subtitles. Unusually good on the languages English-first transcription '
-                    'tools handle worst.'
+                    'subtitles. Name the language rather than relying on auto-detect, which '
+                    'matters on short or accented audio.'
                 ),
                 # From the ordered list, not the set: iterating a set gave two
                 # gunicorn workers two different JSON-LD bodies for one URL.
@@ -2405,8 +2436,8 @@ def llms_txt():
     body = f"""# Podskrift
 
 > Transcribes podcast episodes to text using OpenAI Whisper, in {len(LANGUAGE_ENGLISH_NAMES)}
-> languages. Works with any podcast, anywhere -- and is unusually good on the
-> languages English-first transcription tools handle worst.
+> languages. Works with any podcast in any of them -- search by show or episode
+> name, no file upload and no feed URL needed.
 
 Podskrift is a free web tool. You search for a podcast or an individual episode
 by name, pick the episode, and it downloads the audio and returns the full
@@ -2425,9 +2456,8 @@ Made by Nettsmed (Fjellestad AS), Kristiansand, Norway.
 ## Languages
 {languages}
 
-Auto-detect is available, but naming the language beats it on short or accented
-audio. Nordic and Central European languages are where this does best relative
-to English-first tools -- not the only ones it handles.
+Auto-detect is the default, but naming the language beats it on short or
+accented audio -- Whisper takes the choice as a constraint rather than a hint.
 
 ## What it costs
 {cost} add your own OpenAI API key and pay OpenAI directly -- roughly

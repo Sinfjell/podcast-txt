@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Podskrift{% endblock %}</title>
     {% if structured_data %}<script type="application/ld+json">{{ structured_data | safe }}</script>{% endif %}
-    <meta name="description" content="{% block meta_description %}Transcribe any podcast episode to text with OpenAI Whisper, in 28 languages. Search by podcast or episode name, get .txt and .srt. Unusually good on the languages English-first tools handle worst.{% endblock %}">
+    <meta name="description" content="{% block meta_description %}Transcribe any podcast episode to text with OpenAI Whisper, in {{ language_count }} languages. Search by podcast or episode name, pick the episode, get .txt and .srt.{% endblock %}">
     <link rel="canonical" href="{{ request.base_url }}">
 
     {# Open Graph and Twitter cards: what a link preview shows, and what an
@@ -13,12 +13,13 @@
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="Podskrift">
     <meta property="og:title" content="{% block og_title %}Podskrift — podcast to text{% endblock %}">
-    <meta property="og:description" content="{% block og_description %}Transcribe podcast episodes to text with OpenAI Whisper, in 28 languages.{% endblock %}">
+    <meta property="og:description" content="{% block og_description %}Transcribe podcast episodes to text with OpenAI Whisper, in {{ language_count }} languages.{% endblock %}">
     <meta property="og:url" content="{{ request.base_url }}">
     <meta property="og:locale" content="en_US">
+    <meta property="og:locale:alternate" content="nb_NO">
     <meta name="twitter:card" content="summary">
     <meta name="twitter:title" content="Podskrift — podcast to text">
-    <meta name="twitter:description" content="Transcribe podcast episodes to text with OpenAI Whisper, in 28 languages.">
+    <meta name="twitter:description" content="Transcribe podcast episodes to text with OpenAI Whisper, in {{ language_count }} languages.">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
