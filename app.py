@@ -2664,6 +2664,8 @@ with app.app_context():
         if _seconds_since(t.heartbeat_at or t.started_at) > _stale_after_seconds(t)
     ]
     for task in orphaned:
+        # Both gunicorn workers run this sweep, so a stuck task can be reported
+        # twice. The shared fingerprint keeps that to one issue.
         report_stale_task(task.id, task.status,
                           _seconds_since(task.heartbeat_at or task.started_at), source='boot')
         task.status = 'error'

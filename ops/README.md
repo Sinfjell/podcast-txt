@@ -84,7 +84,8 @@ sudo -u podskrift .venv/bin/python ops/sentry-check.py   # sends one test except
 echoes the submitted key in a 401 (users have pasted passwords there), and
 private feeds carry their token in the audio URL. Request bodies, local
 variables and PII are never collected, OpenAI's own error message is dropped,
-and key-shaped strings and URL query strings are redacted from every event. The
+and key-shaped strings, the rest of OpenAI's echo line and the query string
+after any URL or path (requests quotes bare paths) are redacted from every event. The
 test check event above must arrive with its fake key as `[redacted]`.
 
 If sentry-sdk is missing from the venv the app still boots and logs an error

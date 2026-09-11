@@ -32,13 +32,16 @@ REDACTED = '[redacted]'
 REDACTED_OPENAI = '[OpenAI error message redacted: it can echo the submitted key]'
 
 # The key shapes OpenAI issues (sk-..., sk-proj-...), plus the phrase its 401
-# uses to echo whatever was submitted -- which is how a password leaks.
+# uses to echo whatever was submitted -- which is how a password leaks. A
+# passphrase can contain spaces, so the echo is redacted to the end of the line.
 _SECRET_PATTERNS = (
     re.compile(r'sk-[A-Za-z0-9_\-*]{8,}'),
-    re.compile(r'(Incorrect API key provided:\s*)\S+'),
+    re.compile(r'(Incorrect API key provided:\s*)[^\n]+'),
 )
-# Private feeds (Supercast, Patreon, Memberful) authorise by query string.
-_URL_QUERY = re.compile(r'(https?://[^\s?#\'"]+)\?[^\s#\'"]*')
+# Private feeds (Supercast, Patreon, Memberful) authorise by query string. Match
+# any path, not just full URLs: requests' connection errors quote the path alone
+# ("Max retries exceeded with url: /ep.mp3?token=...").
+_URL_QUERY = re.compile(r'(/[^\s?#\'"]*)\?[^\s#\'"]*')
 
 
 def _redact_text(value):
@@ -95,7 +98,6 @@ def init_sentry(**overrides):
     options = dict(
         dsn=dsn,
         environment=os.getenv('SENTRY_ENVIRONMENT', 'production'),
-        release=os.getenv('SENTRY_RELEASE') or None,
         integrations=[FlaskIntegration()],
         # Errors only. Performance tracing is out of scope and costs quota.
         traces_sample_rate=0.0,
