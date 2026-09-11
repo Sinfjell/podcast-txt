@@ -188,6 +188,9 @@ The app includes a comprehensive help guide for finding RSS feeds from:
   the canonical link, the sitemap and the JSON-LD would all point at URLs that
   redirect. Deliberately not derived from `X-Forwarded-Proto`: those headers are
   only as trustworthy as the proxy stripping them.
+- `SENTRY_DSN` — turns on error reporting. Production server only, never
+  committed; unset means off. `SENTRY_ENVIRONMENT` defaults to `production`.
+  See [ops/README.md](ops/README.md#error-reporting-sentry).
 
 ### Free trial
 

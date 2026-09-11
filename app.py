@@ -41,8 +41,12 @@ from sqlalchemy.engine import Engine
 
 from models import (db, User, SavedFeed, TranscriptionTask,
                     TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS)
+from observability import init_sentry, report_stale_task, report_task_failure
 
 load_dotenv()
+# Before the app exists, so the Flask integration hooks it, and before the boot
+# sweep at the bottom of this module, which reports what it finds.
+init_sentry()
 
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'change-me-in-production')
@@ -1878,6 +1882,9 @@ def start_transcription():
                         failed = db.session.get(TranscriptionTask, task_id)
                         if failed:
                             trial_refund_task(failed)
+                        # After the refund, and it cannot raise: reporting must
+                        # never cost a user the allowance they are owed.
+                        report_task_failure(e, task_id=task_id, key_source=key_source)
                     finally:
                         if os.path.exists(audio_filename):
                             try:
@@ -1995,8 +2002,10 @@ def _fail_if_stale(task):
     """
     if task.status == 'completed' or task.status in TERMINAL_STATUSES:
         return False
-    if _seconds_since(task.heartbeat_at or task.started_at) <= _stale_after_seconds(task):
+    quiet = _seconds_since(task.heartbeat_at or task.started_at)
+    if quiet <= _stale_after_seconds(task):
         return False
+    last_status = task.status
     # One conditional UPDATE, like every other status write here. This used to
     # be a read-check-write on a session-cached row, and it is the one path that
     # can clobber a task that finished inside the window -- turning a completed
@@ -2017,6 +2026,7 @@ def _fail_if_stale(task):
     if not claimed:
         return False
     trial_refund_task(task)
+    report_stale_task(task.id, last_status, quiet, source='poll')
     return True
 
 
@@ -2654,6 +2664,10 @@ with app.app_context():
         if _seconds_since(t.heartbeat_at or t.started_at) > _stale_after_seconds(t)
     ]
     for task in orphaned:
+        # Both gunicorn workers run this sweep, so a stuck task can be reported
+        # twice. The shared fingerprint keeps that to one issue.
+        report_stale_task(task.id, task.status,
+                          _seconds_since(task.heartbeat_at or task.started_at), source='boot')
         task.status = 'error'
         task.phase = 'error'
         task.error_message = (

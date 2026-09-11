@@ -19,6 +19,9 @@ import pytest
 # throwaway file BEFORE the import so running the suite can never touch real data.
 _TEST_DB = os.path.join(tempfile.mkdtemp(prefix='podskrift-test-'), 'test.db')
 os.environ['DATABASE_URL'] = f'sqlite:///{_TEST_DB}'
+# load_dotenv never overrides a set variable, so this keeps a developer's .env
+# from pointing the suite at the real Sentry project.
+os.environ['SENTRY_DSN'] = ''
 
 import app as A  # noqa: E402 - must follow the DATABASE_URL assignment
 
@@ -3539,3 +3542,228 @@ def test_the_language_count_follows_the_list(trial_on, monkeypatch):
     body = A.app.test_client().get('/').data.decode()
     counts = {int(n) for n in _re.findall(r'(\d+) languages', body)}
     assert counts == {3}, f'the page still quotes {sorted(counts)} languages'
+
+
+# --------------------------------------------------------------------------
+# Error reporting (Sentry)
+#
+# The scrubbing is what these guard. OpenAI echoes the submitted key in a 401,
+# users have pasted passwords into that field, and private feeds carry their
+# token in the audio URL. None of it may reach a third party.
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def sentry_events():
+    """Turn reporting on with a transport that keeps events instead of sending."""
+    import sentry_sdk
+    from sentry_sdk.transport import Transport
+    import observability
+
+    class Capture(Transport):
+        def __init__(self):
+            super().__init__()
+            self.events = []
+
+        def capture_envelope(self, envelope):
+            event = envelope.get_event()
+            if event is not None:
+                self.events.append(event)
+
+    transport = Capture()
+    assert observability.init_sentry(dsn='https://public@sentry.invalid/1', transport=transport)
+    yield transport.events
+    sentry_sdk.get_client().close()
+    sentry_sdk.init()  # back to a disabled client for the rest of the suite
+
+
+def _openai_401(echoed, wording='Incorrect API key provided: {}.'):
+    import openai
+    try:  # openai 3.x moved to httpx2; 1.x/2.x (production) use httpx
+        import httpx2 as httpx
+    except ImportError:
+        import httpx
+    request = httpx.Request('POST', 'https://api.openai.com/v1/audio/transcriptions')
+    return openai.AuthenticationError(
+        "Error code: 401 - {'error': {'message': '" + wording.format(echoed) + "'}}",
+        response=httpx.Response(401, request=request), body=None)
+
+
+def _raise_and_report(exc, **kw):
+    import observability
+    try:
+        raise exc
+    except Exception as e:  # noqa: BLE001
+        observability.report_task_failure(e, task_id='t-report', key_source=kw.get('key_source', 'own'))
+
+
+def test_reporting_is_off_without_a_dsn(monkeypatch):
+    import observability
+    monkeypatch.setenv('SENTRY_DSN', '')
+    assert observability.init_sentry() is False
+
+
+def test_an_openai_error_never_ships_the_key_it_echoed(sentry_events):
+    """A password pasted into the key field matches no key pattern, and the
+    401 wording is OpenAI's to change -- so the message itself has to go."""
+    _raise_and_report(_openai_401('hunter2-my-bank-password', wording='Bad credential {} rejected'))
+    (event,) = sentry_events
+    assert 'hunter2' not in repr(event)
+    exc = event['exception']['values'][-1]
+    assert exc['type'] == 'AuthenticationError'
+    assert event['tags']['openai.status'] == '401'
+
+
+def test_the_echo_phrase_is_redacted_outside_openai_errors(sentry_events):
+    """The backstop for when an OpenAI message is re-raised as another type."""
+    _raise_and_report(RuntimeError('Incorrect API key provided: hunter2-password.'))
+    (event,) = sentry_events
+    assert 'hunter2' not in repr(event)
+
+
+def test_key_shaped_strings_are_redacted_anywhere(sentry_events):
+    _raise_and_report(RuntimeError('boom with sk-proj-abcDEF1234567890xyz in it'))
+    (event,) = sentry_events
+    assert 'sk-proj-abcDEF' not in repr(event)
+    assert '[redacted]' in event['exception']['values'][-1]['value']
+
+
+def test_private_feed_tokens_are_stripped_from_urls(sentry_events):
+    _raise_and_report(RuntimeError(
+        'Failed to download audio: 403 for https://feeds.supercast.com/ep.mp3?token=s3cr3t'))
+    (event,) = sentry_events
+    value = event['exception']['values'][-1]['value']
+    assert 's3cr3t' not in repr(event)
+    assert 'https://feeds.supercast.com/ep.mp3?[redacted]' in value
+
+
+def test_a_real_connection_error_does_not_leak_the_feed_token(sentry_events):
+    """requests quotes the bare path in connection errors, and Sentry sends the
+    whole chain (ConnectionError -> MaxRetryError -> NewConnectionError).
+    A hand-written message missed this: the token went out in 3 of 5 values."""
+    import observability
+    import requests
+    # Assembled at runtime: Sentry ships the source lines around each frame, and
+    # a literal in this function's own assert would show up in them unredacted.
+    token = 's3cr3t' + 'TOKEN'
+    try:
+        try:
+            requests.get(f'https://127.0.0.1:1/ep.mp3?token={token}', timeout=2)
+        except requests.exceptions.RequestException as e:
+            raise Exception(f'Failed to download audio: {e}')  # as download_audio does
+    except Exception as wrapped:  # noqa: BLE001
+        observability.report_task_failure(wrapped, task_id='t-conn', key_source='own')
+    (event,) = sentry_events
+    assert len(event['exception']['values']) > 1, 'expected the chained causes too'
+    assert token not in repr(event)
+
+
+def test_the_echo_is_redacted_to_the_end_of_the_line(sentry_events):
+    """A passphrase has spaces; redacting only the first word leaks the rest."""
+    _raise_and_report(RuntimeError('Incorrect API key provided: my secret passphrase'))
+    (event,) = sentry_events
+    assert 'passphrase' not in repr(event)
+
+
+def test_stack_frames_carry_no_local_variables(sentry_events):
+    """A frame's locals include `api_key` and the OpenAI client."""
+    def transcribe(api_key):
+        raise RuntimeError('whisper failed')
+    import observability
+    try:
+        transcribe('sk-local-variable-key-123456')
+    except RuntimeError as e:
+        observability.report_task_failure(e, task_id='t-locals', key_source='own')
+    (event,) = sentry_events
+    frames = event['exception']['values'][-1]['stacktrace']['frames']
+    assert all('vars' not in f for f in frames)
+    assert 'sk-local-variable' not in repr(event)
+
+
+def test_request_bodies_and_pii_are_never_collected(sentry_events):
+    import sentry_sdk
+    options = sentry_sdk.get_client().options
+    assert options['send_default_pii'] is False
+    assert options['max_request_body_size'] == 'never'
+    assert options['traces_sample_rate'] == 0.0
+
+
+def test_a_failed_transcription_is_reported_and_still_refunded(trial_on, monkeypatch, sentry_events):
+    """The real route and the real worker thread, failing in download."""
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+    monkeypatch.setattr(A, 'download_audio',
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('HTTP error 404')))
+    uid = _make_user('sentryfail@test.com', limit=36000)
+    A.app.config['TESTING'] = True
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    resp = client.post('/start_transcription', data={
+        'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
+        'duration_min': '5', 'language': 'no'})
+    assert resp.status_code == 200
+
+    for _ in range(100):
+        if sentry_events:
+            break
+        time.sleep(0.05)
+    (event,) = sentry_events
+    assert event['exception']['values'][-1]['value'] == 'HTTP error 404'
+    assert event['tags']['task.key_source'] == 'trial'
+    assert event['contexts']['task']['id'] == resp.get_json()['task_id']
+    for _ in range(100):
+        if _used(uid) == 0:
+            break
+        time.sleep(0.05)
+    assert _used(uid) == 0, 'the failed job kept its trial reservation'
+
+
+def test_a_broken_reporter_cannot_cost_a_refund(trial_on, monkeypatch, sentry_events):
+    """Reporting runs on the money path's failure branch. If Sentry itself
+    throws, the refund must still happen -- through the real route and worker."""
+    import sentry_sdk
+    monkeypatch.setattr(sentry_sdk, 'capture_exception',
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('sentry down')))
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+    monkeypatch.setattr(A, 'download_audio',
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('HTTP error 404')))
+    uid = _make_user('sentrybroken@test.com', limit=36000)
+    A.app.config['TESTING'] = True
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    assert client.post('/start_transcription', data={
+        'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
+        'duration_min': '5', 'language': 'no'}).status_code == 200
+    for _ in range(100):
+        if _used(uid) == 0:
+            break
+        time.sleep(0.05)
+    assert _used(uid) == 0, 'a failing reporter cost the user their refund'
+
+
+def test_a_stale_task_is_reported_once_failed(sentry_events):
+    from models import TranscriptionTask, db
+    with A.app.app_context():
+        stale_id = 'stale-sentry-test'
+        old = db.session.get(TranscriptionTask, stale_id)
+        if old:
+            db.session.delete(old)
+            db.session.commit()
+        now = datetime.now(timezone.utc)
+        db.session.add(TranscriptionTask(
+            id=stale_id, user_id=1, episode_title='x', status='transcribing',
+            phase='transcribing', progress=53, started_at=now - timedelta(hours=2),
+            heartbeat_at=now - timedelta(hours=2),
+        ))
+        db.session.commit()
+        task = db.session.get(TranscriptionTask, stale_id)
+        assert A._fail_if_stale(task) is True
+        assert A._fail_if_stale(task) is False  # already failed: no second report
+
+    (event,) = sentry_events
+    assert event['level'] == 'warning'
+    assert event['fingerprint'] == ['stale-task']
+    assert event['tags'] == {'task.last_status': 'transcribing', 'sweep.source': 'poll'}
+    assert event['contexts']['task']['id'] == stale_id

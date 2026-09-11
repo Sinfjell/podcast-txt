@@ -60,6 +60,37 @@ falls back to a size estimate silently — worse ETAs, no error.
 ffmpeg -version | head -1 && ffprobe -version | head -1
 ```
 
+## Error reporting (Sentry)
+
+Project `nettsmed/podskrift` on sentry.io (EU region). Errors only -- no
+tracing, no session replay. Reported: uncaught request exceptions, `ERROR` log
+records, transcription tasks that end in `error`, and tasks the stale sweep
+fails (fingerprint `stale-task`, level warning). OpenAI failures group by status
+and key source, so a burst of 429s on the trial key is one issue, apart from
+BYOK users with a bad key. The issue alert emails on **new** issues only.
+
+The DSN lives only in the server's `.env` (the unit's `EnvironmentFile`), never
+in git. Unset, reporting is off -- which is how dev and the test suite run.
+
+```bash
+# once, as root, from the app directory
+.venv/bin/pip install -r requirements.txt
+printf 'SENTRY_DSN=<dsn from Sentry: Settings > Projects > podskrift > Client Keys>\nSENTRY_ENVIRONMENT=production\n' >> .env
+systemctl restart podskrift
+sudo -u podskrift .venv/bin/python ops/sentry-check.py   # sends one test exception
+```
+
+`observability.py` owns the scrubbing, and it is the part that matters: OpenAI
+echoes the submitted key in a 401 (users have pasted passwords there), and
+private feeds carry their token in the audio URL. Request bodies, local
+variables and PII are never collected, OpenAI's own error message is dropped,
+and key-shaped strings, the rest of OpenAI's echo line and the query string
+after any URL or path (requests quotes bare paths) are redacted from every event. The
+test check event above must arrive with its fake key as `[redacted]`.
+
+If sentry-sdk is missing from the venv the app still boots and logs an error
+that reporting is off -- a deploy that skips `pip install` degrades, not dies.
+
 ## Notion daily metrics
 
 Weekday cron upserts one row into the Podskrift daily metrics Notion database
