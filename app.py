@@ -2804,20 +2804,34 @@ def _fetch_feed_capped(feed_url, max_bytes=SPOTIFY_FEED_MAX_BYTES):
     """Feed bytes, or None when the feed is unreachable or too big.
 
     A dead feed returns None instead of raising, so the resolver still gets
-    to try the next show and the iTunes episode search.
+    to try the next show and the iTunes episode search. Redirects are followed
+    by hand and every hop revalidated, as in download_audio: the route is
+    public, and a public feed could otherwise 302 to a private address.
     """
+    current = feed_url
     try:
-        with requests.get(feed_url, headers=_SPOTIFY_HEADERS, timeout=15, stream=True) as resp:
-            resp.raise_for_status()
-            chunks, size = [], 0
-            for chunk in resp.iter_content(64 * 1024):
-                size += len(chunk)
-                if size > max_bytes:
-                    return None
-                chunks.append(chunk)
+        for _ in range(MAX_REDIRECTS):
+            if not _is_fetchable_url(current):
+                return None
+            with requests.get(current, headers=_SPOTIFY_HEADERS, timeout=15,
+                              stream=True, allow_redirects=False) as resp:
+                if resp.is_redirect or resp.is_permanent_redirect:
+                    location = resp.headers.get('location')
+                    if not location:
+                        return None
+                    current = urljoin(current, location)
+                    continue
+                resp.raise_for_status()
+                chunks, size = [], 0
+                for chunk in resp.iter_content(64 * 1024):
+                    size += len(chunk)
+                    if size > max_bytes:
+                        return None
+                    chunks.append(chunk)
+                return b''.join(chunks)
     except requests.RequestException:
         return None
-    return b''.join(chunks)
+    return None
 
 
 def _episode_from_feed(feed_url, title):

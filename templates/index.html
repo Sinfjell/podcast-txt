@@ -291,11 +291,16 @@
     // instead of being searched for as text.
     var SPOTIFY_RE = /(open\.spotify\.com\/.*(episode|show)\/[A-Za-z0-9]{22}|spotify:(episode|show):[A-Za-z0-9]{22})/i;
 
-    function resolveSpotify(url) {
+    // Every search bumps this; a response for an older one is dropped, so a slow
+    // Spotify lookup can't overwrite results for whatever the box holds now.
+    var searchSeq = 0;
+
+    function resolveSpotify(url, seq) {
         setMessage('Looking up the Spotify link…');
         fetch('/resolve-spotify?url=' + encodeURIComponent(url))
             .then(function(r) { return r.json(); })
             .then(function(data) {
+                if (seq !== searchSeq) return;
                 clearResults();
                 resultsDiv.style.padding = '0';
                 resultsDiv.style.color = '';
@@ -313,20 +318,23 @@
                     !(results.length && results[0].type === 'episode') && searchType !== 'episode');
             })
             .catch(function() {
+                if (seq !== searchSeq) return;
                 setMessage('Could not look up that Spotify link.', 'var(--error)');
             });
     }
 
     function doSearch() {
         var query = searchInput.value.trim();
+        var seq = ++searchSeq;
         if (query.length < 2) { clearResults(); return; }
-        if (SPOTIFY_RE.test(query)) { resolveSpotify(query); return; }
+        if (SPOTIFY_RE.test(query)) { resolveSpotify(query, seq); return; }
 
         setMessage('Searching…');
 
         fetch('/search-podcasts?type=' + searchType + '&q=' + encodeURIComponent(query))
             .then(function(r) { return r.json(); })
             .then(function(data) {
+                if (seq !== searchSeq) return;
                 clearResults();
                 resultsDiv.style.padding = '0';
 
@@ -340,6 +348,7 @@
                 renderList(data.results);
             })
             .catch(function() {
+                if (seq !== searchSeq) return;
                 setMessage('Search failed.', 'var(--error)');
             });
     }

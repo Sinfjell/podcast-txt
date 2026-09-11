@@ -3571,11 +3571,14 @@ def _rss(*titles):
 
 
 class _HttpResp:
-    def __init__(self, status=200, text='', content=b'', payload=None):
+    def __init__(self, status=200, text='', content=b'', payload=None, location=None):
         self.status_code = status
         self.text = text
         self.content = content or text.encode()
         self._payload = payload
+        self.headers = {'location': location} if location else {}
+        self.is_redirect = status in (301, 302, 303, 307, 308) and bool(location)
+        self.is_permanent_redirect = status in (301, 308) and bool(location)
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -3756,6 +3759,43 @@ def test_a_feed_on_a_private_host_is_never_fetched(monkeypatch):
     monkeypatch.setattr(A, '_is_fetchable_url', lambda u: False)
     A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
     assert _FEED not in fetched
+
+
+def _redirecting_feed(monkeypatch, target):
+    """The show's feed 302s to `target`; `target` serves the matching feed."""
+    fetched = _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY),
+                        shows=[_HUBERMAN_SHOW], episodes=[])
+    inner = A.requests.get
+
+    def get(url, params=None, **kw):
+        if url == _FEED:
+            fetched.append(url)
+            assert kw.get('allow_redirects') is False, 'requests must not follow redirects itself'
+            return _HttpResp(302, location=target)
+        if url == target:
+            fetched.append(url)
+            return _HttpResp(200, content=_rss('Essentials: Genes &amp; Memory'))
+        return inner(url, params=params, **kw)
+
+    monkeypatch.setattr(A.requests, 'get', get)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: '169.254' not in u)
+    return fetched
+
+
+def test_a_feed_redirect_into_the_private_network_is_refused(monkeypatch):
+    target = 'http://169.254.169.254/latest/meta-data/'
+    fetched = _redirecting_feed(monkeypatch, target)
+    results, _ = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert target not in fetched, 'metadata endpoint was contacted'
+    assert [r['type'] for r in results] == ['show']
+
+
+def test_a_feed_redirect_to_a_public_host_is_followed(monkeypatch):
+    target = 'https://moved.example.com/feed.xml'
+    fetched = _redirecting_feed(monkeypatch, target)
+    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert target in fetched and error is None
+    assert results[0]['audio_url'] == 'https://cdn.example.com/0.mp3'
 
 
 def test_resolve_route_reports_an_unreachable_directory_without_details(monkeypatch):
