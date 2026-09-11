@@ -3545,6 +3545,400 @@ def test_the_language_count_follows_the_list(trial_on, monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# Spotify links  (TSK-20440)
+# --------------------------------------------------------------------------
+
+_SPOTIFY_EP = '7eDBByfSsrz3l3iYbXqDMH'
+_SPOTIFY_SHOW = '79CkJF3UJTHFV8Dse3Oy0P'
+_FEED = 'https://feeds.example.com/huberman'
+
+
+def _embed_page(entity):
+    import json as _json
+    data = {'props': {'pageProps': {'state': {'data': {'entity': entity}}}}}
+    return ('<html><script id="__NEXT_DATA__" type="application/json">'
+            + _json.dumps(data) + '</script></html>')
+
+
+def _rss(*titles):
+    items = ''.join(
+        f'<item><title>{t}</title><enclosure url="https://cdn.example.com/{i}.mp3" '
+        f'type="audio/mpeg" length="1"/><itunes:duration>1:00:00</itunes:duration></item>'
+        for i, t in enumerate(titles))
+    return ('<?xml version="1.0"?><rss version="2.0" '
+            'xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>'
+            f'<title>Huberman Lab</title>{items}</channel></rss>').encode()
+
+
+class _HttpResp:
+    def __init__(self, status=200, text='', content=b'', payload=None, location=None):
+        self.status_code = status
+        self.text = text
+        self.content = content or text.encode()
+        self._payload = payload
+        self.headers = {'location': location} if location else {}
+        self.is_redirect = status in (301, 302, 303, 307, 308) and bool(location)
+        self.is_permanent_redirect = status in (301, 308) and bool(location)
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise A.requests.HTTPError(f'{self.status_code}')
+
+    def json(self):
+        return self._payload
+
+    def iter_content(self, size):
+        for i in range(0, len(self.content), size):
+            yield self.content[i:i + size]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _fake_web(monkeypatch, embed=None, shows=(), episodes=(), feed=b'', oembed=None):
+    """Route requests.get by host. Records every URL that was fetched."""
+    fetched = []
+
+    def get(url, params=None, **kw):
+        fetched.append(url)
+        if '/embed/' in url:
+            return _HttpResp(200, text=embed) if embed else _HttpResp(404)
+        if 'oembed' in url:
+            return _HttpResp(200, payload=oembed) if oembed else _HttpResp(404)
+        if 'itunes.apple.com' in url:
+            items = episodes if params['entity'] == 'podcastEpisode' else shows
+            return _HttpResp(200, payload={'results': list(items)})
+        if url == _FEED:
+            if isinstance(feed, int):
+                return _HttpResp(feed)
+            return _HttpResp(200, content=feed)
+        raise AssertionError(f'unexpected fetch {url}')
+
+    monkeypatch.setattr(A.requests, 'get', get)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    return fetched
+
+
+_HUBERMAN_EP_ENTITY = {'type': 'episode', 'name': 'Essentials: Genes & Memory',
+                       'subtitle': 'Huberman Lab'}
+_HUBERMAN_SHOW = {'collectionName': 'Huberman Lab', 'artistName': 'Scicomm Media',
+                  'feedUrl': _FEED}
+
+
+@pytest.mark.parametrize('url,expected', [
+    (f'https://open.spotify.com/episode/{_SPOTIFY_EP}', ('episode', _SPOTIFY_EP)),
+    (f'https://open.spotify.com/episode/{_SPOTIFY_EP}?si=abc123', ('episode', _SPOTIFY_EP)),
+    (f'https://open.spotify.com/intl-no/episode/{_SPOTIFY_EP}', ('episode', _SPOTIFY_EP)),
+    (f'open.spotify.com/show/{_SPOTIFY_SHOW}', ('show', _SPOTIFY_SHOW)),
+    (f'spotify:episode:{_SPOTIFY_EP}', ('episode', _SPOTIFY_EP)),
+    (f'https://open.spotify.com/track/{_SPOTIFY_EP}', (None, None)),
+    ('https://open.spotify.com/episode/tooShort', (None, None)),
+    (f'https://evil.example.com/episode/{_SPOTIFY_EP}', (None, None)),
+    ('huberman lab', (None, None)),
+])
+def test_spotify_links_are_recognised(url, expected):
+    assert A.parse_spotify_url(url) == expected
+
+
+def test_spotify_episode_resolves_to_the_audio_in_the_public_feed(monkeypatch):
+    fetched = _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY),
+                        shows=[_HUBERMAN_SHOW],
+                        feed=_rss('Another episode', 'Essentials: Genes &amp; Memory'))
+    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}?si=x')
+    assert error is None
+    assert len(results) == 1
+    hit = results[0]
+    assert hit['type'] == 'episode'
+    assert hit['name'] == 'Essentials: Genes & Memory'
+    assert hit['artist'] == 'Huberman Lab'
+    assert hit['audio_url'] == 'https://cdn.example.com/1.mp3'
+    assert hit['feed_url'] == _FEED
+    # The only Spotify request is built from the parsed id, never the raw input.
+    assert f'https://open.spotify.com/embed/episode/{_SPOTIFY_EP}' in fetched
+
+
+def test_numbered_feed_titles_still_match(monkeypatch):
+    _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW],
+              feed=_rss('#212 - Essentials: Genes &amp; Memory'))
+    results, error = A.resolve_spotify_url(f'spotify:episode:{_SPOTIFY_EP}')
+    assert error is None and results[0]['audio_url'] == 'https://cdn.example.com/0.mp3'
+
+
+def test_spotify_exclusive_show_fails_with_a_clear_message(monkeypatch):
+    _fake_web(monkeypatch,
+              embed=_embed_page({'type': 'episode', 'name': 'Ep 1', 'subtitle': 'Only On Spotify'}),
+              shows=[{'collectionName': 'Something Else', 'feedUrl': _FEED}])
+    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert results == []
+    assert 'Only On Spotify' in error
+    assert 'Spotify-exclusive' in error
+
+
+def test_episode_missing_from_the_feed_offers_the_show(monkeypatch):
+    _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW],
+              feed=_rss('Unrelated episode'), episodes=[])
+    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert 'isn\'t in its public feed' in error
+    assert [r['type'] for r in results] == ['show']
+    assert results[0]['feed_url'] == _FEED
+
+
+def test_itunes_episode_search_is_the_fallback_to_the_feed(monkeypatch):
+    _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[],
+              episodes=[{'trackName': 'Essentials: Genes & Memory', 'collectionName': 'Other Show',
+                         'episodeUrl': 'https://cdn.example.com/wrong.mp3'},
+                        {'trackName': 'Essentials: Genes & Memory',
+                         'collectionName': 'Huberman Lab',
+                         'episodeUrl': 'https://cdn.example.com/right.mp3'}])
+    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert error is None
+    assert results[0]['audio_url'] == 'https://cdn.example.com/right.mp3'
+
+
+def test_a_dead_feed_still_falls_through_to_the_episode_search(monkeypatch):
+    _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW],
+              feed=403,
+              episodes=[{'trackName': 'Essentials: Genes & Memory',
+                         'collectionName': 'Huberman Lab',
+                         'episodeUrl': 'https://cdn.example.com/right.mp3'}])
+    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert error is None
+    assert results[0]['audio_url'] == 'https://cdn.example.com/right.mp3'
+
+
+def test_an_oversized_feed_is_not_read_into_memory(monkeypatch):
+    _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW],
+              feed=_rss('Essentials: Genes &amp; Memory'), episodes=[])
+    monkeypatch.setattr(A._fetch_feed_capped, '__defaults__', (100,))
+    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    # The feed would have matched; being over the cap it is skipped, not parsed.
+    assert [r['type'] for r in results] == ['show']
+    assert error
+
+
+def test_spotify_show_link_opens_the_show(monkeypatch):
+    # A show embed renders its latest episode; the show name is the subtitle.
+    _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW])
+    results, error = A.resolve_spotify_url(f'https://open.spotify.com/show/{_SPOTIFY_SHOW}')
+    assert error is None
+    assert results == [A._itunes_show_result(_HUBERMAN_SHOW)]
+
+
+def test_spotify_exclusive_show_link_fails_with_a_clear_message(monkeypatch):
+    _fake_web(monkeypatch,
+              embed=_embed_page({'type': 'episode', 'name': 'Ep 1', 'subtitle': 'Only On Spotify'}),
+              shows=[])
+    results, error = A.resolve_spotify_url(f'https://open.spotify.com/show/{_SPOTIFY_SHOW}')
+    assert results == []
+    assert 'Only On Spotify' in error and 'Spotify-exclusive' in error
+
+
+def test_oembed_is_used_when_the_embed_page_changes_shape(monkeypatch):
+    _fake_web(monkeypatch, embed='<html>no data here</html>',
+              oembed={'title': 'Essentials: Genes & Memory'},
+              episodes=[{'trackName': 'Essentials: Genes & Memory',
+                         'collectionName': 'Huberman Lab',
+                         'episodeUrl': 'https://cdn.example.com/right.mp3'}])
+    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert error is None
+    assert results[0]['audio_url'] == 'https://cdn.example.com/right.mp3'
+
+
+def test_unreadable_spotify_link_says_so(monkeypatch):
+    _fake_web(monkeypatch)
+    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert results == [] and "Couldn't read that Spotify link" in error
+
+
+def test_a_feed_on_a_private_host_is_never_fetched(monkeypatch):
+    fetched = _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY),
+                        shows=[_HUBERMAN_SHOW], feed=_rss('Essentials: Genes &amp; Memory'))
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: False)
+    A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert _FEED not in fetched
+
+
+def _redirecting_feed(monkeypatch, target):
+    """The show's feed 302s to `target`; `target` serves the matching feed."""
+    fetched = _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY),
+                        shows=[_HUBERMAN_SHOW], episodes=[])
+    inner = A.requests.get
+
+    def get(url, params=None, **kw):
+        if url == _FEED:
+            fetched.append(url)
+            assert kw.get('allow_redirects') is False, 'requests must not follow redirects itself'
+            return _HttpResp(302, location=target)
+        if url == target:
+            fetched.append(url)
+            return _HttpResp(200, content=_rss('Essentials: Genes &amp; Memory'))
+        return inner(url, params=params, **kw)
+
+    monkeypatch.setattr(A.requests, 'get', get)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: '169.254' not in u)
+    return fetched
+
+
+def test_a_feed_redirect_into_the_private_network_is_refused(monkeypatch):
+    target = 'http://169.254.169.254/latest/meta-data/'
+    fetched = _redirecting_feed(monkeypatch, target)
+    results, _ = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert target not in fetched, 'metadata endpoint was contacted'
+    assert [r['type'] for r in results] == ['show']
+
+
+def test_a_feed_redirect_to_a_public_host_is_followed(monkeypatch):
+    target = 'https://moved.example.com/feed.xml'
+    fetched = _redirecting_feed(monkeypatch, target)
+    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert target in fetched and error is None
+    assert results[0]['audio_url'] == 'https://cdn.example.com/0.mp3'
+
+
+def test_resolve_route_reports_an_unreachable_directory_without_details(monkeypatch):
+    def down(*a, **kw):
+        if 'spotify.com' in a[0]:
+            return _HttpResp(200, text=_embed_page(_HUBERMAN_EP_ENTITY))
+        raise A.requests.ConnectionError('secret-internal-detail')
+    monkeypatch.setattr(A.requests, 'get', down)
+    data = A.app.test_client().get(
+        f'/resolve-spotify?url=https://open.spotify.com/episode/{_SPOTIFY_EP}').get_json()
+    assert data['results'] == []
+    assert "Couldn't reach the podcast directory" in data['error']
+    assert 'secret-internal-detail' not in data['error']
+
+
+def test_index_routes_spotify_links_to_the_resolver():
+    body = A.app.test_client().get('/').data.decode()
+    assert '/resolve-spotify?url=' in body
+    assert 'SPOTIFY_RE' in body
+
+
+# --------------------------------------------------------------------------
+# Transcript search  (TSK-20441)
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def library():
+    """Two users' transcripts. Returns (owner_id, other_id)."""
+    from models import db, TranscriptionTask
+    owner = _make_user('search-owner@example.com')
+    other = _make_user('search-other@example.com')
+    rows = [
+        ('lib-1', owner, 'completed', 'Weather report',
+         'Tomorrow brings rain across\nØstlandet and snow in the north. ' + 'filler ' * 40),
+        ('lib-2', owner, 'completed', 'Cooking hour', 'We talk about bread <script>x</script>.'),
+        ('lib-3', owner, 'transcribing', 'Still running', 'Østlandet partial text'),
+        ('lib-4', other, 'completed', 'Other user', 'Østlandet is mentioned here too'),
+        ('lib-5', owner, 'completed', 'Østlandet special', 'Nothing about the region in the body'),
+    ]
+    with A.app.app_context():
+        db.session.query(TranscriptionTask).filter(
+            TranscriptionTask.id.in_([r[0] for r in rows])).delete()
+        for i, (tid, uid, status, title, text) in enumerate(rows):
+            db.session.add(TranscriptionTask(
+                id=tid, user_id=uid, status=status, episode_title=title,
+                transcript_text=text, podcast_name='Show',
+                completed_at=datetime(2026, 9, 1 + i, tzinfo=timezone.utc)))
+        db.session.commit()
+    yield owner, other
+    with A.app.app_context():
+        db.session.query(TranscriptionTask).filter(
+            TranscriptionTask.id.in_([r[0] for r in rows])).delete()
+        db.session.commit()
+    _purge(['search-owner@example.com', 'search-other@example.com'])
+
+
+def test_search_finds_a_phrase_across_case_and_line_breaks(library):
+    owner, _ = library
+    with A.app.app_context():
+        matches = A.search_transcripts(owner, 'ACROSS østlandet')
+    ids = [m['id'] for m in matches]
+    assert ids == ['lib-1']
+    before, hit, after = matches[0]['snippet']
+    assert hit == 'across\nØstlandet'
+    # The spaces either side of the hit survive, or the words glue onto the <mark>.
+    assert before == 'Tomorrow brings rain '
+    assert after.startswith(' and snow')
+    assert after.endswith('…')
+
+
+def test_punctuation_in_the_query_is_not_required_in_the_text(library):
+    owner, _ = library
+    with A.app.app_context():
+        odd = A.search_transcripts(owner, 'snow, in the: north!')
+        bare = A.search_transcripts(owner, '?!')
+    assert [m['id'] for m in odd] == ['lib-1']
+    assert odd[0]['snippet'][1] == 'snow in the north'
+    assert bare == []
+
+
+def test_search_matches_words_split_by_punctuation_in_the_text(library):
+    from models import db, TranscriptionTask
+    owner, _ = library
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='lib-6', user_id=owner, status='completed',
+            episode_title='Essentials: Genes & Memory', podcast_name='Show',
+            transcript_text='So, yes -- genes, memory: and inheritance.',
+            completed_at=datetime(2026, 9, 20, tzinfo=timezone.utc)))
+        db.session.commit()
+        try:
+            text = A.search_transcripts(owner, 'genes memory and')
+            title = A.search_transcripts(owner, 'essentials genes')
+        finally:
+            db.session.query(TranscriptionTask).filter_by(id='lib-6').delete()
+            db.session.commit()
+    assert [m['id'] for m in text] == ['lib-6']
+    assert text[0]['snippet'][1] == 'genes, memory: and'
+    assert [m['id'] for m in title] == ['lib-6']
+
+
+def test_search_only_covers_my_completed_transcripts(library):
+    owner, other = library
+    with A.app.app_context():
+        mine = [m['id'] for m in A.search_transcripts(owner, 'østlandet')]
+        theirs = [m['id'] for m in A.search_transcripts(other, 'østlandet')]
+    # Newest first; the title-only hit is included, the running task and the
+    # other user's transcript are not.
+    assert mine == ['lib-5', 'lib-1']
+    assert theirs == ['lib-4']
+
+
+def test_title_only_hit_has_no_snippet(library):
+    owner, _ = library
+    with A.app.app_context():
+        [m] = [m for m in A.search_transcripts(owner, 'special')]
+    assert m['snippet'] is None and m['hits'] == 0
+
+
+def test_history_search_page_renders_and_escapes(library):
+    owner, _ = library
+    client = _login(owner)
+    body = client.get('/history?q=bread').data.decode()
+    assert 'Cooking hour' in body
+    assert '/transcription/lib-2' in body
+    assert '<mark' in body and '>bread</mark>' in body
+    assert '<script>x</script>' not in body
+    assert '&lt;script&gt;' in body
+    assert 'Weather report' not in body
+
+
+def test_history_search_with_no_hits_says_so(library):
+    owner, _ = library
+    body = _login(owner).get('/history?q=zeppelin').data.decode()
+    assert 'No completed transcripts mention' in body
+
+
+def test_history_search_requires_login():
+    resp = A.app.test_client().get('/history?q=anything')
+    assert resp.status_code == 302 and '/login' in resp.headers['Location']
+
+
+# --------------------------------------------------------------------------
 # Error reporting (Sentry)
 #
 # The scrubbing is what these guard. OpenAI echoes the submitted key in a 401,

@@ -8,14 +8,17 @@ Supports user accounts, saved RSS feeds, and self-serve API keys.
 
 import collections
 import glob
+import json
 import math
 import os
+import re
 import sqlite3
 import shutil
 import subprocess
 import ssl
 import time
 import threading
+import unicodedata
 from datetime import datetime, timezone
 import certifi
 import requests
@@ -2241,6 +2244,12 @@ def transcription_page(task_id):
 @app.route('/history')
 @login_required
 def history():
+    query = ' '.join(request.args.get('q', '').split())[:TRANSCRIPT_QUERY_MAX]
+    if query:
+        return render_template('history.html', query=query,
+                               matches=search_transcripts(current_user.id, query),
+                               transcriptions=[], total_cost=0,
+                               cost_per_minute=WHISPER_COST_PER_MINUTE)
     tasks = TranscriptionTask.query.filter_by(
         user_id=current_user.id, status='completed'
     ).order_by(TranscriptionTask.completed_at.desc()).limit(50).all()
@@ -2248,9 +2257,73 @@ def history():
         (t.audio_duration / 60) * WHISPER_COST_PER_MINUTE
         for t in tasks if t.audio_duration
     )
-    return render_template('history.html', transcriptions=tasks,
+    return render_template('history.html', transcriptions=tasks, query='',
                            total_cost=total_cost,
                            cost_per_minute=WHISPER_COST_PER_MINUTE)
+
+
+# ---------------------------------------------------------------------------
+# Transcript search  (TSK-20441)
+# ---------------------------------------------------------------------------
+
+TRANSCRIPT_QUERY_MAX = 200
+TRANSCRIPT_SEARCH_LIMIT = 50
+SNIPPET_RADIUS = 90
+
+
+def _snippet(text, match, radius=SNIPPET_RADIUS):
+    """(before, hit, after) around a regex match, trimmed to word boundaries.
+
+    Returned in parts so the template can wrap the hit in <mark> while Jinja
+    still escapes all three -- transcript text is untrusted.
+    """
+    start, end = match.span()
+    lo, hi = max(0, start - radius), min(len(text), end + radius)
+    before, after = text[lo:start], text[end:hi]
+    if lo > 0:
+        before = '…' + before.split(' ', 1)[-1] if ' ' in before else '…' + before
+    if hi < len(text):
+        after = (after.rsplit(' ', 1)[0] if ' ' in after else after) + '…'
+    # Collapse runs of whitespace but keep the edges: split()/join would glue
+    # the words either side of the hit onto it ("detregn over Østlandetog").
+    return (re.sub(r'\s+', ' ', before), match.group(0), re.sub(r'\s+', ' ', after))
+
+
+def search_transcripts(user_id, query, limit=TRANSCRIPT_SEARCH_LIMIT):
+    """The user's completed transcripts containing `query`, newest first.
+
+    A scan in Python rather than SQL LIKE: SQLite's LIKE only folds ASCII case,
+    so "Østlandet" would miss "østlandet". Only this user's completed rows are
+    read, streamed in batches, which is fine at the current per-user scale.
+    Words match across any run of whitespace or punctuation, so a phrase hits
+    across a line break and across the commas and colons Whisper puts in.
+    """
+    words = [w for w in re.split(r'\W+', query) if w]
+    if not words:
+        return []
+    pattern = re.compile(r'\W+'.join(map(re.escape, words)), re.IGNORECASE)
+    T = TranscriptionTask
+    rows = (db.session.query(T.id, T.episode_title, T.podcast_name, T.completed_at,
+                             T.started_at, T.transcript_text)
+            .filter(T.user_id == user_id, T.status == 'completed')
+            .order_by(T.completed_at.desc()).yield_per(20))
+    matches = []
+    for row in rows:
+        text = row.transcript_text or ''
+        hit = pattern.search(text)
+        if not hit and not pattern.search(row.episode_title or ''):
+            continue
+        matches.append({
+            'id': row.id,
+            'episode_title': row.episode_title,
+            'podcast_name': row.podcast_name,
+            'when': row.completed_at or row.started_at,
+            'hits': len(pattern.findall(text)),
+            'snippet': _snippet(text, hit) if hit else None,
+        })
+        if len(matches) >= limit:
+            break
+    return matches
 
 
 def faq_entries():
@@ -2567,39 +2640,281 @@ def search_podcasts():
     results = []
     for item in data.get('results', []):
         if is_episode:
-            audio_url = item.get('episodeUrl')
-            if not audio_url:
-                continue
-            duration_min = None
-            if item.get('trackTimeMillis'):
-                duration_min = round(item['trackTimeMillis'] / 60000, 1)
-            results.append({
-                'type': 'episode',
-                'name': item.get('trackName', ''),
-                'artist': item.get('collectionName', ''),
-                'artwork': _best_artwork(item),
-                'audio_url': audio_url,
-                'feed_url': item.get('feedUrl', ''),
-                'released': (item.get('releaseDate') or '')[:10],
-                'duration_min': duration_min,
-                'estimated_cost': (
-                    round(duration_min * WHISPER_COST_PER_MINUTE, 3) if duration_min else None
-                ),
-            })
-        else:
-            feed_url = item.get('feedUrl')
-            if not feed_url:
-                continue
-            results.append({
-                'type': 'show',
-                'name': item.get('collectionName', ''),
-                'artist': item.get('artistName', ''),
-                'artwork': _best_artwork(item),
-                'feed_url': feed_url,
-                'genre': item.get('primaryGenreName', ''),
-            })
+            if item.get('episodeUrl'):
+                results.append(_itunes_episode_result(item))
+        elif item.get('feedUrl'):
+            results.append(_itunes_show_result(item))
 
     return jsonify({'results': results})
+
+
+def _itunes_episode_result(item):
+    """An iTunes podcastEpisode hit, in the shape the search box renders."""
+    duration_min = None
+    if item.get('trackTimeMillis'):
+        duration_min = round(item['trackTimeMillis'] / 60000, 1)
+    return {
+        'type': 'episode',
+        'name': item.get('trackName', ''),
+        'artist': item.get('collectionName', ''),
+        'artwork': _best_artwork(item),
+        'audio_url': item.get('episodeUrl'),
+        'feed_url': item.get('feedUrl', ''),
+        'released': (item.get('releaseDate') or '')[:10],
+        'duration_min': duration_min,
+        'estimated_cost': (
+            round(duration_min * WHISPER_COST_PER_MINUTE, 3) if duration_min else None
+        ),
+    }
+
+
+def _itunes_show_result(item):
+    """An iTunes podcast (show) hit, in the shape the search box renders."""
+    return {
+        'type': 'show',
+        'name': item.get('collectionName', ''),
+        'artist': item.get('artistName', ''),
+        'artwork': _best_artwork(item),
+        'feed_url': item.get('feedUrl'),
+        'genre': item.get('primaryGenreName', ''),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Spotify links  (TSK-20440)
+# ---------------------------------------------------------------------------
+
+#: open.spotify.com/episode/<id>, /intl-no/show/<id>, /embed/..., spotify:episode:<id>.
+#: Only the 22-character id is ever used to build a request, so nothing the
+#: user typed decides which host the server talks to.
+SPOTIFY_URL_RE = re.compile(
+    r'(?:open\.spotify\.com/(?:intl-[a-z]{2}(?:-[a-z]{2})?/)?(?:embed/)?|spotify:)'
+    r'(episode|show)[/:]([A-Za-z0-9]{22})(?![A-Za-z0-9])'
+)
+
+SPOTIFY_NO_FEED_HINT = (
+    "Podskrift can only transcribe podcasts that publish a public RSS feed. "
+    "Spotify-exclusive shows don't, so their audio can't be fetched."
+)
+
+_SPOTIFY_HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; Podskrift/1.0)'}
+_NEXT_DATA_RE = re.compile(
+    r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.S)
+
+
+def parse_spotify_url(raw):
+    """Return (kind, id) for a Spotify episode/show link, or (None, None)."""
+    match = SPOTIFY_URL_RE.search(raw or '')
+    return (match.group(1), match.group(2)) if match else (None, None)
+
+
+def _normalize_title(text):
+    """Case-, width- and punctuation-insensitive form for matching titles."""
+    text = unicodedata.normalize('NFKC', text or '').casefold()
+    return re.sub(r'[\W_]+', ' ', text).strip()
+
+
+def _spotify_embed_metadata(kind, spotify_id):
+    """Episode title and show name from Spotify's public embed player.
+
+    The Web API needs an app registration; the embed player does not, and its
+    __NEXT_DATA__ carries both names. It is not a documented API, so any shape
+    change lands here as None and the caller falls back to oEmbed.
+    """
+    try:
+        resp = requests.get(f'https://open.spotify.com/embed/{kind}/{spotify_id}',
+                            headers=_SPOTIFY_HEADERS, timeout=10)
+        resp.raise_for_status()
+        entity = json.loads(_NEXT_DATA_RE.search(resp.text).group(1))[
+            'props']['pageProps']['state']['data']['entity']
+    except (requests.RequestException, AttributeError, KeyError, TypeError, ValueError):
+        return None
+    name = entity.get('name') or entity.get('title') or ''
+    if entity.get('type') == 'episode':
+        # A show embed renders its latest episode: the show is the subtitle.
+        show = entity.get('subtitle') or ''
+        return {'title': name if kind == 'episode' else '', 'show': show}
+    return {'title': '', 'show': name}
+
+
+def _spotify_oembed_metadata(kind, spotify_id):
+    """oEmbed is documented but only carries one title: the episode's or the show's."""
+    try:
+        resp = requests.get('https://open.spotify.com/oembed',
+                            params={'url': f'https://open.spotify.com/{kind}/{spotify_id}'},
+                            headers=_SPOTIFY_HEADERS, timeout=10)
+        resp.raise_for_status()
+        title = (resp.json().get('title') or '').strip()
+    except (requests.RequestException, ValueError, AttributeError):
+        return None
+    if not title:
+        return None
+    return {'title': title, 'show': ''} if kind == 'episode' else {'title': '', 'show': title}
+
+
+def fetch_spotify_metadata(kind, spotify_id):
+    """{'title', 'show'} for a Spotify link, or None when Spotify tells us nothing."""
+    meta = _spotify_embed_metadata(kind, spotify_id)
+    if meta and (meta['show'] or meta['title']):
+        return meta
+    return _spotify_oembed_metadata(kind, spotify_id)
+
+
+def _itunes_search(term, entity):
+    """Raw iTunes results. Raises requests.RequestException -- the caller must
+    tell "directory unreachable" apart from "not in the directory"."""
+    resp = requests.get('https://itunes.apple.com/search', timeout=10, params={
+        'term': term, 'media': 'podcast', 'entity': entity, 'limit': 25})
+    resp.raise_for_status()
+    return resp.json().get('results', [])
+
+
+def _public_shows_named(show_name):
+    """iTunes shows with a feed whose name matches the Spotify show exactly."""
+    want = _normalize_title(show_name)
+    return [item for item in _itunes_search(show_name, 'podcast')
+            if item.get('feedUrl') and _normalize_title(item.get('collectionName')) == want]
+
+
+def _match_episode(episodes, title):
+    """The feed episode with this title: exact first, then containment.
+
+    Containment covers feeds that prefix a number ("#212 - Title") but only for
+    titles long enough that a substring hit is not a coincidence.
+    """
+    want = _normalize_title(title)
+    if not want:
+        return None
+    normalized = [(_normalize_title(ep['title']), ep) for ep in episodes]
+    for have, ep in normalized:
+        if have == want:
+            return ep
+    if len(want) >= 12:
+        for have, ep in normalized:
+            if want in have:
+                return ep
+    return None
+
+
+#: /resolve-spotify is public, so a feed is read into memory only up to this.
+#: Large back catalogues run to a few MB; anything past this is not a feed we want.
+SPOTIFY_FEED_MAX_BYTES = 15 * 1024 * 1024
+
+
+def _fetch_feed_capped(feed_url, max_bytes=SPOTIFY_FEED_MAX_BYTES):
+    """Feed bytes, or None when the feed is unreachable or too big.
+
+    A dead feed returns None instead of raising, so the resolver still gets
+    to try the next show and the iTunes episode search. Redirects are followed
+    by hand and every hop revalidated, as in download_audio: the route is
+    public, and a public feed could otherwise 302 to a private address.
+    """
+    current = feed_url
+    try:
+        for _ in range(MAX_REDIRECTS):
+            if not _is_fetchable_url(current):
+                return None
+            with requests.get(current, headers=_SPOTIFY_HEADERS, timeout=15,
+                              stream=True, allow_redirects=False) as resp:
+                if resp.is_redirect or resp.is_permanent_redirect:
+                    location = resp.headers.get('location')
+                    if not location:
+                        return None
+                    current = urljoin(current, location)
+                    continue
+                resp.raise_for_status()
+                chunks, size = [], 0
+                for chunk in resp.iter_content(64 * 1024):
+                    size += len(chunk)
+                    if size > max_bytes:
+                        return None
+                    chunks.append(chunk)
+                return b''.join(chunks)
+    except requests.RequestException:
+        return None
+    return None
+
+
+def _episode_from_feed(feed_url, title):
+    """Find the episode in the show's public RSS feed, as a search-box result."""
+    if not _is_fetchable_url(feed_url):
+        return None
+    body = _fetch_feed_capped(feed_url)
+    if body is None:
+        return None
+    episodes, _ = get_episodes_from_rss(body)
+    ep = _match_episode(episodes or [], title)
+    if not ep:
+        return None
+    return {
+        'type': 'episode',
+        'name': ep['title'],
+        'artist': ep['podcast_name'],
+        'artwork': ep['artwork'],
+        'audio_url': ep['audio_url'],
+        'feed_url': feed_url,
+        'released': ep['published'],
+        'duration_min': ep['duration_min'],
+        'estimated_cost': ep['estimated_cost'],
+    }
+
+
+def _episode_from_itunes(title, show_name):
+    """Fallback when the feed lookup misses: the same episode search the Episodes
+    tab runs, accepted only on an exact title (and show, when known) match."""
+    want_title, want_show = _normalize_title(title), _normalize_title(show_name)
+    for item in _itunes_search(title, 'podcastEpisode'):
+        if not item.get('episodeUrl'):
+            continue
+        if _normalize_title(item.get('trackName')) != want_title:
+            continue
+        if want_show and _normalize_title(item.get('collectionName')) != want_show:
+            continue
+        return _itunes_episode_result(item)
+    return None
+
+
+def resolve_spotify_url(raw):
+    """Map a Spotify link onto the public feed Podskrift can fetch.
+
+    Returns (results, error) in /search-podcasts' result shape. Raises
+    requests.RequestException when a directory lookup itself fails.
+    """
+    kind, spotify_id = parse_spotify_url(raw)
+    if not kind:
+        return [], "That doesn't look like a Spotify episode or show link."
+    meta = fetch_spotify_metadata(kind, spotify_id)
+    if not meta:
+        return [], "Couldn't read that Spotify link. Check that it's a public episode or show."
+    shows = _public_shows_named(meta['show']) if meta['show'] else []
+    if kind == 'show':
+        if shows:
+            return [_itunes_show_result(shows[0])], None
+        return [], f'"{meta["show"]}" has no public podcast feed. {SPOTIFY_NO_FEED_HINT}'
+
+    for show in shows[:2]:
+        hit = _episode_from_feed(show['feedUrl'], meta['title'])
+        if hit:
+            return [hit], None
+    hit = _episode_from_itunes(meta['title'], meta['show'])
+    if hit:
+        return [hit], None
+    if shows:
+        return [_itunes_show_result(shows[0])], (
+            f'Found "{meta["show"]}", but this episode isn\'t in its public feed -- it may be '
+            'Spotify-exclusive. Open the show below to pick from the episodes that are.')
+    name = meta['show'] or meta['title']
+    return [], f'"{name}" has no public podcast feed. {SPOTIFY_NO_FEED_HINT}'
+
+
+@app.route('/resolve-spotify', methods=['GET'])
+def resolve_spotify():
+    """Turn a pasted Spotify episode/show link into a search-box result."""
+    try:
+        results, error = resolve_spotify_url(request.args.get('url', '').strip())
+    except requests.RequestException:
+        results, error = [], "Couldn't reach the podcast directory. Try again in a moment."
+    return jsonify({'results': results, 'error': error})
 
 
 # ---------------------------------------------------------------------------

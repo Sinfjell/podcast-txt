@@ -63,10 +63,12 @@
         </div>
         <div class="input-group">
             <input type="text" class="form-input form-input-lg" id="podcastSearch"
-                   placeholder="Search podcasts by name..." autocomplete="off">
+                   placeholder="Search podcasts by name, or paste a Spotify link..." autocomplete="off">
             <button class="btn btn-primary" type="button" id="searchBtn">Search</button>
         </div>
-        <p class="form-hint" id="searchHint">Works with any podcast — Spotify, Apple Podcasts, or any other platform.</p>
+        <p class="form-hint" id="searchHint">
+            Search by name, or paste a Spotify episode or show link (public feeds only).
+        </p>
         <div id="episodeLangRow" class="hidden" style="margin-top: 12px;">
             <label class="form-label" for="searchLanguage">Spoken language</label>
             <select class="form-input" id="searchLanguage" style="max-width: 220px;">
@@ -275,15 +277,64 @@
         return row;
     }
 
+    function renderList(results) {
+        var list = document.createElement('div');
+        list.style.marginTop = '12px';
+        list.style.border = '1px solid var(--border)';
+        list.style.borderRadius = 'var(--radius)';
+        list.style.overflow = 'hidden';
+        results.forEach(function(item) { list.appendChild(buildRow(item)); });
+        resultsDiv.appendChild(list);
+    }
+
+    // A pasted Spotify link is resolved to the show's public feed server-side
+    // instead of being searched for as text.
+    var SPOTIFY_RE = /(open\.spotify\.com\/.*(episode|show)\/[A-Za-z0-9]{22}|spotify:(episode|show):[A-Za-z0-9]{22})/i;
+
+    // Every search bumps this; a response for an older one is dropped, so a slow
+    // Spotify lookup can't overwrite results for whatever the box holds now.
+    var searchSeq = 0;
+
+    function resolveSpotify(url, seq) {
+        setMessage('Looking up the Spotify link…');
+        fetch('/resolve-spotify?url=' + encodeURIComponent(url))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (seq !== searchSeq) return;
+                clearResults();
+                resultsDiv.style.padding = '0';
+                resultsDiv.style.color = '';
+                if (data.error) {
+                    var note = document.createElement('p');
+                    note.textContent = data.error;
+                    note.style.color = 'var(--error)';
+                    note.style.margin = '12px 0 0';
+                    resultsDiv.appendChild(note);
+                }
+                var results = data.results || [];
+                if (results.length) renderList(results);
+                // An episode hit transcribes directly, so the language must be pickable
+                langRow.classList.toggle('hidden',
+                    !(results.length && results[0].type === 'episode') && searchType !== 'episode');
+            })
+            .catch(function() {
+                if (seq !== searchSeq) return;
+                setMessage('Could not look up that Spotify link.', 'var(--error)');
+            });
+    }
+
     function doSearch() {
         var query = searchInput.value.trim();
+        var seq = ++searchSeq;
         if (query.length < 2) { clearResults(); return; }
+        if (SPOTIFY_RE.test(query)) { resolveSpotify(query, seq); return; }
 
         setMessage('Searching…');
 
         fetch('/search-podcasts?type=' + searchType + '&q=' + encodeURIComponent(query))
             .then(function(r) { return r.json(); })
             .then(function(data) {
+                if (seq !== searchSeq) return;
                 clearResults();
                 resultsDiv.style.padding = '0';
 
@@ -294,15 +345,10 @@
                     return;
                 }
 
-                var list = document.createElement('div');
-                list.style.marginTop = '12px';
-                list.style.border = '1px solid var(--border)';
-                list.style.borderRadius = 'var(--radius)';
-                list.style.overflow = 'hidden';
-                data.results.forEach(function(item) { list.appendChild(buildRow(item)); });
-                resultsDiv.appendChild(list);
+                renderList(data.results);
             })
             .catch(function() {
+                if (seq !== searchSeq) return;
                 setMessage('Search failed.', 'var(--error)');
             });
     }
@@ -317,10 +363,10 @@
         langRow.classList.toggle('hidden', searchType !== 'episode');
         searchInput.placeholder = searchType === 'episode'
             ? 'Search episodes by title or topic...'
-            : 'Search podcasts by name...';
+            : 'Search podcasts by name, or paste a Spotify link...';
         hint.textContent = searchType === 'episode'
             ? 'Finds individual episodes and starts transcribing the one you pick.'
-            : 'Works with any podcast — Spotify, Apple Podcasts, or any other platform.';
+            : 'Search by name, or paste a Spotify episode or show link (public feeds only).';
         if (searchInput.value.trim().length >= 2) doSearch();
     });
 

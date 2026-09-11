@@ -9,6 +9,51 @@
     {% endif %}
 </div>
 
+<form method="GET" action="{{ url_for('history') }}" class="mb-2" role="search">
+    <div class="input-group">
+        <input type="search" class="form-input" name="q" value="{{ query }}" maxlength="200"
+               placeholder="Search inside your transcripts..." aria-label="Search inside your transcripts">
+        <button type="submit" class="btn btn-ghost">Search</button>
+    </div>
+</form>
+
+{% if query %}
+<p class="text-sm text-muted mb-1">
+    {{ matches|length }}{% if matches|length >= 50 %}+{% endif %}
+    transcript{{ '' if matches|length == 1 else 's' }} matching “{{ query }}” ·
+    <a href="{{ url_for('history') }}">Clear search</a>
+</p>
+<div class="card">
+    {% for m in matches %}
+    <div class="list-item" style="gap: 16px; align-items: flex-start;">
+        <div class="list-item-text" style="min-width: 0; flex: 1;">
+            <a class="list-item-title"
+               href="{{ url_for('transcription_page', task_id=m.id) }}">{{ m.episode_title }}</a>
+            <div class="list-item-sub">
+                {% if m.podcast_name %}{{ m.podcast_name }} · {% endif %}
+                {% if m.when %}{{ m.when.strftime('%Y-%m-%d') }}{% endif %}
+                {% if m.hits %} · {{ m.hits }} hit{{ '' if m.hits == 1 else 's' }}{% endif %}
+            </div>
+            {% if m.snippet %}
+            <p class="text-sm" style="margin: 6px 0 0; color: var(--muted); line-height: 1.6;">
+                {# No whitespace around <mark>: the snippet parts carry their own. #}
+                {{ m.snippet[0] }}<mark style="background: var(--accent-bg); color: var(--accent-bright);
+                    padding: 0 2px; border-radius: 3px;">{{ m.snippet[1] }}</mark>{{ m.snippet[2] }}
+            </p>
+            {% endif %}
+        </div>
+        <div class="flex-center" style="gap: 6px; flex-shrink: 0;">
+            <a href="{{ url_for('transcription_page', task_id=m.id) }}" class="btn btn-sm btn-ghost">Open</a>
+            <a href="{{ url_for('download_file', task_id=m.id, file_type='txt') }}" class="btn btn-sm btn-ghost">TXT</a>
+        </div>
+    </div>
+    {% else %}
+    <div class="card-body text-center text-muted">
+        No completed transcripts mention “{{ query }}”.
+    </div>
+    {% endfor %}
+</div>
+{% else %}
 <div class="card">
     {% if transcriptions %}
         {% for t in transcriptions %}
@@ -34,6 +79,7 @@
         </div>
     {% endif %}
 </div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
