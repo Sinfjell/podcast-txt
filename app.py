@@ -2785,13 +2785,39 @@ def _match_episode(episodes, title):
     return None
 
 
+#: /resolve-spotify is public, so a feed is read into memory only up to this.
+#: Large back catalogues run to a few MB; anything past this is not a feed we want.
+SPOTIFY_FEED_MAX_BYTES = 15 * 1024 * 1024
+
+
+def _fetch_feed_capped(feed_url, max_bytes=SPOTIFY_FEED_MAX_BYTES):
+    """Feed bytes, or None when the feed is unreachable or too big.
+
+    A dead feed returns None instead of raising, so the resolver still gets
+    to try the next show and the iTunes episode search.
+    """
+    try:
+        with requests.get(feed_url, headers=_SPOTIFY_HEADERS, timeout=15, stream=True) as resp:
+            resp.raise_for_status()
+            chunks, size = [], 0
+            for chunk in resp.iter_content(64 * 1024):
+                size += len(chunk)
+                if size > max_bytes:
+                    return None
+                chunks.append(chunk)
+    except requests.RequestException:
+        return None
+    return b''.join(chunks)
+
+
 def _episode_from_feed(feed_url, title):
     """Find the episode in the show's public RSS feed, as a search-box result."""
     if not _is_fetchable_url(feed_url):
         return None
-    resp = requests.get(feed_url, headers=_SPOTIFY_HEADERS, timeout=15)
-    resp.raise_for_status()
-    episodes, _ = get_episodes_from_rss(resp.content)
+    body = _fetch_feed_capped(feed_url)
+    if body is None:
+        return None
+    episodes, _ = get_episodes_from_rss(body)
     ep = _match_episode(episodes or [], title)
     if not ep:
         return None

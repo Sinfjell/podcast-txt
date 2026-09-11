@@ -3581,6 +3581,16 @@ class _HttpResp:
     def json(self):
         return self._payload
 
+    def iter_content(self, size):
+        for i in range(0, len(self.content), size):
+            yield self.content[i:i + size]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
 
 def _fake_web(monkeypatch, embed=None, shows=(), episodes=(), feed=b'', oembed=None):
     """Route requests.get by host. Records every URL that was fetched."""
@@ -3596,6 +3606,8 @@ def _fake_web(monkeypatch, embed=None, shows=(), episodes=(), feed=b'', oembed=N
             items = episodes if params['entity'] == 'podcastEpisode' else shows
             return _HttpResp(200, payload={'results': list(items)})
         if url == _FEED:
+            if isinstance(feed, int):
+                return _HttpResp(feed)
             return _HttpResp(200, content=feed)
         raise AssertionError(f'unexpected fetch {url}')
 
@@ -3678,6 +3690,27 @@ def test_itunes_episode_search_is_the_fallback_to_the_feed(monkeypatch):
     results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
     assert error is None
     assert results[0]['audio_url'] == 'https://cdn.example.com/right.mp3'
+
+
+def test_a_dead_feed_still_falls_through_to_the_episode_search(monkeypatch):
+    _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW],
+              feed=403,
+              episodes=[{'trackName': 'Essentials: Genes & Memory',
+                         'collectionName': 'Huberman Lab',
+                         'episodeUrl': 'https://cdn.example.com/right.mp3'}])
+    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert error is None
+    assert results[0]['audio_url'] == 'https://cdn.example.com/right.mp3'
+
+
+def test_an_oversized_feed_is_not_read_into_memory(monkeypatch):
+    _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW],
+              feed=_rss('Essentials: Genes &amp; Memory'), episodes=[])
+    monkeypatch.setattr(A._fetch_feed_capped, '__defaults__', (100,))
+    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    # The feed would have matched; being over the cap it is skipped, not parsed.
+    assert [r['type'] for r in results] == ['show']
+    assert error
 
 
 def test_spotify_show_link_opens_the_show(monkeypatch):
