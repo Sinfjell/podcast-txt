@@ -1,5 +1,7 @@
 # Environment variables
 .env
+.env.metrics
+ops/.env.metrics
 
 # Python
 __pycache__/

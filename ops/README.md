@@ -59,3 +59,40 @@ falls back to a size estimate silently — worse ETAs, no error.
 ```bash
 ffmpeg -version | head -1 && ffprobe -version | head -1
 ```
+
+## Notion daily metrics
+
+Weekday cron upserts one row into the Podskrift daily metrics Notion database
+(signups, completions, trial burn, etc.). Read-only against SQLite; Python 3
+stdlib only.
+
+### Install (once, on the host)
+
+```bash
+cd /var/www/vhosts/podskrift.nettsmed.dev/app
+cp ops/env.metrics.example ops/.env.metrics
+# paste the Notion integration token; leave the database id as-is unless it moves
+chmod 600 ops/.env.metrics
+mkdir -p data/logs
+```
+
+Never commit `ops/.env.metrics` — it holds `NOTION_TOKEN`.
+
+### Cron (Europe/Oslo, weekdays)
+
+```cron
+50 7 * * 1-5  cd /var/www/vhosts/podskrift.nettsmed.dev/app && TZ=Europe/Oslo ./ops/notion-daily-metrics.sh >> data/logs/notion-daily-metrics.log 2>&1
+```
+
+If the crontab cannot set `TZ` per line, set `CRON_TZ=Europe/Oslo` at the top
+of the crontab instead. Default metric day is yesterday in that timezone.
+
+### Dry-run
+
+```bash
+DRY_RUN=1 ./ops/notion-daily-metrics.sh
+DRY_RUN=1 ./ops/notion-daily-metrics.sh --day 2026-09-10
+```
+
+Prints the JSON payload and skips the Notion write. Useful after a deploy
+before enabling the cron.
