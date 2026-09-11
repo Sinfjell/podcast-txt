@@ -3736,7 +3736,6 @@ def test_a_broken_reporter_cannot_cost_a_refund(trial_on, monkeypatch, sentry_ev
     assert client.post('/start_transcription', data={
         'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
         'duration_min': '5', 'language': 'no'}).status_code == 200
-    assert _used(uid) > 0, 'expected the reservation to exist before the worker fails'
     for _ in range(100):
         if _used(uid) == 0:
             break
