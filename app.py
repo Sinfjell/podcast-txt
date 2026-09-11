@@ -2295,12 +2295,13 @@ def search_transcripts(user_id, query, limit=TRANSCRIPT_SEARCH_LIMIT):
     A scan in Python rather than SQL LIKE: SQLite's LIKE only folds ASCII case,
     so "Østlandet" would miss "østlandet". Only this user's completed rows are
     read, streamed in batches, which is fine at the current per-user scale.
-    Words match across any whitespace, so a phrase spanning a line break hits.
+    Words match across any run of whitespace or punctuation, so a phrase hits
+    across a line break and across the commas and colons Whisper puts in.
     """
-    words = query.split()
+    words = [w for w in re.split(r'\W+', query) if w]
     if not words:
         return []
-    pattern = re.compile(r'\s+'.join(map(re.escape, words)), re.IGNORECASE)
+    pattern = re.compile(r'\W+'.join(map(re.escape, words)), re.IGNORECASE)
     T = TranscriptionTask
     rows = (db.session.query(T.id, T.episode_title, T.podcast_name, T.completed_at,
                              T.started_at, T.transcript_text)

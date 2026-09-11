@@ -3866,6 +3866,37 @@ def test_search_finds_a_phrase_across_case_and_line_breaks(library):
     assert after.endswith('…')
 
 
+def test_punctuation_in_the_query_is_not_required_in_the_text(library):
+    owner, _ = library
+    with A.app.app_context():
+        odd = A.search_transcripts(owner, 'snow, in the: north!')
+        bare = A.search_transcripts(owner, '?!')
+    assert [m['id'] for m in odd] == ['lib-1']
+    assert odd[0]['snippet'][1] == 'snow in the north'
+    assert bare == []
+
+
+def test_search_matches_words_split_by_punctuation_in_the_text(library):
+    from models import db, TranscriptionTask
+    owner, _ = library
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='lib-6', user_id=owner, status='completed',
+            episode_title='Essentials: Genes & Memory', podcast_name='Show',
+            transcript_text='So, yes -- genes, memory: and inheritance.',
+            completed_at=datetime(2026, 9, 20, tzinfo=timezone.utc)))
+        db.session.commit()
+        try:
+            text = A.search_transcripts(owner, 'genes memory and')
+            title = A.search_transcripts(owner, 'essentials genes')
+        finally:
+            db.session.query(TranscriptionTask).filter_by(id='lib-6').delete()
+            db.session.commit()
+    assert [m['id'] for m in text] == ['lib-6']
+    assert text[0]['snippet'][1] == 'genes, memory: and'
+    assert [m['id'] for m in title] == ['lib-6']
+
+
 def test_search_only_covers_my_completed_transcripts(library):
     owner, other = library
     with A.app.app_context():
