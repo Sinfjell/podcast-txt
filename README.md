@@ -173,6 +173,7 @@ The app includes a comprehensive help guide for finding RSS feeds from:
 - `GET /download/<task_id>/<format>` - Download transcript files
 - `GET /rss-help` - RSS feed help guide
 - `POST /convert-apple-url` - Convert Apple Podcasts URL to RSS
+- **Customer API** (per-user key from Settings) — [docs/customer-api.md](docs/customer-api.md)
 - **Agent API** (internal, CoS only) — [docs/agent-api.md](docs/agent-api.md)
 
 ## Configuration

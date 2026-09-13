@@ -71,18 +71,17 @@
 
     <div class="card" style="margin-top: 16px;">
         <div class="card-header">
-            <h5>HTTP API key</h5>
+            <h5>API key</h5>
         </div>
         <div class="card-body">
             <p style="color: var(--muted); font-size: 14px; line-height: 1.6; margin-bottom: 12px;">
-                One key for the same resolve / start / poll / transcript endpoints agents use.
-                Jobs and trial minutes are billed to your account.
-                See <a href="https://github.com/Sinfjell/podcast-txt/blob/main/docs/customer-api.md" target="_blank" rel="noopener">customer API docs</a>.
+                Use this key with scripts or agents to search episodes and fetch
+                transcripts from your account.
             </p>
 
             {% if new_api_key %}
             <div class="form-group">
-                <label class="form-label" for="new_api_key">Your new key (copy now)</label>
+                <label class="form-label" for="new_api_key">Your key (copy now)</label>
                 <div style="display: flex; gap: 8px; align-items: stretch;">
                     <input type="text" class="form-input" id="new_api_key" readonly
                            value="{{ new_api_key }}"
@@ -90,7 +89,7 @@
                     <button type="button" class="btn btn-ghost" id="copy_api_key">Copy</button>
                 </div>
                 <p class="form-hint" style="color: var(--warning); margin-top: 8px;">
-                    This is the only time the full key is shown. Store it somewhere safe.
+                    This is the only time the full key is shown.
                 </p>
             </div>
             {% elif current_user.has_api_key %}
@@ -105,17 +104,17 @@
             </p>
             <div style="display: flex; gap: 8px; flex-wrap: wrap;">
                 <form method="POST" action="{{ url_for('settings_generate_api_key') }}"
-                      onsubmit="return confirm('Generate a new key? The current key stops working immediately.');">
-                    <button type="submit" class="btn btn-ghost">Rotate key</button>
+                      onsubmit="return confirm('Old keys stop working immediately.');">
+                    <button type="submit" class="btn btn-ghost">Regenerate</button>
                 </form>
                 <form method="POST" action="{{ url_for('settings_revoke_api_key') }}"
-                      onsubmit="return confirm('Revoke this API key? Existing integrations will get 401.');">
+                      onsubmit="return confirm('Revoke this key? Scripts using it will get 401.');">
                     <button type="submit" class="btn btn-ghost">Revoke</button>
                 </form>
             </div>
             {% else %}
             <form method="POST" action="{{ url_for('settings_generate_api_key') }}">
-                <button type="submit" class="btn btn-primary">Generate API key</button>
+                <button type="submit" class="btn btn-primary">Create</button>
             </form>
             {% endif %}
         </div>

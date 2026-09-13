@@ -1588,10 +1588,7 @@ def settings_generate_api_key():
     current_user.api_key_created_at = datetime.now(timezone.utc)
     db.session.commit()
     session['new_api_key'] = plaintext
-    flash(
-        'API key created. Copy it now — it will not be shown again.',
-        'success',
-    )
+    flash('API key created. Copy it now — it will not be shown again.', 'success')
     return redirect(url_for('settings'))
 
 

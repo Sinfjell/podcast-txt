@@ -4709,12 +4709,18 @@ def test_customer_settings_generate_and_revoke(trial_on):
 
     page = client.get('/settings')
     assert page.status_code == 200
-    assert b'Generate API key' in page.data
+    assert b'>API key<' in page.data or b'API key' in page.data
+    assert b'Use this key with scripts or agents' in page.data
+    assert b'Create' in page.data
+    # Growth UI: no credits / pricing / multi-key chrome
+    assert b'Buy more' not in page.data
+    assert b'credits' not in page.data.lower()
+    assert b'Developers' not in page.data
 
     gen = client.post('/settings/api-key/generate', follow_redirects=True)
     assert gen.status_code == 200
     assert b'psk_' in gen.data
-    assert b'copy now' in gen.data.lower() or b'Copy now' in gen.data
+    assert b'copy now' in gen.data.lower() or b'Copy' in gen.data
 
     with A.app.app_context():
         u = db.session.get(User, uid)
@@ -4726,7 +4732,9 @@ def test_customer_settings_generate_and_revoke(trial_on):
     # Second GET must not show the secret again
     again = client.get('/settings')
     assert b'id="new_api_key"' not in again.data
-    assert b'Rotate key' in again.data or b'Revoke' in again.data
+    assert b'Regenerate' in again.data
+    assert b'Revoke' in again.data
+    assert b'Old keys stop working immediately.' in again.data
 
     rev = client.post('/settings/api-key/revoke', follow_redirects=True)
     assert rev.status_code == 200
