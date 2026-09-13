@@ -74,7 +74,7 @@ curl -sS -H "Authorization: Bearer $PODSKRIFT_API_KEY" \
   "https://podskrift.com/api/v1/episodes/$ID/transcript"</code></pre>
             <p class="text-muted text-sm" style="margin-bottom: 0;">
                 <code>date</code> is <code>YYYY-MM-DD</code> in Europe/Oslo. Poll until
-                <code>transcript_status</code> is <code>ready</code>; add <code>?format=srt</code>
+                <code>transcript_status</code> is <code>ready</code> (stop on <code>failed</code>); add <code>?format=srt</code>
                 to the transcript URL for subtitles.
             </p>
         </div>
@@ -103,7 +103,7 @@ curl -sS -H "Authorization: Bearer $PODSKRIFT_API_KEY" \
             <table>
                 <tr><th>Status</th><th>Meaning</th></tr>
                 <tr><td><code>401</code></td><td>Missing, wrong or revoked key</td></tr>
-                <tr><td><code>402</code></td><td>Free trial used up — add your own OpenAI API key in Settings</td></tr>
+                <tr><td><code>402</code></td><td>The free trial can’t cover this job — add your own OpenAI API key in Settings</td></tr>
                 <tr><td><code>404</code></td><td>Not found (or another account’s job)</td></tr>
             </table>
         </div>

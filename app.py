@@ -3498,14 +3498,14 @@ Nettsmed -- https://nettsmed.no
 
 @app.route('/sitemap.xml')
 def sitemap_xml():
-    """The three pages worth indexing. Everything else needs a session."""
+    """The public pages worth indexing. Everything else needs a session."""
     from xml.sax.saxutils import escape
     pages = [public_url('index'),
              public_url('rss_help'),
              public_url('api_docs'),
              public_url('register')]
     # No lastmod: it was emitting today's date on every fetch, which claims all
-    # three pages change daily. That is a discount signal, not a freshness one.
+    # the pages change daily. That is a discount signal, not a freshness one.
     urls = '\n'.join(f'  <url><loc>{escape(u)}</loc></url>' for u in pages)
     xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
