@@ -4792,7 +4792,7 @@ def test_public_api_docs_page_renders_customer_markdown(trial_on):
     resp = A.app.test_client().get('/docs/api')
     assert resp.status_code == 200
     body = resp.data.decode()
-    assert 'Customer API' in body
+    assert '<h1>Podcast transcript API</h1>' in body
     assert 'psk_' in body or 'psk_…' in body
     assert 'Authorization: Bearer' in body
     assert 'X-Api-Key' in body
@@ -4818,6 +4818,48 @@ def test_public_api_docs_page_renders_customer_markdown(trial_on):
     assert 'AGENT_API_KEY' not in body
     assert 'MCP' not in body
     assert 'Developers' not in body
+
+
+def test_public_api_docs_seo_metadata_and_intro(trial_on):
+    """Growth-approved title/meta/OG/intro so transcript-API searches find /docs/api."""
+    body = A.app.test_client().get('/docs/api').data.decode()
+    assert '<title>Podcast Transcript API — Get Transcript via HTTP | Podskrift</title>' in body
+    assert (
+        'content="Podcast transcription API for agents and scripts. '
+        'Resolve by show and date, start Whisper, fetch the transcript via HTTP. '
+        'Free 60-minute trial. API key in Settings."'
+    ) in body
+    assert 'content="Podcast Transcript API — Podskrift"' in body
+    assert (
+        'content="HTTP endpoints to resolve a podcast episode, transcribe with Whisper, '
+        'and get the transcript. Same free trial as the web UI."'
+    ) in body
+    assert '<h1>Podcast transcript API</h1>' in body
+    intro = (
+        'Podskrift’s podcast transcription API lets agents and scripts get a transcript '
+        'over HTTP — the same path as the web UI. Resolve an episode by publisher/show '
+        'and date (or URL), start Whisper, poll until ready, then fetch the plain-text '
+        'transcript. New accounts get 60 free trial minutes on our OpenAI key; after that, '
+        'add your own. Create a <code>psk_…</code> key in Settings.'
+    )
+    assert intro in body
+    # Endpoint H2s stay intact and ordered (TSK-20504).
+    assert body.index('<h1>Podcast transcript API</h1>') < body.index(
+        '<h2>Authentication</h2>')
+    assert body.index('<h2>Authentication</h2>') < body.index(
+        '<h2>POST /api/v1/resolve</h2>')
+
+
+def test_llms_txt_mentions_podcast_transcript_api_endpoint(trial_on):
+    """llms.txt FAQ answers the SEO query without changing the homepage FAQ list."""
+    llms = A.app.test_client().get('/llms.txt').data.decode()
+    assert 'Is there a podcast transcript API / get-transcript endpoint?' in llms
+    assert 'resolve → start transcription → get transcript' in llms
+    assert 'https://podskrift.com/docs/api' in llms
+    # Homepage FAQ stays the existing HTTP API entry only.
+    home = A.app.test_client().get('/').data.decode()
+    assert 'Is there an HTTP API?' in home
+    assert 'Is there a podcast transcript API / get-transcript endpoint?' not in home
 
 
 def test_public_api_docs_strips_agent_key_mentions(trial_on, tmp_path, monkeypatch):
