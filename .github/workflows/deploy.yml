@@ -1,0 +1,56 @@
+name: Deploy production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Hetzner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure SSH
+        env:
+          PODSKRIFT_SSH_KEY: ${{ secrets.PODSKRIFT_SSH_KEY }}
+          PODSKRIFT_SSH_KNOWN_HOSTS: ${{ secrets.PODSKRIFT_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "${PODSKRIFT_SSH_KEY:-}" || { echo "Missing secret PODSKRIFT_SSH_KEY"; exit 1; }
+          test -n "${PODSKRIFT_SSH_KNOWN_HOSTS:-}" || { echo "Missing secret PODSKRIFT_SSH_KNOWN_HOSTS"; exit 1; }
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          # Preserve newlines in the private key (ed25519 / RSA PEM).
+          printf '%s\n' "$PODSKRIFT_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$PODSKRIFT_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Pull main and restart podskrift
+        env:
+          PODSKRIFT_SSH_HOST: ${{ secrets.PODSKRIFT_SSH_HOST }}
+          PODSKRIFT_SSH_USER: ${{ secrets.PODSKRIFT_SSH_USER }}
+        run: |
+          set -euo pipefail
+          test -n "${PODSKRIFT_SSH_HOST:-}" || { echo "Missing secret PODSKRIFT_SSH_HOST"; exit 1; }
+          test -n "${PODSKRIFT_SSH_USER:-}" || { echo "Missing secret PODSKRIFT_SSH_USER"; exit 1; }
+          ssh -i ~/.ssh/id_deploy \
+              -o IdentitiesOnly=yes \
+              -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes \
+              "${PODSKRIFT_SSH_USER}@${PODSKRIFT_SSH_HOST}" \
+              'set -euo pipefail
+               cd /var/www/vhosts/podskrift.nettsmed.dev/app
+               git fetch origin
+               git checkout main
+               git pull --ff-only origin main
+               systemctl restart podskrift
+               systemctl is-active --quiet podskrift
+               echo "podskrift is active"
+               echo "HEAD $(git rev-parse --short HEAD)"
+              '
