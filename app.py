@@ -1711,64 +1711,28 @@ def parse_rss():
     )
 
 
-@app.route('/start_transcription', methods=['POST'])
-@login_required
-def start_transcription():
-    """Start a transcription from either an RSS feed + index, or a direct audio URL.
+def enqueue_transcription(user, meta, rss_url=None, language=''):
+    """Start Whisper for one episode on behalf of `user`.
 
-    The direct form is what episode search results post, so an episode found by
-    name never has to be located a second time inside its feed.
+    Shared by the UI form and the agent write API so trial reservation,
+    admission control, and the worker thread stay one code path. Returns
+    ``(payload_dict, http_status)``. On success payload is
+    ``{'task_id': ...}``; on refusal it carries ``error``.
+
+    `meta` keys: title, audio_url, podcast_name, artwork, published, duration_min.
     """
-    # Auto-detect, not Norwegian. Defaulting to 'no' meant a Japanese listener
-    # who took the default had Whisper TOLD the audio was Norwegian -- which it
-    # obeys as a hard constraint, so the result is phonetic nonsense that we
-    # still paid for. The same reasoning makes it the right fallback for an
-    # unrecognised value: guessing beats asserting something we cannot know.
-    language = request.form.get('language', '')
     if language not in VALID_LANGUAGE_CODES:
         language = ''
 
-    audio_url = request.form.get('audio_url')
-    rss_url = request.form.get('rss_url')
+    audio_url = (meta.get('audio_url') or '').strip()
+    if not audio_url or not _is_fetchable_url(audio_url):
+        return {'error': 'That audio URL cannot be fetched.'}, 400
 
-    if audio_url:
-        if not _is_fetchable_url(audio_url):
-            return jsonify({'error': 'That audio URL cannot be fetched.'}), 400
-        meta = {
-            'title': request.form.get('episode_title') or 'Episode',
-            'audio_url': audio_url,
-            'podcast_name': request.form.get('podcast_name'),
-            'artwork': request.form.get('artwork'),
-            'published': request.form.get('published'),
-            'duration_min': _positive_float_or_none(request.form.get('duration_min')),
-        }
-    else:
-        if not rss_url or request.form.get('episode_index') in (None, ''):
-            return jsonify({'error': 'Pick an episode first'}), 400
-        try:
-            episode_index = int(request.form.get('episode_index'))
-        except (TypeError, ValueError):
-            return jsonify({'error': 'Invalid episode selection'}), 400
-
-        episodes, error = get_episodes_from_rss(rss_url)
-        if error or episode_index < 0 or episode_index >= len(episodes):
-            return jsonify({'error': 'Invalid episode selection'}), 400
-
-        episode = episodes[episode_index]
-        meta = {
-            'title': episode['title'],
-            'audio_url': episode['audio_url'],
-            'podcast_name': request.form.get('podcast_name'),
-            'artwork': episode.get('artwork') or request.form.get('artwork'),
-            'published': episode.get('published'),
-            'duration_min': _positive_float_or_none(episode.get('duration_min')),
-        }
-
-    api_key, key_source = resolve_openai_key(current_user)
+    api_key, key_source = resolve_openai_key(user)
     if not api_key:
-        return jsonify({
+        return {
             'error': 'No OpenAI API key configured. Add your key in Settings.'
-        }), 400
+        }, 400
     openai_client = build_openai_client(api_key)
 
     # Admission control, before anything is reserved or written, so a refusal
@@ -1782,19 +1746,19 @@ def start_transcription():
     if free_bytes is not None and free_bytes < MIN_FREE_DISK_BYTES:
         app.logger.error('refusing transcription: only %.1f GB free on the app volume',
                          free_bytes / (1024 ** 3))
-        return jsonify({'error': (
+        return {'error': (
             'Podskrift is out of disk space right now. Please try again later.'
-        )}), 503
+        )}, 503
     if not _transcription_slots.acquire(blocking=False):
         # Logged because this is the only way to learn the cap is being hit, or
         # whether the default is the right number, short of user complaints.
         app.logger.warning('refusing transcription: worker at its limit of %s',
                            MAX_CONCURRENT_TRANSCRIPTIONS)
         episodes = 'episode' if MAX_CONCURRENT_TRANSCRIPTIONS == 1 else 'episodes'
-        return jsonify({'error': (
+        return {'error': (
             f'Podskrift is already transcribing {MAX_CONCURRENT_TRANSCRIPTIONS} '
             f'{episodes} right now. Please try again in a few minutes.'
-        )}), 503
+        )}, 503
     slot_held = True
     try:
 
@@ -1805,16 +1769,16 @@ def start_transcription():
         if key_source == 'trial':
             # Floored at a minute: trial_seconds_charged == 0 means "settled", so a
             # zero reservation would quietly make the task unmetered.
-            estimate = max(60, int((meta['duration_min'] or 0) * 60)
+            estimate = max(60, int((meta.get('duration_min') or 0) * 60)
                            or TRIAL_UNKNOWN_ESTIMATE_SECONDS)
             if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
-                return jsonify({'error': (
+                return {'error': (
                     f'This episode runs {estimate // 60} minutes, past the '
                     f'{TRIAL_MAX_EPISODE_SECONDS // 60}-minute per-episode limit of the '
                     'free trial. Add your own OpenAI API key in Settings to transcribe it.'
-                )}), 402
-            if not trial_reserve(current_user.id, estimate):
-                _, _, remaining = trial_status(current_user)
+                )}, 402
+            if not trial_reserve(user.id, estimate):
+                _, _, remaining = trial_status(user)
                 if remaining < estimate:
                     message = (
                         f'Your free trial has {remaining // 60} minutes left, and this '
@@ -1828,15 +1792,15 @@ def start_transcription():
                         'Podskrift has handed out all the free minutes it has budgeted. '
                         'Add your own OpenAI API key in Settings to keep transcribing.'
                     )
-                return jsonify({'error': message}), 402
+                return {'error': message}, 402
             trial_charge = estimate
 
         task_id = str(uuid.uuid4())
         try:
             task = TranscriptionTask(
                 id=task_id,
-                user_id=current_user.id,
-                episode_title=meta['title'],
+                user_id=user.id,
+                episode_title=meta.get('title') or 'Episode',
                 rss_url=rss_url,
                 status='downloading',
                 phase='downloading',
@@ -1855,7 +1819,7 @@ def start_transcription():
         except Exception:
             db.session.rollback()
             if trial_charge:
-                trial_release(current_user.id, trial_charge)
+                trial_release(user.id, trial_charge)
             raise
 
         parsed_url = urlparse(meta['audio_url'])
@@ -1915,7 +1879,7 @@ def start_transcription():
         # The thread's finally owns the slot from here on.
         slot_held = False
 
-        return jsonify({'task_id': task_id})
+        return {'task_id': task_id}, 200
     finally:
         # Handed to the worker thread on success -- slot_held goes False only
         # AFTER thread.start() returns, so a thread that fails to start (the
@@ -1924,6 +1888,64 @@ def start_transcription():
         # request cannot leak a slot for the life of the process.
         if slot_held:
             _transcription_slots.release()
+
+
+@app.route('/start_transcription', methods=['POST'])
+@login_required
+def start_transcription():
+    """Start a transcription from either an RSS feed + index, or a direct audio URL.
+
+    The direct form is what episode search results post, so an episode found by
+    name never has to be located a second time inside its feed.
+    """
+    # Auto-detect, not Norwegian. Defaulting to 'no' meant a Japanese listener
+    # who took the default had Whisper TOLD the audio was Norwegian -- which it
+    # obeys as a hard constraint, so the result is phonetic nonsense that we
+    # still paid for. The same reasoning makes it the right fallback for an
+    # unrecognised value: guessing beats asserting something we cannot know.
+    language = request.form.get('language', '')
+    if language not in VALID_LANGUAGE_CODES:
+        language = ''
+
+    audio_url = request.form.get('audio_url')
+    rss_url = request.form.get('rss_url')
+
+    if audio_url:
+        if not _is_fetchable_url(audio_url):
+            return jsonify({'error': 'That audio URL cannot be fetched.'}), 400
+        meta = {
+            'title': request.form.get('episode_title') or 'Episode',
+            'audio_url': audio_url,
+            'podcast_name': request.form.get('podcast_name'),
+            'artwork': request.form.get('artwork'),
+            'published': request.form.get('published'),
+            'duration_min': _positive_float_or_none(request.form.get('duration_min')),
+        }
+    else:
+        if not rss_url or request.form.get('episode_index') in (None, ''):
+            return jsonify({'error': 'Pick an episode first'}), 400
+        try:
+            episode_index = int(request.form.get('episode_index'))
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid episode selection'}), 400
+
+        episodes, error = get_episodes_from_rss(rss_url)
+        if error or episode_index < 0 or episode_index >= len(episodes):
+            return jsonify({'error': 'Invalid episode selection'}), 400
+
+        episode = episodes[episode_index]
+        meta = {
+            'title': episode['title'],
+            'audio_url': episode['audio_url'],
+            'podcast_name': request.form.get('podcast_name'),
+            'artwork': episode.get('artwork') or request.form.get('artwork'),
+            'published': episode.get('published'),
+            'duration_min': _positive_float_or_none(episode.get('duration_min')),
+        }
+
+    payload, status = enqueue_transcription(
+        current_user, meta, rss_url=rss_url, language=language)
+    return jsonify(payload), status
 
 
 def _is_fetchable_url(raw):
@@ -2332,18 +2354,26 @@ def search_transcripts(user_id, query, limit=TRANSCRIPT_SEARCH_LIMIT):
 # ---------------------------------------------------------------------------
 # Agent read API  (TSK-20496 / PRJ-596)
 #
-# Machine-readable lookup for Chief-of-Staff agents: search by publisher +
-# date, fetch episode metadata, fetch transcript text. Auth is a shared
-# secret in AGENT_API_KEY -- never commit the value; store it in the host
-# env / 1Password and give CoS the item reference, not the secret itself.
+# Internal CoS agent API (not a public product): resolve a catalog episode,
+# start Whisper on the same trial path as the UI, poll status, fetch text.
+# One AGENT_API_KEY scopes to AGENT_API_USER_ID (Sindre). No multi-tenant
+# keys, no separate agent billing. Never commit the secret; store it in the
+# host env / 1Password and give CoS the item reference only.
 # ---------------------------------------------------------------------------
 
 AGENT_API_TZ = ZoneInfo('Europe/Oslo')
 AGENT_EPISODE_LIMIT = 50
+# Cheap guard against a runaway CoS loop starting dozens of Whisper jobs.
+AGENT_WRITE_MAX_PER_WINDOW = int(os.getenv('AGENT_WRITE_MAX_PER_WINDOW', '10'))
+AGENT_WRITE_WINDOW_SECONDS = int(os.getenv('AGENT_WRITE_WINDOW_SECONDS', '60'))
+# Cap simultaneous in-flight agent jobs for the scoped user (pending phases).
+AGENT_MAX_IN_FLIGHT = int(os.getenv('AGENT_MAX_IN_FLIGHT', '2'))
 # Task statuses that mean Whisper has not finished (or not started) yet.
 _AGENT_PENDING_STATUSES = frozenset({
     'pending', 'downloading', 'splitting', 'transcribing',
 })
+_agent_write_attempts = collections.defaultdict(list)
+_agent_write_lock = threading.Lock()
 
 
 def _agent_configured_key():
@@ -2356,11 +2386,12 @@ def _agent_configured_key():
 
 
 def _agent_scope_user_id():
-    """Optional user_id that all agent reads are limited to.
+    """user_id agent reads/writes are limited to.
 
-    When unset the key can read every account's tasks -- fine for a single
-    operator box, wrong once Podskrift has other people's transcripts. Set
-    AGENT_API_USER_ID in production if the DB is multi-tenant.
+    Reads: when unset the key can see every account's tasks (single-operator
+    box). Writes: required -- enqueue always runs as this user so Whisper
+    minutes hit Sindre's trial pool, never an anonymous or foreign account.
+    Set AGENT_API_USER_ID in production.
     """
     raw = (os.getenv('AGENT_API_USER_ID') or '').strip()
     if not raw:
@@ -2369,6 +2400,51 @@ def _agent_scope_user_id():
         return int(raw)
     except ValueError:
         return None
+
+
+def _agent_write_user():
+    """User row for agent writes, or (None, error_payload, status)."""
+    uid = _agent_scope_user_id()
+    if uid is None:
+        return None, {
+            'error': 'AGENT_API_USER_ID is not configured; agent writes need a '
+                     'scoped account.',
+        }, 403
+    user = db.session.get(User, uid)
+    if user is None:
+        return None, {
+            'error': 'AGENT_API_USER_ID does not match any user account.',
+        }, 403
+    return user, None, None
+
+
+def _agent_write_rate_limit_ok():
+    """True if this process still has room for another agent write."""
+    now = time.time()
+    key = 'agent'
+    with _agent_write_lock:
+        seen = [t for t in _agent_write_attempts.get(key, ())
+                if now - t < AGENT_WRITE_WINDOW_SECONDS]
+        if len(seen) >= AGENT_WRITE_MAX_PER_WINDOW:
+            _agent_write_attempts[key] = seen
+            return False
+        seen.append(now)
+        _agent_write_attempts[key] = seen
+        return True
+
+
+def _agent_in_flight_count(user_id):
+    """How many of this user's tasks are still in a pending Whisper phase."""
+    tasks = (TranscriptionTask.query
+             .filter(TranscriptionTask.user_id == user_id)
+             .order_by(TranscriptionTask.started_at.desc())
+             .limit(50)
+             .all())
+    n = 0
+    for task in tasks:
+        if agent_transcript_status(task) == 'pending':
+            n += 1
+    return n
 
 
 def _extract_agent_api_key():
@@ -2651,6 +2727,402 @@ def agent_get_transcript(task_id):
     if raw in ('1', 'true', 'yes'):
         return Response(payload['text'], mimetype='text/plain; charset=utf-8')
     return jsonify(payload)
+
+
+def _agent_json_body():
+    """JSON object from the request, or {} when absent / not JSON."""
+    data = request.get_json(silent=True)
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _agent_request_value(*keys):
+    """First non-empty value among JSON body keys, then form, then query args."""
+    body = _agent_json_body()
+    for key in keys:
+        for source in (body, request.form, request.args):
+            raw = source.get(key)
+            if raw is None:
+                continue
+            value = str(raw).strip()
+            if value:
+                return value
+    return ''
+
+
+def _catalog_episode_payload(ep, rss_url):
+    """Resolved catalog episode (no TranscriptionTask yet)."""
+    published = _episode_published_date(ep.get('published'))
+    return {
+        'title': ep.get('title'),
+        'publisher': ep.get('podcast_name'),
+        'published_at': published.isoformat() if published else (
+            ep.get('published') if ep.get('published')
+            and not str(ep.get('published')).lower().startswith('unknown')
+            else None
+        ),
+        'audio_url': ep.get('audio_url'),
+        'rss_url': rss_url,
+        'duration_min': ep.get('duration_min'),
+        'artwork_url': ep.get('artwork'),
+        'transcript_status': 'none',
+    }
+
+
+def _itunes_shows_matching(publisher):
+    """iTunes shows with a public feed matching publisher (exact, then substring).
+
+    Same case-insensitive substring spirit as GET /api/v1/episodes; exact
+    normalised title wins so «Spårtsklubben» does not lose to a longer name.
+    """
+    try:
+        results = _itunes_search(publisher, 'podcast')
+    except requests.RequestException as e:
+        raise RuntimeError(f'Podcast directory unreachable: {e}') from e
+
+    want_exact = _normalize_title(publisher)
+    want_sub = publisher.casefold()
+    exact, partial = [], []
+    for item in results:
+        feed = item.get('feedUrl')
+        name = item.get('collectionName') or ''
+        if not feed or not name:
+            continue
+        if _normalize_title(name) == want_exact:
+            exact.append(item)
+        elif want_sub in name.casefold():
+            partial.append(item)
+    return exact + partial
+
+
+def _episodes_on_date(episodes, target_date):
+    """Feed episodes whose Europe/Oslo calendar date matches target_date."""
+    hits = []
+    for ep in episodes or []:
+        pub = _episode_published_date(ep.get('published'))
+        if pub == target_date:
+            hits.append(ep)
+    return hits
+
+
+def resolve_catalog_episode(publisher=None, target_date=None, url=None):
+    """Find a public RSS/iTunes episode without needing a TranscriptionTask.
+
+    Returns ``(catalog_payload, None)`` or ``(None, error_message)``.
+    """
+    publisher = (publisher or '').strip()
+    url = (url or '').strip()
+
+    if not publisher and not url:
+        return None, 'Provide publisher (or show) and date=YYYY-MM-DD, and/or url.'
+
+    # --- URL paths: Spotify, Apple show, direct audio, RSS feed ---
+    if url:
+        kind, spotify_id = parse_spotify_url(url)
+        if kind:
+            try:
+                results, err = resolve_spotify_url(url)
+            except requests.RequestException:
+                return None, "Couldn't reach the podcast directory. Try again in a moment."
+            if err and not results:
+                return None, err
+            if not results:
+                return None, 'Episode not found for that Spotify link.'
+            hit = results[0]
+            if hit.get('type') == 'show':
+                if target_date is None:
+                    return None, (
+                        'That Spotify link is a show. Pass date=YYYY-MM-DD to pick '
+                        'an episode, or use an episode link.'
+                    )
+                feed_url = hit.get('feed_url')
+                if not feed_url:
+                    return None, err or 'No public RSS feed for that show.'
+                episodes, feed_err = get_episodes_from_rss(feed_url)
+                if feed_err or not episodes:
+                    return None, feed_err or 'No episodes found in that feed.'
+                hits = _episodes_on_date(episodes, target_date)
+                if not hits:
+                    return None, (
+                        f'No episode published on {target_date.isoformat()} '
+                        f'(Europe/Oslo) in that feed.'
+                    )
+                return _catalog_episode_payload(hits[0], feed_url), None
+            # Episode result from Spotify resolver.
+            return {
+                'title': hit.get('name'),
+                'publisher': hit.get('artist'),
+                'published_at': hit.get('released') or None,
+                'audio_url': hit.get('audio_url'),
+                'rss_url': hit.get('feed_url') or '',
+                'duration_min': hit.get('duration_min'),
+                'artwork_url': hit.get('artwork'),
+                'transcript_status': 'none',
+            }, None
+
+        if 'podcasts.apple.com' in url.lower() or '/id' in url:
+            rss_url, apple_err = convert_apple_podcasts_url_to_rss(url)
+            if not rss_url:
+                return None, apple_err or 'Could not resolve Apple Podcasts URL.'
+            if target_date is None and not publisher:
+                return None, (
+                    'Apple Podcasts show URL needs date=YYYY-MM-DD to pick an episode.'
+                )
+            episodes, feed_err = get_episodes_from_rss(rss_url)
+            if feed_err or not episodes:
+                return None, feed_err or 'No episodes found in that feed.'
+            if target_date is not None:
+                hits = _episodes_on_date(episodes, target_date)
+                if not hits:
+                    return None, (
+                        f'No episode published on {target_date.isoformat()} '
+                        f'(Europe/Oslo) in that feed.'
+                    )
+                return _catalog_episode_payload(hits[0], rss_url), None
+            return _catalog_episode_payload(episodes[0], rss_url), None
+
+        # Direct audio URL (UI episode-search path).
+        path = urlparse(url).path.lower()
+        if any(path.endswith(ext) for ext in (
+                '.mp3', '.m4a', '.wav', '.aac', '.ogg', '.mp4', '.mpeg')):
+            if not _is_fetchable_url(url):
+                return None, 'That audio URL cannot be fetched.'
+            published = target_date.isoformat() if target_date else None
+            return {
+                'title': publisher or 'Episode',
+                'publisher': publisher or None,
+                'published_at': published,
+                'audio_url': url,
+                'rss_url': '',
+                'duration_min': None,
+                'artwork_url': None,
+                'transcript_status': 'none',
+            }, None
+
+        # Treat as RSS feed URL when fetchable.
+        if _is_fetchable_url(url):
+            if target_date is None:
+                return None, 'RSS feed URL needs date=YYYY-MM-DD to pick an episode.'
+            episodes, feed_err = get_episodes_from_rss(url)
+            if feed_err or not episodes:
+                return None, feed_err or 'No episodes found in that feed.'
+            hits = _episodes_on_date(episodes, target_date)
+            if not hits:
+                return None, (
+                    f'No episode published on {target_date.isoformat()} '
+                    f'(Europe/Oslo) in that feed.'
+                )
+            return _catalog_episode_payload(hits[0], url), None
+        return None, 'URL is not a supported Spotify, Apple, audio, or RSS link.'
+
+    # --- publisher + date via iTunes directory + public RSS ---
+    if not publisher:
+        return None, 'Provide publisher (or show) with date=YYYY-MM-DD.'
+    if target_date is None:
+        return None, 'date must be ISO YYYY-MM-DD (Europe/Oslo).'
+
+    try:
+        shows = _itunes_shows_matching(publisher)
+    except RuntimeError as e:
+        return None, str(e)
+    if not shows:
+        return None, (
+            f'No public podcast feed found for "{publisher}". '
+            'Spotify-exclusive shows have no RSS Podskrift can fetch.'
+        )
+
+    last_feed_err = None
+    for show in shows[:5]:
+        feed_url = show.get('feedUrl')
+        if not feed_url or not _is_fetchable_url(feed_url):
+            continue
+        episodes, feed_err = get_episodes_from_rss(feed_url)
+        if feed_err or not episodes:
+            last_feed_err = feed_err
+            continue
+        hits = _episodes_on_date(episodes, target_date)
+        if hits:
+            # Prefer the feed's own title; fall back to iTunes collection name.
+            ep = dict(hits[0])
+            if not ep.get('podcast_name'):
+                ep['podcast_name'] = show.get('collectionName')
+            return _catalog_episode_payload(ep, feed_url), None
+
+    if last_feed_err:
+        return None, last_feed_err
+    return None, (
+        f'No episode of "{publisher}" published on {target_date.isoformat()} '
+        f'(Europe/Oslo).'
+    )
+
+
+def _find_existing_agent_task(user_id, catalog):
+    """Reuse a recent ready/pending task for the same audio or show+date.
+
+    Avoids burning trial minutes when CoS retries the same episode.
+    """
+    publisher = (catalog.get('publisher') or '').strip()
+    published_at = catalog.get('published_at')
+    target = _parse_agent_date(published_at) if published_at else None
+
+    q = (TranscriptionTask.query
+         .filter(TranscriptionTask.user_id == user_id)
+         .order_by(TranscriptionTask.started_at.desc())
+         .limit(100))
+    for task in q.all():
+        status = agent_transcript_status(task)
+        if status not in ('ready', 'pending'):
+            continue
+        # Match on audio URL when we have it stored... we don't store audio_url
+        # on the task. Match publisher + published date, or title + publisher.
+        if publisher and target is not None:
+            if (task.podcast_name
+                    and publisher.casefold() in (task.podcast_name or '').casefold()
+                    and _episode_published_date(task.episode_published) == target):
+                return task
+        if (catalog.get('title') and task.episode_title
+                and _normalize_title(task.episode_title)
+                == _normalize_title(catalog['title'])
+                and publisher
+                and task.podcast_name
+                and _normalize_title(task.podcast_name)
+                == _normalize_title(publisher)):
+            return task
+    return None
+
+
+def _catalog_to_enqueue_meta(catalog):
+    return {
+        'title': catalog.get('title') or 'Episode',
+        'audio_url': catalog.get('audio_url'),
+        'podcast_name': catalog.get('publisher'),
+        'artwork': catalog.get('artwork_url'),
+        'published': catalog.get('published_at'),
+        'duration_min': _positive_float_or_none(catalog.get('duration_min')),
+    }
+
+
+@app.route('/api/v1/resolve', methods=['POST', 'GET'])
+@require_agent_api_key
+def agent_resolve_episode():
+    """Resolve a catalog episode by publisher+date and/or URL.
+
+    Does not require an existing TranscriptionTask. Clear 404 when the show
+    has no public RSS or no episode on that Europe/Oslo date.
+    """
+    publisher = _agent_request_value('publisher', 'show')
+    date_raw = _agent_request_value('date')
+    url = _agent_request_value('url', 'episode_url', 'audio_url')
+
+    target_date = None
+    if date_raw:
+        target_date = _parse_agent_date(date_raw)
+        if target_date is None:
+            return jsonify({'error': 'date must be ISO YYYY-MM-DD'}), 400
+
+    catalog, err = resolve_catalog_episode(
+        publisher=publisher or None,
+        target_date=target_date,
+        url=url or None,
+    )
+    if err:
+        # 404 for not-found / no feed; 400 for bad input already returned above.
+        status = 400 if err.startswith('Provide ') or 'needs date' in err else 404
+        return jsonify({'error': err, 'episode': None}), status
+    return jsonify({'episode': catalog})
+
+
+@app.route('/api/v1/transcriptions', methods=['POST'])
+@require_agent_api_key
+def agent_start_transcription():
+    """Resolve (if needed) and start Whisper as AGENT_API_USER_ID.
+
+    Body/query: same as /api/v1/resolve (publisher+date and/or url), or the
+    fields returned by resolve (audio_url, title, publisher, ...). Reuses the
+    UI enqueue path -- same trial pool, no separate agent billing.
+    """
+    if not _agent_write_rate_limit_ok():
+        return jsonify({
+            'error': 'Too many agent transcription starts; try again shortly.',
+        }), 429
+
+    user, err_payload, err_status = _agent_write_user()
+    if err_payload:
+        return jsonify(err_payload), err_status
+
+    if _agent_in_flight_count(user.id) >= AGENT_MAX_IN_FLIGHT:
+        return jsonify({
+            'error': (
+                f'Already {AGENT_MAX_IN_FLIGHT} transcriptions in flight for '
+                'this account. Poll an existing job or wait for one to finish.'
+            ),
+        }), 429
+
+    publisher = _agent_request_value('publisher', 'show', 'podcast_name')
+    date_raw = _agent_request_value('date', 'published', 'published_at')
+    url = _agent_request_value('url', 'episode_url', 'audio_url')
+    language = _agent_request_value('language')
+
+    # Prefer an already-resolved audio_url from the client when present.
+    body = _agent_json_body()
+    direct_audio = (body.get('audio_url') or request.form.get('audio_url') or '').strip()
+    if direct_audio and _is_fetchable_url(direct_audio) and (
+            body.get('title') or body.get('episode_title')
+            or request.form.get('title') or request.form.get('episode_title')):
+        catalog = {
+            'title': (body.get('title') or body.get('episode_title')
+                      or request.form.get('title')
+                      or request.form.get('episode_title') or 'Episode'),
+            'publisher': publisher or body.get('publisher') or body.get('podcast_name'),
+            'published_at': (body.get('published_at') or body.get('published')
+                             or date_raw or None),
+            'audio_url': direct_audio,
+            'rss_url': (body.get('rss_url') or request.form.get('rss_url') or ''),
+            'duration_min': _positive_float_or_none(
+                body.get('duration_min') or request.form.get('duration_min')),
+            'artwork_url': (body.get('artwork_url') or body.get('artwork')
+                            or request.form.get('artwork_url')
+                            or request.form.get('artwork')),
+            'transcript_status': 'none',
+        }
+    else:
+        target_date = None
+        if date_raw:
+            target_date = _parse_agent_date(date_raw)
+            if target_date is None and not direct_audio:
+                return jsonify({'error': 'date must be ISO YYYY-MM-DD'}), 400
+        catalog, resolve_err = resolve_catalog_episode(
+            publisher=publisher or None,
+            target_date=target_date,
+            url=url or None,
+        )
+        if resolve_err:
+            status = 400 if resolve_err.startswith('Provide ') or 'needs date' in resolve_err else 404
+            return jsonify({'error': resolve_err}), status
+
+    existing = _find_existing_agent_task(user.id, catalog)
+    if existing is not None:
+        payload = _agent_episode_payload(existing)
+        payload['reused'] = True
+        return jsonify(payload)
+
+    meta = _catalog_to_enqueue_meta(catalog)
+    result, status = enqueue_transcription(
+        user, meta, rss_url=catalog.get('rss_url') or None, language=language)
+    if status != 200:
+        # Map missing-key to 403 for agents (ops misconfig), keep 402 for trial.
+        if status == 400 and 'API key' in (result.get('error') or ''):
+            return jsonify(result), 403
+        return jsonify(result), status
+
+    task = db.session.get(TranscriptionTask, result['task_id'])
+    payload = _agent_episode_payload(task) if task else {
+        'id': result['task_id'],
+        'transcript_status': 'pending',
+    }
+    payload['reused'] = False
+    return jsonify(payload), 201
 
 
 def faq_entries():

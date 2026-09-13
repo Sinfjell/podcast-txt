@@ -4350,3 +4350,202 @@ def test_agent_transcript_status_helper_maps_phases():
     assert A.agent_transcript_status(
         type('T', (), {'status': 'cancelled', 'transcript_text': ''})()
     ) == 'failed'
+
+
+# --------------------------------------------------------------------------
+# Agent write API (TSK-20498): resolve catalog + start transcription
+# --------------------------------------------------------------------------
+
+_SPART_FEED = [
+    {
+        'title': 'Ukas iddiot: De har én jobb!',
+        'published': '2026-09-10',
+        'audio_url': 'https://cdn.example.com/spart-2026-09-10.mp3',
+        'podcast_name': 'Spårtsklubben',
+        'artwork': 'https://cdn.example.com/art.jpg',
+        'duration_min': 42.0,
+        'estimated_cost': 0.025,
+    },
+    {
+        'title': 'Some other episode',
+        'published': '2026-09-11',
+        'audio_url': 'https://cdn.example.com/spart-2026-09-11.mp3',
+        'podcast_name': 'Spårtsklubben',
+        'artwork': 'https://cdn.example.com/art.jpg',
+        'duration_min': 40.0,
+        'estimated_cost': 0.024,
+    },
+]
+
+
+@pytest.fixture
+def agent_write(agent_api, trial_on, monkeypatch):
+    """Agent key + scoped user with trial; catalog lookups stubbed."""
+    from models import db, TranscriptionTask
+    A._agent_write_attempts.clear()
+    uid = _make_user('agent-writer@example.com', limit=3600, used=0)
+    monkeypatch.setenv('AGENT_API_USER_ID', str(uid))
+    monkeypatch.setattr(A, '_itunes_search', lambda term, entity: [{
+        'collectionName': 'Spårtsklubben',
+        'feedUrl': 'https://feeds.example.com/spart.xml',
+    }])
+    monkeypatch.setattr(
+        A, 'get_episodes_from_rss',
+        lambda url: (list(_SPART_FEED), None))
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+    import types
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda *a, **kw: types.SimpleNamespace(daemon=True, start=lambda: None))
+    yield {'user_id': uid, 'key': agent_api}
+    with A.app.app_context():
+        db.session.query(TranscriptionTask).filter_by(user_id=uid).delete()
+        db.session.commit()
+    _purge(['agent-writer@example.com'])
+
+
+def _agent_post(path, key=None, json_body=None, **kwargs):
+    headers = kwargs.pop('headers', {})
+    if key is not None:
+        headers['Authorization'] = f'Bearer {key}'
+    if json_body is not None:
+        headers.setdefault('Content-Type', 'application/json')
+        return A.app.test_client().post(
+            path, headers=headers, json=json_body, **kwargs)
+    return A.app.test_client().post(path, headers=headers, **kwargs)
+
+
+def test_agent_resolve_rejects_missing_auth(agent_write):
+    r = A.app.test_client().post(
+        '/api/v1/resolve',
+        json={'publisher': 'Spårtsklubben', 'date': '2026-09-10'})
+    assert r.status_code == 401
+
+
+def test_agent_resolve_miss_is_clear_404(agent_write, monkeypatch):
+    monkeypatch.setattr(A, '_itunes_search', lambda term, entity: [])
+    r = _agent_post(
+        '/api/v1/resolve', key=agent_write['key'],
+        json_body={'publisher': 'No Such Show XYZ', 'date': '2026-09-10'})
+    assert r.status_code == 404
+    err = r.get_json()['error']
+    assert 'No public podcast feed' in err or 'not found' in err.lower()
+
+
+def test_agent_resolve_date_miss_is_clear_404(agent_write):
+    r = _agent_post(
+        '/api/v1/resolve', key=agent_write['key'],
+        json_body={'publisher': 'Spårtsklubben', 'date': '1999-01-01'})
+    assert r.status_code == 404
+    assert '1999-01-01' in r.get_json()['error']
+    assert 'Europe/Oslo' in r.get_json()['error']
+
+
+def test_agent_resolve_spartsklubben_by_publisher_and_date(agent_write):
+    r = _agent_post(
+        '/api/v1/resolve', key=agent_write['key'],
+        json_body={'publisher': 'spårtsklubben', 'date': '2026-09-10'})
+    assert r.status_code == 200
+    ep = r.get_json()['episode']
+    assert ep['publisher'] == 'Spårtsklubben'
+    assert ep['published_at'] == '2026-09-10'
+    assert ep['title'].startswith('Ukas iddiot')
+    assert ep['audio_url'].endswith('.mp3')
+    assert ep['transcript_status'] == 'none'
+    assert 'id' not in ep  # catalog hit, not a task yet
+
+
+def test_agent_start_rejects_missing_auth(agent_write):
+    r = A.app.test_client().post(
+        '/api/v1/transcriptions',
+        json={'publisher': 'Spårtsklubben', 'date': '2026-09-10'})
+    assert r.status_code == 401
+
+
+def test_agent_start_requires_scoped_user(agent_api, trial_on, monkeypatch):
+    monkeypatch.delenv('AGENT_API_USER_ID', raising=False)
+    A._agent_write_attempts.clear()
+    r = _agent_post(
+        '/api/v1/transcriptions', key=agent_api,
+        json_body={'publisher': 'Spårtsklubben', 'date': '2026-09-10'})
+    assert r.status_code == 403
+    assert 'AGENT_API_USER_ID' in r.get_json()['error']
+
+
+def test_agent_start_creates_task_scoped_to_agent_user(agent_write):
+    from models import db, TranscriptionTask
+    r = _agent_post(
+        '/api/v1/transcriptions', key=agent_write['key'],
+        json_body={'publisher': 'Spårtsklubben', 'date': '2026-09-10'})
+    assert r.status_code == 201, r.get_json()
+    data = r.get_json()
+    assert data['transcript_status'] == 'pending'
+    assert data['publisher'] == 'Spårtsklubben'
+    assert data['published_at'] == '2026-09-10'
+    assert data['reused'] is False
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, data['id'])
+        assert task is not None
+        assert task.user_id == agent_write['user_id']
+        assert task.podcast_name == 'Spårtsklubben'
+        assert task.trial_seconds_charged  # metered on trial
+
+
+def test_agent_start_then_poll_pending_and_ready(agent_write):
+    from models import db, TranscriptionTask
+    start = _agent_post(
+        '/api/v1/transcriptions', key=agent_write['key'],
+        json_body={'publisher': 'Spårtsklubben', 'date': '2026-09-10'})
+    assert start.status_code == 201
+    task_id = start.get_json()['id']
+
+    pending = _agent_get(f'/api/v1/episodes/{task_id}', key=agent_write['key'])
+    assert pending.status_code == 200
+    assert pending.get_json()['transcript_status'] == 'pending'
+
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        task.status = 'completed'
+        task.transcript_text = 'Ferdig transkript for Spårtsklubben.'
+        db.session.commit()
+
+    ready = _agent_get(f'/api/v1/episodes/{task_id}', key=agent_write['key'])
+    assert ready.get_json()['transcript_status'] == 'ready'
+    text = _agent_get(f'/api/v1/episodes/{task_id}/transcript',
+                      key=agent_write['key'])
+    assert text.get_json()['text'] == 'Ferdig transkript for Spårtsklubben.'
+
+
+def test_agent_start_trial_exhausted_is_402(agent_write, monkeypatch):
+    from models import db, User
+    with A.app.app_context():
+        u = db.session.get(User, agent_write['user_id'])
+        u.trial_seconds_used = u.trial_seconds_limit or A.TRIAL_DEFAULT_SECONDS
+        db.session.commit()
+    r = _agent_post(
+        '/api/v1/transcriptions', key=agent_write['key'],
+        json_body={'publisher': 'Spårtsklubben', 'date': '2026-09-10'})
+    assert r.status_code == 402, r.get_json()
+    assert 'error' in r.get_json()
+
+
+def test_agent_start_reuses_existing_pending_task(agent_write):
+    first = _agent_post(
+        '/api/v1/transcriptions', key=agent_write['key'],
+        json_body={'publisher': 'Spårtsklubben', 'date': '2026-09-10'})
+    assert first.status_code == 201
+    second = _agent_post(
+        '/api/v1/transcriptions', key=agent_write['key'],
+        json_body={'publisher': 'Spårtsklubben', 'date': '2026-09-10'})
+    assert second.status_code == 200
+    assert second.get_json()['id'] == first.get_json()['id']
+    assert second.get_json()['reused'] is True
+
+
+def test_agent_resolve_via_get_query_params(agent_write):
+    r = _agent_get(
+        '/api/v1/resolve?publisher=Spårtsklubben&date=2026-09-10',
+        key=agent_write['key'])
+    assert r.status_code == 200
+    assert r.get_json()['episode']['published_at'] == '2026-09-10'
