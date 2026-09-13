@@ -8,6 +8,7 @@ Supports user accounts, saved RSS feeds, and self-serve API keys.
 
 import collections
 import glob
+import hmac
 import json
 import math
 import os
@@ -19,7 +20,9 @@ import ssl
 import time
 import threading
 import unicodedata
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from functools import wraps
+from zoneinfo import ZoneInfo
 import certifi
 import requests
 import feedparser
@@ -38,7 +41,7 @@ import uuid
 from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError, APITimeoutError
 
-from sqlalchemy import (event as sa_event, inspect as sa_inspect, text,
+from sqlalchemy import (event as sa_event, func as sa_func, inspect as sa_inspect, text,
                         update as sa_update)
 from sqlalchemy.engine import Engine
 
@@ -2326,6 +2329,330 @@ def search_transcripts(user_id, query, limit=TRANSCRIPT_SEARCH_LIMIT):
     return matches
 
 
+# ---------------------------------------------------------------------------
+# Agent read API  (TSK-20496 / PRJ-596)
+#
+# Machine-readable lookup for Chief-of-Staff agents: search by publisher +
+# date, fetch episode metadata, fetch transcript text. Auth is a shared
+# secret in AGENT_API_KEY -- never commit the value; store it in the host
+# env / 1Password and give CoS the item reference, not the secret itself.
+# ---------------------------------------------------------------------------
+
+AGENT_API_TZ = ZoneInfo('Europe/Oslo')
+AGENT_EPISODE_LIMIT = 50
+# Task statuses that mean Whisper has not finished (or not started) yet.
+_AGENT_PENDING_STATUSES = frozenset({
+    'pending', 'downloading', 'splitting', 'transcribing',
+})
+
+
+def _agent_configured_key():
+    """The shared agent secret, or '' when the API is disabled.
+
+    Read from the environment on every call so tests can monkeypatch and so a
+    restart is not required to rotate the key under gunicorn's preload.
+    """
+    return (os.getenv('AGENT_API_KEY') or '').strip()
+
+
+def _agent_scope_user_id():
+    """Optional user_id that all agent reads are limited to.
+
+    When unset the key can read every account's tasks -- fine for a single
+    operator box, wrong once Podskrift has other people's transcripts. Set
+    AGENT_API_USER_ID in production if the DB is multi-tenant.
+    """
+    raw = (os.getenv('AGENT_API_USER_ID') or '').strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _extract_agent_api_key():
+    """Bearer token or X-Api-Key header. Empty string if neither was sent."""
+    auth = request.headers.get('Authorization', '')
+    if auth.lower().startswith('bearer '):
+        return auth[7:].strip()
+    return (request.headers.get('X-Api-Key') or '').strip()
+
+
+def require_agent_api_key(view):
+    """401 unless Authorization/X-Api-Key matches AGENT_API_KEY.
+
+    Constant-time compare. A missing env var means every request fails closed
+    with 401 -- same status as a wrong key, so we do not advertise whether the
+    API is configured.
+    """
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        expected = _agent_configured_key()
+        provided = _extract_agent_api_key()
+        if not expected or not provided:
+            return jsonify({'error': 'Unauthorized'}), 401
+        if not hmac.compare_digest(provided, expected):
+            return jsonify({'error': 'Unauthorized'}), 401
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def agent_transcript_status(task):
+    """Map a TranscriptionTask row to none|pending|ready|failed.
+
+    The agent API talks about episodes/transcripts, not internal job phases.
+    `ready` means there is text to return; `pending` means work is still in
+    flight; `failed` means it stopped without a usable transcript; `none` is
+    reserved for rows that never produced text (e.g. completed empty).
+    """
+    # "transcribing chunk 2/5" → "transcribing"
+    status = (task.status or '').split()[0]
+    text = (task.transcript_text or '').strip()
+    if status == 'completed':
+        return 'ready' if text else 'none'
+    if status in _AGENT_PENDING_STATUSES or status.startswith('transcribing'):
+        return 'pending'
+    if status == 'cancelled':
+        # Partial text was billed pro-rata and is downloadable in the UI --
+        # treat it as ready so CoS can still pull what exists.
+        return 'ready' if text else 'failed'
+    if status == 'error':
+        return 'failed'
+    return 'none'
+
+
+def _like_contains(value):
+    """Escape LIKE wildcards so a publisher filter cannot match everything."""
+    return (value.replace('\\', '\\\\')
+                 .replace('%', '\\%')
+                 .replace('_', '\\_'))
+
+
+def _parse_agent_date(value):
+    """ISO calendar date (YYYY-MM-DD). Returns date or None."""
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def _episode_published_date(published):
+    """Best-effort calendar date for episode_published, in Europe/Oslo.
+
+    Feed parsing stores YYYY-MM-DD already; older rows may hold a raw RSS
+    string or a timestamp. Anything unparseable returns None so a date filter
+    does not invent a match.
+    """
+    if not published:
+        return None
+    raw = published.strip()
+    if raw.lower().startswith('unknown'):
+        return None
+    # Fast path: the format _format_published writes.
+    if len(raw) >= 10 and raw[4] == '-' and raw[7] == '-':
+        try:
+            return date.fromisoformat(raw[:10])
+        except ValueError:
+            pass
+    for fmt in ('%a, %d %b %Y %H:%M:%S %z',
+                '%a, %d %b %Y %H:%M:%S %Z',
+                '%Y-%m-%dT%H:%M:%S%z',
+                '%Y-%m-%dT%H:%M:%SZ',
+                '%Y-%m-%d %H:%M:%S'):
+        try:
+            dt = datetime.strptime(raw.replace('Z', '+0000') if fmt.endswith('%z')
+                                   and raw.endswith('Z') else raw, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(AGENT_API_TZ).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _agent_task_query():
+    """Base query for agent reads, optionally scoped to AGENT_API_USER_ID."""
+    q = TranscriptionTask.query
+    uid = _agent_scope_user_id()
+    if uid is not None:
+        q = q.filter(TranscriptionTask.user_id == uid)
+    return q
+
+
+def _agent_episode_payload(task):
+    published = _episode_published_date(task.episode_published)
+    return {
+        'id': task.id,
+        'title': task.episode_title,
+        'publisher': task.podcast_name,
+        'published_at': published.isoformat() if published else (
+            task.episode_published if task.episode_published
+            and not str(task.episode_published).lower().startswith('unknown')
+            else None
+        ),
+        'transcript_status': agent_transcript_status(task),
+        'language': task.language,
+        'audio_duration_seconds': task.audio_duration,
+        'artwork_url': task.artwork_url,
+        'rss_url': task.rss_url,
+        'task_status': task.status,
+        'started_at': task.started_at.isoformat() if task.started_at else None,
+        'completed_at': task.completed_at.isoformat() if task.completed_at else None,
+        'error_message': task.error_message if task.status == 'error' else None,
+    }
+
+
+def _segments_to_srt(segments_json, fallback_text=''):
+    """Build SubRip text from stored Whisper segments. Cheap: no re-encode."""
+    if not segments_json:
+        return None
+    try:
+        segments = json.loads(segments_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not segments:
+        return None
+    lines = []
+    for i, seg in enumerate(segments, 1):
+        lines.append(f"{i}")
+        lines.append(
+            f"{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}"
+        )
+        lines.append((seg.get('text') or '').strip() or fallback_text)
+        lines.append('')
+    return '\n'.join(lines)
+
+
+@app.route('/api/v1/episodes')
+@require_agent_api_key
+def agent_list_episodes():
+    """Search transcribed episodes by publisher/show and calendar date.
+
+    Query params:
+      publisher / show  – case-insensitive substring on podcast_name
+      date              – YYYY-MM-DD, interpreted in Europe/Oslo against
+                          episode_published
+      limit             – max rows (default 50, hard cap 100)
+
+    At least one of publisher/show or date is required so a bare GET cannot
+    dump the whole library.
+    """
+    publisher = (request.args.get('publisher') or request.args.get('show') or '').strip()
+    date_raw = (request.args.get('date') or '').strip()
+    if not publisher and not date_raw:
+        return jsonify({
+            'error': 'Provide publisher (or show) and/or date=YYYY-MM-DD',
+        }), 400
+
+    target_date = None
+    if date_raw:
+        target_date = _parse_agent_date(date_raw)
+        if target_date is None:
+            return jsonify({'error': 'date must be ISO YYYY-MM-DD'}), 400
+
+    try:
+        limit = min(int(request.args.get('limit', AGENT_EPISODE_LIMIT)), 100)
+    except (TypeError, ValueError):
+        limit = AGENT_EPISODE_LIMIT
+    limit = max(1, limit)
+
+    q = _agent_task_query()
+    if publisher:
+        # lower()+LIKE: SQLite's bare LIKE only folds ASCII, and ilike is the
+        # same under this dialect. Escape %/_ so the filter is literal.
+        needle = f'%{_like_contains(publisher.lower())}%'
+        q = q.filter(
+            sa_func.lower(TranscriptionTask.podcast_name).like(needle, escape='\\')
+        )
+
+    # Pull a bounded window newest-first, then apply the Oslo date filter in
+    # Python -- episode_published is a free-form string, not a typed column.
+    candidates = (q.order_by(TranscriptionTask.started_at.desc())
+                  .limit(500).all())
+    episodes = []
+    for task in candidates:
+        if target_date is not None:
+            pub = _episode_published_date(task.episode_published)
+            if pub != target_date:
+                continue
+        episodes.append(_agent_episode_payload(task))
+        if len(episodes) >= limit:
+            break
+
+    return jsonify({
+        'episodes': episodes,
+        'count': len(episodes),
+        'filters': {
+            'publisher': publisher or None,
+            'date': target_date.isoformat() if target_date else None,
+            'timezone': 'Europe/Oslo',
+        },
+    })
+
+
+@app.route('/api/v1/episodes/<task_id>')
+@require_agent_api_key
+def agent_get_episode(task_id):
+    """Episode metadata + transcript_status for one transcription task id."""
+    task = _agent_task_query().filter(TranscriptionTask.id == task_id).first()
+    if not task:
+        return jsonify({'error': 'Episode not found'}), 404
+    return jsonify(_agent_episode_payload(task))
+
+
+@app.route('/api/v1/episodes/<task_id>/transcript')
+@require_agent_api_key
+def agent_get_transcript(task_id):
+    """Return transcript text when ready; otherwise transcript_status only.
+
+    Never 500s on a missing/pending transcript -- agents need a stable
+    contract. Optional ?format=srt when segments_json is present (cheap).
+    """
+    task = _agent_task_query().filter(TranscriptionTask.id == task_id).first()
+    if not task:
+        return jsonify({'error': 'Episode not found', 'transcript_status': 'none'}), 404
+
+    status = agent_transcript_status(task)
+    fmt = (request.args.get('format') or 'txt').strip().lower()
+    if fmt not in ('txt', 'srt', 'text', 'plain'):
+        return jsonify({'error': 'format must be txt or srt',
+                        'transcript_status': status}), 400
+
+    payload = {
+        'id': task.id,
+        'title': task.episode_title,
+        'publisher': task.podcast_name,
+        'transcript_status': status,
+        'format': 'srt' if fmt == 'srt' else 'txt',
+    }
+
+    if status != 'ready':
+        # Clear status, no body text, no 500 -- CoS can poll or tell Sindre.
+        return jsonify(payload), 200
+
+    if fmt == 'srt':
+        srt = _segments_to_srt(task.segments_json, task.transcript_text or '')
+        if srt is None:
+            payload['error'] = 'SRT unavailable (no segment timestamps stored)'
+            payload['transcript_status'] = 'ready'
+            # Still ready for plain text; surface that rather than pretending
+            # SRT failed the whole transcript.
+            payload['text'] = None
+            return jsonify(payload), 200
+        payload['text'] = srt
+        return jsonify(payload)
+
+    payload['text'] = task.transcript_text or ''
+    raw = request.args.get('raw')
+    if raw in ('1', 'true', 'yes'):
+        return Response(payload['text'], mimetype='text/plain; charset=utf-8')
+    return jsonify(payload)
+
+
 def faq_entries():
     """Answered on the page, in the schema and in llms.txt.
 
@@ -2470,7 +2797,7 @@ def robots_txt():
     """
     disallow = ['Disallow: ' + path for path in (
         '/settings', '/history', '/feeds', '/transcription/', '/download/',
-        '/status/', '/active-jobs', '/cancel/',
+        '/api/', '/status/', '/active-jobs', '/cancel/',
     )]
     lines = [
         '# Podskrift -- podcast transcription',

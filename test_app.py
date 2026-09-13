@@ -3176,7 +3176,7 @@ def test_robots_txt_keeps_crawlers_out_of_session_only_pages(trial_on):
     personal -- a transcript is the user's, not the index's."""
     body = A.app.test_client().get('/robots.txt').data.decode()
     for path in ('/settings', '/history', '/transcription/', '/download/',
-                 '/active-jobs', '/cancel/'):
+                 '/api/', '/active-jobs', '/cancel/'):
         assert f'Disallow: {path}' in body, f'{path} is crawlable'
 
 
@@ -4161,3 +4161,192 @@ def test_a_stale_task_is_reported_once_failed(sentry_events):
     assert event['fingerprint'] == ['stale-task']
     assert event['tags'] == {'task.last_status': 'transcribing', 'sweep.source': 'poll'}
     assert event['contexts']['task']['id'] == stale_id
+
+
+# --------------------------------------------------------------------------
+# Agent read API  (TSK-20496 / PRJ-596)
+# --------------------------------------------------------------------------
+
+_AGENT_KEY = 'test-agent-key-not-for-prod'
+
+
+@pytest.fixture
+def agent_api(monkeypatch):
+    """Enable the agent API with a known key; clear optional user scope."""
+    monkeypatch.setenv('AGENT_API_KEY', _AGENT_KEY)
+    monkeypatch.delenv('AGENT_API_USER_ID', raising=False)
+    return _AGENT_KEY
+
+
+@pytest.fixture
+def agent_library(agent_api):
+    """Episodes across two users for search / status / transcript tests."""
+    from models import db, TranscriptionTask
+    owner = _make_user('agent-owner@example.com')
+    other = _make_user('agent-other@example.com')
+    rows = [
+        dict(id='ag-ready', user_id=owner, status='completed',
+             episode_title='Morning briefing', podcast_name='Forklaringssaften',
+             episode_published='2026-09-12',
+             transcript_text='Hei. Dette er hele transkriptet.',
+             language='no', audio_duration=600.0,
+             completed_at=datetime(2026, 9, 12, 10, tzinfo=timezone.utc)),
+        dict(id='ag-pending', user_id=owner, status='transcribing chunk 1/3',
+             episode_title='Still cooking', podcast_name='Forklaringssaften',
+             episode_published='2026-09-12', transcript_text='partial…'),
+        dict(id='ag-failed', user_id=owner, status='error',
+             episode_title='Broken download', podcast_name='Forklaringssaften',
+             episode_published='2026-09-11', error_message='403 from host'),
+        dict(id='ag-other-day', user_id=owner, status='completed',
+             episode_title='Older show', podcast_name='Forklaringssaften',
+             episode_published='2026-09-01',
+             transcript_text='Gammel episode.',
+             completed_at=datetime(2026, 9, 1, tzinfo=timezone.utc)),
+        dict(id='ag-other-show', user_id=owner, status='completed',
+             episode_title='Unrelated', podcast_name='Some Other Pod',
+             episode_published='2026-09-12',
+             transcript_text='Wrong publisher.',
+             completed_at=datetime(2026, 9, 12, 11, tzinfo=timezone.utc)),
+        dict(id='ag-other-user', user_id=other, status='completed',
+             episode_title='Private', podcast_name='Forklaringssaften',
+             episode_published='2026-09-12',
+             transcript_text='Should hide when scoped.',
+             completed_at=datetime(2026, 9, 12, 12, tzinfo=timezone.utc)),
+    ]
+    with A.app.app_context():
+        db.session.query(TranscriptionTask).filter(
+            TranscriptionTask.id.in_([r['id'] for r in rows])).delete()
+        for r in rows:
+            db.session.add(TranscriptionTask(**r))
+        db.session.commit()
+    yield {'owner': owner, 'other': other, 'key': agent_api}
+    with A.app.app_context():
+        db.session.query(TranscriptionTask).filter(
+            TranscriptionTask.id.in_([r['id'] for r in rows])).delete()
+        db.session.commit()
+    _purge(['agent-owner@example.com', 'agent-other@example.com'])
+
+
+def _agent_get(path, key=None, **kwargs):
+    headers = kwargs.pop('headers', {})
+    if key is not None:
+        headers['Authorization'] = f'Bearer {key}'
+    return A.app.test_client().get(path, headers=headers, **kwargs)
+
+
+def test_agent_api_rejects_missing_auth(agent_library):
+    r = _agent_get('/api/v1/episodes?publisher=Forklaring&date=2026-09-12')
+    assert r.status_code == 401
+    assert r.get_json()['error'] == 'Unauthorized'
+
+
+def test_agent_api_rejects_wrong_key(agent_library):
+    r = _agent_get('/api/v1/episodes?publisher=Forklaring&date=2026-09-12',
+                   key='wrong-key')
+    assert r.status_code == 401
+
+
+def test_agent_api_rejects_when_unconfigured(monkeypatch, agent_library):
+    monkeypatch.delenv('AGENT_API_KEY', raising=False)
+    r = _agent_get('/api/v1/episodes?publisher=x', key=_AGENT_KEY)
+    assert r.status_code == 401
+
+
+def test_agent_search_by_publisher_and_date(agent_library):
+    r = _agent_get(
+        '/api/v1/episodes?publisher=forklaring&date=2026-09-12',
+        key=agent_library['key'])
+    assert r.status_code == 200
+    data = r.get_json()
+    ids = {e['id'] for e in data['episodes']}
+    assert 'ag-ready' in ids
+    assert 'ag-pending' in ids
+    assert 'ag-other-day' not in ids
+    assert 'ag-other-show' not in ids
+    assert data['filters']['timezone'] == 'Europe/Oslo'
+
+
+def test_agent_search_empty_list_when_nothing_matches(agent_library):
+    r = _agent_get(
+        '/api/v1/episodes?publisher=Forklaring&date=1999-01-01',
+        key=agent_library['key'])
+    assert r.status_code == 200
+    assert r.get_json()['episodes'] == []
+    assert r.get_json()['count'] == 0
+
+
+def test_agent_search_requires_a_filter(agent_library):
+    r = _agent_get('/api/v1/episodes', key=agent_library['key'])
+    assert r.status_code == 400
+
+
+def test_agent_get_episode_includes_status(agent_library):
+    key = agent_library['key']
+    ready = _agent_get('/api/v1/episodes/ag-ready', key=key).get_json()
+    assert ready['transcript_status'] == 'ready'
+    assert ready['published_at'] == '2026-09-12'
+    assert ready['publisher'] == 'Forklaringssaften'
+
+    pending = _agent_get('/api/v1/episodes/ag-pending', key=key).get_json()
+    assert pending['transcript_status'] == 'pending'
+
+    failed = _agent_get('/api/v1/episodes/ag-failed', key=key).get_json()
+    assert failed['transcript_status'] == 'failed'
+
+
+def test_agent_transcript_ready_returns_full_text(agent_library):
+    r = _agent_get('/api/v1/episodes/ag-ready/transcript',
+                   key=agent_library['key'])
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data['transcript_status'] == 'ready'
+    assert data['text'] == 'Hei. Dette er hele transkriptet.'
+
+
+def test_agent_transcript_pending_is_not_500(agent_library):
+    r = _agent_get('/api/v1/episodes/ag-pending/transcript',
+                   key=agent_library['key'])
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data['transcript_status'] == 'pending'
+    assert 'text' not in data
+
+
+def test_agent_transcript_failed_is_not_500(agent_library):
+    r = _agent_get('/api/v1/episodes/ag-failed/transcript',
+                   key=agent_library['key'])
+    assert r.status_code == 200
+    assert r.get_json()['transcript_status'] == 'failed'
+    assert 'text' not in r.get_json()
+
+
+def test_agent_x_api_key_header_works(agent_library):
+    r = A.app.test_client().get(
+        '/api/v1/episodes/ag-ready',
+        headers={'X-Api-Key': agent_library['key']})
+    assert r.status_code == 200
+    assert r.get_json()['id'] == 'ag-ready'
+
+
+def test_agent_user_scope_hides_other_accounts(agent_library, monkeypatch):
+    monkeypatch.setenv('AGENT_API_USER_ID', str(agent_library['owner']))
+    r = _agent_get(
+        '/api/v1/episodes?publisher=Forklaring&date=2026-09-12',
+        key=agent_library['key'])
+    ids = {e['id'] for e in r.get_json()['episodes']}
+    assert 'ag-ready' in ids
+    assert 'ag-other-user' not in ids
+    assert _agent_get('/api/v1/episodes/ag-other-user',
+                      key=agent_library['key']).status_code == 404
+
+
+def test_agent_transcript_status_helper_maps_phases():
+    assert A.agent_transcript_status(
+        type('T', (), {'status': 'downloading', 'transcript_text': None})()
+    ) == 'pending'
+    assert A.agent_transcript_status(
+        type('T', (), {'status': 'completed', 'transcript_text': 'x'})()
+    ) == 'ready'
+    assert A.agent_transcript_status(
+        type('T', (), {'status': 'cancelled', 'transcript_text': ''})()
+    ) == 'failed'
