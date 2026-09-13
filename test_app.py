@@ -4794,12 +4794,24 @@ def test_public_api_docs_page_renders_customer_markdown(trial_on):
     body = resp.data.decode()
     assert 'Customer API' in body
     assert 'psk_' in body or 'psk_…' in body
-    assert '/api/v1/resolve' in body
-    assert '/api/v1/transcriptions' in body
-    assert '/api/v1/episodes' in body
     assert 'Authorization: Bearer' in body
     assert 'X-Api-Key' in body
     assert '401' in body and '402' in body and '404' in body
+    # One visible heading per endpoint (modern reference layout, not a curl dump).
+    for heading in (
+        'POST /api/v1/resolve',
+        'POST /api/v1/transcriptions',
+        'GET /api/v1/episodes',
+        'GET /api/v1/episodes/{id}',
+        'GET /api/v1/episodes/{id}/transcript',
+        'Authentication',
+        'Errors',
+    ):
+        assert f'<h2>{heading}</h2>' in body, heading
+    assert body.index('<h2>POST /api/v1/resolve</h2>') < body.index(
+        '<h2>POST /api/v1/transcriptions</h2>')
+    assert body.index('<h2>POST /api/v1/transcriptions</h2>') < body.index(
+        '<h2>GET /api/v1/episodes</h2>')
     # Same trial length the UI grants — not a hardcoded figure that can drift.
     assert f'{A.TRIAL_DEFAULT_SECONDS // 60} minutes' in body
     # Host CoS secret must never appear on the public page.
