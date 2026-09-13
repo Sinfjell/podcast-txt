@@ -10,13 +10,16 @@ scraping.
 
 Base URL (prod): `https://podskrift.com`
 
-Product model (Growth → CoS 2026-09-13, locked):
+Product model (Growth → CoS 2026-09-13, locked; customer keys 2026-09-13):
 
-1. One `AGENT_API_KEY` → Sindre via `AGENT_API_USER_ID`. No multi-tenant / customer keys.
+1. One host `AGENT_API_KEY` → Sindre via `AGENT_API_USER_ID`. **CoS only** —
+   do not hand this to customers. Customers mint their own key in Settings
+   (see [customer-api.md](customer-api.md)); never reuse `AGENT_API_KEY`.
 2. Cost = UI trial/quota (`trial_seconds_used` / limit). No separate agent billing or BYOK-for-agents.
 3. Exhausted trial → `402` (or `403` if no key/user scope) + JSON body — never `500`.
 4. Jobs scoped to that user; rate-limit + in-flight cap; anonymous write → `401`.
-5. Out of scope: Credits/Paddle, webhooks, MCP.
+5. Out of scope for *this* CoS surface: Credits/Paddle, webhooks, MCP.
+   (Customer keys are a separate product path; still no Paddle/webhooks/MCP in v1.)
 
 ## Auth
 
@@ -188,4 +191,6 @@ Optional tuning (defaults are fine):
 | `AGENT_WRITE_WINDOW_SECONDS` | `60` | Rate-limit window |
 | `AGENT_MAX_IN_FLIGHT` | `2` | Max pending jobs for the scoped user |
 
-Out of scope: webhooks, MCP server, multi-tenant agent keys, Credits/Paddle.
+Out of scope: webhooks, MCP server, Credits/Paddle. Customer per-user keys are
+documented in [customer-api.md](customer-api.md) — they do **not** use
+`AGENT_API_KEY`.
