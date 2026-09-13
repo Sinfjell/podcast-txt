@@ -3274,12 +3274,18 @@ def faq_entries():
                 f'their rate -- about {hourly} per hour of audio. There is no subscription.')
         need_key = ('Not to start. The free trial runs on ours. Add your own key when the '
                     'trial runs out and there is no limit beyond what you spend at OpenAI.')
+        api = ('Yes. Create an API key in Settings and use it from scripts to find an '
+               'episode, start a transcription and fetch the transcript. API jobs draw on '
+               f'the same {minutes} free trial minutes as the website. Docs: podskrift.com/docs/api')
     else:
         free = ('Podskrift itself is free. You add your own OpenAI API key and pay OpenAI '
                 f'directly at their rate -- about {hourly} per hour of audio. There is no '
                 'subscription.')
         need_key = ('Yes. Add it in Settings; it is stored on your account and used only '
                     'for your own transcriptions.')
+        api = ('Yes. Create an API key in Settings and use it from scripts to find an '
+               'episode, start a transcription and fetch the transcript. Docs: '
+               'podskrift.com/docs/api')
     return [
         ('How do I transcribe a podcast episode to text?',
          'Search for the podcast or the episode by name, pick the episode, and Podskrift '
@@ -3300,6 +3306,7 @@ def faq_entries():
          'Plain text (.txt) and SubRip subtitles (.srt) with timestamps.'),
         ('Can I transcribe a podcast that is not in the search index?',
          'Yes. Paste the RSS feed URL instead and pick the episode from the feed.'),
+        ('Is there an API?', api),
     ]
 
 
@@ -3476,6 +3483,7 @@ USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscripti
 ## Pages
 - [Home]({public_url('index')}): search, pick an episode, transcribe
 - [How to find an RSS feed]({public_url('rss_help')}): for podcasts outside the search index
+- [API docs]({public_url('api_docs')}): transcribe and fetch transcripts from scripts, with a key from Settings
 - [Sign up]({public_url('register')}): {signup_blurb}
 
 ## Frequently asked
@@ -3490,13 +3498,14 @@ Nettsmed -- https://nettsmed.no
 
 @app.route('/sitemap.xml')
 def sitemap_xml():
-    """The three pages worth indexing. Everything else needs a session."""
+    """The public pages worth indexing. Everything else needs a session."""
     from xml.sax.saxutils import escape
     pages = [public_url('index'),
              public_url('rss_help'),
+             public_url('api_docs'),
              public_url('register')]
     # No lastmod: it was emitting today's date on every fetch, which claims all
-    # three pages change daily. That is a discount signal, not a freshness one.
+    # the pages change daily. That is a discount signal, not a freshness one.
     urls = '\n'.join(f'  <url><loc>{escape(u)}</loc></url>' for u in pages)
     xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
@@ -3507,6 +3516,18 @@ def sitemap_xml():
 @app.route('/rss-help')
 def rss_help():
     return render_template('rss_help.html')
+
+
+@app.route('/docs/api')
+def api_docs():
+    """Public docs for the customer API, so a new user finds them without the repo.
+
+    Mirrors docs/customer-api.md; a test keeps the endpoint list in step. The
+    trial length is passed in, not typed, for the same reason as faq_entries().
+    """
+    return render_template('api_docs.html',
+                           trial_minutes=(TRIAL_DEFAULT_SECONDS // 60
+                                          if trial_available() else None))
 
 
 @app.route('/convert-apple-url', methods=['POST'])

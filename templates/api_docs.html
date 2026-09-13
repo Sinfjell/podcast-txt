@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}API docs — Podskrift{% endblock %}
+
+{% block meta_description %}Podskrift customer API: find a podcast episode, transcribe it with Whisper and fetch the transcript from your own scripts.{% endblock %}
+
+{% block content %}
+<style>
+    .api-docs pre {
+        background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+        padding: 12px 14px; overflow-x: auto; font-size: 12.5px; line-height: 1.6; margin: 0 0 12px;
+    }
+    .api-docs code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+    .api-docs pre code { font-size: inherit; }
+    .api-docs table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    .api-docs th, .api-docs td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    .api-docs th { color: var(--muted); font-weight: 600; }
+    .api-docs ul { margin: 0; padding-left: 18px; line-height: 1.8; font-size: 14px; }
+</style>
+<div class="api-docs" style="max-width: 680px; margin: 24px auto;">
+    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 8px;">Customer API</h1>
+    <p class="text-muted" style="font-size: 14px; line-height: 1.6; margin-bottom: 24px;">
+        Find an episode, transcribe it and fetch the transcript from your own scripts or agents.
+        {% if trial_minutes %}
+        API jobs draw on the same {{ trial_minutes }} free trial minutes as the website;
+        after that, add your own OpenAI API key in Settings.
+        {% else %}
+        Transcription runs on the OpenAI API key saved in your Settings.
+        {% endif %}
+    </p>
+
+    <div class="card">
+        <div class="card-header">
+            <h5>1. Get a key</h5>
+        </div>
+        <div class="card-body">
+            <p style="font-size: 14px; line-height: 1.6; margin-bottom: 12px;">
+                Create one in <a href="{{ url_for('settings') }}">Settings → API key</a>. Keys start with
+                <code>psk_</code>, one per account, and the full key is shown once.
+                Regenerate or Revoke there — the old key stops working immediately.
+            </p>
+            <p style="font-size: 14px; line-height: 1.6; margin-bottom: 0;">
+                Send it as <code>Authorization: Bearer psk_…</code> or <code>X-Api-Key: psk_…</code>.
+                Keep it out of source control.
+            </p>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <h5>2. Resolve → transcribe → transcript</h5>
+        </div>
+        <div class="card-body">
+<pre><code>export PODSKRIFT_API_KEY='psk_…'   # from Settings — never commit
+
+# Resolve an episode
+curl -sS -H "Authorization: Bearer $PODSKRIFT_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"publisher":"Spårtsklubben","date":"2026-09-10"}' \
+  https://podskrift.com/api/v1/resolve
+
+# Start transcription (same trial path as the UI)
+START=$(curl -sS -H "Authorization: Bearer $PODSKRIFT_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"publisher":"Spårtsklubben","date":"2026-09-10"}' \
+  https://podskrift.com/api/v1/transcriptions)
+ID=$(python3 -c "import json,sys; print(json.load(sys.stdin)['id'])" &lt;&lt;&lt;"$START")
+
+# Poll
+curl -sS -H "Authorization: Bearer $PODSKRIFT_API_KEY" \
+  "https://podskrift.com/api/v1/episodes/$ID"
+
+# Transcript when ready
+curl -sS -H "Authorization: Bearer $PODSKRIFT_API_KEY" \
+  "https://podskrift.com/api/v1/episodes/$ID/transcript"</code></pre>
+            <p class="text-muted text-sm" style="margin-bottom: 0;">
+                <code>date</code> is <code>YYYY-MM-DD</code> in Europe/Oslo. Poll until
+                <code>transcript_status</code> is <code>ready</code> (stop on <code>failed</code>); add <code>?format=srt</code>
+                to the transcript URL for subtitles.
+            </p>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <h5>Endpoints</h5>
+        </div>
+        <div class="card-body">
+            <ul>
+                <li><code>POST/GET /api/v1/resolve</code> — find an episode by publisher + date, or by URL</li>
+                <li><code>POST /api/v1/transcriptions</code> — start a transcription (reuses an existing job for the same episode)</li>
+                <li><code>GET /api/v1/episodes</code> — your transcribed episodes, by <code>publisher</code> and/or <code>date</code></li>
+                <li><code>GET /api/v1/episodes/&lt;id&gt;</code> — one job and its <code>transcript_status</code></li>
+                <li><code>GET /api/v1/episodes/&lt;id&gt;/transcript</code> — the text, once ready</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <h5>Status codes</h5>
+        </div>
+        <div class="card-body">
+            <table>
+                <tr><th>Status</th><th>Meaning</th></tr>
+                <tr><td><code>401</code></td><td>Missing, wrong or revoked key</td></tr>
+                <tr><td><code>402</code></td><td>The free trial can’t cover this job — add your own OpenAI API key in Settings</td></tr>
+                <tr><td><code>404</code></td><td>Not found (or another account’s job)</td></tr>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
