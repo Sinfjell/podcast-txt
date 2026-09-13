@@ -1,5 +1,44 @@
 # Ops
 
+## Production deploy (GitHub Actions)
+
+On every push to `main` (merge or direct), [.github/workflows/deploy.yml](../.github/workflows/deploy.yml)
+SSHs into the Hetzner/Plesk host and runs the same steps as today's manual
+deploy: `git fetch` / `checkout main` / `pull --ff-only`, then
+`systemctl restart podskrift`, asserts the unit is active, and prints the
+short HEAD SHA. Manual re-run: Actions → **Deploy production** →
+**Run workflow**.
+
+No `pip install` — same as the current pull+restart. If a change needs new
+Python deps, install them on the host once (as the app user / into `.venv`)
+before or right after that deploy; see Sentry install notes below.
+
+### GitHub secrets (Settings → Secrets and variables → Actions)
+
+| Secret | Example / how to get it |
+| --- | --- |
+| `PODSKRIFT_SSH_HOST` | `37.27.191.154` |
+| `PODSKRIFT_SSH_USER` | `root` (matches current ops) |
+| `PODSKRIFT_SSH_KEY` | Private key whose public half is in `authorized_keys` on the host. Prefer a deploy-only ed25519 key, not a personal laptop key. |
+| `PODSKRIFT_SSH_KNOWN_HOSTS` | Output of `ssh-keyscan -t ed25519,rsa 37.27.191.154` (paste the host lines only). The workflow uses `StrictHostKeyChecking=yes` — never `no`. |
+
+A failed SSH, non-ff pull, or inactive unit fails the job red.
+
+### Rollback
+
+On the server, check out the previous good SHA and restart:
+
+```bash
+cd /var/www/vhosts/podskrift.nettsmed.dev/app
+git fetch origin
+git checkout <previous-good-sha>
+systemctl restart podskrift
+systemctl is-active podskrift
+git rev-parse --short HEAD
+```
+
+To return to tracking `main` afterward: `git checkout main && git pull --ff-only`.
+
 ## Database backups
 
 Until 2026-09-09 there were none. The database is the only copy of every user's

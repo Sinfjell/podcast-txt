@@ -354,7 +354,12 @@ For issues or questions:
 
 ## 🚀 Deployment Options
 
-The Docker setup works on multiple platforms:
+**Production (podskrift.com)** lives on Hetzner/Plesk under systemd. Merges to
+`main` deploy automatically via GitHub Actions — see
+[ops/README.md § Production deploy](ops/README.md#production-deploy-github-actions)
+for secrets, re-run, and rollback.
+
+The Docker setup works for local and other hosts:
 
 - **Local Development**: `docker-compose up --build`
 - **Production Hosting**: Railway, Render, DigitalOcean, AWS ECS
