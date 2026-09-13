@@ -3490,6 +3490,10 @@ USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscripti
 
 {faq}
 
+**Is there a podcast transcript API / get-transcript endpoint?**
+
+Yes. Create a key in Settings (`psk_…`) and call the HTTP API: resolve → start transcription → get transcript. Docs: https://podskrift.com/docs/api
+
 ## Contact
 Nettsmed -- https://nettsmed.no
 """

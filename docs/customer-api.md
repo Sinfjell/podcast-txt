@@ -1,10 +1,6 @@
-# Customer API
+# Podcast transcript API
 
-Resolve an episode, start a transcription, poll until ready, then fetch the
-transcript — the same path as the web UI, over HTTP.
-
-New accounts get the same free trial minutes as the UI (on our OpenAI key)
-before you add your own. Jobs and trial minutes belong to your account.
+Podskrift’s podcast transcription API lets agents and scripts get a transcript over HTTP — the same path as the web UI. Resolve an episode by publisher/show and date (or URL), start Whisper, poll until ready, then fetch the plain-text transcript. New accounts get 60 free trial minutes on our OpenAI key; after that, add your own. Create a `psk_…` key in Settings.
 
 ## Authentication
 
