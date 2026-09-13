@@ -173,10 +173,12 @@ The app includes a comprehensive help guide for finding RSS feeds from:
 - `GET /download/<task_id>/<format>` - Download transcript files
 - `GET /rss-help` - RSS feed help guide
 - `POST /convert-apple-url` - Convert Apple Podcasts URL to RSS
-- **Agent read API** (auth required) — see [docs/agent-api.md](docs/agent-api.md):
-  - `GET /api/v1/episodes?publisher=&date=` — search by show + ISO date (Europe/Oslo)
+- **Agent API** (auth required) — see [docs/agent-api.md](docs/agent-api.md):
+  - `GET /api/v1/episodes?publisher=&date=` — search transcribed episodes
   - `GET /api/v1/episodes/<id>` — episode metadata + `transcript_status`
   - `GET /api/v1/episodes/<id>/transcript` — plain text when ready
+  - `POST /api/v1/resolve` — catalog/RSS resolve (no prior task needed)
+  - `POST /api/v1/transcriptions` — start Whisper as `AGENT_API_USER_ID`
 
 ## Configuration
 
@@ -195,11 +197,12 @@ The app includes a comprehensive help guide for finding RSS feeds from:
 - `SENTRY_DSN` — turns on error reporting. Production server only, never
   committed; unset means off. `SENTRY_ENVIRONMENT` defaults to `production`.
   See [ops/README.md](ops/README.md#error-reporting-sentry).
-- `AGENT_API_KEY` — shared secret for the agent read API (`/api/v1/...`).
+- `AGENT_API_KEY` — shared secret for the agent API (`/api/v1/...`).
   Unset = API refuses all callers with 401. Store in host env / 1Password;
   never commit the value. See [docs/agent-api.md](docs/agent-api.md).
-- `AGENT_API_USER_ID` — optional. When set, agent reads are limited to that
-  `users.id`. Use this on a multi-tenant database.
+- `AGENT_API_USER_ID` — scopes agent reads (optional) and **required for
+  writes**. Transcriptions run as this `users.id` on the normal trial/own-key
+  path.
 
 ### Free trial
 
