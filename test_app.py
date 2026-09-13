@@ -4779,3 +4779,79 @@ def test_customer_api_key_is_hashed_not_plaintext():
     assert digest != plaintext
     assert A.hash_customer_api_key(plaintext) == digest
 
+
+# ---------------------------------------------------------------------------
+# Public API docs (TSK-20502)
+# ---------------------------------------------------------------------------
+
+def _customer_api_md():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'docs', 'customer-api.md')
+    with open(path, encoding='utf-8') as fh:
+        return fh.read()
+
+
+def test_the_api_docs_page_is_public_and_matches_the_markdown(trial_on):
+    """/docs/api is a hand-written copy of docs/customer-api.md. A copy that
+    is not checked goes stale -- AGENTS.md did within one commit."""
+    import html as _html
+    import re as _re
+    resp = A.app.test_client().get('/docs/api')           # no session
+    assert resp.status_code == 200
+    page = _html.unescape(resp.data.decode())
+
+    md = _customer_api_md()
+    curl_block = _re.search(r'```bash\n(.*?)```', md, _re.S).group(1).strip()
+    assert curl_block in page, 'the curl walkthrough on /docs/api differs from the markdown'
+
+    endpoints = _re.search(r'Endpoints:(.*?)\n\n', md, _re.S).group(1)
+    listed = _re.findall(r'`([^`]+)`', endpoints)
+    assert len(listed) == 5, listed
+    for endpoint in listed:
+        assert endpoint in page, f'{endpoint} is in the markdown but not on /docs/api'
+
+    for claim in ('psk_', 'Authorization: Bearer', 'X-Api-Key', '401', '402', '404'):
+        assert claim in page, f'{claim} missing from /docs/api'
+    assert 'AGENT_API_KEY' not in page, 'the internal host key is documented publicly'
+    assert 'MCP' not in page
+
+    granted = A.TRIAL_DEFAULT_SECONDS // 60
+    figures = {int(n) for n in _re.findall(r'(\d+) free trial minutes', page)}
+    assert figures == {granted}, f'/docs/api quotes {sorted(figures)} trial minutes'
+
+
+def test_the_api_docs_do_not_promise_a_trial_that_is_switched_off(trial_on, monkeypatch):
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
+    resp = A.app.test_client().get('/docs/api')
+    assert resp.status_code == 200
+    assert 'free trial minutes' not in resp.data.decode()
+
+
+def test_settings_links_the_api_key_card_to_the_docs(trial_on):
+    uid = _make_user('settings-docs-link@example.com', limit=600, used=0)
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    page = client.get('/settings').data.decode()
+    card = page[page.index('<h5>API key</h5>'):]
+    card = card[:card.index('Feedback / feature ideas')]
+    assert 'href="/docs/api"' in card, 'the API key card does not link to the docs'
+
+
+def test_the_home_page_mentions_the_api_without_promising_mcp(trial_on, monkeypatch):
+    home = A.app.test_client().get('/').data.decode()
+    answer = dict(A.faq_entries())['Is there an API?']
+    assert 'Is there an API?' in home and answer in home
+    assert '/docs/api' in answer
+    assert f'{A.TRIAL_DEFAULT_SECONDS // 60} free trial minutes' in answer
+    assert 'MCP' not in home
+
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
+    assert 'trial' not in dict(A.faq_entries())['Is there an API?'].lower()
+
+
+def test_the_api_docs_are_in_the_sitemap_and_llms_txt(trial_on):
+    client = A.app.test_client()
+    assert '/docs/api<' in client.get('/sitemap.xml').data.decode()
+    assert '/docs/api)' in client.get('/llms.txt').data.decode()
+

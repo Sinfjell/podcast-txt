@@ -1,7 +1,8 @@
 # Customer API
 
 Generate a key in **Settings → API key**. One key per account. Jobs and trial
-minutes belong to you.
+minutes belong to you. Public copy of this page: https://podskrift.com/docs/api
+(`templates/api_docs.html` — keep the two in step).
 
 Never use or share the host `AGENT_API_KEY` — that is internal CoS only.
 
