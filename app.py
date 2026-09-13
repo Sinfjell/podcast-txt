@@ -2354,11 +2354,11 @@ def search_transcripts(user_id, query, limit=TRANSCRIPT_SEARCH_LIMIT):
 # ---------------------------------------------------------------------------
 # Agent read API  (TSK-20496 / PRJ-596)
 #
-# Machine-readable API for Chief-of-Staff agents: resolve a catalog episode,
+# Internal CoS agent API (not a public product): resolve a catalog episode,
 # start Whisper on the same trial path as the UI, poll status, fetch text.
-# Auth is a shared secret in AGENT_API_KEY -- never commit the value; store
-# it in the host env / 1Password and give CoS the item reference, not the
-# secret itself. Writes always run as AGENT_API_USER_ID (Sindre).
+# One AGENT_API_KEY scopes to AGENT_API_USER_ID (Sindre). No multi-tenant
+# keys, no separate agent billing. Never commit the secret; store it in the
+# host env / 1Password and give CoS the item reference only.
 # ---------------------------------------------------------------------------
 
 AGENT_API_TZ = ZoneInfo('Europe/Oslo')

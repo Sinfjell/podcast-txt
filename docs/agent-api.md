@@ -1,13 +1,22 @@
-# Agent API (TSK-20496 read + TSK-20498 write)
+# Agent API (internal — CoS only)
 
-HTTP API for Chief-of-Staff / Grok agents: find an episode by publisher + date
-(or URL), start Whisper transcription on the same trial path as the UI, poll
-until ready, and fetch transcript text. No UI scraping.
+**Not a public product surface.** This doc is for Sindre / Chief-of-Staff /
+Grok tooling only. Do not publish endpoint lists elsewhere; keep customer-facing
+README pointers minimal.
+
+HTTP API: find an episode by publisher + date (or URL), start Whisper on the
+same trial path as the UI, poll until ready, fetch transcript text. No UI
+scraping.
 
 Base URL (prod): `https://podskrift.com`
 
-Audience: **Sindre / CoS only**. One shared key, scoped to one account. No
-customer API keys, no multi-tenant agent billing, no webhooks, no MCP.
+Product model (Growth → CoS 2026-09-13, locked):
+
+1. One `AGENT_API_KEY` → Sindre via `AGENT_API_USER_ID`. No multi-tenant / customer keys.
+2. Cost = UI trial/quota (`trial_seconds_used` / limit). No separate agent billing or BYOK-for-agents.
+3. Exhausted trial → `402` (or `403` if no key/user scope) + JSON body — never `500`.
+4. Jobs scoped to that user; rate-limit + in-flight cap; anonymous write → `401`.
+5. Out of scope: Credits/Paddle, webhooks, MCP.
 
 ## Auth
 
