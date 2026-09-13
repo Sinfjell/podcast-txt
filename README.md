@@ -173,6 +173,10 @@ The app includes a comprehensive help guide for finding RSS feeds from:
 - `GET /download/<task_id>/<format>` - Download transcript files
 - `GET /rss-help` - RSS feed help guide
 - `POST /convert-apple-url` - Convert Apple Podcasts URL to RSS
+- **Agent read API** (auth required) — see [docs/agent-api.md](docs/agent-api.md):
+  - `GET /api/v1/episodes?publisher=&date=` — search by show + ISO date (Europe/Oslo)
+  - `GET /api/v1/episodes/<id>` — episode metadata + `transcript_status`
+  - `GET /api/v1/episodes/<id>/transcript` — plain text when ready
 
 ## Configuration
 
@@ -191,6 +195,11 @@ The app includes a comprehensive help guide for finding RSS feeds from:
 - `SENTRY_DSN` — turns on error reporting. Production server only, never
   committed; unset means off. `SENTRY_ENVIRONMENT` defaults to `production`.
   See [ops/README.md](ops/README.md#error-reporting-sentry).
+- `AGENT_API_KEY` — shared secret for the agent read API (`/api/v1/...`).
+  Unset = API refuses all callers with 401. Store in host env / 1Password;
+  never commit the value. See [docs/agent-api.md](docs/agent-api.md).
+- `AGENT_API_USER_ID` — optional. When set, agent reads are limited to that
+  `users.id`. Use this on a multi-tenant database.
 
 ### Free trial
 
