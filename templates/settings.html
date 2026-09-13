@@ -72,11 +72,13 @@
     <div class="card" style="margin-top: 16px;">
         <div class="card-header">
             <h5>API key</h5>
+            <a href="{{ url_for('api_docs') }}" class="btn btn-sm btn-ghost">Docs</a>
         </div>
         <div class="card-body">
             <p style="color: var(--muted); font-size: 14px; line-height: 1.6; margin-bottom: 12px;">
                 Use this key with scripts or agents to search episodes and fetch
                 transcripts from your account.
+                <a href="{{ url_for('api_docs') }}">How to use</a>
             </p>
 
             {% if new_api_key %}
