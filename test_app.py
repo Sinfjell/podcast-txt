@@ -3251,6 +3251,7 @@ def test_the_sitemap_lists_the_public_pages(trial_on):
     locs = [e.text for e in root.iter('{http://www.sitemaps.org/schemas/sitemap/0.9}loc')]
     assert any(u.endswith('/') for u in locs)
     assert any(u.endswith('/rss-help') for u in locs)
+    assert any(u.endswith('/docs/api') for u in locs)
     assert any(u.endswith('/register') for u in locs)
     assert not any('/settings' in u or '/history' in u for u in locs), (
         'a session-only page is in the sitemap'
@@ -3369,7 +3370,7 @@ def test_no_page_quotes_a_trial_length_the_code_does_not_grant(trial_on):
     import re as _re
     client = A.app.test_client()
     granted = A.TRIAL_DEFAULT_SECONDS // 60
-    for path in ('/', '/llms.txt'):
+    for path in ('/', '/llms.txt', '/docs/api'):
         text = client.get(path).data.decode()
         figures = {int(n) for n in _re.findall(r'(\d+)\s+(?:trial\s+)?minutes', text)}
         assert figures <= {granted}, (
@@ -3394,6 +3395,9 @@ def test_the_copy_does_not_promise_a_trial_that_is_switched_off(trial_on, monkey
     # And the FAQ answers the question honestly instead.
     answers = dict(A.faq_entries())
     assert 'free trial' not in answers['Do I need an OpenAI API key?'].lower()
+    assert 'free trial' not in answers['Is there an HTTP API?'].lower()
+    docs = client.get('/docs/api').data.decode()
+    assert f'{A.TRIAL_DEFAULT_SECONDS // 60} minutes' not in docs
 
 
 def test_structured_data_cannot_break_out_of_its_script_tag(trial_on, monkeypatch):
@@ -4712,6 +4716,9 @@ def test_customer_settings_generate_and_revoke(trial_on):
     assert b'>API key<' in page.data or b'API key' in page.data
     assert b'Use this key with scripts or agents' in page.data
     assert b'Create' in page.data
+    assert b'/docs/api' in page.data
+    assert b'How to use' in page.data
+    assert b'>Docs<' in page.data or b'Docs</a>' in page.data
     # Growth UI: no credits / pricing / multi-key chrome
     assert b'Buy more' not in page.data
     assert b'credits' not in page.data.lower()
@@ -4778,4 +4785,53 @@ def test_customer_api_key_is_hashed_not_plaintext():
     assert len(digest) == 64
     assert digest != plaintext
     assert A.hash_customer_api_key(plaintext) == digest
+
+
+def test_public_api_docs_page_renders_customer_markdown(trial_on):
+    """Self-serve docs live at /docs/api so users need not open the GitHub repo."""
+    resp = A.app.test_client().get('/docs/api')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'Customer API' in body
+    assert 'psk_' in body or 'psk_…' in body
+    assert '/api/v1/resolve' in body
+    assert '/api/v1/transcriptions' in body
+    assert '/api/v1/episodes' in body
+    assert 'Authorization: Bearer' in body
+    assert 'X-Api-Key' in body
+    assert '401' in body and '402' in body and '404' in body
+    # Same trial length the UI grants — not a hardcoded figure that can drift.
+    assert f'{A.TRIAL_DEFAULT_SECONDS // 60} minutes' in body
+    # Host CoS secret must never appear on the public page.
+    assert 'AGENT_API_KEY' not in body
+    assert 'MCP' not in body
+    assert 'Developers' not in body
+
+
+def test_public_api_docs_strips_agent_key_mentions(trial_on, tmp_path, monkeypatch):
+    """Even if the markdown is edited to mention AGENT_API_KEY, the HTML must not."""
+    poisoned = (
+        '# Customer API\n\n'
+        'Never use `AGENT_API_KEY` — internal only.\n\n'
+        'Use `psk_…` from Settings.\n'
+    )
+    doc = tmp_path / 'customer-api.md'
+    doc.write_text(poisoned, encoding='utf-8')
+    monkeypatch.setattr(A, 'CUSTOMER_API_DOC_PATH', str(doc))
+    body = A.app.test_client().get('/docs/api').data.decode()
+    assert 'AGENT_API_KEY' not in body
+    assert 'psk_' in body
+
+
+def test_homepage_faq_mentions_api_and_docs(trial_on):
+    answers = dict(A.faq_entries())
+    assert 'Is there an HTTP API?' in answers
+    api = answers['Is there an HTTP API?']
+    assert 'psk_' in api or 'Settings' in api
+    assert '/docs/api' in api
+    assert 'free trial' in api.lower() or 'trial' in api.lower()
+    assert 'MCP' not in api
+    home = A.app.test_client().get('/').data.decode()
+    assert 'Is there an HTTP API?' in home
+    assert 'Developers' not in home
 

@@ -10,6 +10,7 @@ import collections
 import glob
 import hashlib
 import hmac
+import html as html_lib
 import json
 import math
 import os
@@ -3300,6 +3301,12 @@ def faq_entries():
          'Plain text (.txt) and SubRip subtitles (.srt) with timestamps.'),
         ('Can I transcribe a podcast that is not in the search index?',
          'Yes. Paste the RSS feed URL instead and pick the episode from the feed.'),
+        ('Is there an HTTP API?',
+         'Yes. Create a key in Settings (psk_…) and call the API to resolve an episode, '
+         'start a transcription, then fetch the transcript — Bearer or X-Api-Key. '
+         + (f'Same {minutes} minutes free trial as the web UI. '
+            if trial_available() else '')
+         + 'Curl examples and status codes: /docs/api.'),
     ]
 
 
@@ -3475,6 +3482,7 @@ USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscripti
 
 ## Pages
 - [Home]({public_url('index')}): search, pick an episode, transcribe
+- [API docs]({public_url('api_docs')}): customer HTTP API (resolve → transcribe → transcript)
 - [How to find an RSS feed]({public_url('rss_help')}): for podcasts outside the search index
 - [Sign up]({public_url('register')}): {signup_blurb}
 
@@ -3493,10 +3501,11 @@ def sitemap_xml():
     """The three pages worth indexing. Everything else needs a session."""
     from xml.sax.saxutils import escape
     pages = [public_url('index'),
+             public_url('api_docs'),
              public_url('rss_help'),
              public_url('register')]
     # No lastmod: it was emitting today's date on every fetch, which claims all
-    # three pages change daily. That is a discount signal, not a freshness one.
+    # pages change daily. That is a discount signal, not a freshness one.
     urls = '\n'.join(f'  <url><loc>{escape(u)}</loc></url>' for u in pages)
     xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
@@ -3507,6 +3516,117 @@ def sitemap_xml():
 @app.route('/rss-help')
 def rss_help():
     return render_template('rss_help.html')
+
+
+CUSTOMER_API_DOC_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'docs', 'customer-api.md')
+
+
+def load_customer_api_markdown():
+    """Source for /docs/api. Public HTML must never ship AGENT_API_KEY copy."""
+    with open(CUSTOMER_API_DOC_PATH, encoding='utf-8') as f:
+        text = f.read()
+    # Defence in depth: the public page must not document the host CoS secret,
+    # even if someone reintroduces that line in the markdown.
+    kept = []
+    for line in text.splitlines():
+        if 'AGENT_API_KEY' in line:
+            continue
+        kept.append(line)
+    return '\n'.join(kept).strip() + '\n'
+
+
+def _md_inline(text):
+    """Escape, then apply a tiny subset of Markdown inline markup."""
+    out = html_lib.escape(text)
+    out = re.sub(r'`([^`]+)`', r'<code>\1</code>', out)
+    out = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', out)
+    out = re.sub(
+        r'\[([^\]]+)\]\((https?://[^)\s]+)\)',
+        r'<a href="\2" rel="noopener noreferrer">\1</a>',
+        out,
+    )
+    return out
+
+
+def markdown_to_safe_html(source):
+    """Render the customer-api.md subset to HTML. No third-party Markdown lib.
+
+    Handles ATX headings, fenced code, tables, paragraphs, and the inline
+    forms in `_md_inline`. Anything else stays escaped text.
+    """
+    lines = source.splitlines()
+    parts = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('```'):
+            lang = html_lib.escape(line[3:].strip())
+            i += 1
+            body = []
+            while i < len(lines) and not lines[i].startswith('```'):
+                body.append(lines[i])
+                i += 1
+            if i < len(lines):
+                i += 1  # closing fence
+            code = html_lib.escape('\n'.join(body))
+            cls = f' class="language-{lang}"' if lang else ''
+            parts.append(f'<pre><code{cls}>{code}</code></pre>')
+            continue
+        if line.startswith('|'):
+            rows = []
+            while i < len(lines) and lines[i].startswith('|'):
+                rows.append(lines[i])
+                i += 1
+            # Drop Markdown separator rows (| --- | --- |)
+            data_rows = [
+                r for r in rows
+                if not re.match(r'^\|\s*[-:| ]+\|\s*$', r)
+            ]
+            if not data_rows:
+                continue
+            def cells(row):
+                return [c.strip() for c in row.strip('|').split('|')]
+            header = cells(data_rows[0])
+            parts.append('<table><thead><tr>')
+            for cell in header:
+                parts.append(f'<th>{_md_inline(cell)}</th>')
+            parts.append('</tr></thead><tbody>')
+            for row in data_rows[1:]:
+                parts.append('<tr>')
+                for cell in cells(row):
+                    parts.append(f'<td>{_md_inline(cell)}</td>')
+                parts.append('</tr>')
+            parts.append('</tbody></table>')
+            continue
+        heading = re.match(r'^(#{1,3})\s+(.*)$', line)
+        if heading:
+            level = len(heading.group(1))
+            parts.append(f'<h{level}>{_md_inline(heading.group(2))}</h{level}>')
+            i += 1
+            continue
+        if not line.strip():
+            i += 1
+            continue
+        para = [line]
+        i += 1
+        while i < len(lines) and lines[i].strip() and not lines[i].startswith(
+                ('#', '|', '```')):
+            para.append(lines[i])
+            i += 1
+        parts.append(f'<p>{_md_inline(" ".join(para))}</p>')
+    return '\n'.join(parts)
+
+
+@app.route('/docs/api')
+def api_docs():
+    """Public customer API docs — HTML from docs/customer-api.md."""
+    body_html = markdown_to_safe_html(load_customer_api_markdown())
+    return render_template(
+        'api_docs.html',
+        body_html=body_html,
+        trial_minutes=(TRIAL_DEFAULT_SECONDS // 60 if trial_available() else None),
+    )
 
 
 @app.route('/convert-apple-url', methods=['POST'])

@@ -1,9 +1,13 @@
 # Customer API
 
-Generate a key in **Settings → API key**. One key per account. Jobs and trial
-minutes belong to you.
+Resolve an episode, start a transcription, poll until ready, then fetch the
+transcript — the same path as the web UI, over HTTP.
 
-Never use or share the host `AGENT_API_KEY` — that is internal CoS only.
+Generate a key in **Settings → API key** (`psk_…`). One key per account. Jobs
+and trial minutes belong to you. New accounts get the same free trial minutes as
+the UI (on our OpenAI key) before you add your own.
+
+Auth: send the key as `Authorization: Bearer …` or `X-Api-Key`.
 
 ```bash
 export PODSKRIFT_API_KEY='psk_…'   # from Settings — never commit

@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}API docs — Podskrift{% endblock %}
+{% block meta_description %}HTTP API for Podskrift: resolve a podcast episode, transcribe it, and fetch the transcript. Auth with a psk_… key from Settings.{% endblock %}
+{% block og_title %}Podskrift API docs{% endblock %}
+{% block og_description %}Resolve → transcribe → transcript over HTTP. Same free trial as the web UI.{% endblock %}
+
+{% block content %}
+<style>
+    .docs-page { max-width: 640px; margin: 24px auto; }
+    .docs-body h1 {
+        font-size: 24px; font-weight: 700; letter-spacing: -0.03em;
+        margin-bottom: 16px; color: var(--text);
+    }
+    .docs-body h2 {
+        font-size: 16px; font-weight: 600; margin: 24px 0 10px;
+        letter-spacing: -0.02em; color: var(--text);
+    }
+    .docs-body h3 {
+        font-size: 14px; font-weight: 600; margin: 18px 0 8px; color: var(--text);
+    }
+    .docs-body p {
+        color: var(--muted); font-size: 14px; line-height: 1.7;
+        margin-bottom: 12px;
+    }
+    .docs-body p strong { color: var(--text); font-weight: 600; }
+    .docs-body code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12.5px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 1px 5px;
+        color: var(--text);
+    }
+    .docs-body pre {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 14px 16px;
+        overflow-x: auto;
+        margin: 14px 0 18px;
+        font-size: 12.5px;
+        line-height: 1.55;
+    }
+    .docs-body pre code {
+        background: none; border: none; padding: 0;
+        color: var(--text); font-size: inherit;
+    }
+    .docs-body table {
+        width: 100%; border-collapse: collapse;
+        margin: 12px 0 18px; font-size: 13.5px;
+    }
+    .docs-body th, .docs-body td {
+        text-align: left; padding: 8px 10px;
+        border: 1px solid var(--border);
+    }
+    .docs-body th {
+        color: var(--muted); font-weight: 600; font-size: 12px;
+        text-transform: uppercase; letter-spacing: 0.04em;
+        background: var(--surface);
+    }
+    .docs-body td { color: var(--text); }
+    .docs-body ul {
+        margin: 8px 0 16px 18px; color: var(--muted);
+        font-size: 14px; line-height: 1.7;
+    }
+    .docs-body li { margin-bottom: 4px; }
+    .docs-callout {
+        border: 1px solid var(--accent-border);
+        background: var(--accent-bg);
+        border-radius: var(--radius);
+        padding: 12px 14px;
+        margin: 0 0 20px;
+        font-size: 13.5px;
+        line-height: 1.6;
+        color: var(--text);
+    }
+    .docs-callout a { font-weight: 600; }
+</style>
+
+<div class="docs-page">
+    {% if trial_minutes %}
+    <p class="docs-callout">
+        Same free trial as the web UI: <strong>{{ trial_minutes }} minutes</strong>
+        of audio on signup. Create a key in
+        <a href="{{ url_for('settings') }}">Settings</a>, then call the endpoints below.
+    </p>
+    {% else %}
+    <p class="docs-callout">
+        Create a key in <a href="{{ url_for('settings') }}">Settings</a>, then
+        call the endpoints below. Transcription uses your OpenAI key (or the
+        account trial when available).
+    </p>
+    {% endif %}
+    <div class="docs-body">
+        {{ body_html | safe }}
+    </div>
+</div>
+{% endblock %}
