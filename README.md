@@ -173,6 +173,7 @@ The app includes a comprehensive help guide for finding RSS feeds from:
 - `GET /download/<task_id>/<format>` - Download transcript files
 - `GET /rss-help` - RSS feed help guide
 - `POST /convert-apple-url` - Convert Apple Podcasts URL to RSS
+- **Customer API** (per-user key from Settings) — [docs/customer-api.md](docs/customer-api.md)
 - **Agent API** (internal, CoS only) — [docs/agent-api.md](docs/agent-api.md)
 
 ## Configuration
@@ -193,7 +194,8 @@ The app includes a comprehensive help guide for finding RSS feeds from:
   committed; unset means off. `SENTRY_ENVIRONMENT` defaults to `production`.
   See [ops/README.md](ops/README.md#error-reporting-sentry).
 - `AGENT_API_KEY` / `AGENT_API_USER_ID` — internal CoS agent API only.
-  See [docs/agent-api.md](docs/agent-api.md). Never commit values.
+  See [docs/agent-api.md](docs/agent-api.md). Never commit values. Customers
+  use a per-user key from Settings ([docs/customer-api.md](docs/customer-api.md)).
 
 ### Free trial
 

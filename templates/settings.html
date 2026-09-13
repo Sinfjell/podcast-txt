@@ -71,6 +71,57 @@
 
     <div class="card" style="margin-top: 16px;">
         <div class="card-header">
+            <h5>API key</h5>
+        </div>
+        <div class="card-body">
+            <p style="color: var(--muted); font-size: 14px; line-height: 1.6; margin-bottom: 12px;">
+                Use this key with scripts or agents to search episodes and fetch
+                transcripts from your account.
+            </p>
+
+            {% if new_api_key %}
+            <div class="form-group">
+                <label class="form-label" for="new_api_key">Your key (copy now)</label>
+                <div style="display: flex; gap: 8px; align-items: stretch;">
+                    <input type="text" class="form-input" id="new_api_key" readonly
+                           value="{{ new_api_key }}"
+                           style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;">
+                    <button type="button" class="btn btn-ghost" id="copy_api_key">Copy</button>
+                </div>
+                <p class="form-hint" style="color: var(--warning); margin-top: 8px;">
+                    This is the only time the full key is shown.
+                </p>
+            </div>
+            {% elif current_user.has_api_key %}
+            <p style="font-size: 14px; margin-bottom: 12px;">
+                Active key:
+                <code style="font-size: 13px;">{{ current_user.api_key_prefix }}…</code>
+                {% if current_user.api_key_created_at %}
+                <span style="color: var(--muted);">
+                    · created {{ current_user.api_key_created_at.strftime('%Y-%m-%d') }}
+                </span>
+                {% endif %}
+            </p>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <form method="POST" action="{{ url_for('settings_generate_api_key') }}"
+                      onsubmit="return confirm('Old keys stop working immediately.');">
+                    <button type="submit" class="btn btn-ghost">Regenerate</button>
+                </form>
+                <form method="POST" action="{{ url_for('settings_revoke_api_key') }}"
+                      onsubmit="return confirm('Revoke this key? Scripts using it will get 401.');">
+                    <button type="submit" class="btn btn-ghost">Revoke</button>
+                </form>
+            </div>
+            {% else %}
+            <form method="POST" action="{{ url_for('settings_generate_api_key') }}">
+                <button type="submit" class="btn btn-primary">Create</button>
+            </form>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="card" style="margin-top: 16px;">
+        <div class="card-header">
             <h5>Feedback / feature ideas</h5>
         </div>
         <div class="card-body">
@@ -82,4 +133,30 @@
         </div>
     </div>
 </div>
+{% if new_api_key %}
+<script>
+(function () {
+    var btn = document.getElementById('copy_api_key');
+    var input = document.getElementById('new_api_key');
+    if (!btn || !input) return;
+    btn.addEventListener('click', function () {
+        var done = function () {
+            btn.textContent = 'Copied';
+            setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(input.value).then(done).catch(function () {
+                input.select();
+                document.execCommand('copy');
+                done();
+            });
+        } else {
+            input.select();
+            document.execCommand('copy');
+            done();
+        }
+    });
+})();
+</script>
+{% endif %}
 {% endblock %}

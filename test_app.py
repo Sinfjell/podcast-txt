@@ -4549,3 +4549,233 @@ def test_agent_resolve_via_get_query_params(agent_write):
         key=agent_write['key'])
     assert r.status_code == 200
     assert r.get_json()['episode']['published_at'] == '2026-09-10'
+
+
+# --------------------------------------------------------------------------
+# Customer API keys (TSK-20500): per-user hashed keys on the same endpoints
+# --------------------------------------------------------------------------
+
+def _issue_customer_key(user_id):
+    """Persist a fresh customer API key for user_id; return plaintext."""
+    from models import db, User
+    plaintext = A.mint_customer_api_key()
+    with A.app.app_context():
+        u = db.session.get(User, user_id)
+        u.api_key_hash = A.hash_customer_api_key(plaintext)
+        u.api_key_prefix = A.customer_api_key_prefix(plaintext)
+        u.api_key_created_at = datetime.now(timezone.utc)
+        db.session.commit()
+    return plaintext
+
+
+@pytest.fixture
+def customer_api(trial_on, monkeypatch):
+    """Two users with keys; catalog stubs for write tests."""
+    from models import db, TranscriptionTask
+    A._agent_write_attempts.clear()
+    a = _make_user('customer-a@example.com', limit=3600, used=0)
+    b = _make_user('customer-b@example.com', limit=3600, used=0)
+    key_a = _issue_customer_key(a)
+    key_b = _issue_customer_key(b)
+    with A.app.app_context():
+        db.session.query(TranscriptionTask).filter(
+            TranscriptionTask.id.in_(['cust-a-ep', 'cust-b-ep'])).delete()
+        db.session.add(TranscriptionTask(
+            id='cust-a-ep', user_id=a, status='completed',
+            episode_title='A private episode', podcast_name='Forklaringssaften',
+            episode_published='2026-09-12',
+            transcript_text='Transcript belonging to A.',
+            completed_at=datetime(2026, 9, 12, 10, tzinfo=timezone.utc)))
+        db.session.add(TranscriptionTask(
+            id='cust-b-ep', user_id=b, status='completed',
+            episode_title='B private episode', podcast_name='Forklaringssaften',
+            episode_published='2026-09-12',
+            transcript_text='Transcript belonging to B.',
+            completed_at=datetime(2026, 9, 12, 11, tzinfo=timezone.utc)))
+        db.session.commit()
+    monkeypatch.setattr(A, '_itunes_search', lambda term, entity: [{
+        'collectionName': 'Spårtsklubben',
+        'feedUrl': 'https://feeds.example.com/spart.xml',
+    }])
+    monkeypatch.setattr(
+        A, 'get_episodes_from_rss',
+        lambda url: (list(_SPART_FEED), None))
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+    import types
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda *a, **kw: types.SimpleNamespace(daemon=True, start=lambda: None))
+    yield {
+        'a': a, 'b': b, 'key_a': key_a, 'key_b': key_b,
+    }
+    with A.app.app_context():
+        db.session.query(TranscriptionTask).filter(
+            TranscriptionTask.user_id.in_([a, b])).delete()
+        db.session.commit()
+    _purge(['customer-a@example.com', 'customer-b@example.com'])
+
+
+def test_customer_api_rejects_missing_auth(customer_api):
+    r = A.app.test_client().get(
+        '/api/v1/episodes?publisher=Forklaring&date=2026-09-12')
+    assert r.status_code == 401
+    assert r.get_json()['error'] == 'Unauthorized'
+
+
+def test_customer_api_rejects_wrong_key(customer_api):
+    r = _agent_get(
+        '/api/v1/episodes?publisher=Forklaring&date=2026-09-12',
+        key='psk_not-a-real-key')
+    assert r.status_code == 401
+
+
+def test_customer_a_cannot_see_customer_b_jobs(customer_api):
+    listed = _agent_get(
+        '/api/v1/episodes?publisher=Forklaring&date=2026-09-12',
+        key=customer_api['key_a'])
+    assert listed.status_code == 200
+    ids = {e['id'] for e in listed.get_json()['episodes']}
+    assert 'cust-a-ep' in ids
+    assert 'cust-b-ep' not in ids
+
+    assert _agent_get('/api/v1/episodes/cust-b-ep',
+                      key=customer_api['key_a']).status_code == 404
+    assert _agent_get('/api/v1/episodes/cust-b-ep/transcript',
+                      key=customer_api['key_a']).status_code == 404
+
+    own = _agent_get('/api/v1/episodes/cust-a-ep/transcript',
+                     key=customer_api['key_a'])
+    assert own.status_code == 200
+    assert own.get_json()['text'] == 'Transcript belonging to A.'
+
+
+def test_customer_start_scopes_job_to_key_owner(customer_api):
+    from models import db, TranscriptionTask
+    r = _agent_post(
+        '/api/v1/transcriptions', key=customer_api['key_a'],
+        json_body={'publisher': 'Spårtsklubben', 'date': '2026-09-10'})
+    assert r.status_code == 201, r.get_json()
+    task_id = r.get_json()['id']
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        assert task.user_id == customer_api['a']
+        assert task.trial_seconds_charged  # metered on A's trial
+
+    # B cannot poll A's new job
+    assert _agent_get(f'/api/v1/episodes/{task_id}',
+                      key=customer_api['key_b']).status_code == 404
+
+
+def test_customer_start_trial_exhausted_is_402(customer_api):
+    from models import db, User
+    with A.app.app_context():
+        u = db.session.get(User, customer_api['a'])
+        u.trial_seconds_used = u.trial_seconds_limit or A.TRIAL_DEFAULT_SECONDS
+        db.session.commit()
+    r = _agent_post(
+        '/api/v1/transcriptions', key=customer_api['key_a'],
+        json_body={'publisher': 'Spårtsklubben', 'date': '2026-09-10'})
+    assert r.status_code == 402, r.get_json()
+    assert 'error' in r.get_json()
+
+
+def test_customer_revoke_invalidates_immediately(customer_api):
+    from models import db, User
+    key = customer_api['key_a']
+    assert _agent_get('/api/v1/episodes/cust-a-ep', key=key).status_code == 200
+
+    with A.app.app_context():
+        u = db.session.get(User, customer_api['a'])
+        u.api_key_hash = None
+        u.api_key_prefix = None
+        u.api_key_created_at = None
+        db.session.commit()
+
+    assert _agent_get('/api/v1/episodes/cust-a-ep', key=key).status_code == 401
+    assert _agent_post(
+        '/api/v1/transcriptions', key=key,
+        json_body={'publisher': 'Spårtsklubben', 'date': '2026-09-10'},
+    ).status_code == 401
+
+
+def test_customer_settings_generate_and_revoke(trial_on):
+    from models import db, User
+    uid = _make_user('settings-api@example.com', limit=600, used=0)
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+
+    page = client.get('/settings')
+    assert page.status_code == 200
+    assert b'>API key<' in page.data or b'API key' in page.data
+    assert b'Use this key with scripts or agents' in page.data
+    assert b'Create' in page.data
+    # Growth UI: no credits / pricing / multi-key chrome
+    assert b'Buy more' not in page.data
+    assert b'credits' not in page.data.lower()
+    assert b'Developers' not in page.data
+
+    gen = client.post('/settings/api-key/generate', follow_redirects=True)
+    assert gen.status_code == 200
+    assert b'psk_' in gen.data
+    assert b'copy now' in gen.data.lower() or b'Copy' in gen.data
+
+    with A.app.app_context():
+        u = db.session.get(User, uid)
+        assert u.api_key_hash
+        assert u.api_key_prefix.startswith('psk_')
+        # Plaintext must not be persisted
+        assert 'psk_' not in (u.api_key_hash or '')
+
+    # Second GET must not show the secret again
+    again = client.get('/settings')
+    assert b'id="new_api_key"' not in again.data
+    assert b'Regenerate' in again.data
+    assert b'Revoke' in again.data
+    assert b'Old keys stop working immediately.' in again.data
+
+    rev = client.post('/settings/api-key/revoke', follow_redirects=True)
+    assert rev.status_code == 200
+    with A.app.app_context():
+        u = db.session.get(User, uid)
+        assert u.api_key_hash is None
+    _purge(['settings-api@example.com'])
+
+
+def test_agent_key_still_works_alongside_customer_keys(
+        agent_write, customer_api, monkeypatch):
+    """CoS AGENT_API_KEY path is unchanged when customer keys exist."""
+    r = _agent_post(
+        '/api/v1/resolve', key=agent_write['key'],
+        json_body={'publisher': 'Spårtsklubben', 'date': '2026-09-10'})
+    assert r.status_code == 200
+    assert r.get_json()['episode']['publisher'] == 'Spårtsklubben'
+
+    start = _agent_post(
+        '/api/v1/transcriptions', key=agent_write['key'],
+        json_body={'publisher': 'Spårtsklubben', 'date': '2026-09-10'})
+    assert start.status_code == 201, start.get_json()
+    with A.app.app_context():
+        from models import db, TranscriptionTask
+        task = db.session.get(TranscriptionTask, start.get_json()['id'])
+        assert task.user_id == agent_write['user_id']
+
+
+def test_customer_key_works_when_agent_env_unset(customer_api, monkeypatch):
+    monkeypatch.delenv('AGENT_API_KEY', raising=False)
+    monkeypatch.delenv('AGENT_API_USER_ID', raising=False)
+    r = _agent_get('/api/v1/episodes/cust-a-ep', key=customer_api['key_a'])
+    assert r.status_code == 200
+    assert r.get_json()['id'] == 'cust-a-ep'
+
+
+def test_customer_api_key_is_hashed_not_plaintext():
+    plaintext = A.mint_customer_api_key()
+    assert plaintext.startswith('psk_')
+    digest = A.hash_customer_api_key(plaintext)
+    assert len(digest) == 64
+    assert digest != plaintext
+    assert A.hash_customer_api_key(plaintext) == digest
+

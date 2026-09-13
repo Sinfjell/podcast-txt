@@ -25,6 +25,14 @@ class User(UserMixin, db.Model):
     trial_seconds_used = db.Column(db.Integer, nullable=False, default=0,
                                    server_default='0')
 
+    # Customer HTTP API key (v1: one active key per user). Plaintext is shown
+    # once on generate and never stored — only the SHA-256 hash + a short
+    # display prefix. Distinct from openai_api_key (BYOK) and from the host
+    # AGENT_API_KEY (CoS-only shared secret).
+    api_key_hash = db.Column(db.String(64), nullable=True, index=True)
+    api_key_prefix = db.Column(db.String(16), nullable=True)
+    api_key_created_at = db.Column(db.DateTime, nullable=True)
+
     feeds = db.relationship('SavedFeed', backref='user', lazy=True, cascade='all, delete-orphan')
     tasks = db.relationship('TranscriptionTask', backref='user', lazy=True, cascade='all, delete-orphan')
 
@@ -33,6 +41,10 @@ class User(UserMixin, db.Model):
 
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
+
+    @property
+    def has_api_key(self):
+        return bool(self.api_key_hash)
 
 
 class SavedFeed(db.Model):
@@ -115,4 +127,7 @@ TASK_COLUMN_MIGRATIONS = {
 USER_COLUMN_MIGRATIONS = {
     'trial_seconds_limit': 'INTEGER',
     'trial_seconds_used': 'INTEGER NOT NULL DEFAULT 0',
+    'api_key_hash': 'VARCHAR(64)',
+    'api_key_prefix': 'VARCHAR(16)',
+    'api_key_created_at': 'DATETIME',
 }

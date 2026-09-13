@@ -8,11 +8,13 @@ Supports user accounts, saved RSS feeds, and self-serve API keys.
 
 import collections
 import glob
+import hashlib
 import hmac
 import json
 import math
 import os
 import re
+import secrets
 import sqlite3
 import shutil
 import subprocess
@@ -34,7 +36,7 @@ if not os.path.exists(certifi.where()):
         os.environ.setdefault('REQUESTS_CA_BUNDLE', _sys_ca)
         os.environ.setdefault('SSL_CERT_FILE', _sys_ca)
 from flask import (Flask, render_template, request, jsonify, send_file, flash,
-                   redirect, url_for, Response)
+                   redirect, url_for, Response, g, session)
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from urllib.parse import urljoin, urlparse
 import uuid
@@ -1563,7 +1565,46 @@ def settings():
         flash(message, 'warning' if caveat else 'success')
         return redirect(url_for('settings'))
 
-    return render_template('settings.html', trial=_trial_context())
+    # One-shot plaintext after generate (session, not DB).
+    new_api_key = session.pop('new_api_key', None)
+    return render_template(
+        'settings.html',
+        trial=_trial_context(),
+        new_api_key=new_api_key,
+    )
+
+
+@app.route('/settings/api-key/generate', methods=['POST'])
+@login_required
+def settings_generate_api_key():
+    """Create (or rotate) the user's one customer HTTP API key.
+
+    Plaintext is shown once via the session and never stored — only the hash.
+    Rotating invalidates the previous key immediately.
+    """
+    plaintext = mint_customer_api_key()
+    current_user.api_key_hash = hash_customer_api_key(plaintext)
+    current_user.api_key_prefix = customer_api_key_prefix(plaintext)
+    current_user.api_key_created_at = datetime.now(timezone.utc)
+    db.session.commit()
+    session['new_api_key'] = plaintext
+    flash('API key created. Copy it now — it will not be shown again.', 'success')
+    return redirect(url_for('settings'))
+
+
+@app.route('/settings/api-key/revoke', methods=['POST'])
+@login_required
+def settings_revoke_api_key():
+    """Drop the active customer API key. Subsequent API calls get 401."""
+    if not current_user.api_key_hash:
+        flash('No API key to revoke.', 'info')
+        return redirect(url_for('settings'))
+    current_user.api_key_hash = None
+    current_user.api_key_prefix = None
+    current_user.api_key_created_at = None
+    db.session.commit()
+    flash('API key revoked. It can no longer be used.', 'success')
+    return redirect(url_for('settings'))
 
 
 # ---------------------------------------------------------------------------
@@ -2352,13 +2393,11 @@ def search_transcripts(user_id, query, limit=TRANSCRIPT_SEARCH_LIMIT):
 
 
 # ---------------------------------------------------------------------------
-# Agent read API  (TSK-20496 / PRJ-596)
+# HTTP API auth  (agent CoS key + per-user customer keys)
 #
-# Internal CoS agent API (not a public product): resolve a catalog episode,
-# start Whisper on the same trial path as the UI, poll status, fetch text.
-# One AGENT_API_KEY scopes to AGENT_API_USER_ID (Sindre). No multi-tenant
-# keys, no separate agent billing. Never commit the secret; store it in the
-# host env / 1Password and give CoS the item reference only.
+# AGENT_API_KEY remains Sindre/CoS-only (env secret → AGENT_API_USER_ID).
+# Customers mint their own key in Settings; we store only a SHA-256 hash.
+# Same endpoints; jobs and trial quota belong to the authenticated user.
 # ---------------------------------------------------------------------------
 
 AGENT_API_TZ = ZoneInfo('Europe/Oslo')
@@ -2375,9 +2414,36 @@ _AGENT_PENDING_STATUSES = frozenset({
 _agent_write_attempts = collections.defaultdict(list)
 _agent_write_lock = threading.Lock()
 
+# Customer keys are high-entropy random tokens; SHA-256 is fine for lookup
+# (unlike passwords). Prefix makes them greppable and distinct from OpenAI sk-.
+CUSTOMER_API_KEY_PREFIX = 'psk_'
+
+
+def mint_customer_api_key():
+    """Fresh plaintext customer API key. Caller shows it once, then hashes."""
+    return CUSTOMER_API_KEY_PREFIX + secrets.token_urlsafe(32)
+
+
+def hash_customer_api_key(plaintext):
+    """SHA-256 hex digest of a customer API key (never store plaintext)."""
+    return hashlib.sha256(plaintext.encode('utf-8')).hexdigest()
+
+
+def customer_api_key_prefix(plaintext):
+    """Short display prefix for Settings (not enough to authenticate)."""
+    return (plaintext or '')[:12]
+
+
+def _lookup_user_by_api_key(plaintext):
+    """User owning this customer key, or None. Revoke clears the hash → None."""
+    if not plaintext:
+        return None
+    digest = hash_customer_api_key(plaintext)
+    return User.query.filter_by(api_key_hash=digest).first()
+
 
 def _agent_configured_key():
-    """The shared agent secret, or '' when the API is disabled.
+    """The shared CoS agent secret, or '' when that path is disabled.
 
     Read from the environment on every call so tests can monkeypatch and so a
     restart is not required to rotate the key under gunicorn's preload.
@@ -2386,11 +2452,11 @@ def _agent_configured_key():
 
 
 def _agent_scope_user_id():
-    """user_id agent reads/writes are limited to.
+    """user_id agent (CoS) reads/writes are limited to.
 
-    Reads: when unset the key can see every account's tasks (single-operator
-    box). Writes: required -- enqueue always runs as this user so Whisper
-    minutes hit Sindre's trial pool, never an anonymous or foreign account.
+    Reads: when unset the agent key can see every account's tasks
+    (single-operator box). Writes: required -- enqueue always runs as this
+    user so Whisper minutes hit Sindre's trial pool.
     Set AGENT_API_USER_ID in production.
     """
     raw = (os.getenv('AGENT_API_USER_ID') or '').strip()
@@ -2403,7 +2469,7 @@ def _agent_scope_user_id():
 
 
 def _agent_write_user():
-    """User row for agent writes, or (None, error_payload, status)."""
+    """User row for CoS agent writes, or (None, error_payload, status)."""
     uid = _agent_scope_user_id()
     if uid is None:
         return None, {
@@ -2418,19 +2484,44 @@ def _agent_write_user():
     return user, None, None
 
 
-def _agent_write_rate_limit_ok():
-    """True if this process still has room for another agent write."""
+def _api_write_user():
+    """User row for API writes (customer key owner or CoS agent scope)."""
+    kind = getattr(g, 'api_auth_kind', None)
+    if kind == 'customer':
+        uid = getattr(g, 'api_user_id', None)
+        user = db.session.get(User, uid) if uid is not None else None
+        if user is None:
+            # Key was revoked or account deleted between auth and write.
+            return None, {'error': 'Unauthorized'}, 401
+        return user, None, None
+    return _agent_write_user()
+
+
+def _api_write_rate_limit_ok():
+    """True if this process still has room for another API write.
+
+    CoS agent shares one bucket; each customer is limited separately so one
+    account cannot starve another inside the same gunicorn worker.
+    """
     now = time.time()
-    key = 'agent'
+    kind = getattr(g, 'api_auth_kind', None)
+    if kind == 'customer':
+        bucket = f'customer:{getattr(g, "api_user_id", None)}'
+    else:
+        bucket = 'agent'
     with _agent_write_lock:
-        seen = [t for t in _agent_write_attempts.get(key, ())
+        seen = [t for t in _agent_write_attempts.get(bucket, ())
                 if now - t < AGENT_WRITE_WINDOW_SECONDS]
         if len(seen) >= AGENT_WRITE_MAX_PER_WINDOW:
-            _agent_write_attempts[key] = seen
+            _agent_write_attempts[bucket] = seen
             return False
         seen.append(now)
-        _agent_write_attempts[key] = seen
+        _agent_write_attempts[bucket] = seen
         return True
+
+
+# Back-compat name used by older tests / call sites.
+_agent_write_rate_limit_ok = _api_write_rate_limit_ok
 
 
 def _agent_in_flight_count(user_id):
@@ -2455,23 +2546,47 @@ def _extract_agent_api_key():
     return (request.headers.get('X-Api-Key') or '').strip()
 
 
-def require_agent_api_key(view):
-    """401 unless Authorization/X-Api-Key matches AGENT_API_KEY.
+def require_api_auth(view):
+    """401 unless Authorization/X-Api-Key is the CoS agent key or a customer key.
 
-    Constant-time compare. A missing env var means every request fails closed
-    with 401 -- same status as a wrong key, so we do not advertise whether the
-    API is configured.
+    Sets ``g.api_auth_kind`` to ``'agent'`` or ``'customer'`` and
+    ``g.api_user_id`` to the scoped user (always set for customers; for the
+    agent key, only when AGENT_API_USER_ID is configured).
+
+    Customer keys work even when AGENT_API_KEY is unset. Missing/wrong key →
+    the same 401 either way (fail closed; do not advertise which paths exist).
+    Revoking a customer key clears the hash, so the next request is 401.
     """
     @wraps(view)
     def wrapped(*args, **kwargs):
-        expected = _agent_configured_key()
         provided = _extract_agent_api_key()
-        if not expected or not provided:
+        if not provided:
             return jsonify({'error': 'Unauthorized'}), 401
-        if not hmac.compare_digest(provided, expected):
-            return jsonify({'error': 'Unauthorized'}), 401
-        return view(*args, **kwargs)
+
+        expected = _agent_configured_key()
+        # compare_digest raises on length mismatch; customer keys are longer
+        # than a typical AGENT_API_KEY, so gate on equal length first.
+        agent_ok = (
+            bool(expected)
+            and len(provided) == len(expected)
+            and hmac.compare_digest(provided, expected)
+        )
+        customer = None if agent_ok else _lookup_user_by_api_key(provided)
+
+        if agent_ok:
+            g.api_auth_kind = 'agent'
+            g.api_user_id = _agent_scope_user_id()
+            return view(*args, **kwargs)
+        if customer is not None:
+            g.api_auth_kind = 'customer'
+            g.api_user_id = customer.id
+            return view(*args, **kwargs)
+        return jsonify({'error': 'Unauthorized'}), 401
     return wrapped
+
+
+# Historical name — agent-only era. Same decorator; customer keys also pass.
+require_agent_api_key = require_api_auth
 
 
 def agent_transcript_status(task):
@@ -2551,9 +2666,20 @@ def _episode_published_date(published):
 
 
 def _agent_task_query():
-    """Base query for agent reads, optionally scoped to AGENT_API_USER_ID."""
+    """Base query for API reads, scoped to the authenticated principal.
+
+    Customer keys are always limited to their owner. The CoS agent key is
+    limited when AGENT_API_USER_ID is set; otherwise (legacy single-operator)
+    it can see every account's tasks.
+    """
     q = TranscriptionTask.query
-    uid = _agent_scope_user_id()
+    uid = getattr(g, 'api_user_id', None)
+    kind = getattr(g, 'api_auth_kind', None)
+    if kind == 'customer':
+        # Fail closed: a customer auth without a user id sees nothing.
+        if uid is None:
+            return q.filter(TranscriptionTask.user_id == -1)
+        return q.filter(TranscriptionTask.user_id == uid)
     if uid is not None:
         q = q.filter(TranscriptionTask.user_id == uid)
     return q
@@ -3036,18 +3162,20 @@ def agent_resolve_episode():
 @app.route('/api/v1/transcriptions', methods=['POST'])
 @require_agent_api_key
 def agent_start_transcription():
-    """Resolve (if needed) and start Whisper as AGENT_API_USER_ID.
+    """Resolve (if needed) and start Whisper for the authenticated API user.
 
     Body/query: same as /api/v1/resolve (publisher+date and/or url), or the
     fields returned by resolve (audio_url, title, publisher, ...). Reuses the
-    UI enqueue path -- same trial pool, no separate agent billing.
+    UI enqueue path -- same trial pool, no separate agent billing. Customer
+    keys enqueue as the key owner; the CoS AGENT_API_KEY enqueues as
+    AGENT_API_USER_ID.
     """
-    if not _agent_write_rate_limit_ok():
+    if not _api_write_rate_limit_ok():
         return jsonify({
-            'error': 'Too many agent transcription starts; try again shortly.',
+            'error': 'Too many transcription starts; try again shortly.',
         }), 429
 
-    user, err_payload, err_status = _agent_write_user()
+    user, err_payload, err_status = _api_write_user()
     if err_payload:
         return jsonify(err_payload), err_status
 
