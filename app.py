@@ -167,7 +167,15 @@ WHISPER_TIMEOUT_SECONDS = 420.0
 WHISPER_MAX_RETRIES = 1
 
 # Caps on the audio we will pull down from a client-supplied URL.
-MAX_REDIRECTS = 5
+#
+# Podcast CDNs stack measurement prefixes in front of the real file. A Modern
+# Wisdom / Megaphone enclosure is already four hops today
+# (byspotify → pscrb → claritas → traffic.megaphone → dcs), and the previous
+# budget of 5 failed as soon as one more hop appeared — which is exactly the
+# "Too many redirects while fetching audio" two organic users hit. requests'
+# own default is 30; 20 leaves headroom without letting a runaway loop run
+# forever.
+MAX_REDIRECTS = 20
 # The source ceiling. It is a term in the disk floor below, so raising it means
 # raising that too -- see the ## Invariants section in CLAUDE.md.
 MAX_AUDIO_BYTES = 500 * 1024 * 1024
@@ -752,7 +760,7 @@ def download_audio(url, filename, task_id):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
                        'AppleWebKit/537.36 (KHTML, like Gecko) '
-                       'Chrome/91.0.4472.124 Safari/537.36',
+                       'Chrome/122.0.0.0 Safari/537.36',
         'Accept': 'audio/*,*/*',
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept-Encoding': 'gzip, deflate, br',
@@ -765,14 +773,27 @@ def download_audio(url, filename, task_id):
 
         Redirects are followed manually: `requests` follows them itself, which
         would let a public host 302 straight to a private address and slip past
-        the check done on the original URL.
+        the check done on the original URL. A Session carries cookies across
+        hops — some CDNs set one on an intermediate measurement host and
+        expect it on the next. Authorization is dropped when the host changes,
+        matching requests' own cross-host redirect policy.
         """
         current = url
-        for _ in range(MAX_REDIRECTS):
+        seen = set()
+        redirects = 0
+        session = requests.Session()
+        hop_headers = dict(request_headers)
+        while True:
             if not _is_fetchable_url(current):
                 raise Exception('Audio URL points somewhere that cannot be fetched.')
-            resp = requests.get(
-                current, stream=True, headers=request_headers,
+            # Fragments are never sent; ignore them for loop detection.
+            finger = current.split('#', 1)[0]
+            if finger in seen:
+                raise Exception('Redirect loop while fetching audio.')
+            seen.add(finger)
+
+            resp = session.get(
+                current, stream=True, headers=hop_headers,
                 timeout=30, allow_redirects=False,
             )
             if resp.is_redirect or resp.is_permanent_redirect:
@@ -780,7 +801,13 @@ def download_audio(url, filename, task_id):
                 resp.close()
                 if not location:
                     raise Exception('Redirect without a target while fetching audio.')
-                current = urljoin(current, location)
+                if redirects >= MAX_REDIRECTS:
+                    raise Exception('Too many redirects while fetching audio.')
+                redirects += 1
+                next_url = urljoin(current, location)
+                if urlparse(next_url).netloc.lower() != urlparse(current).netloc.lower():
+                    hop_headers.pop('Authorization', None)
+                current = next_url
                 continue
             try:
                 resp.raise_for_status()
@@ -788,7 +815,6 @@ def download_audio(url, filename, task_id):
                 resp.close()   # streamed responses hold the connection open
                 raise
             return resp
-        raise Exception('Too many redirects while fetching audio.')
 
     try:
         response = _fetch(headers)
@@ -3861,26 +3887,36 @@ def _fetch_feed_capped(feed_url, max_bytes=SPOTIFY_FEED_MAX_BYTES):
     public, and a public feed could otherwise 302 to a private address.
     """
     current = feed_url
+    seen = set()
+    redirects = 0
     try:
-        for _ in range(MAX_REDIRECTS):
-            if not _is_fetchable_url(current):
-                return None
-            with requests.get(current, headers=_SPOTIFY_HEADERS, timeout=15,
-                              stream=True, allow_redirects=False) as resp:
-                if resp.is_redirect or resp.is_permanent_redirect:
-                    location = resp.headers.get('location')
-                    if not location:
-                        return None
-                    current = urljoin(current, location)
-                    continue
-                resp.raise_for_status()
-                chunks, size = [], 0
-                for chunk in resp.iter_content(64 * 1024):
-                    size += len(chunk)
-                    if size > max_bytes:
-                        return None
-                    chunks.append(chunk)
-                return b''.join(chunks)
+        with requests.Session() as session:
+            while True:
+                if not _is_fetchable_url(current):
+                    return None
+                finger = current.split('#', 1)[0]
+                if finger in seen:
+                    return None
+                seen.add(finger)
+                with session.get(current, headers=_SPOTIFY_HEADERS, timeout=15,
+                                 stream=True, allow_redirects=False) as resp:
+                    if resp.is_redirect or resp.is_permanent_redirect:
+                        location = resp.headers.get('location')
+                        if not location:
+                            return None
+                        if redirects >= MAX_REDIRECTS:
+                            return None
+                        redirects += 1
+                        current = urljoin(current, location)
+                        continue
+                    resp.raise_for_status()
+                    chunks, size = [], 0
+                    for chunk in resp.iter_content(64 * 1024):
+                        size += len(chunk)
+                        if size > max_bytes:
+                            return None
+                        chunks.append(chunk)
+                    return b''.join(chunks)
     except requests.RequestException:
         return None
     return None

@@ -293,7 +293,8 @@ class _FakeResponse:
         return iter([b'x' * 100])
 
 
-def _download_with(responder, tmp_path):
+def _download_with(responder, tmp_path, start_url='http://example.com/ep.mp3',
+                   fetchable=None):
     """Run download_audio against a fake transport, returning the URLs it hit."""
     from unittest import mock
 
@@ -303,11 +304,25 @@ def _download_with(responder, tmp_path):
         calls.append(url)
         return responder(url)
 
-    with mock.patch.object(A.requests, 'get', side_effect=fake_get), \
-            mock.patch.object(A, '_update_task'):
+    def fake_session_get(self, url, **kwargs):
+        return fake_get(url, **kwargs)
+
+    patches = [
+        mock.patch.object(A.requests, 'get', side_effect=fake_get),
+        mock.patch.object(A.requests.Session, 'get', fake_session_get),
+        mock.patch.object(A, '_update_task'),
+    ]
+    if fetchable is not None:
+        patches.append(mock.patch.object(
+            A, '_is_fetchable_url', side_effect=fetchable))
+
+    from contextlib import ExitStack
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
         try:
             A.download_audio(
-                'http://example.com/ep.mp3', str(tmp_path / 'a.mp3'), 'task-id'
+                start_url, str(tmp_path / 'a.mp3'), 'task-id'
             )
             error = None
         except Exception as exc:  # noqa: BLE001 - the message is the assertion
@@ -348,7 +363,11 @@ def test_http_error_without_a_response_is_reported_cleanly(tmp_path):
     def boom(url, **kwargs):
         raise requests.exceptions.HTTPError('connection reset')
 
+    def boom_session(self, url, **kwargs):
+        return boom(url, **kwargs)
+
     with mock.patch.object(A.requests, 'get', side_effect=boom), \
+            mock.patch.object(A.requests.Session, 'get', boom_session), \
             mock.patch.object(A, '_update_task'):
         with pytest.raises(Exception) as exc:
             A.download_audio(
@@ -359,11 +378,64 @@ def test_http_error_without_a_response_is_reported_cleanly(tmp_path):
 
 
 def test_redirect_loop_is_bounded(tmp_path):
-    calls, error = _download_with(
-        lambda url: _FakeResponse(302, 'https://www.iana.org/next.mp3'), tmp_path
-    )
-    assert len(calls) == A.MAX_REDIRECTS
+    """A non-cycling runaway chain must stop at MAX_REDIRECTS, not hang."""
+    hop = {'n': 0}
+
+    def responder(url):
+        hop['n'] += 1
+        # Fresh Location every time so loop-detection does not fire first.
+        return _FakeResponse(302, f'https://www.iana.org/next-{hop["n"]}.mp3')
+
+    calls, error = _download_with(responder, tmp_path)
+    # One GET per followed redirect, plus the probe that still redirected and
+    # tripped the cap (we have to see the 302 before we can refuse it).
+    assert len(calls) == A.MAX_REDIRECTS + 1
     assert 'Too many redirects' in error
+
+
+def test_redirect_cycle_is_detected_without_burning_the_budget(tmp_path):
+    """A↔B must fail as a loop, not grind through MAX_REDIRECTS hops."""
+    def responder(url):
+        if 'example.com' in url:
+            return _FakeResponse(302, 'https://www.iana.org/a.mp3')
+        return _FakeResponse(302, 'http://example.com/ep.mp3')
+
+    calls, error = _download_with(responder, tmp_path)
+    assert error is not None
+    assert 'Redirect loop' in error
+    assert len(calls) == 2
+
+
+def test_long_measurement_prefix_chain_succeeds(tmp_path):
+    """Modern Wisdom-style stacks (byspotify→pscrb→claritas→megaphone→dcs)
+    plus a few spare hops must clear the redirect budget. The production
+    failure was MAX_REDIRECTS=5 dying on a chain that needed one more hop.
+    """
+    chain = [
+        'https://prfx.byspotify.com/e/ep.mp3',
+        'https://pscrb.fm/rss/p/ep.mp3',
+        'https://claritaspod.com/measure/ep.mp3',
+        'https://traffic.megaphone.fm/ep.mp3',
+        'https://dcs.megaphone.fm/ep.mp3',
+        'https://cdn1.example.net/ep.mp3',
+        'https://cdn2.example.net/ep.mp3',
+        'https://cdn3.example.net/ep.mp3',
+        'https://cdn4.example.net/ep.mp3',
+        'https://cdn5.example.net/ep.mp3',
+        'https://audio.example.net/final.mp3',
+    ]
+    nxt = {chain[i]: chain[i + 1] for i in range(len(chain) - 1)}
+
+    def responder(url):
+        if url in nxt:
+            return _FakeResponse(302, nxt[url])
+        return _FakeResponse(200)
+
+    calls, error = _download_with(
+        responder, tmp_path, start_url=chain[0], fetchable=lambda u: True)
+    assert error is None
+    assert calls == chain
+    assert len(calls) > 5, 'fixture must exceed the old redirect budget'
 
 
 # --------------------------------------------------------------------------
@@ -2843,9 +2915,9 @@ def test_stopping_during_a_download_aborts_it(trial_on, monkeypatch, tmp_path):
             pass
 
         def iter_content(self, chunk_size=8192):
-            # 50 chunks x 20ms clears download_audio's hard-coded 1s write
-            # throttle, so the cancel check actually runs.
-            for i in range(50):
+            # Enough wall time after the first _update_task to clear the
+            # hard-coded 1s write throttle so the cancel check actually runs.
+            for i in range(80):
                 delivered.append(i)
                 if i == 1:
                     # The user hits Stop two chunks in.
@@ -2854,7 +2926,7 @@ def test_stopping_during_a_download_aborts_it(trial_on, monkeypatch, tmp_path):
                             "UPDATE transcription_tasks SET status='cancelled' "
                             "WHERE id='stop-dl'"))
                         conn.commit()
-                time.sleep(0.02)      # clear the 1s write throttle
+                time.sleep(0.025)
                 yield b'\0' * 8192
 
         def close(self):
@@ -2862,6 +2934,8 @@ def test_stopping_during_a_download_aborts_it(trial_on, monkeypatch, tmp_path):
 
     monkeypatch.setattr(A, '_is_fetchable_url', lambda raw: True)
     monkeypatch.setattr(A.requests, 'get', lambda *a, **kw: FakeResponse())
+    monkeypatch.setattr(A.requests.Session, 'get',
+                        lambda self, *a, **kw: FakeResponse())
     monkeypatch.setattr(A.requests, 'head', lambda *a, **kw: FakeResponse())
 
     target = tmp_path / 'ep.mp3'
@@ -2869,7 +2943,7 @@ def test_stopping_during_a_download_aborts_it(trial_on, monkeypatch, tmp_path):
         with pytest.raises(A.TaskAbandoned):
             A.download_audio('https://example.com/ep.mp3', str(target), 'stop-dl')
 
-    assert len(delivered) < 50, 'the download ran to completion after cancelling'
+    assert len(delivered) < 80, 'the download ran to completion after cancelling'
     assert closed, 'the streamed response was left open, leaking the connection'
 
 
@@ -2970,6 +3044,8 @@ def test_the_download_connection_closes_on_every_exit(trial_on, monkeypatch, tmp
 
     monkeypatch.setattr(A, '_is_fetchable_url', lambda raw: True)
     monkeypatch.setattr(A.requests, 'get', lambda *a, **kw: FakeResponse())
+    monkeypatch.setattr(A.requests.Session, 'get',
+                        lambda self, *a, **kw: FakeResponse())
 
     real_open = open
 
@@ -3595,11 +3671,23 @@ class _HttpResp:
         for i in range(0, len(self.content), size):
             yield self.content[i:i + size]
 
+    def close(self):
+        pass
+
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
         return False
+
+
+def _patch_requests_get(monkeypatch, get):
+    """download_audio / feed fetch use Session.get; keep module get patched too."""
+    monkeypatch.setattr(A.requests, 'get', get)
+    monkeypatch.setattr(
+        A.requests.Session, 'get',
+        lambda self, url, **kw: get(url, **kw),
+    )
 
 
 def _fake_web(monkeypatch, embed=None, shows=(), episodes=(), feed=b'', oembed=None):
@@ -3621,7 +3709,7 @@ def _fake_web(monkeypatch, embed=None, shows=(), episodes=(), feed=b'', oembed=N
             return _HttpResp(200, content=feed)
         raise AssertionError(f'unexpected fetch {url}')
 
-    monkeypatch.setattr(A.requests, 'get', get)
+    _patch_requests_get(monkeypatch, get)
     monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
     return fetched
 
@@ -3781,7 +3869,7 @@ def _redirecting_feed(monkeypatch, target):
             return _HttpResp(200, content=_rss('Essentials: Genes &amp; Memory'))
         return inner(url, params=params, **kw)
 
-    monkeypatch.setattr(A.requests, 'get', get)
+    _patch_requests_get(monkeypatch, get)
     monkeypatch.setattr(A, '_is_fetchable_url', lambda u: '169.254' not in u)
     return fetched
 
