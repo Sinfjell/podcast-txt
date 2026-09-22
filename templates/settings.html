@@ -17,12 +17,17 @@
                            value="{{ current_user.openai_api_key or '' }}"
                            placeholder="sk-...">
                     <p class="form-hint">
-                        Your key for transcriptions.
-                        <a href="https://platform.openai.com/api-keys" target="_blank">Get one here</a>.
-                        {% if not current_user.openai_api_key %}
+                        With your own key, Podskrift stays free — OpenAI bills you for Whisper
+                        (about $0.36 per hour of audio).
+                        <a href="https://platform.openai.com/api-keys" target="_blank">Get a key</a>.
+                        {% if current_user.openai_api_key %}
+                        <br>You're on your own key; nothing is metered against the trial.
+                        {% else %}
                         <br><span style="color: var(--warning);">
                             {% if trial %}No key saved — you're on the free trial below.
-                            {% else %}No key saved — add one to start transcribing.{% endif %}
+                            Add your key anytime to keep going without a Podskrift charge.
+                            {% else %}No key saved — add one to start transcribing.
+                            Podskrift doesn't charge; you pay OpenAI directly.{% endif %}
                         </span>
                         {% endif %}
                     </p>
@@ -40,7 +45,8 @@
         <div class="card-body">
             {% if trial.on_own_key %}
             <p style="color: var(--muted); font-size: 14px; line-height: 1.6;">
-                You're transcribing on your own key, so nothing is counted against the trial.
+                You're on your own OpenAI key, so Podskrift is free — OpenAI bills you
+                directly (about $0.36 per hour of audio). Nothing is counted against the trial.
                 {{ trial.remaining_minutes }} of {{ trial.limit_minutes }} trial minutes are still
                 unused if you ever remove your key.
             </p>
@@ -55,13 +61,14 @@
             </div>
             <p class="form-hint" style="margin-top: 10px;">
                 {% if trial.exhausted %}
-                Your trial is used up. Add your own OpenAI API key above to keep transcribing —
-                it bills you directly at OpenAI's rate (about $0.36 per hour of audio).
+                Your trial is used up. Add your own OpenAI API key above —
+                the app is free; OpenAI bills you (about $0.36 per hour of audio).
                 {% else %}
                 Trial minutes run on our OpenAI key, and are counted on the audio we
                 actually transcribed. A job that fails part-way keeps only the minutes
                 already sent for transcription; one that fails before it starts costs
-                you nothing.
+                you nothing. Prefer your own key? Add it above — Podskrift stays free;
+                OpenAI bills you for Whisper.
                 {% endif %}
             </p>
             {% endif %}

@@ -12,7 +12,9 @@
     <p style="color: var(--muted); font-size: 16px; margin-top: 10px; max-width: 520px; line-height: 1.6;">
         Search for a podcast, pick an episode, get the full transcript.
         {{ language_count }} languages, powered by OpenAI Whisper.{% if trial_minutes %}
-        First {{ trial_minutes }} minutes free.{% endif %}
+        First {{ trial_minutes }} minutes free on our key.
+        Or add your own OpenAI API key — Podskrift stays free; you only pay OpenAI for Whisper.{% else %}
+        Add your own OpenAI API key — Podskrift stays free; you only pay OpenAI for Whisper.{% endif %}
     </p>
 </div>
 
@@ -23,11 +25,13 @@
        rendered as broken columns on a narrow screen. #}
     <span>
         {% if trial.exhausted %}
-        Your free trial is used up. <a href="{{ url_for('settings') }}">Add your own OpenAI API key</a>
-        to keep transcribing.
+        Your free trial is used up.
+        <a href="{{ url_for('settings') }}">Add your own OpenAI API key</a>
+        — the app is free; OpenAI bills you.
         {% else %}
-        Free trial: <strong>{{ trial.remaining_minutes }} minutes</strong> of audio left, on our key.
-        <a href="{{ url_for('settings') }}">Add your own key</a> for unlimited use.
+        Free trial: <strong>{{ trial.remaining_minutes }} minutes</strong> left on our key.
+        Or <a href="{{ url_for('settings') }}">add your own key</a>
+        — Podskrift stays free; OpenAI bills you for Whisper.
         {% endif %}
     </span>
 </div>
@@ -100,7 +104,16 @@
 {% if not current_user.is_authenticated %}
 <div class="card" style="margin-top: 16px;">
     <div class="card-body text-center" style="padding: 32px 20px;">
-        <p class="text-muted mb-1">Save feeds, store your API key, and keep transcription history.</p>
+        <p class="text-muted mb-1">
+            Free account — no Podskrift subscription.
+            {% if trial_minutes %}
+            First {{ trial_minutes }} minutes on our key, or add your own OpenAI API key
+            and you only pay OpenAI for Whisper.
+            {% else %}
+            Add your own OpenAI API key and you only pay OpenAI for Whisper.
+            {% endif %}
+            Save feeds and keep transcription history.
+        </p>
         <div class="flex-center" style="gap: 12px; justify-content: center; margin-top: 12px;">
             <a href="{{ url_for('register') }}" class="btn btn-accent">Create free account</a>
             <a href="{{ url_for('login') }}" class="btn btn-ghost">Log in</a>
