@@ -350,6 +350,13 @@
                 if (seq !== searchSeq) return;
                 clearResults();
                 resultsDiv.style.padding = '0';
+                // Top of the funnel, before signup. The query text is left out on purpose.
+                if (window.posthog && window.posthog.capture) {
+                    window.posthog.capture('podcast_searched', {
+                        search_type: searchType,
+                        result_count: (data.results || []).length
+                    });
+                }
 
                 if (!data.results || data.results.length === 0) {
                     setMessage(searchType === 'episode'

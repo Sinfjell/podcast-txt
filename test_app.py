@@ -5123,7 +5123,7 @@ def test_transcript_started_includes_key_source(ph_events, monkeypatch, trial_on
     assert resp.status_code == 200
     started = [e for e in ph_events.events if e['event'] == 'transcript_started']
     assert len(started) == 1
-    assert started[0]['properties'] == {'key_source': 'user'}
+    assert started[0]['properties'] == {'key_source': 'user', 'source': 'web'}
 
 
 def test_transcript_started_trial_key_source(ph_events, monkeypatch, trial_on):
@@ -5136,7 +5136,7 @@ def test_transcript_started_trial_key_source(ph_events, monkeypatch, trial_on):
     assert resp.status_code == 200
     started = [e for e in ph_events.events if e['event'] == 'transcript_started']
     assert len(started) == 1
-    assert started[0]['properties'] == {'key_source': 'trial'}
+    assert started[0]['properties'] == {'key_source': 'trial', 'source': 'web'}
 
 
 def test_transcript_completed_includes_key_source(ph_events, monkeypatch, trial_on):
@@ -5161,7 +5161,7 @@ def test_transcript_completed_includes_key_source(ph_events, monkeypatch, trial_
     assert status == 200 and 'task_id' in payload
     completed = [e for e in ph_events.events if e['event'] == 'transcript_completed']
     assert len(completed) == 1
-    assert completed[0]['properties'] == {'key_source': 'user'}
+    assert completed[0]['properties'] == {'key_source': 'user', 'source': 'web'}
 
 
 def test_openai_fail_reason_is_coarse():
@@ -5185,3 +5185,131 @@ def test_privacy_page_mentions_posthog():
     assert 'EU' in body
     assert 'session replay' in body.lower()
 
+
+# --- trial_limit_hit: the buying signal ---------------------------------------
+
+def _limit_hits(ph_events):
+    return [e for e in ph_events.events if e['event'] == 'trial_limit_hit']
+
+
+def test_trial_limit_hit_when_the_account_is_short(ph_events, monkeypatch, trial_on):
+    uid = _make_user('phlimit-user@test.com', limit=600, used=540)  # 1 min left
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Ep',
+        'duration_min': '5',
+    })
+    assert resp.status_code == 402
+    hits = _limit_hits(ph_events)
+    assert len(hits) == 1
+    assert hits[0]['distinct_id'] == str(uid)
+    assert hits[0]['properties'] == {'scope': 'user', 'stage': 'start', 'source': 'web'}
+    assert not [e for e in ph_events.events if e['event'] == 'transcript_started']
+
+
+def test_trial_limit_hit_when_the_service_is_out(ph_events, monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 0)
+    uid = _make_user('phlimit-global@test.com', limit=3600)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Ep',
+        'duration_min': '5',
+    })
+    assert resp.status_code == 402
+    hits = _limit_hits(ph_events)
+    assert [h['properties']['scope'] for h in hits] == ['global']
+
+
+def test_trial_limit_hit_for_an_over_long_episode(ph_events, monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 1800)
+    uid = _make_user('phlimit-long@test.com', limit=10 ** 6)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Ep',
+        'duration_min': '60',
+    })
+    assert resp.status_code == 402
+    hits = _limit_hits(ph_events)
+    assert [h['properties']['scope'] for h in hits] == ['episode_length']
+
+
+def test_no_trial_limit_hit_on_a_granted_reservation(ph_events, monkeypatch, trial_on):
+    uid = _make_user('phlimit-ok@test.com', limit=3600)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Ep',
+        'duration_min': '5',
+    })
+    assert resp.status_code == 200
+    assert _limit_hits(ph_events) == []
+
+
+def test_reconcile_names_the_cap_that_refused(trial_on, monkeypatch):
+    from models import db, TranscriptionTask
+    uid = _make_user('phrecon-scope@test.com', limit=900)
+    with A.app.app_context():
+        A.trial_reserve(uid, 600)
+        db.session.add(TranscriptionTask(id='trial-recon-scope', user_id=uid,
+                                         episode_title='x', status='transcribing',
+                                         trial_seconds_charged=600))
+        db.session.commit()
+        with pytest.raises(A.TrialExhausted) as short:
+            A.trial_reconcile_task('trial-recon-scope', 2400)
+        assert short.value.scope == 'user'
+
+        monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 1800)
+        with pytest.raises(A.TrialExhausted) as too_long:
+            A.trial_reconcile_task('trial-recon-scope', 3600)
+        assert too_long.value.scope == 'episode_length'
+    assert _used(uid) == 600  # neither refusal took anything extra
+
+
+def test_worker_reports_trial_exhausted_at_reconcile(ph_events, monkeypatch, trial_on):
+    """The real audio outgrew the allowance after download: a failed transcript
+    with reason trial_exhausted, plus the buying signal at stage reconcile."""
+    import types
+    uid = _make_user('phrecon-worker@test.com', limit=3600)
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: target and target()))
+    monkeypatch.setattr(A, 'download_audio', lambda *a, **kw: None)
+
+    def refuse(*a, **kw):
+        raise A.TrialExhausted('too long for what is left', scope='user')
+
+    monkeypatch.setattr(A, 'transcribe_audio', refuse)
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user, {'title': 'Ep', 'audio_url': 'https://example.com/ep.mp3',
+                   'duration_min': 1})
+    assert status == 200, payload
+    failed = [e for e in ph_events.events if e['event'] == 'transcript_failed']
+    assert [f['properties'] for f in failed] == [
+        {'key_source': 'trial', 'source': 'web', 'reason': 'trial_exhausted'}]
+    assert [h['properties'] for h in _limit_hits(ph_events)] == [
+        {'scope': 'user', 'stage': 'reconcile', 'source': 'web'}]
+    assert _used(uid) == 0  # refunded in full: nothing reached Whisper
+
+
+def test_api_transcriptions_are_labelled_api(ph_events, agent_write):
+    r = _agent_post(
+        '/api/v1/transcriptions', key=agent_write['key'],
+        json_body={'publisher': 'Spårtsklubben', 'date': '2026-09-10'})
+    assert r.status_code == 201, r.get_json()
+    started = [e for e in ph_events.events if e['event'] == 'transcript_started']
+    assert [e['properties'] for e in started] == [
+        {'key_source': 'trial', 'source': 'api'}]
+
+
+def test_search_emits_podcast_searched_without_the_query(monkeypatch):
+    monkeypatch.setenv('POSTHOG_KEY', 'phc_test_not_real')
+    body = A.app.test_client().get('/').data.decode()
+    assert "capture('podcast_searched'" in body
+    start = body.index("capture('podcast_searched'")
+    snippet = body[start:start + 200]
+    assert 'result_count' in snippet
+    assert 'query' not in snippet

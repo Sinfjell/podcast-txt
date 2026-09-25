@@ -154,6 +154,20 @@ systemctl restart podskrift
 snippet lives in `templates/base.html` and only renders when `POSTHOG_KEY` is
 set.
 
+Named events:
+
+| Event | Where | Properties |
+|---|---|---|
+| `podcast_searched` | browser, before signup | `search_type`, `result_count` (never the query) |
+| `user_signed_up`, `settings_viewed` | server | — |
+| `openai_key_saved` / `openai_key_validation_failed` | server | `status` / `reason` |
+| `transcript_started` / `transcript_completed` | server | `key_source` (trial/user), `source` (web/api) |
+| `transcript_failed` | server | the above + `reason` (`invalid_key`, `no_billing`, `network`, `trial_exhausted`, `abandoned`, `other`) |
+| `trial_limit_hit` | server | `scope` (`episode_length`, `user`, `global`), `stage` (`start`, `reconcile`), `source` |
+
+`trial_limit_hit` is the buying signal: a trial user wanted more than the free
+allowance gives.
+
 ## Notion daily metrics
 
 Weekday cron upserts one row into the Podskrift daily metrics Notion database
