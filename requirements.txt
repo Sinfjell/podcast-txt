@@ -6,3 +6,4 @@ flask-login>=0.6.3
 python-dotenv>=1.0.0
 openai>=1.0.0
 sentry-sdk[flask]>=2.0.0
+posthog>=3.0.0

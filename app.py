@@ -51,11 +51,13 @@ from sqlalchemy.engine import Engine
 from models import (db, User, SavedFeed, TranscriptionTask,
                     TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS)
 from observability import init_sentry, report_stale_task, report_task_failure
+import analytics as product_analytics
 
 load_dotenv()
 # Before the app exists, so the Flask integration hooks it, and before the boot
 # sweep at the bottom of this module, which reports what it finds.
 init_sentry()
+product_analytics.init_posthog()
 
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'change-me-in-production')
@@ -683,7 +685,11 @@ def looks_like_openai_key(key):
 
 
 def verify_openai_key(key):
-    """Check a key against OpenAI. Returns (ok, message).
+    """Check a key against OpenAI. Returns (ok, message, status).
+
+    `status` is a coarse analytics tag, never key material:
+      success — verified | no_billing | unverified_network
+      failure — invalid_key | other (and rarely network-shaped rejects)
 
     Done at save time rather than at transcription time: previously the first
     signal that a key was wrong came minutes later, after picking an episode and
@@ -692,7 +698,7 @@ def verify_openai_key(key):
     if not looks_like_openai_key(key):
         return False, ('That does not look like an OpenAI API key. Keys start with '
                        '"sk-" and come from platform.openai.com/api-keys — it is not '
-                       'your OpenAI password.')
+                       'your OpenAI password.'), 'invalid_key'
     try:
         OpenAI(api_key=key, timeout=15.0, max_retries=0).models.list()
     except Exception as e:
@@ -704,15 +710,16 @@ def verify_openai_key(key):
             e, (APIConnectionError, APITimeoutError))
         if unreachable:
             return True, ('Key saved, but OpenAI could not be reached to verify it. '
-                          'If transcription fails, re-check the key here.')
+                          'If transcription fails, re-check the key here.'), 'unverified_network'
         if status == 429:
             # The key authenticated; the account is just out of credit or rate
             # limited. Refusing the save would leave them unable to store a
             # working key at all.
             return True, ('Key saved. Note: ' +
-                          describe_openai_error(e, context='verify'))
-        return False, describe_openai_error(e, context='verify')
-    return True, 'API key verified.'
+                          describe_openai_error(e, context='verify')), 'no_billing'
+        return (False, describe_openai_error(e, context='verify'),
+                product_analytics.openai_fail_reason(e, looks_like_key=True))
+    return True, 'API key verified.', 'verified'
 
 
 # ---------------------------------------------------------------------------
@@ -1527,6 +1534,7 @@ def register():
         created = True
 
         login_user(user)
+        product_analytics.capture('user_signed_up', user.id)
         flash('Account created! Add your OpenAI API key in Settings to use your own quota.',
               'success')
         return redirect(url_for('index'))
@@ -1560,7 +1568,9 @@ def login():
 def logout():
     logout_user()
     flash('Logged out.', 'info')
-    return redirect(url_for('index'))
+    # ph_reset tells the client SDK to call posthog.reset() so the next visitor
+    # on this browser is not glued to the previous distinct_id.
+    return redirect(url_for('index', ph_reset=1))
 
 
 # ---------------------------------------------------------------------------
@@ -1579,21 +1589,32 @@ def settings():
             flash('API key removed.', 'success')
             return redirect(url_for('settings'))
 
-        ok, message = verify_openai_key(api_key)
-        caveat = ok and not message.startswith('API key verified')
+        ok, message, status = verify_openai_key(api_key)
+        caveat = ok and status != 'verified'
         if not ok:
             # Never store a rejected key: it is frequently a password, and it
             # would otherwise sit in the database and fail again at transcribe time.
+            product_analytics.capture(
+                'openai_key_validation_failed',
+                current_user.id,
+                {'reason': status or 'other'},
+            )
             flash(message, 'error')
             return redirect(url_for('settings'))
 
         current_user.openai_api_key = api_key
         db.session.commit()
+        product_analytics.capture(
+            'openai_key_saved',
+            current_user.id,
+            {'status': status or 'verified'},
+        )
         flash(message, 'warning' if caveat else 'success')
         return redirect(url_for('settings'))
 
     # One-shot plaintext after generate (session, not DB).
     new_api_key = session.pop('new_api_key', None)
+    product_analytics.capture('settings_viewed', current_user.id)
     return render_template(
         'settings.html',
         trial=_trial_context(),
@@ -1904,6 +1925,11 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
                     try:
                         download_audio(source_url, audio_filename, task_id)
                         transcribe_audio(audio_filename, task_id, openai_client, language=language)
+                        product_analytics.capture(
+                            'transcript_completed',
+                            user.id,
+                            {'key_source': key_source},
+                        )
                     except TaskAbandoned:
                         # The sweeper wrote the error and settled the charge. Refund
                         # anyway: it is idempotent, and it is the backstop if anything
@@ -1911,6 +1937,11 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
                         abandoned = db.session.get(TranscriptionTask, task_id)
                         if abandoned:
                             trial_refund_task(abandoned)
+                            product_analytics.capture(
+                                'transcript_failed',
+                                abandoned.user_id,
+                                {'reason': 'abandoned', 'key_source': key_source},
+                            )
                     except Exception as e:
                         _update_task(task_id, status='error', phase='error',
                                      error_message=describe_openai_error(e)
@@ -1920,6 +1951,16 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
                         failed = db.session.get(TranscriptionTask, task_id)
                         if failed:
                             trial_refund_task(failed)
+                            reason = (
+                                product_analytics.openai_fail_reason(e)
+                                if _is_openai_error(e)
+                                else 'other'
+                            )
+                            product_analytics.capture(
+                                'transcript_failed',
+                                failed.user_id,
+                                {'reason': reason, 'key_source': key_source},
+                            )
                         # After the refund, and it cannot raise: reporting must
                         # never cost a user the allowance they are owed.
                         report_task_failure(e, task_id=task_id, key_source=key_source)
@@ -1947,6 +1988,8 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
         # The thread's finally owns the slot from here on.
         slot_held = False
 
+        product_analytics.capture(
+            'transcript_started', user.id, {'key_source': key_source})
         return {'task_id': task_id}, 200
     finally:
         # Handed to the worker thread on success -- slot_held goes False only
@@ -3344,6 +3387,21 @@ def inject_language_count():
     return {'language_count': len(LANGUAGE_ENGLISH_NAMES)}
 
 
+@app.context_processor
+def inject_posthog():
+    """Expose PostHog public config to templates. Empty key → client SDK off."""
+    key = product_analytics.posthog_key()
+    return {
+        'posthog_key': key,
+        'posthog_host': product_analytics.posthog_host() if key else '',
+        'posthog_user_id': (
+            str(current_user.id)
+            if getattr(current_user, 'is_authenticated', False)
+            else ''
+        ),
+    }
+
+
 def _structured_data():
     """JSON-LD for the home page.
 
@@ -3546,6 +3604,12 @@ def sitemap_xml():
 @app.route('/rss-help')
 def rss_help():
     return render_template('rss_help.html')
+
+
+@app.route('/privacy')
+def privacy():
+    """Short privacy note — analytics/replay disclosure for EU PostHog."""
+    return render_template('privacy.html')
 
 
 CUSTOMER_API_DOC_PATH = os.path.join(

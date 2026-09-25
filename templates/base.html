@@ -777,7 +777,8 @@
                     Settings
                 </a>
                 <div class="nav-sep" aria-hidden="true"></div>
-                <a href="{{ url_for('logout') }}">
+                <a href="{{ url_for('logout') }}"
+                   onclick="try{if(window.posthog){posthog.reset();}}catch(e){}">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
                     Log out
                 </a>
@@ -837,9 +838,57 @@
     <footer class="footer">
         A <a href="https://productivitytech.io" target="_blank">ProductivityTech</a> product &middot;
         Developed by <a href="https://nettsmed.no" target="_blank">Nettsmed</a> &middot;
+        <a href="{{ url_for('privacy') }}">Privacy</a> &middot;
         <a href="https://productivitytech.io/contact/" target="_blank">Contact</a> &middot;
         <a href="https://productivitytech.io/contact/" target="_blank">Feedback / feature ideas</a>
     </footer>
+
+    {% if posthog_key %}
+    <script>
+    !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host.replace(".i.posthog.com","-assets.i.posthog.com")+"/static/array.js",r=t.getElementsByTagName("script")[0],r.parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagResult isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey getNextSurveyStep identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty createPersonProfile opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
+    posthog.init({{ posthog_key | tojson }}, {
+        api_host: {{ posthog_host | tojson }},
+        person_profiles: 'identified_only',
+        // Pageviews + autocapture stay on (PostHog defaults).
+        session_recording: {
+            maskAllInputs: true,
+            maskInputOptions: { password: true, email: true },
+            // Transcript pane + anything marked ph-no-capture (keys, emails).
+            maskTextSelector: '.ph-no-capture, .transcript-pane',
+            maskNetworkRequestFn: function (data) {
+                // Never ship request/response bodies (settings POST carries the key).
+                if (data) {
+                    data.requestBody = undefined;
+                    data.responseBody = undefined;
+                    if (data.requestHeaders) {
+                        delete data.requestHeaders['authorization'];
+                        delete data.requestHeaders['Authorization'];
+                        delete data.requestHeaders['cookie'];
+                        delete data.requestHeaders['Cookie'];
+                    }
+                }
+                return data;
+            }
+        }
+    });
+    (function () {
+        try {
+            var params = new URLSearchParams(window.location.search);
+            if (params.get('ph_reset') === '1') {
+                posthog.reset();
+                params.delete('ph_reset');
+                var qs = params.toString();
+                var clean = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash;
+                window.history.replaceState({}, '', clean);
+            }
+        } catch (e) { /* ignore */ }
+        {% if posthog_user_id %}
+        // Internal user id only — never email or name as person properties.
+        posthog.identify({{ posthog_user_id | tojson }});
+        {% endif %}
+    })();
+    </script>
+    {% endif %}
 
     {% block scripts %}{% endblock %}
     <script>

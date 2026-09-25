@@ -9,13 +9,14 @@
             <form method="POST">
                 <div class="form-group">
                     <label class="form-label">Email</label>
-                    <input type="email" class="form-input" value="{{ current_user.email }}" disabled style="opacity: 0.5;">
+                    <input type="email" class="form-input ph-no-capture" value="{{ current_user.email }}"
+                           disabled style="opacity: 0.5;" autocomplete="email">
                 </div>
                 <div class="form-group">
                     <label class="form-label" for="openai_api_key">OpenAI API Key</label>
-                    <input type="password" class="form-input" id="openai_api_key" name="openai_api_key"
+                    <input type="password" class="form-input ph-no-capture" id="openai_api_key" name="openai_api_key"
                            value="{{ current_user.openai_api_key or '' }}"
-                           placeholder="sk-...">
+                           placeholder="sk-..." autocomplete="off" data-ph-no-capture>
                     <p class="form-hint">
                         With your own key, Podskrift stays free — OpenAI bills you for Whisper
                         (about $0.36 per hour of audio).
@@ -92,9 +93,10 @@
             <div class="form-group">
                 <label class="form-label" for="new_api_key">Your key (copy now)</label>
                 <div style="display: flex; gap: 8px; align-items: stretch;">
-                    <input type="text" class="form-input" id="new_api_key" readonly
+                    <input type="text" class="form-input ph-no-capture" id="new_api_key" readonly
                            value="{{ new_api_key }}"
-                           style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;">
+                           style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;"
+                           autocomplete="off" data-ph-no-capture>
                     <button type="button" class="btn btn-ghost" id="copy_api_key">Copy</button>
                 </div>
                 <p class="form-hint" style="color: var(--warning); margin-top: 8px;">

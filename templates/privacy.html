@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Privacy — Podskrift{% endblock %}
+{% block meta_description %}How Podskrift handles accounts, transcripts, and analytics.{% endblock %}
+
+{% block content %}
+<div style="max-width: 560px; margin: 24px auto;">
+    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 16px;">Privacy</h1>
+    <p style="color: var(--muted); font-size: 14px; line-height: 1.7; margin-bottom: 14px;">
+        Podskrift stores your account email, password hash, optional OpenAI API key,
+        and transcripts you create. Your OpenAI key is used only to call OpenAI on
+        your behalf; we never send it to analytics.
+    </p>
+    <p style="color: var(--muted); font-size: 14px; line-height: 1.7; margin-bottom: 14px;">
+        We use <a href="https://posthog.com" target="_blank" rel="noopener">PostHog</a>
+        (EU Cloud) for product analytics and session replay so we can see where
+        signup-to-first-transcript drops off. Replays mask form inputs (including
+        email, password, and API key fields). We identify you only by an internal
+        user id — not by email or name — and we do not send API keys, passwords,
+        emails, or transcript text as event properties.
+    </p>
+    <p style="color: var(--muted); font-size: 14px; line-height: 1.7;">
+        Questions:
+        <a href="https://productivitytech.io/contact/" target="_blank" rel="noopener">Contact</a>.
+    </p>
+</div>
+{% endblock %}
