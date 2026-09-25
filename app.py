@@ -337,7 +337,15 @@ TRIAL_ENABLED = os.getenv('TRIAL_ENABLED', '1').strip().lower() not in ('0', 'fa
 
 
 class TrialExhausted(Exception):
-    """Raised when a job would cost more trial allowance than is left."""
+    """Raised when a job would cost more trial allowance than is left.
+
+    `scope` names the limit that refused it -- 'episode_length', 'user' or
+    'global' -- for the trial_limit_hit analytics event.
+    """
+
+    def __init__(self, message, scope='user'):
+        super().__init__(message)
+        self.scope = scope
 
 
 class TaskAbandoned(Exception):
@@ -356,6 +364,12 @@ def trial_status(user):
         limit = TRIAL_DEFAULT_SECONDS
     used = user.trial_seconds_used or 0
     return limit, used, max(0, limit - used)
+
+
+def trial_refusal_scope(user, needed_seconds):
+    """Which cap refused a reservation: 'user' if the account is short, else 'global'."""
+    _, _, remaining = trial_status(user)
+    return 'user' if remaining < needed_seconds else 'global'
 
 
 def trial_global_used_seconds():
@@ -530,16 +544,20 @@ def trial_reconcile_task(task_id, actual_seconds):
         raise TrialExhausted(
             f'This episode runs {actual // 60} minutes, past the '
             f'{TRIAL_MAX_EPISODE_SECONDS // 60}-minute per-episode limit of the free '
-            'trial. Add your own OpenAI API key in Settings to transcribe it.'
+            'trial. Add your own OpenAI API key in Settings to transcribe it.',
+            scope='episode_length',
         )
 
     if actual > reserved:
         extra = actual - reserved
         if not trial_reserve(user_id, extra):
+            # Read-only, after the refusal: which cap it was, for analytics.
+            owner = db.session.get(User, user_id)
             raise TrialExhausted(
                 f'This episode runs {actual // 60} minutes and your free trial has '
                 'less than that left. Add your own OpenAI API key in Settings to '
-                'keep transcribing.'
+                'keep transcribing.',
+                scope=trial_refusal_scope(owner, extra) if owner else 'user',
             )
         if not _claim_task_charge(task_id, reserved, actual):
             # Someone else settled the task while we were topping up; give the
@@ -1800,7 +1818,17 @@ def parse_rss():
     )
 
 
-def enqueue_transcription(user, meta, rss_url=None, language=''):
+def _capture_trial_limit_hit(user_id, scope, stage, source):
+    """The buying signal: a trial user wanted more than the free allowance gives.
+
+    scope: episode_length | user | global. stage: start (refused before the job
+    existed) or reconcile (the real audio turned out longer than the feed said).
+    """
+    product_analytics.capture(
+        'trial_limit_hit', user_id, {'scope': scope, 'stage': stage, 'source': source})
+
+
+def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
     """Start Whisper for one episode on behalf of `user`.
 
     Shared by the UI form and the agent write API so trial reservation,
@@ -1809,6 +1837,7 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
     ``{'task_id': ...}``; on refusal it carries ``error``.
 
     `meta` keys: title, audio_url, podcast_name, artwork, published, duration_min.
+    `source` is 'web' or 'api'; it only labels the analytics events.
     """
     if language not in VALID_LANGUAGE_CODES:
         language = ''
@@ -1823,6 +1852,8 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
             'error': 'No OpenAI API key configured. Add your key in Settings.'
         }, 400
     openai_client = build_openai_client(api_key)
+    # Every analytics event for this job carries the same two labels.
+    ph_props = {'key_source': key_source, 'source': source}
 
     # Admission control, before anything is reserved or written, so a refusal
     # has nothing to unwind. This box is shared with 50+ other services, so
@@ -1861,6 +1892,7 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
             estimate = max(60, int((meta.get('duration_min') or 0) * 60)
                            or TRIAL_UNKNOWN_ESTIMATE_SECONDS)
             if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
+                _capture_trial_limit_hit(user.id, 'episode_length', 'start', source)
                 return {'error': (
                     f'This episode runs {estimate // 60} minutes, past the '
                     f'{TRIAL_MAX_EPISODE_SECONDS // 60}-minute per-episode limit of the '
@@ -1868,7 +1900,9 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
                 )}, 402
             if not trial_reserve(user.id, estimate):
                 _, _, remaining = trial_status(user)
-                if remaining < estimate:
+                scope = trial_refusal_scope(user, estimate)
+                _capture_trial_limit_hit(user.id, scope, 'start', source)
+                if scope == 'user':
                     message = (
                         f'Your free trial has {remaining // 60} minutes left, and this '
                         f'episode needs about {estimate // 60}. Add your own OpenAI API '
@@ -1925,11 +1959,7 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
                     try:
                         download_audio(source_url, audio_filename, task_id)
                         transcribe_audio(audio_filename, task_id, openai_client, language=language)
-                        product_analytics.capture(
-                            'transcript_completed',
-                            user.id,
-                            {'key_source': key_source},
-                        )
+                        product_analytics.capture('transcript_completed', user.id, ph_props)
                     except TaskAbandoned:
                         # The sweeper wrote the error and settled the charge. Refund
                         # anyway: it is idempotent, and it is the backstop if anything
@@ -1940,7 +1970,7 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
                             product_analytics.capture(
                                 'transcript_failed',
                                 abandoned.user_id,
-                                {'reason': 'abandoned', 'key_source': key_source},
+                                {**ph_props, 'reason': 'abandoned'},
                             )
                     except Exception as e:
                         _update_task(task_id, status='error', phase='error',
@@ -1951,15 +1981,18 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
                         failed = db.session.get(TranscriptionTask, task_id)
                         if failed:
                             trial_refund_task(failed)
-                            reason = (
-                                product_analytics.openai_fail_reason(e)
-                                if _is_openai_error(e)
-                                else 'other'
-                            )
+                            if isinstance(e, TrialExhausted):
+                                reason = 'trial_exhausted'
+                                _capture_trial_limit_hit(
+                                    failed.user_id, e.scope, 'reconcile', source)
+                            elif _is_openai_error(e):
+                                reason = product_analytics.openai_fail_reason(e)
+                            else:
+                                reason = 'other'
                             product_analytics.capture(
                                 'transcript_failed',
                                 failed.user_id,
-                                {'reason': reason, 'key_source': key_source},
+                                {**ph_props, 'reason': reason},
                             )
                         # After the refund, and it cannot raise: reporting must
                         # never cost a user the allowance they are owed.
@@ -1988,8 +2021,7 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
         # The thread's finally owns the slot from here on.
         slot_held = False
 
-        product_analytics.capture(
-            'transcript_started', user.id, {'key_source': key_source})
+        product_analytics.capture('transcript_started', user.id, ph_props)
         return {'task_id': task_id}, 200
     finally:
         # Handed to the worker thread on success -- slot_held goes False only
@@ -3307,7 +3339,8 @@ def agent_start_transcription():
 
     meta = _catalog_to_enqueue_meta(catalog)
     result, status = enqueue_transcription(
-        user, meta, rss_url=catalog.get('rss_url') or None, language=language)
+        user, meta, rss_url=catalog.get('rss_url') or None, language=language,
+        source='api')
     if status != 200:
         # Map missing-key to 403 for agents (ops misconfig), keep 402 for trial.
         if status == 400 and 'API key' in (result.get('error') or ''):
