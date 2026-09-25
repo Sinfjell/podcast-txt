@@ -5313,3 +5313,23 @@ def test_search_emits_podcast_searched_without_the_query(monkeypatch):
     snippet = body[start:start + 200]
     assert 'result_count' in snippet
     assert 'query' not in snippet
+    # Both ways into the funnel: typed search and a pasted Spotify link.
+    assert 'trackSearch(searchType,' in body
+    assert "trackSearch('spotify_link'," in body
+
+
+def test_reconcile_names_the_global_cap(trial_on, monkeypatch):
+    """The account has room; the service does not."""
+    from models import db, TranscriptionTask
+    uid = _make_user('phrecon-global@test.com', limit=10 ** 6)
+    with A.app.app_context():
+        A.trial_reserve(uid, 600)
+        db.session.add(TranscriptionTask(id='trial-recon-global', user_id=uid,
+                                         episode_title='x', status='transcribing',
+                                         trial_seconds_charged=600))
+        db.session.commit()
+        monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', A.trial_global_used_seconds())
+        with pytest.raises(A.TrialExhausted) as refused:
+            A.trial_reconcile_task('trial-recon-global', 1200)
+        assert refused.value.scope == 'global'
+    assert _used(uid) == 600
