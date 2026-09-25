@@ -735,9 +735,9 @@ def test_unreachable_openai_does_not_reject_the_key(monkeypatch):
         raise Down()
 
     monkeypatch.setattr(A, 'OpenAI', boom)
-    ok, msg, reason = A.verify_openai_key('sk-' + 'a' * 40)
+    ok, msg, status = A.verify_openai_key('sk-' + 'a' * 40)
     assert ok is True
-    assert reason is None
+    assert status == 'unverified_network'
     assert 'could not be reached' in msg.lower()
 
 
@@ -847,9 +847,9 @@ def test_out_of_credit_key_is_still_saved(monkeypatch):
         raise RateLimited()
 
     monkeypatch.setattr(A, 'OpenAI', limited)
-    ok, msg, reason = A.verify_openai_key('sk-' + 'c' * 40)
+    ok, msg, status = A.verify_openai_key('sk-' + 'c' * 40)
     assert ok is True
-    assert reason is None
+    assert status == 'no_billing'
     assert 'credit' in msg.lower()
 
 
@@ -987,9 +987,9 @@ def test_out_of_credit_message_says_the_key_was_saved(monkeypatch):
 
     monkeypatch.setattr(A, 'OpenAI',
                         lambda *a, **kw: (_ for _ in ()).throw(RateLimited()))
-    ok, msg, reason = A.verify_openai_key('sk-' + 'e' * 40)
+    ok, msg, status = A.verify_openai_key('sk-' + 'e' * 40)
     assert ok is True
-    assert reason is None
+    assert status == 'no_billing'
     assert 'saved' in msg.lower()
 
 
@@ -5064,7 +5064,7 @@ def test_settings_view_and_key_save_events(ph_events, monkeypatch):
     uid = _make_user('phsettings@test.com')
 
     def ok_verify(key):
-        return True, 'API key verified.', None
+        return True, 'API key verified.', 'verified'
     monkeypatch.setattr(A, 'verify_openai_key', ok_verify)
 
     client = _login(uid)
@@ -5074,8 +5074,26 @@ def test_settings_view_and_key_save_events(ph_events, monkeypatch):
 
     client.post('/settings', data={'openai_api_key': 'sk-' + 'f' * 40},
                 follow_redirects=True)
-    assert any(e['event'] == 'openai_key_saved' and e['distinct_id'] == str(uid)
-               for e in ph_events.events)
+    saved = [e for e in ph_events.events if e['event'] == 'openai_key_saved']
+    assert len(saved) == 1
+    assert saved[0]['distinct_id'] == str(uid)
+    assert saved[0]['properties'] == {'status': 'verified'}
+
+
+@pytest.mark.parametrize('verify_status', ['no_billing', 'unverified_network'])
+def test_key_save_carries_coarse_status(ph_events, monkeypatch, verify_status):
+    """429 and unreachable still save the key — status must distinguish them."""
+    uid = _make_user(f'phstatus-{verify_status}@test.com')
+
+    def soft_verify(key):
+        return True, 'Key saved with caveat.', verify_status
+    monkeypatch.setattr(A, 'verify_openai_key', soft_verify)
+
+    _login(uid).post('/settings', data={'openai_api_key': 'sk-' + 'g' * 40},
+                     follow_redirects=True)
+    saved = [e for e in ph_events.events if e['event'] == 'openai_key_saved']
+    assert len(saved) == 1
+    assert saved[0]['properties'] == {'status': verify_status}
 
 
 def test_rejected_key_emits_validation_failed_with_coarse_reason(ph_events, monkeypatch):
@@ -5092,6 +5110,58 @@ def test_rejected_key_emits_validation_failed_with_coarse_reason(ph_events, monk
     assert fails[0]['properties'] == {'reason': 'invalid_key'}
     # Never echo the submitted value
     assert 'not-a-key' not in str(fails[0])
+
+
+def test_transcript_started_includes_key_source(ph_events, monkeypatch, trial_on):
+    """resolve_openai_key uses 'user' (BYOK) or 'trial' — surface that on start."""
+    uid = _make_user('phstart@test.com', key='sk-' + 'h' * 40)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Ep',
+        'duration_min': '1',
+    })
+    assert resp.status_code == 200
+    started = [e for e in ph_events.events if e['event'] == 'transcript_started']
+    assert len(started) == 1
+    assert started[0]['properties'] == {'key_source': 'user'}
+
+
+def test_transcript_started_trial_key_source(ph_events, monkeypatch, trial_on):
+    uid = _make_user('phtrialstart@test.com')  # no own key → trial
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Ep',
+        'duration_min': '1',
+    })
+    assert resp.status_code == 200
+    started = [e for e in ph_events.events if e['event'] == 'transcript_started']
+    assert len(started) == 1
+    assert started[0]['properties'] == {'key_source': 'trial'}
+
+
+def test_transcript_completed_includes_key_source(ph_events, monkeypatch, trial_on):
+    """Worker fires completed with the same key_source captured at enqueue."""
+    import types
+    uid = _make_user('phdone@test.com', key='sk-' + 'i' * 40)
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: target and target()))
+    monkeypatch.setattr(A, 'download_audio', lambda *a, **kw: None)
+    monkeypatch.setattr(A, 'transcribe_audio', lambda *a, **kw: None)
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user,
+            {'title': 'Ep', 'audio_url': 'https://example.com/ep.mp3',
+             'duration_min': 1},
+        )
+    assert status == 200 and 'task_id' in payload
+    completed = [e for e in ph_events.events if e['event'] == 'transcript_completed']
+    assert len(completed) == 1
+    assert completed[0]['properties'] == {'key_source': 'user'}
 
 
 def test_openai_fail_reason_is_coarse():

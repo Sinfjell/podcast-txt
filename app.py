@@ -685,10 +685,11 @@ def looks_like_openai_key(key):
 
 
 def verify_openai_key(key):
-    """Check a key against OpenAI. Returns (ok, message, fail_reason).
+    """Check a key against OpenAI. Returns (ok, message, status).
 
-    fail_reason is a coarse analytics tag (invalid_key / no_billing / network /
-    other) when ok is False, else None. Never carries key material.
+    `status` is a coarse analytics tag, never key material:
+      success — verified | no_billing | unverified_network
+      failure — invalid_key | other (and rarely network-shaped rejects)
 
     Done at save time rather than at transcription time: previously the first
     signal that a key was wrong came minutes later, after picking an episode and
@@ -709,16 +710,16 @@ def verify_openai_key(key):
             e, (APIConnectionError, APITimeoutError))
         if unreachable:
             return True, ('Key saved, but OpenAI could not be reached to verify it. '
-                          'If transcription fails, re-check the key here.'), None
+                          'If transcription fails, re-check the key here.'), 'unverified_network'
         if status == 429:
             # The key authenticated; the account is just out of credit or rate
             # limited. Refusing the save would leave them unable to store a
             # working key at all.
             return True, ('Key saved. Note: ' +
-                          describe_openai_error(e, context='verify')), None
+                          describe_openai_error(e, context='verify')), 'no_billing'
         return (False, describe_openai_error(e, context='verify'),
                 product_analytics.openai_fail_reason(e, looks_like_key=True))
-    return True, 'API key verified.', None
+    return True, 'API key verified.', 'verified'
 
 
 # ---------------------------------------------------------------------------
@@ -1195,9 +1196,6 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
         transcription_time=elapsed,
         completed_at=datetime.now(timezone.utc),
     )
-    done = db.session.get(TranscriptionTask, task_id)
-    if done and done.user_id:
-        product_analytics.capture('transcript_completed', done.user_id)
 
     if os.path.exists(audio_file):
         os.remove(audio_file)
@@ -1591,22 +1589,26 @@ def settings():
             flash('API key removed.', 'success')
             return redirect(url_for('settings'))
 
-        ok, message, fail_reason = verify_openai_key(api_key)
-        caveat = ok and not message.startswith('API key verified')
+        ok, message, status = verify_openai_key(api_key)
+        caveat = ok and status != 'verified'
         if not ok:
             # Never store a rejected key: it is frequently a password, and it
             # would otherwise sit in the database and fail again at transcribe time.
             product_analytics.capture(
                 'openai_key_validation_failed',
                 current_user.id,
-                {'reason': fail_reason or 'other'},
+                {'reason': status or 'other'},
             )
             flash(message, 'error')
             return redirect(url_for('settings'))
 
         current_user.openai_api_key = api_key
         db.session.commit()
-        product_analytics.capture('openai_key_saved', current_user.id)
+        product_analytics.capture(
+            'openai_key_saved',
+            current_user.id,
+            {'status': status or 'verified'},
+        )
         flash(message, 'warning' if caveat else 'success')
         return redirect(url_for('settings'))
 
@@ -1923,6 +1925,11 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
                     try:
                         download_audio(source_url, audio_filename, task_id)
                         transcribe_audio(audio_filename, task_id, openai_client, language=language)
+                        product_analytics.capture(
+                            'transcript_completed',
+                            user.id,
+                            {'key_source': key_source},
+                        )
                     except TaskAbandoned:
                         # The sweeper wrote the error and settled the charge. Refund
                         # anyway: it is idempotent, and it is the backstop if anything
@@ -1933,7 +1940,7 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
                             product_analytics.capture(
                                 'transcript_failed',
                                 abandoned.user_id,
-                                {'reason': 'abandoned'},
+                                {'reason': 'abandoned', 'key_source': key_source},
                             )
                     except Exception as e:
                         _update_task(task_id, status='error', phase='error',
@@ -1952,7 +1959,7 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
                             product_analytics.capture(
                                 'transcript_failed',
                                 failed.user_id,
-                                {'reason': reason},
+                                {'reason': reason, 'key_source': key_source},
                             )
                         # After the refund, and it cannot raise: reporting must
                         # never cost a user the allowance they are owed.
@@ -1981,7 +1988,8 @@ def enqueue_transcription(user, meta, rss_url=None, language=''):
         # The thread's finally owns the slot from here on.
         slot_held = False
 
-        product_analytics.capture('transcript_started', user.id)
+        product_analytics.capture(
+            'transcript_started', user.id, {'key_source': key_source})
         return {'task_id': task_id}, 200
     finally:
         # Handed to the worker thread on success -- slot_held goes False only
