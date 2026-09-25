@@ -194,6 +194,10 @@ The app includes a comprehensive help guide for finding RSS feeds from:
 - `SENTRY_DSN` — turns on error reporting. Production server only, never
   committed; unset means off. `SENTRY_ENVIRONMENT` defaults to `production`.
   See [ops/README.md](ops/README.md#error-reporting-sentry).
+- `POSTHOG_KEY` — PostHog project API key (`phc_…`). Turns on product analytics
+  and session replay. Unset means fully off (no client SDK, no server events).
+  `POSTHOG_HOST` defaults to `https://eu.i.posthog.com` (EU Cloud).
+  See [ops/README.md](ops/README.md#product-analytics-posthog).
 - `AGENT_API_KEY` / `AGENT_API_USER_ID` — internal CoS agent API only.
   See [docs/agent-api.md](docs/agent-api.md). Never commit values. Customers
   use a per-user key from Settings ([docs/customer-api.md](docs/customer-api.md)).

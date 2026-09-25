@@ -20,8 +20,10 @@ import pytest
 _TEST_DB = os.path.join(tempfile.mkdtemp(prefix='podskrift-test-'), 'test.db')
 os.environ['DATABASE_URL'] = f'sqlite:///{_TEST_DB}'
 # load_dotenv never overrides a set variable, so this keeps a developer's .env
-# from pointing the suite at the real Sentry project.
+# from pointing the suite at the real Sentry / PostHog projects.
 os.environ['SENTRY_DSN'] = ''
+os.environ['POSTHOG_KEY'] = ''
+os.environ['POSTHOG_HOST'] = ''
 
 import app as A  # noqa: E402 - must follow the DATABASE_URL assignment
 
@@ -536,8 +538,9 @@ def test_bad_shape_never_reaches_the_network(monkeypatch):
     def explode(*a, **kw):
         raise AssertionError('OpenAI must not be called for an obvious non-key')
     monkeypatch.setattr(A, 'OpenAI', explode)
-    ok, msg = A.verify_openai_key('Clashofc*ans1')
+    ok, msg, reason = A.verify_openai_key('Clashofc*ans1')
     assert ok is False
+    assert reason == 'invalid_key'
     assert 'sk-' in msg
 
 
@@ -732,8 +735,9 @@ def test_unreachable_openai_does_not_reject_the_key(monkeypatch):
         raise Down()
 
     monkeypatch.setattr(A, 'OpenAI', boom)
-    ok, msg = A.verify_openai_key('sk-' + 'a' * 40)
+    ok, msg, reason = A.verify_openai_key('sk-' + 'a' * 40)
     assert ok is True
+    assert reason is None
     assert 'could not be reached' in msg.lower()
 
 
@@ -843,8 +847,9 @@ def test_out_of_credit_key_is_still_saved(monkeypatch):
         raise RateLimited()
 
     monkeypatch.setattr(A, 'OpenAI', limited)
-    ok, msg = A.verify_openai_key('sk-' + 'c' * 40)
+    ok, msg, reason = A.verify_openai_key('sk-' + 'c' * 40)
     assert ok is True
+    assert reason is None
     assert 'credit' in msg.lower()
 
 
@@ -982,8 +987,9 @@ def test_out_of_credit_message_says_the_key_was_saved(monkeypatch):
 
     monkeypatch.setattr(A, 'OpenAI',
                         lambda *a, **kw: (_ for _ in ()).throw(RateLimited()))
-    ok, msg = A.verify_openai_key('sk-' + 'e' * 40)
+    ok, msg, reason = A.verify_openai_key('sk-' + 'e' * 40)
     assert ok is True
+    assert reason is None
     assert 'saved' in msg.lower()
 
 
@@ -4976,4 +4982,136 @@ def test_homepage_faq_mentions_api_and_docs(trial_on):
     home = A.app.test_client().get('/').data.decode()
     assert 'Is there an HTTP API?' in home
     assert 'Developers' not in home
+
+
+# --------------------------------------------------------------------------
+# Product analytics (PostHog)
+# --------------------------------------------------------------------------
+
+class _FakePosthog:
+    """Records capture() calls without touching the network."""
+
+    def __init__(self):
+        self.events = []
+
+    def capture(self, event, distinct_id=None, properties=None, **kwargs):
+        self.events.append({
+            'event': event,
+            'distinct_id': distinct_id,
+            'properties': dict(properties or {}),
+        })
+
+
+@pytest.fixture
+def ph_events(monkeypatch):
+    import analytics
+    fake = _FakePosthog()
+    monkeypatch.setattr(analytics, '_client', fake)
+    yield fake
+    monkeypatch.setattr(analytics, '_client', False)
+
+
+def test_posthog_stays_off_without_a_key():
+    import analytics
+    assert analytics.posthog_key() == ''
+    assert analytics.get_client() is None
+    # Must not raise and must not invent a client.
+    analytics.capture('user_signed_up', 1)
+    body = A.app.test_client().get('/').data.decode()
+    assert 'posthog.init' not in body
+    assert 'phc_' not in body
+
+
+def test_posthog_snippet_renders_when_key_is_set(monkeypatch):
+    monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
+    monkeypatch.setenv('POSTHOG_HOST', 'https://eu.i.posthog.com')
+    body = A.app.test_client().get('/').data.decode()
+    assert 'posthog.init' in body
+    assert 'phc_test_public_key' in body
+    assert 'https://eu.i.posthog.com' in body
+    assert 'maskAllInputs: true' in body
+    assert "maskTextSelector: '.ph-no-capture, .transcript-pane'" in body
+
+
+def test_openai_key_field_is_marked_for_replay_masking():
+    uid = _make_user('phmask@test.com')
+    body = _login(uid).get('/settings').data.decode()
+    assert 'id="openai_api_key"' in body
+    assert 'ph-no-capture' in body
+    # password-type input → maskAllInputs / maskInputOptions.password cover it
+    assert 'type="password"' in body
+    assert 'name="openai_api_key"' in body
+
+
+def test_signup_emits_user_signed_up(ph_events):
+    A._register_attempts.clear()
+    client = A.app.test_client()
+    resp = client.post('/register', data={
+        'email': 'phsignup@example.com',
+        'password': 'password123',
+        'password2': 'password123',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    events = [e for e in ph_events.events if e['event'] == 'user_signed_up']
+    assert len(events) == 1
+    assert events[0]['distinct_id']
+    # No email/name in properties
+    assert 'email' not in events[0]['properties']
+    assert 'name' not in events[0]['properties']
+
+
+def test_settings_view_and_key_save_events(ph_events, monkeypatch):
+    uid = _make_user('phsettings@test.com')
+
+    def ok_verify(key):
+        return True, 'API key verified.', None
+    monkeypatch.setattr(A, 'verify_openai_key', ok_verify)
+
+    client = _login(uid)
+    client.get('/settings')
+    assert any(e['event'] == 'settings_viewed' and e['distinct_id'] == str(uid)
+               for e in ph_events.events)
+
+    client.post('/settings', data={'openai_api_key': 'sk-' + 'f' * 40},
+                follow_redirects=True)
+    assert any(e['event'] == 'openai_key_saved' and e['distinct_id'] == str(uid)
+               for e in ph_events.events)
+
+
+def test_rejected_key_emits_validation_failed_with_coarse_reason(ph_events, monkeypatch):
+    uid = _make_user('phbadkey@test.com')
+
+    def bad_verify(key):
+        return False, 'rejected', 'invalid_key'
+    monkeypatch.setattr(A, 'verify_openai_key', bad_verify)
+
+    _login(uid).post('/settings', data={'openai_api_key': 'not-a-key'},
+                     follow_redirects=True)
+    fails = [e for e in ph_events.events if e['event'] == 'openai_key_validation_failed']
+    assert len(fails) == 1
+    assert fails[0]['properties'] == {'reason': 'invalid_key'}
+    # Never echo the submitted value
+    assert 'not-a-key' not in str(fails[0])
+
+
+def test_openai_fail_reason_is_coarse():
+    import analytics
+    class E401(Exception):
+        status_code = 401
+    class E429(Exception):
+        status_code = 429
+    class E503(Exception):
+        status_code = 503
+    assert analytics.openai_fail_reason(E401()) == 'invalid_key'
+    assert analytics.openai_fail_reason(E429()) == 'no_billing'
+    assert analytics.openai_fail_reason(E503()) == 'network'
+    assert analytics.openai_fail_reason(None, looks_like_key=False) == 'invalid_key'
+    assert analytics.openai_fail_reason(RuntimeError('boom')) == 'other'
+
+
+def test_privacy_page_mentions_posthog():
+    body = A.app.test_client().get('/privacy').data.decode()
+    assert 'PostHog' in body
+    assert 'EU' in body
+    assert 'session replay' in body.lower()
 

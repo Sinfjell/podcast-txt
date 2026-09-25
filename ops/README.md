@@ -11,7 +11,7 @@ short HEAD SHA. Manual re-run: Actions → **Deploy production** →
 
 No `pip install` — same as the current pull+restart. If a change needs new
 Python deps, install them on the host once (as the app user / into `.venv`)
-before or right after that deploy; see Sentry install notes below.
+before or right after that deploy; see Sentry / PostHog install notes below.
 
 ### GitHub secrets (Settings → Secrets and variables → Actions)
 
@@ -129,6 +129,30 @@ test check event above must arrive with its fake key as `[redacted]`.
 
 If sentry-sdk is missing from the venv the app still boots and logs an error
 that reporting is off -- a deploy that skips `pip install` degrades, not dies.
+
+## Product analytics (PostHog)
+
+Project on PostHog EU Cloud (`https://eu.i.posthog.com`). Used for funnel
+events (signup → settings → OpenAI key → first transcript) and session replay.
+Unset `POSTHOG_KEY` means fully off: no client snippet, no server captures, no
+network calls — how local and current production behave until you set it.
+
+Privacy defaults: session replay masks all inputs; email / password / OpenAI
+key fields also carry `ph-no-capture`; network request bodies are stripped.
+Users are identified by internal user id only (never email/name as person
+properties). Event properties never include API keys, emails, or transcript
+text. See `/privacy`.
+
+```bash
+# once, as root, from the app directory
+.venv/bin/pip install -r requirements.txt
+printf 'POSTHOG_KEY=phc_...\nPOSTHOG_HOST=https://eu.i.posthog.com\n' >> .env
+systemctl restart podskrift
+```
+
+`analytics.py` owns the server SDK (soft import, like Sentry). The browser
+snippet lives in `templates/base.html` and only renders when `POSTHOG_KEY` is
+set.
 
 ## Notion daily metrics
 
