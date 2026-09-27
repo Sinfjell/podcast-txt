@@ -197,30 +197,39 @@ count before “stopped” / sharp drop; failure-rate delta vs baseline.
 
 ```bash
 cd /var/www/vhosts/podskrift.nettsmed.dev/app
-cp ops/env.metrics.example ops/.env.metrics
+cp ops/env.metrics.example .env.metrics
 # paste the Notion integration token; leave the database id as-is unless it moves
 # optional: POSTHOG_PERSONAL_API_KEY (personal key, query:read) for the health check
-chmod 600 ops/.env.metrics
-mkdir -p data/logs
+chmod 600 .env.metrics
 ```
 
-Never commit `ops/.env.metrics` — it holds `NOTION_TOKEN` and the optional
+The script reads the first file it finds: `ops/.env.metrics`, then
+`$APP_DIR/.env.metrics`. Production uses `.env.metrics` in the app root
+(root-owned, `600`); there is no `ops/.env.metrics` on the host. Variables
+already set in the environment win over the file.
+
+Never commit `.env.metrics` — it holds `NOTION_TOKEN` and the optional
 PostHog personal key.
 
-### Cron (Europe/Oslo, weekdays)
+### Cron (root crontab, weekdays)
+
+The host runs in UTC, so the schedule is in UTC. The script computes the
+metric day in Europe/Oslo itself (default: yesterday), so the crontab needs no
+`TZ`:
 
 ```cron
-50 7 * * 1-5  cd /var/www/vhosts/podskrift.nettsmed.dev/app && TZ=Europe/Oslo ./ops/notion-daily-metrics.sh >> data/logs/notion-daily-metrics.log 2>&1
+# Podskrift Notion daily metrics — 05:50 UTC = 07:50 Europe/Oslo in CEST (06:50 in CET); always before 08:00 digest
+50 5 * * 1-5 cd /var/www/vhosts/podskrift.nettsmed.dev/app && /usr/bin/python3 ops/notion-daily-metrics.py >> /var/log/podskrift-metrics.log 2>&1
 ```
 
-If the crontab cannot set `TZ` per line, set `CRON_TZ=Europe/Oslo` at the top
-of the crontab instead. Default metric day is yesterday in that timezone.
+Log: `/var/log/podskrift-metrics.log`.
 
 ### Dry-run
 
 ```bash
-DRY_RUN=1 ./ops/notion-daily-metrics.sh
-DRY_RUN=1 ./ops/notion-daily-metrics.sh --day 2026-09-10
+cd /var/www/vhosts/podskrift.nettsmed.dev/app
+DRY_RUN=1 /usr/bin/python3 ops/notion-daily-metrics.py
+DRY_RUN=1 /usr/bin/python3 ops/notion-daily-metrics.py --day 2026-09-10
 ```
 
 Prints the JSON metrics payload, any would-be Notes warning lines, and skips
