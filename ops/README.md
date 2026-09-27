@@ -174,17 +174,38 @@ Weekday cron upserts one row into the Podskrift daily metrics Notion database
 (signups, completions, trial burn, etc.). Read-only against SQLite; Python 3
 stdlib only.
 
+Each run also hits PostHog EU (HogQL) for a short health check: whether
+productivitytech.io is sending events / `cta_clicked`, whether Podskrift sees
+`utm_source=productivitytech` referrals, whether named Podskrift funnel events
+have stopped or fallen sharply vs a 14-day baseline, and whether
+`transcript_failed` rates (overall and per `reason`) spiked. Podskrift queries
+exclude the same internal cohort as dashboard
+[Podskrift — aktivering](https://eu.posthog.com/project/283916/dashboard/975121)
+(`filterTestAccounts` → cohort «Internal / Test users»).
+
+Warnings go only to the Notion `Notes` property (Norwegian lines, ⚠️-prefixed,
+capped at 2000 chars). No Notes write when everything looks fine. A missing
+`POSTHOG_PERSONAL_API_KEY`, timeout, or API error still upserts metrics and
+writes one “helsesjekk kjørte ikke” line. No email/Slack/webhooks.
+
+Thresholds (named constants in `ops/posthog_daily_health.py`): check window =
+metric day, or 3 days when the metric day is Sunday (covers Fri–Sat which the
+weekday cron never rows alone); baseline = previous 14 days; minimum baseline
+count before “stopped” / sharp drop; failure-rate delta vs baseline.
+
 ### Install (once, on the host)
 
 ```bash
 cd /var/www/vhosts/podskrift.nettsmed.dev/app
 cp ops/env.metrics.example ops/.env.metrics
 # paste the Notion integration token; leave the database id as-is unless it moves
+# optional: POSTHOG_PERSONAL_API_KEY (personal key, query:read) for the health check
 chmod 600 ops/.env.metrics
 mkdir -p data/logs
 ```
 
-Never commit `ops/.env.metrics` — it holds `NOTION_TOKEN`.
+Never commit `ops/.env.metrics` — it holds `NOTION_TOKEN` and the optional
+PostHog personal key.
 
 ### Cron (Europe/Oslo, weekdays)
 
@@ -202,5 +223,5 @@ DRY_RUN=1 ./ops/notion-daily-metrics.sh
 DRY_RUN=1 ./ops/notion-daily-metrics.sh --day 2026-09-10
 ```
 
-Prints the JSON payload and skips the Notion write. Useful after a deploy
-before enabling the cron.
+Prints the JSON metrics payload, any would-be Notes warning lines, and skips
+the Notion write. Useful after a deploy before enabling the cron.

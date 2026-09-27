@@ -4,13 +4,21 @@
 Python 3 stdlib only (sqlite3, urllib). Read-only against the SQLite database.
 Timezone for the metric day is Europe/Oslo; default day is yesterday.
 
+Each run also queries PostHog (EU) for a short product-health check. When
+something looks abnormal — or the check cannot run — warning lines are written
+to the Notion rich-text property Notes (Norwegian, under 2000 chars). When
+everything is fine, Notes is omitted so manual notes stay untouched. A missing
+PostHog key, timeout, or API error never blocks the metrics upsert.
+
 Run via ops/notion-daily-metrics.sh on the host, or:
 
     DRY_RUN=1 python3 ops/notion-daily-metrics.py
     python3 ops/notion-daily-metrics.py --day 2026-09-10
 
 Requires ops/.env.metrics (or $APP_DIR/.env.metrics) with NOTION_TOKEN.
-Do not set the Entity relation — the integration is database-scoped only.
+Optional: POSTHOG_PERSONAL_API_KEY (query:read), POSTHOG_PROJECT_ID,
+POSTHOG_HOST. Do not set the Entity relation — the integration is database-scoped
+only.
 """
 
 from __future__ import annotations
@@ -25,6 +33,10 @@ import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+# Sibling module (ops/ is not a package).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import posthog_daily_health as phh  # noqa: E402
 
 OSLO = ZoneInfo('Europe/Oslo')
 UTC = timezone.utc
@@ -230,7 +242,12 @@ def collect_metrics(conn: sqlite3.Connection, day: date,
     }
 
 
-def notion_properties(metrics: dict, source: str, synced_at: datetime) -> dict:
+def notion_properties(
+    metrics: dict,
+    source: str,
+    synced_at: datetime,
+    notes_content: str | None = None,
+) -> dict:
     day = metrics['day']
     props = {
         'Name': {'title': [{'type': 'text', 'text': {'content': day}}]},
@@ -256,6 +273,10 @@ def notion_properties(metrics: dict, source: str, synced_at: datetime) -> dict:
         'Saved feeds',
     ):
         props[key] = {'number': metrics[key]}
+    # Only set Notes when the health check produced warnings — omit otherwise
+    # so a manual note on the row is left untouched.
+    if notes_content:
+        props['Notes'] = phh.notes_rich_text_property(notes_content)
     return props
 
 
@@ -295,9 +316,15 @@ def find_page_id(token: str, database_id: str, day: str) -> str | None:
     return results[0]['id']
 
 
-def upsert_notion(token: str, database_id: str, metrics: dict, source: str) -> str:
+def upsert_notion(
+    token: str,
+    database_id: str,
+    metrics: dict,
+    source: str,
+    notes_content: str | None = None,
+) -> str:
     synced_at = datetime.now(UTC)
-    props = notion_properties(metrics, source, synced_at)
+    props = notion_properties(metrics, source, synced_at, notes_content=notes_content)
     page_id = find_page_id(token, database_id, metrics['day'])
     if page_id:
         notion_request(
@@ -318,6 +345,95 @@ def upsert_notion(token: str, database_id: str, metrics: dict, source: str) -> s
         },
     )
     return 'created'
+
+
+def posthog_query(host: str, project_id: str, api_key: str, hogql: str) -> list:
+    """Run one HogQL query via the PostHog query API. Raises on HTTP/parse errors."""
+    url = f'{host.rstrip("/")}/api/projects/{project_id}/query/'
+    body = {'query': {'kind': 'HogQLQuery', 'query': hogql}}
+    data = json.dumps(body).encode('utf-8')
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method='POST',
+        headers={
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+        },
+    )
+    with urllib.request.urlopen(req, timeout=phh.POSTHOG_QUERY_TIMEOUT_SEC) as resp:
+        payload = json.loads(resp.read().decode('utf-8'))
+    # HogQL query endpoint returns {"results": [[...], ...], "columns": [...]}
+    rows = payload.get('results')
+    if rows is None:
+        rows = payload.get('result') or []
+    return rows
+
+
+def _health_error_reason(exc: BaseException) -> str:
+    if isinstance(exc, urllib.error.HTTPError):
+        return f'PostHog HTTP {exc.code}'
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, 'reason', exc)
+        return f'PostHog nettverksfeil ({reason})'
+    if isinstance(exc, TimeoutError):
+        return 'PostHog timeout'
+    msg = str(exc).strip() or exc.__class__.__name__
+    # Keep Notes short; never echo secrets.
+    if len(msg) > 120:
+        msg = msg[:117] + '...'
+    return msg
+
+
+def fetch_health_snapshot(metric_day: date, *, api_key: str, host: str,
+                          project_id: str) -> phh.HealthSnapshot:
+    window_days = phh.health_window_days(metric_day)
+    window_start, window_end, baseline_start, baseline_end = (
+        phh.window_and_baseline_bounds(metric_day, window_days=window_days)
+    )
+    queries = phh.build_health_queries(
+        window_start, window_end, baseline_start, baseline_end,
+    )
+    pt_rows = posthog_query(host, project_id, api_key, queries['pt_cta_utm'])
+    if not pt_rows:
+        pt_row: list | dict = [0, 0, 0, 0]
+    else:
+        pt_row = pt_rows[0]
+    cta_rows = posthog_query(host, project_id, api_key, queries['cta_breakdown'])
+    event_rows = posthog_query(host, project_id, api_key, queries['podskrift_events'])
+    fail_rows = posthog_query(host, project_id, api_key, queries['failed_reasons'])
+    return phh.snapshot_from_query_results(
+        window_days=window_days,
+        baseline_days=phh.HEALTH_BASELINE_DAYS,
+        pt_cta_utm_row=pt_row,
+        cta_breakdown_rows=cta_rows or [],
+        podskrift_event_rows=event_rows or [],
+        failed_reason_rows=fail_rows or [],
+    )
+
+
+def run_health_check(metric_day: date) -> list[str]:
+    """Return unprefixed warning lines. Never raises — fail soft into one line."""
+    try:
+        api_key = os.environ.get('POSTHOG_PERSONAL_API_KEY', '').strip()
+        if not api_key:
+            return [
+                'PostHog-helsesjekk kjørte ikke: POSTHOG_PERSONAL_API_KEY mangler',
+            ]
+        host = (
+            os.environ.get('POSTHOG_HOST', '').strip().rstrip('/')
+            or phh.DEFAULT_POSTHOG_HOST
+        )
+        project_id = (
+            os.environ.get('POSTHOG_PROJECT_ID', '').strip()
+            or phh.DEFAULT_POSTHOG_PROJECT_ID
+        )
+        snap = fetch_health_snapshot(
+            metric_day, api_key=api_key, host=host, project_id=project_id,
+        )
+        return phh.evaluate_health(snap)
+    except Exception as exc:  # noqa: BLE001 — health must never break metrics
+        return [f'PostHog-helsesjekk kjørte ikke: {_health_error_reason(exc)}']
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -346,7 +462,15 @@ def main(argv: list[str] | None = None) -> int:
     with open_db(db_path) as conn:
         metrics = collect_metrics(conn, day, trial_default_seconds)
 
+    # Health check after metrics collect; failures become a single Notes line.
+    health_lines = run_health_check(day)
+    notes_content = phh.format_notes_content(health_lines)
+
     print(json.dumps(metrics, indent=2, sort_keys=True))
+    if notes_content:
+        print(notes_content)
+    else:
+        print('# health: ok (no Notes)', file=sys.stderr)
     if env_path:
         print(f'# env: {env_path}', file=sys.stderr)
     print(f'# db: {db_path}', file=sys.stderr)
@@ -363,7 +487,9 @@ def main(argv: list[str] | None = None) -> int:
             '.env.metrics (mode 600) and fill in the token.'
         )
 
-    action = upsert_notion(token, database_id, metrics, source)
+    action = upsert_notion(
+        token, database_id, metrics, source, notes_content=notes_content,
+    )
     print(f'# notion: {action} for {metrics["day"]}', file=sys.stderr)
     return 0
 
