@@ -1595,16 +1595,25 @@ def logout():
 # Settings
 # ---------------------------------------------------------------------------
 
+def _openai_key_hint(user):
+    """Last-4 hint for a saved OpenAI key. Never return the full key to a template."""
+    key = getattr(user, 'openai_api_key', None) or ''
+    if len(key) < 4:
+        return ''
+    return key[-4:]
+
+
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required
 def settings():
     if request.method == 'POST':
         api_key = request.form.get('openai_api_key', '').strip()
 
+        # Empty field means "leave the saved key alone". Clearing used to be the
+        # same path, which meant a Save with the masked blank input wiped the
+        # key — and the full key must never be re-rendered into the form anyway.
         if not api_key:
-            current_user.openai_api_key = None
-            db.session.commit()
-            flash('API key removed.', 'success')
+            flash('No changes made.', 'success')
             return redirect(url_for('settings'))
 
         ok, message, status = verify_openai_key(api_key)
@@ -1637,7 +1646,21 @@ def settings():
         'settings.html',
         trial=_trial_context(),
         new_api_key=new_api_key,
+        openai_key_hint=_openai_key_hint(current_user),
     )
+
+
+@app.route('/settings/openai-key/remove', methods=['POST'])
+@login_required
+def settings_remove_openai_key():
+    """Explicitly drop the saved OpenAI key. Empty Save must not do this."""
+    if not current_user.openai_api_key:
+        flash('No OpenAI API key to remove.', 'info')
+        return redirect(url_for('settings'))
+    current_user.openai_api_key = None
+    db.session.commit()
+    flash('API key removed.', 'success')
+    return redirect(url_for('settings'))
 
 
 @app.route('/settings/api-key/generate', methods=['POST'])
@@ -1846,6 +1869,11 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
     if not audio_url or not _is_fetchable_url(audio_url):
         return {'error': 'That audio URL cannot be fetched.'}, 400
 
+    # Snapshot before the worker thread: callers may pass flask_login's
+    # current_user LocalProxy, which is None outside a request context.
+    # Evaluating .id inside the thread is what turned completed jobs into
+    # status=error with "'NoneType' object has no attribute 'id'".
+    user_id = user.id
     api_key, key_source = resolve_openai_key(user)
     if not api_key:
         return {
@@ -1892,16 +1920,16 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
             estimate = max(60, int((meta.get('duration_min') or 0) * 60)
                            or TRIAL_UNKNOWN_ESTIMATE_SECONDS)
             if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
-                _capture_trial_limit_hit(user.id, 'episode_length', 'start', source)
+                _capture_trial_limit_hit(user_id, 'episode_length', 'start', source)
                 return {'error': (
                     f'This episode runs {estimate // 60} minutes, past the '
                     f'{TRIAL_MAX_EPISODE_SECONDS // 60}-minute per-episode limit of the '
                     'free trial. Add your own OpenAI API key in Settings to transcribe it.'
                 )}, 402
-            if not trial_reserve(user.id, estimate):
+            if not trial_reserve(user_id, estimate):
                 _, _, remaining = trial_status(user)
                 scope = trial_refusal_scope(user, estimate)
-                _capture_trial_limit_hit(user.id, scope, 'start', source)
+                _capture_trial_limit_hit(user_id, scope, 'start', source)
                 if scope == 'user':
                     message = (
                         f'Your free trial has {remaining // 60} minutes left, and this '
@@ -1922,7 +1950,7 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
         try:
             task = TranscriptionTask(
                 id=task_id,
-                user_id=user.id,
+                user_id=user_id,
                 episode_title=meta.get('title') or 'Episode',
                 rss_url=rss_url,
                 status='downloading',
@@ -1942,7 +1970,7 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
         except Exception:
             db.session.rollback()
             if trial_charge:
-                trial_release(user.id, trial_charge)
+                trial_release(user_id, trial_charge)
             raise
 
         parsed_url = urlparse(meta['audio_url'])
@@ -1959,7 +1987,6 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                     try:
                         download_audio(source_url, audio_filename, task_id)
                         transcribe_audio(audio_filename, task_id, openai_client, language=language)
-                        product_analytics.capture('transcript_completed', user.id, ph_props)
                     except TaskAbandoned:
                         # The sweeper wrote the error and settled the charge. Refund
                         # anyway: it is idempotent, and it is the backstop if anything
@@ -1997,6 +2024,20 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                         # After the refund, and it cannot raise: reporting must
                         # never cost a user the allowance they are owed.
                         report_task_failure(e, task_id=task_id, key_source=key_source)
+                    else:
+                        # Outside the except that marks the job failed: analytics
+                        # must never be able to turn a completed transcript into
+                        # status=error (and must not trigger a trial refund).
+                        # user_id is a plain int snapshotted before the thread;
+                        # capture() also swallows, but keep a local guard so a
+                        # broken monkeypatch / SDK cannot fail the job either.
+                        try:
+                            product_analytics.capture(
+                                'transcript_completed', user_id, ph_props)
+                        except Exception:  # noqa: BLE001
+                            app.logger.exception(
+                                'transcript_completed analytics failed for %s',
+                                task_id)
                     finally:
                         if os.path.exists(audio_filename):
                             try:
@@ -2021,7 +2062,7 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
         # The thread's finally owns the slot from here on.
         slot_held = False
 
-        product_analytics.capture('transcript_started', user.id, ph_props)
+        product_analytics.capture('transcript_started', user_id, ph_props)
         return {'task_id': task_id}, 200
     finally:
         # Handed to the worker thread on success -- slot_held goes False only

@@ -15,14 +15,17 @@
                 <div class="form-group">
                     <label class="form-label" for="openai_api_key">OpenAI API Key</label>
                     <input type="password" class="form-input ph-no-capture" id="openai_api_key" name="openai_api_key"
-                           value="{{ current_user.openai_api_key or '' }}"
-                           placeholder="sk-..." autocomplete="off" data-ph-no-capture>
+                           value=""
+                           placeholder="{% if openai_key_hint %}••••{{ openai_key_hint }}{% else %}sk-...{% endif %}"
+                           autocomplete="off" data-ph-no-capture>
                     <p class="form-hint">
                         With your own key, Podskrift stays free — OpenAI bills you for Whisper
                         (about $0.36 per hour of audio).
                         <a href="https://platform.openai.com/api-keys" target="_blank">Get a key</a>.
                         {% if current_user.openai_api_key %}
-                        <br>You're on your own key; nothing is metered against the trial.
+                        <br>Key saved{% if openai_key_hint %} (ends in {{ openai_key_hint }}){% endif %}.
+                        Leave blank to keep it; paste a new key to replace it.
+                        You're on your own key; nothing is metered against the trial.
                         {% else %}
                         <br><span style="color: var(--warning);">
                             {% if trial %}No key saved — you're on the free trial below.
@@ -35,6 +38,13 @@
                 </div>
                 <button type="submit" class="btn btn-primary">Save</button>
             </form>
+            {% if current_user.openai_api_key %}
+            <form method="POST" action="{{ url_for('settings_remove_openai_key') }}"
+                  style="margin-top: 12px;"
+                  onsubmit="return confirm('Remove your OpenAI API key? You will fall back to the free trial if it is available.');">
+                <button type="submit" class="btn btn-ghost">Remove key</button>
+            </form>
+            {% endif %}
         </div>
     </div>
 
