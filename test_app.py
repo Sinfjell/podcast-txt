@@ -5043,6 +5043,40 @@ def test_openai_key_field_is_marked_for_replay_masking():
     assert 'name="openai_api_key"' in body
 
 
+def test_settings_never_renders_the_full_openai_key():
+    """The raw key used to be stuffed into value=""; it must never reach the browser."""
+    key = 'sk-' + 'k' * 40
+    uid = _make_user('keymask@test.com', key=key)
+    body = _login(uid).get('/settings').data.decode()
+    assert key not in body
+    assert f'••••{key[-4:]}' in body
+    assert 'Key saved' in body
+    assert 'value=""' in body
+    assert 'Remove key' in body
+    assert 'ph-no-capture' in body
+    assert 'type="password"' in body
+
+
+def test_settings_empty_save_keeps_the_openai_key(monkeypatch):
+    key = 'sk-' + 'm' * 40
+    uid = _make_user('keykeep@test.com', key=key)
+    client = _login(uid)
+    client.post('/settings', data={'openai_api_key': ''}, follow_redirects=True)
+    with A.app.app_context():
+        assert A.db.session.get(A.User, uid).openai_api_key == key
+
+
+def test_settings_explicit_remove_clears_the_openai_key():
+    key = 'sk-' + 'n' * 40
+    uid = _make_user('keyrm@test.com', key=key)
+    client = _login(uid)
+    resp = client.post('/settings/openai-key/remove', follow_redirects=True)
+    assert resp.status_code == 200
+    assert b'API key removed' in resp.data
+    with A.app.app_context():
+        assert A.db.session.get(A.User, uid).openai_api_key is None
+
+
 def test_signup_emits_user_signed_up(ph_events):
     A._register_attempts.clear()
     client = A.app.test_client()
@@ -5161,7 +5195,125 @@ def test_transcript_completed_includes_key_source(ph_events, monkeypatch, trial_
     assert status == 200 and 'task_id' in payload
     completed = [e for e in ph_events.events if e['event'] == 'transcript_completed']
     assert len(completed) == 1
+    assert completed[0]['distinct_id'] == str(uid)
     assert completed[0]['properties'] == {'key_source': 'user', 'source': 'web'}
+
+
+def test_transcript_completed_outside_request_context(ph_events, monkeypatch, trial_on):
+    """Background worker must not read flask_login.current_user after the request.
+
+    Production passes the LocalProxy into enqueue_transcription. Evaluating
+    user.id in the thread (no request context) raised
+    "'NoneType' object has no attribute 'id'", which the except path turned
+    into status=error even though the transcript was already saved — and then
+    tried a trial refund on a finished job.
+    """
+    import types
+    from flask_login import current_user, login_user
+    from models import db, TranscriptionTask
+
+    uid = _make_user('phproxy@test.com', limit=3600)  # trial path, no own key
+    deferred = []
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: deferred.append(target)))
+    monkeypatch.setattr(A, 'download_audio', lambda *a, **kw: None)
+
+    def finish(audio_file, task_id, openai_client, language=None):
+        # Mimic a successful Whisper run: transcript saved, charge still open
+        # (trial_settled stays False until refund/settle — same as production).
+        A._update_task(
+            task_id,
+            status='completed',
+            phase='completed',
+            progress=100,
+            transcript_text='done',
+            chunk_total=1,
+            chunk_index=0,
+        )
+
+    monkeypatch.setattr(A, 'transcribe_audio', finish)
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+
+    with A.app.test_request_context('/start_transcription'):
+        user = db.session.get(A.User, uid)
+        login_user(user)
+        # Same object the web route passes: the LocalProxy, not a detached User.
+        payload, status = A.enqueue_transcription(
+            current_user,
+            {'title': 'Ep', 'audio_url': 'https://example.com/ep.mp3',
+             'duration_min': 1},
+        )
+    assert status == 200 and 'task_id' in payload
+    assert deferred, 'worker was never scheduled'
+    # Request context is gone — this is the production failure mode.
+    deferred[0]()
+
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, payload['task_id'])
+        assert task.status == 'completed', task.error_message
+        assert task.transcript_text == 'done'
+        assert task.error_message is None
+        # Full episode reached Whisper; allowance stays charged (no false refund).
+        assert task.trial_seconds_charged and task.trial_seconds_charged > 0
+        charged = task.trial_seconds_charged
+        assert task.trial_settled is False
+    assert _used(uid) == charged
+
+    completed = [e for e in ph_events.events if e['event'] == 'transcript_completed']
+    assert len(completed) == 1
+    assert completed[0]['distinct_id'] == str(uid)
+    assert completed[0]['properties'] == {'key_source': 'trial', 'source': 'web'}
+    assert not [e for e in ph_events.events if e['event'] == 'transcript_failed']
+
+
+def test_analytics_raise_after_success_cannot_fail_the_job(monkeypatch, trial_on):
+    """Even a broken capture() must leave status=completed and the charge alone."""
+    import types
+    from models import db, TranscriptionTask
+
+    uid = _make_user('phanalyticboom@test.com', limit=3600)
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: target and target()))
+    monkeypatch.setattr(A, 'download_audio', lambda *a, **kw: None)
+
+    def finish(audio_file, task_id, openai_client, language=None):
+        A._update_task(
+            task_id, status='completed', phase='completed', progress=100,
+            transcript_text='ok', chunk_total=1, chunk_index=0)
+
+    monkeypatch.setattr(A, 'transcribe_audio', finish)
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+
+    real_capture = A.product_analytics.capture
+
+    def boom(event, distinct_id=None, properties=None):
+        if event == 'transcript_completed':
+            raise RuntimeError('posthog down')
+        return real_capture(event, distinct_id, properties)
+
+    monkeypatch.setattr(A.product_analytics, 'capture', boom)
+
+    used_before = None
+    with A.app.app_context():
+        user = db.session.get(A.User, uid)
+        used_before = user.trial_seconds_used
+        payload, status = A.enqueue_transcription(
+            user,
+            {'title': 'Ep', 'audio_url': 'https://example.com/ep.mp3',
+             'duration_min': 1},
+        )
+    assert status == 200
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, payload['task_id'])
+        assert task.status == 'completed'
+        assert task.transcript_text == 'ok'
+        charged = task.trial_seconds_charged
+        assert task.trial_settled is False
+    assert _used(uid) == used_before + charged
 
 
 def test_openai_fail_reason_is_coarse():
