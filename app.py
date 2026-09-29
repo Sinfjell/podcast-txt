@@ -2910,7 +2910,8 @@ def use_feed(feed_id):
         rss_url=feed.rss_url,
         feed_name=feed.name,
         has_more=has_more,
-        needs_api_key=not _user_has_api_key(),
+        needs_api_key=_episode_paywall_needed(),
+        show_openai_cost=_show_openai_cost_estimates(),
         podcast_name=episodes[0].get('podcast_name') or feed.name,
         artwork=episodes[0].get('artwork') or '',
         languages=language_choices(),
@@ -3013,6 +3014,25 @@ def _user_has_api_key():
     return False
 
 
+def _episode_paywall_needed():
+    """Show the episode-picker "Out of free minutes" card?
+
+    Only for logged-in users who cannot start (no own key, no trial, no paid).
+    Logged-out visitors still have the signup/trial path — Start Transcription
+    stashes the episode and sends them to register — so they must not see a
+    paywall that claims they are out of minutes they have not claimed yet.
+    """
+    return current_user.is_authenticated and not _user_has_api_key()
+
+
+def _show_openai_cost_estimates():
+    """Dollar Whisper estimates are only meaningful for own-key users."""
+    return (
+        current_user.is_authenticated
+        and bool(getattr(current_user, 'openai_api_key', None))
+    )
+
+
 def _minutes_limit_actions(user_id, location='enqueue'):
     """CTA payload for out-of-minutes messages: Buy (if configured) + add key."""
     actions = []
@@ -3099,7 +3119,8 @@ def parse_rss():
         all_episodes=episodes,
         rss_url=rss_url,
         has_more=has_more,
-        needs_api_key=not _user_has_api_key(),
+        needs_api_key=_episode_paywall_needed(),
+        show_openai_cost=_show_openai_cost_estimates(),
         podcast_name=episodes[0].get('podcast_name') or '',
         artwork=episodes[0].get('artwork') or '',
         languages=language_choices(),
