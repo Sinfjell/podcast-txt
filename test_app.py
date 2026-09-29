@@ -4929,7 +4929,7 @@ def test_public_api_docs_seo_metadata_and_intro(trial_on):
     assert (
         'content="Podcast transcription API for agents and scripts. '
         'Resolve by show and date, start Whisper, fetch the transcript via HTTP. '
-        'Free 60-minute trial. API key in Settings."'
+        'Free 180-minute trial. API key in Settings."'
     ) in body
     assert 'content="Podcast Transcript API — Podskrift"' in body
     assert (
@@ -4941,7 +4941,7 @@ def test_public_api_docs_seo_metadata_and_intro(trial_on):
         'Podskrift’s podcast transcription API lets agents and scripts get a transcript '
         'over HTTP — the same path as the web UI. Resolve an episode by publisher/show '
         'and date (or URL), start Whisper, poll until ready, then fetch the plain-text '
-        'transcript. New accounts get 60 free trial minutes on our OpenAI key; after that, '
+        'transcript. New accounts get 180 free trial minutes on our OpenAI key; after that, '
         'add your own. Create a <code>psk_…</code> key in Settings.'
     )
     assert intro in body
@@ -5715,3 +5715,21 @@ def test_own_key_user_gets_null_trial_badge(trial_on):
 def test_anon_homepage_exposes_new_account_trial_badge(trial_on):
     body = A.app.test_client().get('/').data.decode()
     assert f'var TRIAL_REMAINING_MIN = {A.TRIAL_DEFAULT_SECONDS // 60};' in body
+
+
+def test_default_trial_grant_is_three_hours():
+    """New-account allowance is 180 minutes; the per-episode cap stays 180 too."""
+    assert A.TRIAL_DEFAULT_SECONDS == 180 * 60
+    assert A.TRIAL_MAX_EPISODE_SECONDS == 180 * 60
+
+
+def test_null_limit_accounts_pick_up_the_raised_default(monkeypatch, trial_on):
+    """users.trial_seconds_limit NULL means "use TRIAL_MINUTES" — raising the
+    constant lifts every existing account without resetting trial_seconds_used."""
+    monkeypatch.setattr(A, 'TRIAL_DEFAULT_SECONDS', 180 * 60)
+    uid = _make_user('lift-default@test.com', limit=None, used=600)
+    with A.app.app_context():
+        limit, used, remaining = A.trial_status(A.db.session.get(A.User, uid))
+    assert limit == 180 * 60
+    assert used == 600
+    assert remaining == 180 * 60 - 600

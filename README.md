@@ -212,7 +212,7 @@ claims, which a caller controls.
 | Variable | Default | What it bounds |
 | --- | --- | --- |
 | `TRIAL_ENABLED` | `1` | Kill switch. `0` stops handing out the key. |
-| `TRIAL_MINUTES` | `60` | Free audio minutes per account (~$0.36 each). |
+| `TRIAL_MINUTES` | `180` | Free audio minutes per account (~$1.08 at Whisper rates). |
 | `TRIAL_GLOBAL_MINUTES` | `600` | **Lifetime** minutes across all accounts (~$3.60). |
 | `TRIAL_MAX_EPISODE_MINUTES` | `180` | Longest single episode the trial accepts. |
 | `TRIAL_UNKNOWN_ESTIMATE_MINUTES` | `30` | Reserved when a feed states no duration. |
@@ -221,7 +221,7 @@ claims, which a caller controls.
 resets it on a schedule. It counts minutes actually *spent*: a job that fails
 before transcribing gives its reservation back, so the ceiling tracks the bill
 rather than the attempts. That is deliberate — the failure mode is "the trial
-stops working", never "the bill kept growing". At the defaults, ten accounts
+stops working", never "the bill kept growing". At the defaults, a handful of accounts
 using their full grant exhaust it.
 Raising the env var re-opens it.
 

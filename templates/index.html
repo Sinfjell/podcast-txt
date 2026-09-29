@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}Spotify & podcast transcripts — Podskrift{% endblock %}
-{% block meta_description %}Paste a Spotify episode link or search any podcast, and get the full transcript as text and .srt. {{ language_count }} languages, powered by OpenAI Whisper.{% if trial_minutes %} First {{ trial_minutes }} minutes free.{% endif %}{% endblock %}
+{% block meta_description %}Paste a Spotify episode link or search any podcast, and get the full transcript as text and .srt. {{ language_count }} languages, powered by OpenAI Whisper.{% if trial_minutes %} First {{ trial_minutes }} minutes free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.{% endif %}{% endblock %}
 {% block og_title %}Spotify & podcast transcripts — Podskrift{% endblock %}
 {% block og_description %}Paste a Spotify link or search any podcast — get the full transcript.{% if trial_minutes %} First {{ trial_minutes }} minutes free.{% endif %}{% endblock %}
 
@@ -17,7 +17,7 @@
     </p>
     {% if trial_minutes %}
     <p style="color: var(--muted); font-size: 14px; margin-top: 6px; max-width: 520px; line-height: 1.5; opacity: 0.85;">
-        First {{ trial_minutes }} minutes of audio free — no card, no OpenAI key needed to start.
+        First {{ trial_minutes }} minutes of audio free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} — no card, no OpenAI key needed to start.
     </p>
     {% endif %}
 </div>
@@ -88,8 +88,9 @@
         <div id="searchResults"></div>
         {% if trial_minutes %}
         <p class="form-hint" style="margin-top: 12px;">
-            The free trial covers {{ trial_minutes }} minutes of audio in total, so one episode up to about an hour.
-            For longer episodes, add your own OpenAI API key: a 90-minute episode costs about ${{ openai_90min_cost }} at OpenAI's rate.
+            The free trial covers {{ trial_minutes }} minutes of audio in total{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.
+            For longer episodes, or once the trial is used up, add your own OpenAI API key:
+            a 90-minute episode costs about ${{ openai_90min_cost }} at OpenAI's rate.
         </p>
         {% endif %}
     </div>
@@ -116,7 +117,7 @@
     <div class="card-body text-center" style="padding: 32px 20px;">
         <p class="text-muted mb-1">
             {% if trial_minutes %}
-            Free account, {{ trial_minutes }} free minutes. After that, add your own OpenAI key
+            Free account, {{ trial_minutes }} free minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}. After that, add your own OpenAI key
             and pay OpenAI directly — about ${{ openai_hourly_cost }} per hour of audio. No subscription.
             {% else %}
             Free account — no Podskrift subscription. Add your own OpenAI API key
@@ -141,7 +142,7 @@
         <div style="font-size: 13.5px; color: var(--muted); padding: 8px 0;">
             <span style="color: var(--accent-bright); font-weight: 600;">2.</span>
             {% if trial_minutes %}
-            Create a free account and press Transcribe. Your first {{ trial_minutes }} minutes run on our key.
+            Create a free account and press Transcribe. Your first {{ trial_minutes }} minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} run on our key.
             {% else %}
             Create a free account, add your OpenAI key, and press Transcribe.
             {% endif %}

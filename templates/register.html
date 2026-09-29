@@ -28,7 +28,7 @@
             </form>
             <p class="form-hint" style="margin-top: 14px; margin-bottom: 0;">
                 {% if trial_minutes %}
-                Create a free account to start your transcript. Includes {{ trial_minutes }} free minutes of audio — no card, no OpenAI key needed.
+                Create a free account to start your transcript. Includes {{ trial_minutes }} free minutes of audio{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} — no card, no OpenAI key needed.
                 {% else %}
                 Create a free account to start your transcript. Add your own OpenAI API key in Settings — you only pay OpenAI for Whisper.
                 {% endif %}

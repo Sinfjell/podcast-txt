@@ -404,7 +404,7 @@ def _env_minutes(name, default):
 
 
 #: Free audio minutes granted to an account with no key of its own.
-TRIAL_DEFAULT_SECONDS = _env_minutes('TRIAL_MINUTES', 60) * 60
+TRIAL_DEFAULT_SECONDS = _env_minutes('TRIAL_MINUTES', 180) * 60
 #: Hard ceiling on trial minutes across ALL accounts. Without this, the per-user
 #: cap bounds nothing -- signups are free, so N accounts cost N x the grant.
 TRIAL_GLOBAL_SECONDS = _env_minutes('TRIAL_GLOBAL_MINUTES', 600) * 60
@@ -3697,10 +3697,11 @@ def faq_entries():
     # promises free minutes while the kill switch is on is a promise the app
     # then refuses at /start_transcription.
     if trial_available():
-        free = (f'The free trial covers {minutes} minutes of audio in total, so one '
-                f'episode up to about an hour. For longer episodes, add your own '
-                f'OpenAI API key: a 90-minute episode costs about {cost_90} at '
-                f'OpenAI\'s rate.')
+        hours_bit = (f' (about {minutes // 60} hours)' if minutes >= 120 else '')
+        free = (f'The free trial covers {minutes} minutes of audio in total'
+                f'{hours_bit}. For longer episodes, or once the '
+                f'trial is used up, add your own OpenAI API key: a 90-minute '
+                f'episode costs about {cost_90} at OpenAI\'s rate.')
         need_key = ('Not to start. The free trial runs on ours. Add your own key when the '
                     'trial runs out and there is no limit beyond what you spend at OpenAI.')
     else:
