@@ -5988,3 +5988,156 @@ def test_enqueue_uses_paid_after_trial(trial_on, monkeypatch):
             TranscriptionTask.started_at.desc()).first()
         assert task.trial_seconds_charged == 300
         assert task.paid_seconds_charged == 300
+
+
+def test_webhook_unconfigured_returns_404():
+    """Stripe unset must look like a missing route, not a soft outage (503)."""
+    assert A.stripe_webhook_enabled() is False
+    resp = A.app.test_client().post(
+        '/stripe/webhook', data=b'{}',
+        headers={'Stripe-Signature': 't=1,v1=x'},
+    )
+    assert resp.status_code == 404
+
+
+def test_webhook_rejects_unpaid_or_wrong_amount(stripe_on):
+    uid = _make_user('badpay@test.com')
+
+    def post_session(session_obj):
+        event = {
+            'id': 'evt_' + session_obj['id'],
+            'type': 'checkout.session.completed',
+            'data': {'object': session_obj},
+        }
+        A.stripe.Webhook.construct_event = staticmethod(
+            lambda payload, sig, secret: event)
+        return A.app.test_client().post(
+            '/stripe/webhook', data=b'{}',
+            headers={'Stripe-Signature': 't=1,v1=ok'})
+
+    base = {
+        'client_reference_id': str(uid),
+        'metadata': {'user_id': str(uid), 'minutes': '300'},
+        'currency': 'usd',
+        'amount_total': 500,
+        'payment_status': 'paid',
+    }
+    unpaid = dict(base, id='cs_unpaid', payment_status='unpaid')
+    assert post_session(unpaid).status_code == 200
+    assert _paid(uid) == 0
+
+    missing_status = dict(base, id='cs_nostatus')
+    del missing_status['payment_status']
+    assert post_session(missing_status).status_code == 200
+    assert _paid(uid) == 0
+
+    wrong_amount = dict(base, id='cs_wrong_amt', amount_total=100)
+    assert post_session(wrong_amount).status_code == 200
+    assert _paid(uid) == 0
+
+    wrong_currency = dict(base, id='cs_wrong_cur', currency='eur')
+    assert post_session(wrong_currency).status_code == 200
+    assert _paid(uid) == 0
+
+
+def test_reconcile_over_cap_keeps_trial_when_paid_debit_fails(trial_on, monkeypatch):
+    """Paid debit must succeed before trial is released.
+
+    If we released first and the re-reserve failed, the task would still show
+    trial_seconds_charged and the later refund would invent free minutes.
+    """
+    from models import db, TranscriptionTask
+
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 1800)
+    uid = _make_user('recon-race@test.com', limit=900, used=0)
+    # Enough paid that the pre-check passes — then force the debit to fail
+    # (simulating a concurrent drain between the read and the UPDATE).
+    _set_paid(uid, 7200)
+    with A.app.app_context():
+        assert A.trial_reserve(uid, 600) is True
+        db.session.add(TranscriptionTask(
+            id='recon-race-1', user_id=uid, episode_title='x',
+            status='transcribing', trial_seconds_charged=600,
+            paid_seconds_charged=None, trial_settled=False))
+        db.session.commit()
+
+        monkeypatch.setattr(A, 'paid_reserve', lambda *a, **k: False)
+        # Also poison re-reserve: if the buggy path still runs, it must not
+        # paper over a failed re-reserve by writing the charge anyway.
+        real_trial_reserve = A.trial_reserve
+        re_reserve_calls = []
+
+        def tracking_reserve(user_id, seconds):
+            ok = real_trial_reserve(user_id, seconds)
+            re_reserve_calls.append((user_id, seconds, ok))
+            return False  # force failure if called after a release
+
+        monkeypatch.setattr(A, 'trial_reserve', tracking_reserve)
+
+        with pytest.raises(A.TrialExhausted) as exc:
+            A.trial_reconcile_task('recon-race-1', 3600)
+        assert exc.value.scope == 'episode_length'
+
+        task = db.session.get(TranscriptionTask, 'recon-race-1')
+        assert task.trial_seconds_charged == 600
+        assert (task.paid_seconds_charged or 0) == 0
+        assert task.trial_settled is False or task.trial_settled == 0
+
+    # Trial reservation never left the user balance.
+    assert _used(uid) == 600, (
+        f'trial was released (used={_used(uid)}); re-reserve calls={re_reserve_calls}')
+    assert _paid(uid) == 7200
+    # No re-reserve attempt — we kept the original reservation.
+    assert re_reserve_calls == []
+
+    # Refund must return only what was actually charged, not invent minutes.
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'recon-race-1')
+        task.status = 'error'
+        db.session.commit()
+        assert A.trial_refund_task(task) == 600
+    assert _used(uid) == 0
+    assert _paid(uid) == 7200
+
+
+def test_reconcile_over_cap_swaps_to_paid_when_debit_succeeds(trial_on, monkeypatch):
+    from models import db, TranscriptionTask
+
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 1800)
+    uid = _make_user('recon-swap@test.com', limit=900, used=0)
+    _set_paid(uid, 7200)
+    with A.app.app_context():
+        assert A.trial_reserve(uid, 600) is True
+        db.session.add(TranscriptionTask(
+            id='recon-swap-1', user_id=uid, episode_title='x',
+            status='transcribing', trial_seconds_charged=600,
+            paid_seconds_charged=None, trial_settled=False))
+        db.session.commit()
+        A.trial_reconcile_task('recon-swap-1', 3600)
+        task = db.session.get(TranscriptionTask, 'recon-swap-1')
+        assert (task.trial_seconds_charged or 0) == 0
+        assert task.paid_seconds_charged == 3600
+    assert _used(uid) == 0
+    assert _paid(uid) == 7200 - 3600
+
+
+def test_anon_homepage_does_not_mint_csrf_cookie(trial_on):
+    """Anonymous visitors must not get a session cookie just for CSRF."""
+    client = A.app.test_client()
+    resp = client.get('/')
+    assert resp.status_code == 200
+    # No Set-Cookie writing a session with _csrf_token.
+    with client.session_transaction() as sess:
+        assert '_csrf_token' not in sess
+
+
+def test_ensure_credit_purchases_table_is_idempotent(trial_on):
+    """Two boot races must not raise — CREATE TABLE IF NOT EXISTS."""
+    with A.app.app_context():
+        A.ensure_credit_purchases_table()
+        A.ensure_credit_purchases_table()
+        rows = A.db.session.execute(A.text(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='credit_purchases'"
+        )).fetchall()
+        assert len(rows) == 1

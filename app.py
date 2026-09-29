@@ -833,48 +833,36 @@ def trial_reconcile_task(task_id, actual_seconds):
         # cap. Paid credits can still save it if they cover the full length;
         # otherwise refuse without mutating the reservation — the worker's
         # refund settles, matching the pre-credits behaviour.
+        #
+        # Critical order: debit paid WHILE still holding the trial reservation.
+        # Releasing trial first, then failing the paid debit, then re-reserving
+        # trial was a race: a concurrent job could take the freed minutes, the
+        # re-reserve would fail, and writing trial_seconds_charged anyway would
+        # invent a charge the balance never held — so the later refund would
+        # hand the user free minutes they never had.
         estimate_min = actual // 60
         cost = openai_whisper_cost_usd(estimate_min)
         owner = db.session.get(User, user_id)
+        refuse_msg = (
+            f'This episode is {estimate_min} minutes — too long for the free '
+            f'trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). '
+            f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
+            f'or add your own OpenAI API key (about ${cost} at OpenAI\'s rate).'
+        )
         if paid_balance_seconds(owner) < actual:
-            raise TrialExhausted(
-                f'This episode is {estimate_min} minutes — too long for the free '
-                f'trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). '
-                f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
-                f'or add your own OpenAI API key (about ${cost} at OpenAI\'s rate).',
-                scope='episode_length',
-            )
-        if not _claim_task_platform_charges(
-                task_id, trial_reserved, 0, 0, 0):
-            raise TrialExhausted(
-                f'This episode is {estimate_min} minutes — too long for the free '
-                f'trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). Add your own '
-                f'OpenAI API key to transcribe it (about ${cost} at OpenAI\'s rate).',
-                scope='episode_length',
-            )
-        trial_release(user_id, trial_reserved)
+            raise TrialExhausted(refuse_msg, scope='episode_length')
         if not paid_reserve(user_id, actual):
-            # Race: balance moved. Restore the trial reservation shape so the
-            # worker refund path can settle cleanly.
-            trial_reserve(user_id, trial_reserved)
-            _claim_task_platform_charges(task_id, 0, 0, trial_reserved, 0)
-            raise TrialExhausted(
-                f'This episode is {estimate_min} minutes — too long for the free '
-                f'trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). '
-                f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
-                f'or add your own OpenAI API key (about ${cost} at OpenAI\'s rate).',
-                scope='episode_length',
-            )
-        if not _claim_task_platform_charges(task_id, 0, 0, 0, actual):
+            # Race: paid balance moved after the read. Keep the trial charge.
+            raise TrialExhausted(refuse_msg, scope='episode_length')
+        if not _claim_task_platform_charges(
+                task_id, trial_reserved, 0, 0, actual):
+            # Someone else settled (or the charge moved). Hand the paid debit
+            # back; the trial reservation on the user balance is still intact
+            # and still matches trial_seconds_charged on the row.
             paid_release(user_id, actual)
-            trial_reserve(user_id, trial_reserved)
-            _claim_task_platform_charges(task_id, 0, 0, trial_reserved, 0)
-            raise TrialExhausted(
-                f'This episode is {estimate_min} minutes — too long for the free '
-                f'trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). Add your own '
-                f'OpenAI API key to transcribe it (about ${cost} at OpenAI\'s rate).',
-                scope='episode_length',
-            )
+            raise TrialExhausted(refuse_msg, scope='episode_length')
+        # Paid is now on the task; only now release the free-trial reservation.
+        trial_release(user_id, trial_reserved)
         return
 
     if actual > total_reserved:
@@ -2108,7 +2096,12 @@ def _openai_key_hint(user):
 
 
 def generate_csrf_token():
-    """Session CSRF token for state-changing POSTs (billing checkout)."""
+    """Session CSRF token for billing Buy POSTs.
+
+    Call only from templates that render a Buy form for a logged-in user.
+    Minting here writes the session and would otherwise give anonymous
+    homepage visitors a cookie for nothing.
+    """
     token = session.get('_csrf_token')
     if not token:
         token = secrets.token_hex(32)
@@ -2135,11 +2128,25 @@ def credit_user_from_checkout_session(session_obj, event_id=None):
     """
     if not session_obj:
         return False
-    payment_status = session_obj.get('payment_status')
-    if payment_status and payment_status != 'paid':
+    # Require an explicit paid status — never credit on absent/unpaid.
+    if session_obj.get('payment_status') != 'paid':
         return False
     session_id = session_obj.get('id')
     if not session_id:
+        return False
+    # Amount and currency must match the configured pack. Do not fall back to
+    # defaults that would credit minutes for a mismatched Checkout Session.
+    try:
+        amount = int(session_obj.get('amount_total'))
+    except (TypeError, ValueError):
+        app.logger.error('Stripe session %s missing amount_total', session_id)
+        return False
+    currency = (session_obj.get('currency') or '').lower()
+    if amount != CREDIT_PACK_AMOUNT_CENTS or currency != CREDIT_PACK_CURRENCY:
+        app.logger.error(
+            'Stripe session %s amount/currency mismatch: %s %s (expected %s %s)',
+            session_id, amount, currency,
+            CREDIT_PACK_AMOUNT_CENTS, CREDIT_PACK_CURRENCY)
         return False
     metadata = session_obj.get('metadata') or {}
     ref = session_obj.get('client_reference_id') or metadata.get('user_id')
@@ -2148,13 +2155,8 @@ def credit_user_from_checkout_session(session_obj, event_id=None):
     except (TypeError, ValueError):
         app.logger.error('Stripe session %s missing user id', session_id)
         return False
-    try:
-        minutes = int(metadata.get('minutes') or CREDIT_PACK_MINUTES)
-    except (TypeError, ValueError):
-        minutes = CREDIT_PACK_MINUTES
-    minutes = max(0, minutes)
-    amount = int(session_obj.get('amount_total') or CREDIT_PACK_AMOUNT_CENTS)
-    currency = (session_obj.get('currency') or CREDIT_PACK_CURRENCY).lower()
+    # Credited minutes follow the pack, not attacker-controlled metadata.
+    minutes = CREDIT_PACK_MINUTES
 
     purchase = CreditPurchase(
         user_id=user_id,
@@ -2328,7 +2330,8 @@ def billing_success():
 def stripe_webhook():
     """Verify and handle Stripe events. Credits only on checkout.session.completed."""
     if not stripe_webhook_enabled():
-        return jsonify({'error': 'Stripe webhook not configured'}), 503
+        # Not configured: look like a missing route rather than a soft outage.
+        return jsonify({'error': 'not found'}), 404
     payload = request.get_data(cache=False, as_text=False)
     sig_header = request.headers.get('Stripe-Signature', '')
     try:
@@ -5041,9 +5044,46 @@ def apply_column_migrations():
     return added
 
 
+def ensure_credit_purchases_table():
+    """Create credit_purchases if missing. Safe when two gunicorn workers race.
+
+    ``db.create_all()`` uses check-then-create, so two workers that both see the
+    table as absent can both run CREATE and the loser dies on "already exists".
+    ``CREATE TABLE IF NOT EXISTS`` makes that race a no-op.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        db.session.execute(text("""
+            CREATE TABLE IF NOT EXISTS credit_purchases (
+                id INTEGER NOT NULL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                stripe_session_id VARCHAR(255) NOT NULL UNIQUE,
+                stripe_event_id VARCHAR(255),
+                amount_cents INTEGER NOT NULL,
+                currency VARCHAR(16) NOT NULL,
+                minutes INTEGER NOT NULL,
+                created_at DATETIME,
+                FOREIGN KEY(user_id) REFERENCES users (id)
+            )
+        """))
+        db.session.execute(text(
+            'CREATE INDEX IF NOT EXISTS ix_credit_purchases_user_id '
+            'ON credit_purchases (user_id)'
+        ))
+        db.session.commit()
+    except OperationalError as exc:
+        db.session.rollback()
+        msg = str(exc).lower()
+        if 'already exists' not in msg:
+            raise
+        app.logger.info(
+            'credit_purchases was created by another worker; continuing')
+
 
 with app.app_context():
     db.create_all()
+    ensure_credit_purchases_table()
 
     apply_column_migrations()
     inspector = sa_inspect(db.engine)

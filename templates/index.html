@@ -223,7 +223,9 @@
     var STRIPE_BUY = {{ stripe_buy_enabled|tojson }};
     var BUY_LABEL = {{ credit_pack_label|tojson }};
     var BUY_URL = {{ url_for('billing_checkout')|tojson }};
-    var CSRF_TOKEN = {{ csrf_token()|tojson }};
+    {# Only mint CSRF when a logged-in user can actually submit Buy — otherwise
+       an anonymous homepage visit would get a session cookie for nothing. #}
+    var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
     var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
 
     function episodeNeedsOwnKey(durationMin) {
@@ -279,9 +281,6 @@
         actions.style.display = 'flex';
         actions.style.flexWrap = 'wrap';
         actions.style.gap = '8px';
-        if (buyAvailable || (STRIPE_BUY && buyAvailable !== false && actionLabel && actionLabel.indexOf('Buy') === 0)) {
-            // Prefer explicit buy_available from the API when present.
-        }
         var showBuy = (typeof buyAvailable === 'boolean') ? buyAvailable : false;
         if (showBuy && STRIPE_BUY) {
             var buyBtn = document.createElement('button');

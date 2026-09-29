@@ -150,7 +150,7 @@ document.addEventListener('DOMContentLoaded', function() {
     var STRIPE_BUY = {{ stripe_buy_enabled|tojson }};
     var BUY_LABEL = {{ credit_pack_label|tojson }};
     var BUY_URL = {{ url_for('billing_checkout')|tojson }};
-    var CSRF_TOKEN = {{ csrf_token()|tojson }};
+    var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
     var BADGE_PREFIX = STRIPE_BUY ? 'Needs key or pack' : 'Needs own key';
 
     function episodeNeedsOwnKey(durationMin) {
