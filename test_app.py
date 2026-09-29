@@ -6520,3 +6520,55 @@ def test_ensure_credit_purchases_table_is_idempotent(trial_on):
         assert 'status' in cols
         assert 'stripe_payment_intent_id' in cols
         assert 'seconds_clawed_back' in cols
+
+
+def test_ensure_credit_purchases_table_upgrades_legacy_table(trial_on):
+    """A credit_purchases table from the first Stripe ship (no hardening
+    columns) must be upgraded in place on boot, not crash on the index."""
+    with A.app.app_context():
+        A.db.session.execute(A.text('DROP TABLE IF EXISTS credit_purchases'))
+        A.db.session.execute(A.text("""
+            CREATE TABLE credit_purchases (
+                id INTEGER NOT NULL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                stripe_session_id VARCHAR(255) NOT NULL UNIQUE,
+                stripe_event_id VARCHAR(255),
+                amount_cents INTEGER NOT NULL,
+                currency VARCHAR(16) NOT NULL,
+                minutes INTEGER NOT NULL,
+                created_at DATETIME
+            )
+        """))
+        A.db.session.execute(A.text(
+            "INSERT INTO credit_purchases (user_id, stripe_session_id, "
+            "amount_cents, currency, minutes) VALUES (1, 'cs_legacy', 500, 'usd', 300)"
+        ))
+        A.db.session.commit()
+        # Other pooled SQLite connections still cache the old (full) schema
+        # after the DROP/CREATE above and would report "duplicate column";
+        # a real boot starts with fresh connections, so start fresh here too.
+        A.db.session.remove()
+        A.db.engine.dispose()
+        try:
+            A.ensure_credit_purchases_table()
+            A.ensure_credit_purchases_table()
+            cols = {c['name'] for c in A.sa_inspect(A.db.engine).get_columns(
+                'credit_purchases')}
+            for col in A.CREDIT_PURCHASE_COLUMN_MIGRATIONS:
+                assert col in cols
+            idx = {r[0] for r in A.db.session.execute(A.text(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND tbl_name='credit_purchases'")).fetchall()}
+            assert 'ix_credit_purchases_stripe_payment_intent_id' in idx
+            row = A.db.session.execute(A.text(
+                "SELECT status, seconds_clawed_back, amount_refunded_cents "
+                "FROM credit_purchases WHERE stripe_session_id='cs_legacy'"
+            )).fetchone()
+            assert tuple(row) == ('credited', 0, 0)
+        finally:
+            A.db.session.execute(A.text('DROP TABLE IF EXISTS credit_purchases'))
+            A.db.session.commit()
+            A.db.session.remove()
+            A.db.engine.dispose()
+            A.db.create_all()
+            A.ensure_credit_purchases_table()
