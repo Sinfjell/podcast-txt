@@ -5530,10 +5530,9 @@ def ensure_credit_purchases_table():
             'CREATE INDEX IF NOT EXISTS ix_credit_purchases_user_id '
             'ON credit_purchases (user_id)'
         ))
-        db.session.execute(text(
-            'CREATE INDEX IF NOT EXISTS ix_credit_purchases_stripe_payment_intent_id '
-            'ON credit_purchases (stripe_payment_intent_id)'
-        ))
+        # The payment_intent index is created below, only after missing
+        # columns are ALTERed in: a table from the first Stripe ship lacks
+        # stripe_payment_intent_id, and indexing it here crashed boot.
         db.session.commit()
     except OperationalError as exc:
         db.session.rollback()
@@ -5573,6 +5572,8 @@ def ensure_credit_purchases_table():
         db.session.commit()
     except OperationalError:
         db.session.rollback()
+        app.logger.exception(
+            'Could not create ix_credit_purchases_stripe_payment_intent_id')
 
 
 with app.app_context():
