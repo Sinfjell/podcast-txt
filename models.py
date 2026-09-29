@@ -116,20 +116,35 @@ class TranscriptionTask(db.Model):
 
 
 class CreditPurchase(db.Model):
-    """One Stripe Checkout payment that credited paid minutes.
+    """One Stripe Checkout payment that credited paid minutes (or needs review).
 
     Idempotency is the unique stripe_session_id: a duplicate webhook must not
-    credit the pack twice.
+    credit the pack twice. status='needs_review' rows record paid-but-unmatched
+    sessions without changing the balance.
     """
     __tablename__ = 'credit_purchases'
 
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    # Nullable so a paid session with a missing/deleted user can still be
+    # recorded as needs_review without a FK failure blocking the webhook 2xx.
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True, index=True)
     stripe_session_id = db.Column(db.String(255), unique=True, nullable=False)
     stripe_event_id = db.Column(db.String(255), nullable=True)
+    stripe_payment_intent_id = db.Column(db.String(255), nullable=True, index=True)
     amount_cents = db.Column(db.Integer, nullable=False)
+    amount_subtotal_cents = db.Column(db.Integer, nullable=True)
+    amount_tax_cents = db.Column(db.Integer, nullable=True)
+    amount_total_cents = db.Column(db.Integer, nullable=True)
     currency = db.Column(db.String(16), nullable=False, default='usd')
+    customer_country = db.Column(db.String(2), nullable=True)
     minutes = db.Column(db.Integer, nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='credited',
+                       server_default='credited')
+    seconds_clawed_back = db.Column(db.Integer, nullable=False, default=0,
+                                    server_default='0')
+    amount_refunded_cents = db.Column(db.Integer, nullable=False, default=0,
+                                      server_default='0')
+    refunded_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -160,4 +175,18 @@ USER_COLUMN_MIGRATIONS = {
     'api_key_hash': 'VARCHAR(64)',
     'api_key_prefix': 'VARCHAR(16)',
     'api_key_created_at': 'DATETIME',
+}
+
+#: Additive columns for credit_purchases (Stripe hardening). Applied by
+#: ensure_credit_purchases_table / apply_column_migrations.
+CREDIT_PURCHASE_COLUMN_MIGRATIONS = {
+    'stripe_payment_intent_id': 'VARCHAR(255)',
+    'amount_subtotal_cents': 'INTEGER',
+    'amount_tax_cents': 'INTEGER',
+    'amount_total_cents': 'INTEGER',
+    'customer_country': 'VARCHAR(2)',
+    'status': "VARCHAR(20) NOT NULL DEFAULT 'credited'",
+    'seconds_clawed_back': 'INTEGER NOT NULL DEFAULT 0',
+    'amount_refunded_cents': 'INTEGER NOT NULL DEFAULT 0',
+    'refunded_at': 'DATETIME',
 }

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Terms — Podskrift{% endblock %}
+{% block meta_description %}Terms of use and refund policy for Podskrift credit packs.{% endblock %}
+
+{% block content %}
+<div style="max-width: 560px; margin: 24px auto;">
+    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 16px;">Terms</h1>
+    <p style="color: var(--muted); font-size: 14px; line-height: 1.7; margin-bottom: 14px;">
+        Podskrift is a web app for transcribing podcast episodes. You can use a
+        free trial (when available), bring your own OpenAI API key, or buy a
+        prepaid pack of transcription minutes.
+    </p>
+    <h2 style="font-size: 16px; font-weight: 600; margin: 20px 0 8px;">Credit packs</h2>
+    <p style="color: var(--muted); font-size: 14px; line-height: 1.7; margin-bottom: 14px;">
+        A credit pack adds prepaid minutes to your account. Minutes do not
+        expire. They are used after any free trial minutes, on audio we actually
+        send for transcription. Buying a pack does not include an OpenAI API
+        key — transcription still runs through Podskrift on our key, billed
+        against your paid balance.
+    </p>
+    <h2 style="font-size: 16px; font-weight: 600; margin: 20px 0 8px;">Refunds</h2>
+    <p style="color: var(--muted); font-size: 14px; line-height: 1.7; margin-bottom: 14px;">
+        Prepaid packs are refundable on request within 14 days for unused
+        minutes. Minutes already used for transcription are not refundable
+        (they have already been spent on OpenAI). Contact us via the link below
+        and we will refund the unused portion.
+    </p>
+    <h2 style="font-size: 16px; font-weight: 600; margin: 20px 0 8px;">Payments</h2>
+    <p style="color: var(--muted); font-size: 14px; line-height: 1.7; margin-bottom: 14px;">
+        Card payments are processed by Stripe. We store a purchase record
+        (session id, amount, minutes) — never your full card number.
+    </p>
+    <p style="color: var(--muted); font-size: 14px; line-height: 1.7;">
+        Questions or refund requests:
+        <a href="https://productivitytech.io/contact/" target="_blank" rel="noopener">Contact</a>.
+        See also our <a href="{{ url_for('privacy') }}">Privacy</a> note.
+    </p>
+</div>
+{% endblock %}
