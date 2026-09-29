@@ -507,9 +507,13 @@ CREDIT_PACK_SECONDS = CREDIT_PACK_MINUTES * 60
 CREDIT_PACK_AMOUNT_CENTS = 500
 CREDIT_PACK_CURRENCY = 'usd'
 CREDIT_PACK_LABEL = 'Buy 5 hours for $5'
+#: Shown under Buy buttons — do not fold into CREDIT_PACK_LABEL (SKU/analytics).
+CREDIT_PACK_SUBLINE = 'One-time · 300 min · VAT incl.'
 CREDIT_PACK_SKU = 'minutes_300_usd500_v1'
 CREDIT_PACK_TAX_BEHAVIOR = STRIPE_TAX_BEHAVIOR if STRIPE_TAX_BEHAVIOR in (
     'inclusive', 'exclusive') else 'inclusive'
+#: Soft nudge on the home banner when free+paid remaining is under this.
+LOW_BALANCE_MINUTES = 30
 
 if stripe is not None and STRIPE_API_VERSION:
     stripe.api_version = STRIPE_API_VERSION
@@ -923,11 +927,15 @@ def trial_reconcile_task(task_id, actual_seconds):
                     f'OpenAI API key (about ${cost} for this one, billed by OpenAI).',
                     scope='user',
                 )
+            buy_bit = (
+                f'{CREDIT_PACK_LABEL}, or '
+                if stripe_checkout_enabled() else ''
+            )
             raise TrialExhausted(
                 f'This episode is about {estimate_min} minutes — longer than the '
                 f'{remaining // 60} free minutes you have left. Pick a shorter '
-                f'episode, or add your own OpenAI API key (about ${cost} for this '
-                f'one, billed by OpenAI).',
+                f'episode, {buy_bit}or add your own OpenAI API key (about ${cost} '
+                f'for this one, billed by OpenAI).',
                 scope=trial_refusal_scope(owner, extra) if owner else 'user',
             )
         extra_trial, extra_paid = split
@@ -2922,17 +2930,69 @@ def _trial_context():
         limit, used, remaining = trial_status(current_user)
     else:
         limit = used = remaining = 0
+    remaining_minutes = remaining // 60
     exhausted = (remaining <= 0 and paid_seconds <= 0)
+    total_minutes = remaining_minutes + paid_minutes
+    low_balance = (
+        not on_own_key
+        and not exhausted
+        and total_minutes < LOW_BALANCE_MINUTES
+    )
     return {
         'limit_minutes': limit // 60,
         'used_minutes': used // 60,
-        'remaining_minutes': remaining // 60,
+        'remaining_minutes': remaining_minutes,
         'paid_minutes': paid_minutes,
+        'total_minutes': total_minutes,
         'exhausted': exhausted,
+        'low_balance': low_balance,
         'on_own_key': on_own_key,
         'stripe_buy': stripe_checkout_enabled(),
         'buy_label': CREDIT_PACK_LABEL,
+        'buy_subline': CREDIT_PACK_SUBLINE,
     }
+
+
+def _nav_credits_context():
+    """Compact balance + Buy visibility for the nav. Reuses trial/paid attrs
+    already on the loaded user — no extra query beyond Flask-Login's load."""
+    if not current_user.is_authenticated:
+        return {
+            'nav_minutes_left': None,
+            'nav_show_buy': False,
+        }
+    on_own_key = bool(current_user.openai_api_key)
+    if on_own_key:
+        return {
+            'nav_minutes_left': None,
+            'nav_show_buy': False,
+        }
+    paid_minutes = paid_balance_seconds(current_user) // 60
+    if trial_available():
+        remaining_minutes = trial_status(current_user)[2] // 60
+    else:
+        remaining_minutes = 0
+    # Always show a pill for metered users so "0 min left" is still obvious.
+    return {
+        'nav_minutes_left': remaining_minutes + paid_minutes,
+        'nav_show_buy': stripe_checkout_enabled(),
+    }
+
+
+def _is_minutes_limit_error(message):
+    """True when an error string is a trial/paid minutes refusal (no DB flag)."""
+    if not message:
+        return False
+    msg = str(message).lower()
+    return any(marker in msg for marker in (
+        'minutes you have left',
+        'too long for the free trial',
+        'out of free minutes',
+        'buy more minutes',
+        CREDIT_PACK_LABEL.lower(),
+        'not enough minutes',
+        'trial is used up',
+    ))
 
 
 def _user_has_api_key():
@@ -3544,7 +3604,11 @@ def get_status(task_id):
     if task.status == 'cancelled':
         result['cancelled'] = True
     elif task.status == 'error':
-        result['error'] = task.error_message or 'Unknown error'
+        err = task.error_message or 'Unknown error'
+        result['error'] = err
+        if _is_minutes_limit_error(err):
+            result['minutes_error'] = True
+            result.update(_minutes_limit_actions(task.user_id, 'reconcile_status'))
 
     # Partial text so the page fills in as chunks land, rather than staying empty
     if task.transcript_text and task.status != 'completed':
@@ -4682,16 +4746,28 @@ def faq_entries():
     # then refuses at /start_transcription.
     if trial_available():
         hours_bit = (f' (about {minutes // 60} hours)' if minutes >= 120 else '')
+        pack_bit = (
+            f' Or buy a one-time pack: ${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for '
+            f'{CREDIT_PACK_MINUTES} minutes ({CREDIT_PACK_MINUTES // 60} hours), '
+            f'VAT included, paid via Stripe — no subscription.'
+            if stripe_checkout_enabled() else ''
+        )
         free = (f'The free trial covers {minutes} minutes of audio in total'
                 f'{hours_bit}. For longer episodes, or once the '
                 f'trial is used up, add your own OpenAI API key: a 90-minute '
-                f'episode costs about {cost_90} at OpenAI\'s rate.')
+                f'episode costs about {cost_90} at OpenAI\'s rate.{pack_bit}')
         need_key = ('Not to start. The free trial runs on ours. Add your own key when the '
                     'trial runs out and there is no limit beyond what you spend at OpenAI.')
     else:
+        pack_bit = (
+            f' Or buy a one-time pack: ${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for '
+            f'{CREDIT_PACK_MINUTES} minutes ({CREDIT_PACK_MINUTES // 60} hours), '
+            f'VAT included — no subscription.'
+            if stripe_checkout_enabled() else ''
+        )
         free = ('Podskrift itself is free. You add your own OpenAI API key and pay OpenAI '
                 f'directly at their rate -- about {hourly} per hour of audio. There is no '
-                'subscription.')
+                f'subscription.{pack_bit}')
         need_key = ('Yes. Add it in Settings; it is stored on your account and used only '
                     'for your own transcriptions.')
     return [
@@ -4736,6 +4812,7 @@ def inject_language_count():
 @app.context_processor
 def inject_trial_badge():
     """Remaining free/paid minutes for the needs-own-key badge on episode rows."""
+    nav = _nav_credits_context()
     return {
         'trial_badge_remaining_min': trial_badge_remaining_minutes(),
         'trial_badge_paid_min': trial_badge_paid_minutes(),
@@ -4747,6 +4824,11 @@ def inject_trial_badge():
         'openai_90min_cost': f'{openai_whisper_cost_usd(90):.2f}',
         'stripe_buy_enabled': stripe_checkout_enabled(),
         'credit_pack_label': CREDIT_PACK_LABEL,
+        'credit_pack_subline': CREDIT_PACK_SUBLINE,
+        'credit_pack_minutes': CREDIT_PACK_MINUTES,
+        'credit_pack_price_usd': f'{CREDIT_PACK_AMOUNT_CENTS / 100:.0f}',
+        'nav_minutes_left': nav['nav_minutes_left'],
+        'nav_show_buy': nav['nav_show_buy'],
         'csrf_token': generate_csrf_token,
     }
 
@@ -4809,9 +4891,14 @@ def _structured_data():
                     'priceCurrency': 'USD',
                     'description': (
                         (f'{TRIAL_DEFAULT_SECONDS // 60} minutes of audio free on signup. '
-                         'After that, bring ' if trial_available() else 'Bring ')
-                        + 'your own OpenAI API key and pay OpenAI directly at their rate. '
-                          'No subscription.'
+                         'After that, ' if trial_available() else '')
+                        + (
+                            f'buy a one-time pack (${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for '
+                            f'{CREDIT_PACK_MINUTES} minutes, VAT included) via Stripe, or '
+                            if stripe_checkout_enabled() else ''
+                        )
+                        + 'bring your own OpenAI API key and pay OpenAI directly at their '
+                          'rate. No subscription.'
                     ),
                 },
                 'provider': {
@@ -4898,6 +4985,12 @@ def llms_txt():
     cost = (f'New accounts get {TRIAL_DEFAULT_SECONDS // 60} minutes of audio free on '
             "Podskrift's own OpenAI key.\nAfter that you"
             if trial_available() else 'You')
+    pack = (
+        f'\nOr buy a one-time pack: ${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for '
+        f'{CREDIT_PACK_MINUTES} minutes ({CREDIT_PACK_MINUTES // 60} hours), VAT '
+        f'included, paid via Stripe — no subscription.'
+        if stripe_checkout_enabled() else ''
+    )
     body = f"""# Podskrift
 
 > Transcribes podcast episodes to text using OpenAI Whisper, in {len(LANGUAGE_ENGLISH_NAMES)}
@@ -4926,10 +5019,11 @@ accented audio -- Whisper takes the choice as a constraint rather than a hint.
 
 ## What it costs
 {cost} add your own OpenAI API key and pay OpenAI directly -- roughly
-USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscription and no per-seat pricing.
+USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscription and no per-seat pricing.{pack}
 
 ## Pages
 - [Home]({public_url('index')}): search, pick an episode, transcribe
+- [Pricing]({public_url('pricing')}): free trial, credit pack, or bring your own key
 - [API docs]({public_url('api_docs')}): customer HTTP API (resolve → transcribe → transcript)
 - [How to find an RSS feed]({public_url('rss_help')}): for podcasts outside the search index
 - [Sign up]({public_url('register')}): {signup_blurb}
@@ -4953,6 +5047,7 @@ def sitemap_xml():
     """The three pages worth indexing. Everything else needs a session."""
     from xml.sax.saxutils import escape
     pages = [public_url('index'),
+             public_url('pricing'),
              public_url('api_docs'),
              public_url('rss_help'),
              public_url('register')]
@@ -4963,6 +5058,16 @@ def sitemap_xml():
            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
            f'{urls}\n</urlset>\n')
     return Response(xml, mimetype='application/xml')
+
+
+@app.route('/pricing')
+def pricing():
+    """Public pricing page: free trial, one-time pack, or bring your own key."""
+    return render_template(
+        'pricing.html',
+        trial_minutes=(TRIAL_DEFAULT_SECONDS // 60 if trial_available() else None),
+        stripe_configured=stripe_checkout_enabled(),
+    )
 
 
 @app.route('/rss-help')

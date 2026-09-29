@@ -23,7 +23,7 @@
 </div>
 
 {% if trial and not trial.on_own_key %}
-<div class="alert alert-{% if trial.exhausted %}warning{% else %}info{% endif %}" style="margin-bottom: 16px;">
+<div class="alert alert-{% if trial.exhausted %}warning{% elif trial.low_balance %}warning{% else %}info{% endif %}" style="margin-bottom: 16px;">
     {# One span, not loose inline nodes: .alert is display:flex, so each text
        node and link became its own unwrappable flex item and the sentence
        rendered as broken columns on a narrow screen. #}
@@ -36,10 +36,23 @@
             <input type="hidden" name="source" value="home_banner">
             <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
         </form>
+        <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
         or
         {% endif %}
         <a href="{{ url_for('settings') }}#openai">Add your own OpenAI API key</a>
         — the app is free; OpenAI bills you.
+        {% elif trial.low_balance %}
+        Running low — <strong>{{ trial.total_minutes }} minutes</strong> left.
+        {% if trial.stripe_buy %}
+        <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="source" value="home_low_balance">
+            <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">Buy minutes</button>
+        </form>
+        <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
+        or
+        {% endif %}
+        <a href="{{ url_for('settings') }}#openai">add your own key</a>.
         {% else %}
         Free trial: <strong>{{ trial.remaining_minutes }} minutes</strong> left on our key.
         {% if trial.paid_minutes %}
@@ -51,6 +64,7 @@
             <input type="hidden" name="source" value="home_banner">
             <button type="submit" class="btn btn-sm btn-ghost" style="margin: 0 4px;">{{ trial.buy_label }}</button>
         </form>
+        <span class="form-hint" style="display: inline; margin: 0 4px 0 0;">{{ credit_pack_subline }}</span>
         or
         {% endif %}
         <a href="{{ url_for('settings') }}#openai">add your own key</a>
@@ -108,8 +122,14 @@
         {% if trial_minutes %}
         <p class="form-hint" style="margin-top: 12px;">
             The free trial covers {{ trial_minutes }} minutes of audio in total{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.
+            {% if stripe_buy_enabled %}
+            After that, buy a one-time pack (${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min, VAT included),
+            or add your own OpenAI API key — a 90-minute episode costs about ${{ openai_90min_cost }} at OpenAI's rate.
+            {% else %}
             For longer episodes, or once the trial is used up, add your own OpenAI API key:
             a 90-minute episode costs about ${{ openai_90min_cost }} at OpenAI's rate.
+            {% endif %}
+            <a href="{{ url_for('pricing') }}">See pricing</a>.
         </p>
         {% endif %}
     </div>
@@ -136,12 +156,24 @@
     <div class="card-body text-center" style="padding: 32px 20px;">
         <p class="text-muted mb-1">
             {% if trial_minutes %}
-            Free account, {{ trial_minutes }} free minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}. After that, add your own OpenAI key
-            and pay OpenAI directly — about ${{ openai_hourly_cost }} per hour of audio. No subscription.
+            Free account, {{ trial_minutes }} free minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.
+            {% if stripe_buy_enabled %}
+            After that, buy ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (one-time, VAT included),
+            or add your own OpenAI key (~${{ openai_hourly_cost }}/h billed by OpenAI). No subscription.
             {% else %}
-            Free account — no Podskrift subscription. Add your own OpenAI API key
-            and you only pay OpenAI for Whisper.
+            After that, add your own OpenAI key
+            and pay OpenAI directly — about ${{ openai_hourly_cost }} per hour of audio. No subscription.
             {% endif %}
+            {% else %}
+            Free account — no Podskrift subscription.
+            {% if stripe_buy_enabled %}
+            Buy ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (one-time, VAT included),
+            or add your own OpenAI API key and pay OpenAI for Whisper.
+            {% else %}
+            Add your own OpenAI API key and you only pay OpenAI for Whisper.
+            {% endif %}
+            {% endif %}
+            <a href="{{ url_for('pricing') }}">Pricing</a>.
         </p>
         <div class="flex-center" style="gap: 12px; justify-content: center; margin-top: 12px;">
             <a href="{{ url_for('register') }}" class="btn btn-accent">Create free account</a>

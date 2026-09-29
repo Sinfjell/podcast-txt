@@ -78,6 +78,7 @@
                     <input type="hidden" name="source" value="episode_selection">
                     <button type="submit" class="btn btn-sm btn-primary">{{ credit_pack_label }}</button>
                 </form>
+                <span class="form-hint" style="display: block; margin: 4px 0 8px;">{{ credit_pack_subline }}</span>
                 or
                 {% endif %}
                 <a href="{{ url_for('settings') }}#openai">Add your OpenAI API key</a>
@@ -86,6 +87,8 @@
         </div>
     </div>
     {% endif %}
+
+    <div id="startError" class="hidden mt-2" style="margin-top: 16px;"></div>
 
     <div class="text-center mt-3">
         <button type="submit" class="btn btn-accent btn-lg" id="transcribeBtn" disabled>
@@ -152,6 +155,64 @@ document.addEventListener('DOMContentLoaded', function() {
     var BUY_URL = {{ url_for('billing_checkout')|tojson }};
     var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
     var BADGE_PREFIX = STRIPE_BUY ? 'Needs key or pack' : 'Needs own key';
+    var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
+    var startError = document.getElementById('startError');
+
+    function postBuyForm(source) {
+        var form = document.createElement('form');
+        form.method = 'POST';
+        form.action = BUY_URL;
+        function hidden(name, value) {
+            var input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = name;
+            input.value = value;
+            form.appendChild(input);
+        }
+        hidden('csrf_token', CSRF_TOKEN);
+        hidden('source', source || 'episode_selection');
+        document.body.appendChild(form);
+        form.submit();
+    }
+
+    function setStartError(text, buyAvailable) {
+        startError.classList.remove('hidden');
+        startError.style.display = '';
+        while (startError.firstChild) startError.removeChild(startError.firstChild);
+        var box = document.createElement('div');
+        box.className = 'alert alert-error';
+        box.style.flexDirection = 'column';
+        box.style.alignItems = 'flex-start';
+        var msg = document.createElement('span');
+        msg.style.lineHeight = '1.6';
+        msg.textContent = text;
+        box.appendChild(msg);
+        var actions = document.createElement('div');
+        actions.style.marginTop = '10px';
+        actions.style.display = 'flex';
+        actions.style.flexWrap = 'wrap';
+        actions.style.gap = '8px';
+        if (buyAvailable && STRIPE_BUY) {
+            var buyBtn = document.createElement('button');
+            buyBtn.type = 'button';
+            buyBtn.className = 'btn btn-sm btn-primary';
+            buyBtn.textContent = BUY_LABEL;
+            buyBtn.addEventListener('click', function() { postBuyForm('episode_selection'); });
+            actions.appendChild(buyBtn);
+        }
+        var keyLink = document.createElement('a');
+        keyLink.href = SETTINGS_OPENAI;
+        keyLink.textContent = 'Add OpenAI key →';
+        keyLink.className = 'btn btn-sm btn-ghost';
+        actions.appendChild(keyLink);
+        box.appendChild(actions);
+        startError.appendChild(box);
+    }
+
+    function clearStartError() {
+        startError.classList.add('hidden');
+        while (startError.firstChild) startError.removeChild(startError.firstChild);
+    }
 
     function episodeNeedsOwnKey(durationMin) {
         if (TRIAL_REMAINING_MIN === null || durationMin == null) return false;
@@ -278,6 +339,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         transcribeBtn.disabled = true;
         transcribeBtn.textContent = 'Starting...';
+        clearStartError();
 
         fetch('/start_transcription', { method: 'POST', body: new FormData(this) })
             .then(function(r) { return r.json().then(function(data) {
@@ -287,37 +349,16 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (res.data.task_id) {
                     window.location.href = '/transcription/' + res.data.task_id;
                 } else {
-                    var msg = res.data.error || 'Error';
-                    if (res.data.buy_available && STRIPE_BUY) {
-                        if (confirm(msg + '\n\n' + BUY_LABEL + '?')) {
-                            var form = document.createElement('form');
-                            form.method = 'POST';
-                            form.action = BUY_URL;
-                            function hidden(name, value) {
-                                var input = document.createElement('input');
-                                input.type = 'hidden';
-                                input.name = name;
-                                input.value = value;
-                                form.appendChild(input);
-                            }
-                            hidden('csrf_token', CSRF_TOKEN);
-                            hidden('source', 'episode_selection');
-                            document.body.appendChild(form);
-                            form.submit();
-                            return;
-                        }
-                    } else if (res.data.action_url) {
-                        msg += '\n\n' + (res.data.action_label || 'Add OpenAI key →')
-                            + ': ' + res.data.action_url;
-                        alert(msg);
-                    } else {
-                        alert(msg);
-                    }
+                    setStartError(
+                        res.data.error || 'Could not start transcription.',
+                        !!res.data.buy_available
+                    );
                     transcribeBtn.disabled = false;
                     transcribeBtn.textContent = 'Start Transcription';
                 }
             })
             .catch(function() {
+                setStartError('Could not start transcription.', false);
                 transcribeBtn.disabled = false;
                 transcribeBtn.textContent = 'Start Transcription';
             });
