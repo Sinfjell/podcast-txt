@@ -5121,7 +5121,7 @@ def test_settings_view_and_key_save_events(ph_events, monkeypatch):
     saved = [e for e in ph_events.events if e['event'] == 'openai_key_saved']
     assert len(saved) == 1
     assert saved[0]['distinct_id'] == str(uid)
-    assert saved[0]['properties'] == {'status': 'verified'}
+    assert saved[0]['properties'] == {'status': 'verified', 'app': 'podskrift'}
 
 
 @pytest.mark.parametrize('verify_status', ['no_billing', 'unverified_network'])
@@ -5137,7 +5137,7 @@ def test_key_save_carries_coarse_status(ph_events, monkeypatch, verify_status):
                      follow_redirects=True)
     saved = [e for e in ph_events.events if e['event'] == 'openai_key_saved']
     assert len(saved) == 1
-    assert saved[0]['properties'] == {'status': verify_status}
+    assert saved[0]['properties'] == {'status': verify_status, 'app': 'podskrift'}
 
 
 def test_rejected_key_emits_validation_failed_with_coarse_reason(ph_events, monkeypatch):
@@ -5151,7 +5151,7 @@ def test_rejected_key_emits_validation_failed_with_coarse_reason(ph_events, monk
                      follow_redirects=True)
     fails = [e for e in ph_events.events if e['event'] == 'openai_key_validation_failed']
     assert len(fails) == 1
-    assert fails[0]['properties'] == {'reason': 'invalid_key'}
+    assert fails[0]['properties'] == {'reason': 'invalid_key', 'app': 'podskrift'}
     # Never echo the submitted value
     assert 'not-a-key' not in str(fails[0])
 
@@ -5167,7 +5167,7 @@ def test_transcript_started_includes_key_source(ph_events, monkeypatch, trial_on
     assert resp.status_code == 200
     started = [e for e in ph_events.events if e['event'] == 'transcript_started']
     assert len(started) == 1
-    assert started[0]['properties'] == {'key_source': 'user', 'source': 'web'}
+    assert started[0]['properties'] == {'key_source': 'user', 'source': 'web', 'app': 'podskrift'}
 
 
 def test_transcript_started_trial_key_source(ph_events, monkeypatch, trial_on):
@@ -5180,7 +5180,7 @@ def test_transcript_started_trial_key_source(ph_events, monkeypatch, trial_on):
     assert resp.status_code == 200
     started = [e for e in ph_events.events if e['event'] == 'transcript_started']
     assert len(started) == 1
-    assert started[0]['properties'] == {'key_source': 'trial', 'source': 'web'}
+    assert started[0]['properties'] == {'key_source': 'trial', 'source': 'web', 'app': 'podskrift'}
 
 
 def test_transcript_completed_includes_key_source(ph_events, monkeypatch, trial_on):
@@ -5206,7 +5206,7 @@ def test_transcript_completed_includes_key_source(ph_events, monkeypatch, trial_
     completed = [e for e in ph_events.events if e['event'] == 'transcript_completed']
     assert len(completed) == 1
     assert completed[0]['distinct_id'] == str(uid)
-    assert completed[0]['properties'] == {'key_source': 'user', 'source': 'web'}
+    assert completed[0]['properties'] == {'key_source': 'user', 'source': 'web', 'app': 'podskrift'}
 
 
 def test_transcript_completed_outside_request_context(ph_events, monkeypatch, trial_on):
@@ -5274,7 +5274,7 @@ def test_transcript_completed_outside_request_context(ph_events, monkeypatch, tr
     completed = [e for e in ph_events.events if e['event'] == 'transcript_completed']
     assert len(completed) == 1
     assert completed[0]['distinct_id'] == str(uid)
-    assert completed[0]['properties'] == {'key_source': 'trial', 'source': 'web'}
+    assert completed[0]['properties'] == {'key_source': 'trial', 'source': 'web', 'app': 'podskrift'}
     assert not [e for e in ph_events.events if e['event'] == 'transcript_failed']
 
 
@@ -5367,7 +5367,7 @@ def test_trial_limit_hit_when_the_account_is_short(ph_events, monkeypatch, trial
     assert hits[0]['distinct_id'] == str(uid)
     assert hits[0]['properties'] == {
         'scope': 'user', 'stage': 'start', 'source': 'web',
-        'estimate_min': 5, 'remaining_min': 1,
+        'estimate_min': 5, 'remaining_min': 1, 'app': 'podskrift',
     }
     body = resp.get_json()
     assert 'about 5 minutes' in body['error']
@@ -5467,10 +5467,11 @@ def test_worker_reports_trial_exhausted_at_reconcile(ph_events, monkeypatch, tri
     assert status == 200, payload
     failed = [e for e in ph_events.events if e['event'] == 'transcript_failed']
     assert [f['properties'] for f in failed] == [
-        {'key_source': 'trial', 'source': 'web', 'reason': 'trial_exhausted'}]
+        {'key_source': 'trial', 'source': 'web', 'reason': 'trial_exhausted',
+         'app': 'podskrift'}]
     assert [h['properties'] for h in _limit_hits(ph_events)] == [
         {'scope': 'user', 'stage': 'reconcile', 'source': 'web',
-         'estimate_min': 1, 'remaining_min': 60}]
+         'estimate_min': 1, 'remaining_min': 60, 'app': 'podskrift'}]
     assert _used(uid) == 0  # refunded in full: nothing reached Whisper
 
 
@@ -5481,7 +5482,7 @@ def test_api_transcriptions_are_labelled_api(ph_events, agent_write):
     assert r.status_code == 201, r.get_json()
     started = [e for e in ph_events.events if e['event'] == 'transcript_started']
     assert [e['properties'] for e in started] == [
-        {'key_source': 'trial', 'source': 'api'}]
+        {'key_source': 'trial', 'source': 'api', 'app': 'podskrift'}]
 
 
 def test_search_emits_podcast_searched_without_the_query(monkeypatch):
@@ -5912,7 +5913,18 @@ def test_buy_shown_when_stripe_configured(stripe_on):
     assert 'Buy 5 hours for $5' in body
     assert 'billing/checkout' in body
     assert 'csrf_token' in body
+    assert 'name="ph_sid"' in body
     assert '/terms' in body
+
+
+def test_header_pill_sets_buy_source(stripe_on):
+    uid = _make_user('headerpill@test.com', limit=600, used=600)
+    client = _login(uid)
+    home = client.get('/').data.decode()
+    assert 'from=header_pill' in home
+    assert 'id="navBuyPill"' in home
+    settings = client.get('/settings?from=header_pill').data.decode()
+    assert 'name="source" value="header_pill"' in settings
 
 
 def test_checkout_session_creation(stripe_on, ph_events):
@@ -5993,6 +6005,23 @@ def test_checkout_rejects_bad_csrf(stripe_on, ph_events):
     assert failed[-1]['properties']['stage'] == 'checkout_create'
     assert failed[-1]['distinct_id'] == str(uid)
     assert 'email' not in failed[-1]['properties']
+
+
+def test_checkout_rejects_byok_user(stripe_on, ph_events):
+    uid = _make_user('byokbuy@test.com', key='sk-' + 'b' * 40)
+    client = _login(uid)
+    # Mint CSRF via the homepage script block (authenticated + stripe on).
+    client.get('/')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    assert token
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'settings',
+    }, follow_redirects=True)
+    assert resp.status_code == 200
+    failed = [e for e in ph_events.events if e['event'] == 'purchase_failed']
+    assert failed and failed[-1]['properties']['reason'] == 'byok_user'
+    assert b'own OpenAI key' in resp.data or b'paid minutes are not needed' in resp.data
 
 
 def test_billing_cancel_fires_checkout_returned(stripe_on, ph_events):
