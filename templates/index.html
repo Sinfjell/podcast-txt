@@ -23,6 +23,14 @@
 </div>
 
 {% if trial and not trial.on_own_key %}
+{% if first_run and not trial.exhausted and not trial.low_balance %}
+<div class="alert alert-info" style="margin-bottom: 16px;">
+    <span>
+        Your <strong>{{ trial.remaining_minutes }} free minutes</strong> are ready.
+        Start your first transcript below — no card needed.
+    </span>
+</div>
+{% else %}
 <div class="alert alert-{% if trial.exhausted %}warning{% elif trial.low_balance %}warning{% else %}info{% endif %}" style="margin-bottom: 16px;">
     {# One span, not loose inline nodes: .alert is display:flex, so each text
        node and link became its own unwrappable flex item and the sentence
@@ -76,6 +84,16 @@
     </span>
 </div>
 {% endif %}
+{% endif %}
+
+{% if first_run and current_user.is_authenticated %}
+<div style="margin-bottom: 16px;">
+    <h2 style="font-size: 20px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 4px;">
+        Start your first transcript
+    </h2>
+    <p class="text-muted text-sm">Paste a Spotify link or search a show — your episode starts in one click.</p>
+</div>
+{% endif %}
 
 <!-- Saved feeds quick access -->
 {% if current_user.is_authenticated and saved_feeds %}
@@ -107,7 +125,8 @@
         </div>
         <div class="input-group">
             <input type="text" class="form-input form-input-lg" id="podcastSearch"
-                   placeholder="https://open.spotify.com/episode/…  or  podcast name" autocomplete="off">
+                   placeholder="https://open.spotify.com/episode/…  or  podcast name" autocomplete="off"
+                   {% if first_run and current_user.is_authenticated %}autofocus{% endif %}>
             <button class="btn btn-primary" type="button" id="searchBtn">Search</button>
         </div>
         <p class="form-hint" id="searchHint">
@@ -239,6 +258,9 @@
     var searchType = 'show';
     var langRow = document.getElementById('episodeLangRow');
     var langSelect = document.getElementById('searchLanguage');
+    {% if first_run and current_user.is_authenticated %}
+    if (searchInput) searchInput.focus();
+    {% endif %}
 
     var storedLang = localStorage.getItem('podskrift_language');
     if (storedLang !== null && langSelect.querySelector('option[value="' + storedLang + '"]')) {
@@ -286,7 +308,18 @@
         resultsDiv.style.padding = '12px 0';
     }
 
-    function postBuyForm(source) {
+    function postBuyForm(source, neededMin, episodeTitle) {
+        if (typeof window.openBuyModal === 'function') {
+            var left = (Number(TRIAL_REMAINING_MIN) || 0) + (Number(PAID_REMAINING_MIN) || 0);
+            window.openBuyModal({
+                needed: neededMin,
+                left: TRIAL_REMAINING_MIN === null ? null : left,
+                title: episodeTitle || '',
+                source: source === 'home_error' ? 'buy_modal_episode' : (source || 'buy_modal_header'),
+                returnTo: window.location.pathname + window.location.search,
+            });
+            return;
+        }
         var form = document.createElement('form');
         form.method = 'POST';
         form.action = BUY_URL;
@@ -302,12 +335,14 @@
         var sid = '';
         try { if (window.posthog) sid = posthog.get_session_id() || ''; } catch (e) { sid = ''; }
         hidden('ph_sid', sid);
+        hidden('return_to', window.location.pathname + window.location.search);
         document.body.appendChild(form);
         form.submit();
     }
 
-    function setError(text, actionUrl, actionLabel, buyAvailable, paywallReason) {
-        clearResults();
+    var lastEpisodeForBuy = { duration: null, title: '' };
+
+    function setError(text, actionUrl, actionLabel, buyAvailable, paywallReason) {        clearResults();
         resultsDiv.style.color = 'var(--error)';
         resultsDiv.style.padding = '12px 0';
         var wrap = document.createElement('div');
@@ -325,7 +360,9 @@
             buyBtn.type = 'button';
             buyBtn.className = 'btn btn-sm btn-primary';
             buyBtn.textContent = BUY_LABEL;
-            buyBtn.addEventListener('click', function() { postBuyForm('home_error'); });
+            buyBtn.addEventListener('click', function() {
+                postBuyForm('home_error', lastEpisodeForBuy.duration, lastEpisodeForBuy.title);
+            });
             actions.appendChild(buyBtn);
             if (typeof window.podskriftPaywallShown === 'function') {
                 window.podskriftPaywallShown(
@@ -440,6 +477,10 @@
                 postForm(PENDING_URL, fields);
                 return;
             }
+            lastEpisodeForBuy = {
+                duration: item.duration_min != null ? Number(item.duration_min) : null,
+                title: item.name || '',
+            };
             badge.textContent = 'Starting…';
             var body = new FormData();
             Object.keys(fields).forEach(function(k) { body.append(k, fields[k]); });

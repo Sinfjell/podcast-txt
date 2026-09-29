@@ -1,0 +1,175 @@
+{# Episode-aware Buy minutes modal. Opened via openBuyModal({needed, left, title, returnTo, source}).
+   Included from base.html when Stripe is on and the user is metered (not own-key). #}
+{% if stripe_buy_enabled and current_user.is_authenticated and nav_show_buy %}
+<style>
+    .buy-modal-scrim {
+        position: fixed; inset: 0; z-index: 400;
+        background: rgba(0, 0, 0, 0.72);
+        display: none; align-items: center; justify-content: center;
+        padding: 20px;
+    }
+    .buy-modal-scrim.is-open { display: flex; }
+    .buy-modal {
+        width: 100%; max-width: 420px;
+        background: var(--surface); border: 1px solid var(--border);
+        border-radius: 14px; padding: 24px 24px 20px;
+        box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+    }
+    .buy-modal-head {
+        display: flex; align-items: flex-start; justify-content: space-between;
+        gap: 12px; margin-bottom: 8px;
+    }
+    .buy-modal-title {
+        font-size: 20px; font-weight: 700; letter-spacing: -0.03em;
+        line-height: 1.3; margin: 0;
+    }
+    .buy-modal-close {
+        background: none; border: 0; color: var(--muted); cursor: pointer;
+        font-size: 22px; line-height: 1; padding: 0 2px;
+    }
+    .buy-modal-close:hover { color: var(--text); }
+    .buy-modal-sub {
+        color: var(--muted); font-size: 14px; line-height: 1.55;
+        margin: 0 0 18px;
+    }
+    .buy-modal-pack {
+        display: flex; justify-content: space-between; align-items: baseline;
+        padding: 14px 0; margin-bottom: 8px;
+        border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+    }
+    .buy-modal-pack strong { font-size: 18px; letter-spacing: -0.02em; }
+    .buy-modal-foot {
+        text-align: center; color: var(--muted); font-size: 12px;
+        margin-top: 12px; line-height: 1.45;
+    }
+    .buy-modal-alt {
+        display: block; text-align: center; margin-top: 14px;
+        font-size: 13px; color: var(--muted);
+    }
+    .buy-modal-alt a { color: var(--accent-bright); }
+</style>
+<div class="buy-modal-scrim" id="buyModalScrim" role="dialog" aria-modal="true"
+     aria-labelledby="buyModalTitle" hidden>
+    <div class="buy-modal">
+        <div class="buy-modal-head">
+            <h2 class="buy-modal-title" id="buyModalTitle">Buy transcription minutes</h2>
+            <button type="button" class="buy-modal-close" id="buyModalClose" aria-label="Close">&times;</button>
+        </div>
+        <p class="buy-modal-sub" id="buyModalSub">
+            {{ credit_pack_minutes }} minutes for ${{ credit_pack_price_usd }} — one-time, never expires.
+        </p>
+        <div class="buy-modal-pack">
+            <strong>{{ credit_pack_minutes }} min</strong>
+            <strong>${{ credit_pack_price_usd }}</strong>
+        </div>
+        <form method="POST" action="{{ url_for('billing_checkout') }}" id="buyModalForm">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="source" id="buyModalSource" value="buy_modal_header">
+            <input type="hidden" name="return_to" id="buyModalReturnTo" value="">
+            <input type="hidden" name="ph_sid" id="buyModalPhSid" value="">
+            <input type="hidden" name="rss_url" id="buyModalRssUrl" value="">
+            <input type="hidden" name="episode_index" id="buyModalEpisodeIndex" value="">
+            <input type="hidden" name="episode_title" id="buyModalEpisodeTitle" value="">
+            <input type="hidden" name="duration_min" id="buyModalDurationMin" value="">
+            <input type="hidden" name="podcast_name" id="buyModalPodcastName" value="">
+            <input type="hidden" name="artwork" id="buyModalArtwork" value="">
+            <input type="hidden" name="audio_url" id="buyModalAudioUrl" value="">
+            <input type="hidden" name="language" id="buyModalLanguage" value="">
+            <button type="submit" class="btn btn-primary w-full" style="justify-content: center; margin-top: 8px;">
+                Buy {{ credit_pack_minutes }} min, ${{ credit_pack_price_usd }}
+            </button>
+        </form>
+        <p class="buy-modal-foot">One-time · VAT included · minutes never expire · Stripe</p>
+        <p class="buy-modal-alt">
+            <a href="{{ url_for('settings') }}#openai">Use my own OpenAI key instead</a>
+        </p>
+    </div>
+</div>
+<script>
+(function() {
+    var PACK = {{ credit_pack_minutes|int }};
+    var PRICE = {{ credit_pack_price_usd|tojson }};
+    var scrim = document.getElementById('buyModalScrim');
+    var titleEl = document.getElementById('buyModalTitle');
+    var subEl = document.getElementById('buyModalSub');
+    var sourceEl = document.getElementById('buyModalSource');
+    var returnEl = document.getElementById('buyModalReturnTo');
+    if (!scrim) return;
+
+    function closeBuyModal() {
+        scrim.classList.remove('is-open');
+        scrim.hidden = true;
+        document.body.style.overflow = '';
+    }
+
+    function openBuyModal(opts) {
+        opts = opts || {};
+        var needed = opts.needed != null ? Math.max(0, Math.round(Number(opts.needed))) : null;
+        var left = opts.left != null ? Math.max(0, Math.round(Number(opts.left))) : null;
+        var epTitle = opts.title || '';
+        var source = opts.source || 'buy_modal_header';
+        var returnTo = opts.returnTo || (window.location.pathname + window.location.search);
+
+        sourceEl.value = source;
+        returnEl.value = returnTo;
+        try {
+            var phEl = document.getElementById('buyModalPhSid');
+            if (phEl && window.posthog) phEl.value = posthog.get_session_id() || '';
+        } catch (e) { /* ignore */ }
+
+        function setHidden(id, val) {
+            var el = document.getElementById(id);
+            if (el) el.value = val == null ? '' : String(val);
+        }
+        setHidden('buyModalRssUrl', opts.rssUrl);
+        setHidden('buyModalEpisodeIndex', opts.episodeIndex);
+        setHidden('buyModalEpisodeTitle', opts.title);
+        setHidden('buyModalDurationMin', needed);
+        setHidden('buyModalPodcastName', opts.podcastName);
+        setHidden('buyModalArtwork', opts.artwork);
+        setHidden('buyModalAudioUrl', opts.audioUrl);
+        setHidden('buyModalLanguage', opts.language);
+
+        if (needed != null && left != null) {
+            titleEl.textContent = 'This episode needs ' + needed + ' min, you have ' + left + ' left';
+            var cover = PACK + left - needed;
+            var more = needed > 0 ? Math.floor(cover / needed) : 0;
+            var line = PACK + ' min for $' + PRICE + ' covers this';
+            if (more > 0) {
+                line += ' and about ' + more + ' more episode' + (more === 1 ? '' : 's') + ' like it';
+            }
+            line += '.';
+            if (epTitle) line = '"' + epTitle.replace(/"/g, '') + '" — ' + line;
+            subEl.textContent = line;
+        } else {
+            titleEl.textContent = 'Buy transcription minutes';
+            subEl.textContent = PACK + ' minutes for $' + PRICE + ' — one-time, never expires.';
+        }
+        scrim.hidden = false;
+        scrim.classList.add('is-open');
+        document.body.style.overflow = 'hidden';
+    }
+
+    document.getElementById('buyModalClose').addEventListener('click', closeBuyModal);
+    scrim.addEventListener('click', function(e) {
+        if (e.target === scrim) closeBuyModal();
+    });
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && scrim.classList.contains('is-open')) closeBuyModal();
+    });
+
+    window.openBuyModal = openBuyModal;
+    window.closeBuyModal = closeBuyModal;
+
+    document.querySelectorAll('[data-open-buy-modal]').forEach(function(el) {
+        el.addEventListener('click', function(e) {
+            e.preventDefault();
+            openBuyModal({
+                source: el.getAttribute('data-buy-source') || 'buy_modal_header',
+                returnTo: el.getAttribute('data-return-to') || undefined,
+            });
+        });
+    });
+})();
+</script>
+{% endif %}

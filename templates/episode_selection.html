@@ -3,6 +3,42 @@
 {% block container_class %}container-wide{% endblock %}
 
 {% block content %}
+<style>
+    .ep-sticky {
+        position: sticky; bottom: 0; z-index: 50;
+        margin: 20px -4px 0; padding: 12px 14px;
+        background: rgba(17, 17, 17, 0.94);
+        backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+        border: 1px solid var(--border); border-radius: var(--radius) var(--radius) 0 0;
+        display: flex; align-items: center; gap: 12px;
+        box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.45);
+    }
+    .ep-sticky-art {
+        width: 40px; height: 40px; border-radius: 6px; object-fit: cover;
+        flex-shrink: 0; background: var(--border);
+    }
+    .ep-sticky-art-ph {
+        width: 40px; height: 40px; border-radius: 6px; flex-shrink: 0;
+        background: var(--accent-bg); border: 1px solid var(--accent-border);
+    }
+    .ep-sticky-info { flex: 1; min-width: 0; }
+    .ep-sticky-title {
+        font-size: 13.5px; font-weight: 600; white-space: nowrap;
+        overflow: hidden; text-overflow: ellipsis;
+    }
+    .ep-sticky-meter { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .ep-sticky .btn { flex-shrink: 0; white-space: nowrap; }
+    .ep-desktop-start { text-align: center; margin-top: 24px; }
+    @media (max-width: 640px) {
+        .ep-desktop-start { display: none; }
+        .ep-sticky { margin-left: -12px; margin-right: -12px; border-radius: 0; }
+        /* Room so the last cards clear the sticky bar */
+        #episodeForm { padding-bottom: 8px; }
+    }
+    @media (min-width: 641px) {
+        .ep-sticky { max-width: 640px; margin-left: auto; margin-right: auto; border-radius: var(--radius); }
+    }
+</style>
 <div class="flex-between mb-2">
     <div class="episode-hero">
         {% if artwork %}<img src="{{ artwork }}" alt="" style="width: 64px; height: 64px;">{% endif %}
@@ -37,18 +73,26 @@
             </select>
         </div>
     </div>
+    {% if not current_user.is_authenticated %}
+    <p class="form-hint" style="padding: 0 20px 14px; margin: 0;">
+        No account needed to browse. Sign up takes 20 seconds and your episode starts right after.
+    </p>
+    {% endif %}
 </div>
 
 <form id="episodeForm" method="POST" action="{{ url_for('start_transcription') }}">
     <input type="hidden" name="rss_url" value="{{ rss_url }}">
     <input type="hidden" name="episode_index" id="episode_index" value="">
     <input type="hidden" name="podcast_name" value="{{ feed_name or podcast_name }}">
-    <input type="hidden" name="artwork" value="{{ artwork }}">
+    <input type="hidden" name="artwork" id="form_artwork" value="{{ artwork }}">
+    <input type="hidden" name="episode_title" id="episode_title" value="">
+    <input type="hidden" name="duration_min" id="duration_min" value="">
 
     <p class="text-muted text-sm mb-1 hidden" id="filterCount"></p>
     <div class="grid grid-2">
         {% for episode in episodes %}
         <div class="episode-card" data-episode-index="{{ episode.index }}" data-listener-attached="true"
+             data-episode-title="{{ episode.title|e }}"
              {% if episode.duration_min is not none %}data-duration-min="{{ episode.duration_min }}"{% endif %}>
             <input type="radio" name="episode" value="{{ episode.index }}" id="ep_{{ episode.index }}" style="display: none;">
             <div class="episode-title">{{ episode.title }}</div>
@@ -80,9 +124,10 @@
                 {% if stripe_buy_enabled %}
                 {# Buy submits via form= — must not nest a <form> inside episodeForm
                    or browsers drop the inner form and close episodeForm early,
-                   leaving #transcribeBtn outside any form. #}
+                   leaving #transcribeBtn outside any form. JS opens the buy modal. #}
                 <button type="submit" class="btn btn-sm btn-primary"
                         form="buyFormEpisodeSelection"
+                        id="paywallBuyBtn"
                         style="display: inline-block; margin: 8px 6px;">
                     {{ credit_pack_label }}
                 </button>
@@ -98,10 +143,11 @@
 
     <div id="startError" class="hidden mt-2" style="margin-top: 16px;"></div>
 
-    <div class="text-center mt-3">
+    <div class="ep-desktop-start">
         <button type="submit" class="btn btn-accent btn-lg" id="transcribeBtn" disabled>
             Start Transcription
         </button>
+        <p class="form-hint hidden" id="desktopMeter" style="margin-top: 10px;"></p>
     </div>
 
     {% if has_more %}
@@ -111,13 +157,37 @@
         </button>
     </div>
     {% endif %}
+
+    <div class="ep-sticky" id="epSticky" aria-live="polite">
+        {% if artwork %}
+        <img class="ep-sticky-art" id="stickyArt" src="{{ artwork }}" alt="">
+        {% else %}
+        <div class="ep-sticky-art-ph" id="stickyArtPh" aria-hidden="true"></div>
+        <img class="ep-sticky-art hidden" id="stickyArt" src="" alt="">
+        {% endif %}
+        <div class="ep-sticky-info">
+            <div class="ep-sticky-title" id="stickyTitle">Pick an episode to transcribe</div>
+            <div class="ep-sticky-meter" id="stickyMeter"></div>
+        </div>
+        <button type="submit" class="btn btn-accent" id="stickyTranscribeBtn" disabled>
+            {% if current_user.is_authenticated and trial_badge_paid_min and not trial_badge_remaining_min %}
+            Transcribe →
+            {% elif not current_user.is_authenticated or trial_badge_remaining_min %}
+            Transcribe free →
+            {% else %}
+            Transcribe →
+            {% endif %}
+        </button>
+    </div>
 </form>
 
 {% if needs_api_key and stripe_buy_enabled %}
+{# Sibling form kept for PR A compatibility / progressive enhancement; modal is preferred. #}
 <form id="buyFormEpisodeSelection" method="POST" action="{{ url_for('billing_checkout') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="source" value="episode_selection">
     <input type="hidden" name="ph_sid" value="">
+    <input type="hidden" name="return_to" id="buyFormReturnTo" value="">
 </form>
 {% endif %}
 
@@ -153,11 +223,19 @@
 document.addEventListener('DOMContentLoaded', function() {
     var grid = document.querySelector('.grid');
     var transcribeBtn = document.getElementById('transcribeBtn');
+    var stickyBtn = document.getElementById('stickyTranscribeBtn');
     var episodeIndexInput = document.getElementById('episode_index');
+    var episodeTitleInput = document.getElementById('episode_title');
+    var durationMinInput = document.getElementById('duration_min');
     var languageSelect = document.getElementById('language');
     var filterInput = document.getElementById('episodeFilter');
     var filterCount = document.getElementById('filterCount');
     var loadMoreBtn = document.getElementById('loadMoreBtn');
+    var stickyTitle = document.getElementById('stickyTitle');
+    var stickyMeter = document.getElementById('stickyMeter');
+    var desktopMeter = document.getElementById('desktopMeter');
+    var stickyArt = document.getElementById('stickyArt');
+    var stickyArtPh = document.getElementById('stickyArtPh');
 
     var ALL_EPISODES = {{ all_episodes|tojson }};
     var renderedCount = {{ episodes|length }};
@@ -173,26 +251,85 @@ document.addEventListener('DOMContentLoaded', function() {
     var BADGE_PREFIX = STRIPE_BUY ? 'Needs key or pack' : 'Needs own key';
     var SHOW_OPENAI_COST = {{ (show_openai_cost|default(false))|tojson }};
     var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
+    var FEED_ARTWORK = {{ artwork|tojson }};
+    var ON_OWN_KEY = TRIAL_REMAINING_MIN === null;
+    var WHISPER_RATE = {{ whisper_cost_per_minute|tojson }};
     var startError = document.getElementById('startError');
+    var selectedDuration = null;
+    var selectedTitle = '';
+
+    function minutesLeft() {
+        if (ON_OWN_KEY) return null;
+        return Math.max(0, (Number(TRIAL_REMAINING_MIN) || 0) + (Number(PAID_REMAINING_MIN) || 0));
+    }
+
+    function isPaidOnly() {
+        return IS_AUTHENTICATED && !ON_OWN_KEY
+            && (Number(TRIAL_REMAINING_MIN) || 0) <= 0
+            && (Number(PAID_REMAINING_MIN) || 0) > 0;
+    }
+
+    function defaultStickyLabel() {
+        return isPaidOnly() ? 'Transcribe →' : 'Transcribe free →';
+    }
+
+    function meterText(durationMin) {
+        if (ON_OWN_KEY) {
+            if (durationMin == null) return '';
+            var cost = (Number(durationMin) * Number(WHISPER_RATE)).toFixed(3);
+            return 'Est. cost ~$' + cost + ' (your OpenAI key)';
+        }
+        if (durationMin == null) return '';
+        var n = Math.max(1, Math.round(Number(durationMin)));
+        var left = minutesLeft();
+        if (!IS_AUTHENTICATED) {
+            var grant = Number(TRIAL_REMAINING_MIN) || 0;
+            return 'This episode uses ~' + n + ' min · ' + grant + ' free after signup';
+        }
+        if (left == null) return '';
+        return 'This episode uses ~' + n + ' min · you have ' + left + ' left';
+    }
+
+    function returnToForCheckout() {
+        var path = window.location.pathname + window.location.search;
+        return path;
+    }
+
+    function openEpisodeBuyModal(needed) {
+        var left = minutesLeft() || 0;
+        var epForm = document.getElementById('episodeForm');
+        var lang = languageSelect ? languageSelect.value : '';
+        var opts = {
+            needed: needed || selectedDuration || 0,
+            left: left,
+            title: selectedTitle,
+            source: 'buy_modal_episode',
+            returnTo: returnToForCheckout(),
+            rssUrl: epForm ? (epForm.querySelector('[name="rss_url"]') || {}).value : '',
+            episodeIndex: episodeIndexInput ? episodeIndexInput.value : '',
+            podcastName: epForm ? (epForm.querySelector('[name="podcast_name"]') || {}).value : '',
+            artwork: FEED_ARTWORK || '',
+            language: lang,
+        };
+        if (typeof window.openBuyModal === 'function') {
+            window.openBuyModal(opts);
+            return;
+        }
+        // Fallback: sibling form (PR A pattern)
+        var form = document.getElementById('buyFormEpisodeSelection');
+        if (form) {
+            var rt = document.getElementById('buyFormReturnTo');
+            if (rt) rt.value = returnToForCheckout();
+            var ph = form.querySelector('input[name="ph_sid"]');
+            if (ph) {
+                try { if (window.posthog) ph.value = posthog.get_session_id() || ''; } catch (e) { ph.value = ''; }
+            }
+            form.submit();
+        }
+    }
 
     function postBuyForm(source) {
-        var form = document.createElement('form');
-        form.method = 'POST';
-        form.action = BUY_URL;
-        function hidden(name, value) {
-            var input = document.createElement('input');
-            input.type = 'hidden';
-            input.name = name;
-            input.value = value;
-            form.appendChild(input);
-        }
-        hidden('csrf_token', CSRF_TOKEN);
-        hidden('source', source || 'episode_selection');
-        var sid = '';
-        try { if (window.posthog) sid = posthog.get_session_id() || ''; } catch (e) { sid = ''; }
-        hidden('ph_sid', sid);
-        document.body.appendChild(form);
-        form.submit();
+        openEpisodeBuyModal(selectedDuration);
     }
 
     function setStartError(text, buyAvailable, paywallReason) {
@@ -217,7 +354,7 @@ document.addEventListener('DOMContentLoaded', function() {
             buyBtn.type = 'button';
             buyBtn.className = 'btn btn-sm btn-primary';
             buyBtn.textContent = BUY_LABEL;
-            buyBtn.addEventListener('click', function() { postBuyForm('episode_selection'); });
+            buyBtn.addEventListener('click', function() { postBuyForm('buy_modal_episode'); });
             actions.appendChild(buyBtn);
             if (typeof window.podskriftPaywallShown === 'function') {
                 window.podskriftPaywallShown(
@@ -253,6 +390,39 @@ document.addEventListener('DOMContentLoaded', function() {
         return estimateSec > freeSec + paidSec;
     }
 
+    function updateSticky(card) {
+        if (!card) {
+            stickyTitle.textContent = 'Pick an episode to transcribe';
+            stickyMeter.textContent = '';
+            desktopMeter.textContent = '';
+            desktopMeter.classList.add('hidden');
+            stickyBtn.disabled = true;
+            stickyBtn.textContent = defaultStickyLabel();
+            transcribeBtn.disabled = true;
+            return;
+        }
+        var title = card.dataset.episodeTitle || (card.querySelector('.episode-title') || {}).textContent || 'Episode';
+        var duration = card.dataset.durationMin != null ? Number(card.dataset.durationMin) : null;
+        selectedTitle = title;
+        selectedDuration = duration;
+        stickyTitle.textContent = title;
+        var meter = meterText(duration);
+        stickyMeter.textContent = meter;
+        if (meter) {
+            desktopMeter.textContent = meter;
+            desktopMeter.classList.remove('hidden');
+        } else {
+            desktopMeter.classList.add('hidden');
+        }
+        stickyBtn.disabled = false;
+        stickyBtn.textContent = defaultStickyLabel();
+        if (FEED_ARTWORK && stickyArt) {
+            stickyArt.src = FEED_ARTWORK;
+            stickyArt.classList.remove('hidden');
+            if (stickyArtPh) stickyArtPh.classList.add('hidden');
+        }
+    }
+
     // Remember the language across pages so episode search on the home page
     // starts transcribing with the same choice.
     var stored = localStorage.getItem('podskrift_language');
@@ -269,6 +439,14 @@ document.addEventListener('DOMContentLoaded', function() {
         card.querySelector('input[type="radio"]').checked = true;
         transcribeBtn.disabled = false;
         episodeIndexInput.value = card.dataset.episodeIndex;
+        episodeTitleInput.value = card.dataset.episodeTitle || (card.querySelector('.episode-title') || {}).textContent || '';
+        durationMinInput.value = card.dataset.durationMin != null ? card.dataset.durationMin : '';
+        updateSticky(card);
+
+        if (IS_AUTHENTICATED && episodeNeedsOwnKey(card.dataset.durationMin)) {
+            // Soft nudge: open buy modal when the pick won't fit the balance.
+            // Don't block selection — they can still try / add a key.
+        }
     }
 
     function attach(card) {
@@ -281,6 +459,7 @@ document.addEventListener('DOMContentLoaded', function() {
         var card = document.createElement('div');
         card.className = 'episode-card';
         card.dataset.episodeIndex = ep.index;
+        card.dataset.episodeTitle = ep.title || '';
         if (ep.duration_min != null) card.dataset.durationMin = ep.duration_min;
 
         var radio = document.createElement('input');
@@ -351,7 +530,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 card.classList.remove('selected');
                 card.querySelector('input[type="radio"]').checked = false;
                 episodeIndexInput.value = '';
-                transcribeBtn.disabled = true;
+                episodeTitleInput.value = '';
+                durationMinInput.value = '';
+                updateSticky(null);
             }
         });
 
@@ -359,9 +540,20 @@ document.addEventListener('DOMContentLoaded', function() {
         filterCount.classList.toggle('hidden', !q);
     });
 
+    function maybeOpenBuyInstead(e) {
+        if (!IS_AUTHENTICATED || ON_OWN_KEY) return false;
+        if (selectedDuration == null) return false;
+        if (!episodeNeedsOwnKey(selectedDuration)) return false;
+        if (!STRIPE_BUY) return false;
+        e.preventDefault();
+        openEpisodeBuyModal(selectedDuration);
+        return true;
+    }
+
     document.getElementById('episodeForm').addEventListener('submit', function(e) {
         e.preventDefault();
         if (!grid.querySelector('input[name="episode"]:checked')) return;
+        if (maybeOpenBuyInstead(e)) return;
 
         if (!IS_AUTHENTICATED) {
             // Same stash-then-register path as homepage Transcribe.
@@ -371,7 +563,9 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         transcribeBtn.disabled = true;
+        stickyBtn.disabled = true;
         transcribeBtn.textContent = 'Starting...';
+        stickyBtn.textContent = 'Starting...';
         clearStartError();
 
         fetch('/start_transcription', { method: 'POST', body: new FormData(this) })
@@ -387,16 +581,33 @@ document.addEventListener('DOMContentLoaded', function() {
                         !!res.data.buy_available,
                         res.data.paywall_reason
                     );
+                    if (res.data.buy_available && STRIPE_BUY) {
+                        openEpisodeBuyModal(selectedDuration);
+                    }
                     transcribeBtn.disabled = false;
+                    stickyBtn.disabled = false;
                     transcribeBtn.textContent = 'Start Transcription';
+                    stickyBtn.textContent = defaultStickyLabel();
                 }
             })
             .catch(function() {
                 setStartError('Could not start transcription.', false);
                 transcribeBtn.disabled = false;
+                stickyBtn.disabled = false;
                 transcribeBtn.textContent = 'Start Transcription';
+                stickyBtn.textContent = defaultStickyLabel();
             });
     });
+
+    var paywallBuyBtn = document.getElementById('paywallBuyBtn');
+    if (paywallBuyBtn) {
+        paywallBuyBtn.addEventListener('click', function(e) {
+            if (typeof window.openBuyModal === 'function') {
+                e.preventDefault();
+                openEpisodeBuyModal(selectedDuration);
+            }
+        });
+    }
 
     // Save feed dialog
     var saveBtn = document.getElementById('saveFeedBtn');
