@@ -6936,6 +6936,45 @@ def test_pricing_hides_buy_for_own_key_user(stripe_on):
     assert 'Add OpenAI key' in body or 'own OpenAI' in body
 
 
+def test_openai_key_never_rendered_into_analytics_pages(stripe_on, monkeypatch):
+    """Jinja `a and openai_api_key` returns the key string — never |tojson it.
+
+    A logged-in own-key user must see has_own_key as the boolean true, and the
+    raw key must not appear in any page that fires funnel events.
+    """
+    leak = 'sk-test-LEAKCHECK'
+    uid = _make_user('leakcheck@test.com', key=leak, limit=600, used=0)
+    client = _login(uid)
+
+    pricing = client.get('/pricing').data.decode()
+    assert leak not in pricing
+    assert 'has_own_key: true' in pricing
+    assert 'has_own_key: false' not in pricing
+    # Guard the specific footgun: truthy-and must not pipe the key through tojson.
+    assert 'openai_api_key)|tojson' not in pricing
+    assert 'openai_api_key |tojson' not in pricing
+
+    index = client.get('/').data.decode()
+    assert leak not in index
+
+    episodes = [{
+        'index': 0,
+        'title': 'Ep One',
+        'published': '2024-01-01',
+        'audio_url': 'https://example.com/ep.mp3',
+        'description': '',
+        'duration_min': 30.0,
+        'estimated_cost': 0.18,
+        'artwork': '',
+        'podcast_name': 'Test Feed',
+    }]
+    monkeypatch.setattr(A, 'get_episodes_from_rss', lambda url: (episodes, None))
+    picker = client.post('/parse_rss', data={
+        'rss_url': 'https://example.com/feed.xml',
+    }, follow_redirects=True).data.decode()
+    assert leak not in picker
+
+
 def test_pricing_in_sitemap_and_llms(trial_on):
     sitemap = A.app.test_client().get('/sitemap.xml').data.decode()
     assert '/pricing' in sitemap

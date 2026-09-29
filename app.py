@@ -5389,10 +5389,15 @@ def sitemap_xml():
 @app.route('/pricing')
 def pricing():
     """Public pricing page: free trial, one-time pack, or bring your own key."""
+    # Must be a real bool — Jinja `a and b` returns b, so piping openai_api_key
+    # through |tojson would render the raw key into the page (and PostHog).
+    has_own_key = bool(
+        current_user.is_authenticated and current_user.openai_api_key)
     return render_template(
         'pricing.html',
         trial_minutes=(TRIAL_DEFAULT_SECONDS // 60 if trial_available() else None),
         stripe_configured=stripe_checkout_enabled(),
+        has_own_key=has_own_key,
     )
 
 

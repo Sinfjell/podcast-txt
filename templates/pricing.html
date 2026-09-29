@@ -102,7 +102,7 @@ document.addEventListener('DOMContentLoaded', function () {
         } catch (e) { referrerPath = ''; }
         posthog.capture('pricing_viewed', {
             logged_in: {{ current_user.is_authenticated|tojson }},
-            has_own_key: {{ (current_user.is_authenticated and current_user.openai_api_key)|tojson }},
+            has_own_key: {{ has_own_key|tojson }},
             stripe_configured: {{ stripe_configured|tojson }},
             referrer_path: referrerPath
         });
