@@ -6850,3 +6850,54 @@ def test_episode_selection_uses_inline_error_not_confirm(stripe_on):
     assert 'setStartError' in src
     assert 'startError' in src
     assert 'Add OpenAI key' in src
+
+
+def test_episode_selection_buy_form_not_nested_in_episode_form(stripe_on):
+    """Buy must not nest inside #episodeForm — browsers drop the inner form and
+    close episodeForm early, leaving #transcribeBtn outside any form."""
+    from bs4 import BeautifulSoup
+    from flask import render_template
+
+    episodes = [{
+        'index': 0,
+        'title': 'Ep One',
+        'published': '2024-01-01',
+        'duration_min': 30,
+        'estimated_cost': 0.01,
+        'description': '',
+        'needs_own_key': False,
+    }]
+    with A.app.test_request_context('/'):
+        html = render_template(
+            'episode_selection.html',
+            episodes=episodes,
+            all_episodes=episodes,
+            rss_url='https://example.com/feed.xml',
+            feed_name='Test Feed',
+            has_more=False,
+            needs_api_key=True,
+            podcast_name='Test Feed',
+            artwork='',
+            languages=[('en', 'English')],
+        )
+    soup = BeautifulSoup(html, 'html5lib')
+    episode_form = soup.find('form', id='episodeForm')
+    assert episode_form is not None
+    # Nested <form> inside <form> is invalid HTML; after a real parse the Buy
+    # form must be a sibling of episodeForm, not a descendant.
+    nested = episode_form.find_all('form')
+    assert nested == [], f'nested form(s) inside #episodeForm: {nested}'
+    buy_form = soup.find('form', id='buyFormEpisodeSelection')
+    assert buy_form is not None
+    assert buy_form.find_parent('form') is None
+    assert buy_form.get('action', '').endswith('/billing/checkout')
+    assert buy_form.find('input', {'name': 'source', 'value': 'episode_selection'})
+    # HTML5 form= associates the Buy button with buyForm without nesting.
+    buy_btn = soup.find('button', attrs={'form': 'buyFormEpisodeSelection'})
+    assert buy_btn is not None
+    assert buy_btn.get('type') == 'submit'
+    # Start Transcription must remain a submit control of episodeForm.
+    transcribe = soup.find(id='transcribeBtn')
+    assert transcribe is not None
+    assert transcribe.find_parent('form', id='episodeForm') is not None
+    assert transcribe.get('type') == 'submit'

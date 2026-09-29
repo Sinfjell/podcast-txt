@@ -73,11 +73,14 @@
             <p style="font-weight: 600; font-size: 14px;">Out of free minutes</p>
             <p class="form-hint">
                 {% if stripe_buy_enabled %}
-                <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline-block; margin: 8px 6px;">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <input type="hidden" name="source" value="episode_selection">
-                    <button type="submit" class="btn btn-sm btn-primary">{{ credit_pack_label }}</button>
-                </form>
+                {# Buy submits via form= — must not nest a <form> inside episodeForm
+                   or browsers drop the inner form and close episodeForm early,
+                   leaving #transcribeBtn outside any form. #}
+                <button type="submit" class="btn btn-sm btn-primary"
+                        form="buyFormEpisodeSelection"
+                        style="display: inline-block; margin: 8px 6px;">
+                    {{ credit_pack_label }}
+                </button>
                 <span class="form-hint" style="display: block; margin: 4px 0 8px;">{{ credit_pack_subline }}</span>
                 or
                 {% endif %}
@@ -104,6 +107,13 @@
     </div>
     {% endif %}
 </form>
+
+{% if needs_api_key and stripe_buy_enabled %}
+<form id="buyFormEpisodeSelection" method="POST" action="{{ url_for('billing_checkout') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="source" value="episode_selection">
+</form>
+{% endif %}
 
 <!-- Save Feed Dialog -->
 {% if current_user.is_authenticated %}
