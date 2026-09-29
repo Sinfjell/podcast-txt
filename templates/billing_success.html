@@ -23,3 +23,19 @@
     <a href="{{ url_for('index') }}" class="btn btn-ghost" style="margin-left: 8px;">Transcribe</a>
 </div>
 {% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    try {
+        var params = new URLSearchParams(window.location.search);
+        if (params.has('session_id')) {
+            params.delete('session_id');
+            var qs = params.toString();
+            var clean = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash;
+            window.history.replaceState({}, '', clean);
+        }
+    } catch (e) { /* ignore */ }
+})();
+</script>
+{% endblock %}

@@ -46,6 +46,7 @@
             <form method="POST" action="{{ url_for('billing_checkout') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="source" value="pricing">
+                <input type="hidden" name="ph_sid" value="">
                 <input type="hidden" name="cancel_url" value="{{ url_for('pricing') }}">
                 <button type="submit" class="btn btn-primary">{{ credit_pack_label }}</button>
             </form>
@@ -86,4 +87,26 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    try {
+        if (!window.posthog) return;
+        var referrerPath = '';
+        try {
+            if (document.referrer) {
+                referrerPath = new URL(document.referrer).pathname || '';
+            }
+        } catch (e) { referrerPath = ''; }
+        posthog.capture('pricing_viewed', {
+            logged_in: {{ current_user.is_authenticated|tojson }},
+            has_own_key: {{ has_own_key|tojson }},
+            stripe_configured: {{ stripe_configured|tojson }},
+            referrer_path: referrerPath
+        });
+    } catch (e) { /* ignore */ }
+});
+</script>
 {% endblock %}

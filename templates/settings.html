@@ -41,7 +41,8 @@
             </p>
             <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline-block; margin: 0 8px 8px 0;">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <input type="hidden" name="source" value="settings">
+                <input type="hidden" name="source" value="{{ buy_source|default('settings') }}">
+                <input type="hidden" name="ph_sid" value="">
                 <button type="submit" class="btn btn-primary">{{ trial.buy_label }}</button>
             </form>
             <p class="form-hint" style="display: inline; margin: 0;">{{ credit_pack_subline }}</p>
@@ -76,7 +77,8 @@
             </p>
             <form method="POST" action="{{ url_for('billing_checkout') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <input type="hidden" name="source" value="settings">
+                <input type="hidden" name="source" value="{{ buy_source|default('settings') }}">
+                <input type="hidden" name="ph_sid" value="">
                 <button type="submit" class="btn btn-primary">{{ credit_pack_label }}</button>
             </form>
             <p class="form-hint" style="margin-top: 8px;">{{ credit_pack_subline }}</p>
@@ -204,6 +206,18 @@
         </div>
     </div>
 </div>
+{% if trial and trial.exhausted and trial.stripe_buy and not trial.on_own_key %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    if (typeof window.podskriftPaywallShown !== 'function') return;
+    var reason = {{ ('trial_exhausted' if trial.used_minutes > 0 else 'paid_exhausted')|tojson }};
+    window.podskriftPaywallShown('settings', reason, {
+        trial_remaining_min: {{ trial.remaining_minutes|tojson }},
+        paid_remaining_min: {{ trial.paid_minutes|tojson }}
+    });
+});
+</script>
+{% endif %}
 {% if new_api_key %}
 <script>
 (function () {

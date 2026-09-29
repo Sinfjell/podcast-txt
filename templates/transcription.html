@@ -155,6 +155,9 @@
         }
         hidden('csrf_token', CSRF_TOKEN);
         hidden('source', source || 'transcription_error');
+        var sid = '';
+        try { if (window.posthog) sid = posthog.get_session_id() || ''; } catch (e) { sid = ''; }
+        hidden('ph_sid', sid);
         document.body.appendChild(form);
         form.submit();
     }
@@ -174,6 +177,16 @@
             buyBtn.textContent = d.buy_label || BUY_LABEL;
             buyBtn.addEventListener('click', function() { postBuyForm('transcription_error'); });
             actions.appendChild(buyBtn);
+            if (typeof window.podskriftPaywallShown === 'function') {
+                window.podskriftPaywallShown(
+                    'transcription_error',
+                    d.paywall_reason || 'trial_exhausted',
+                    {
+                        trial_remaining_min: null,
+                        paid_remaining_min: null
+                    }
+                );
+            }
         }
         var keyLink = document.createElement('a');
         keyLink.href = SETTINGS_OPENAI;

@@ -34,6 +34,7 @@
         <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="source" value="home_banner">
+            <input type="hidden" name="ph_sid" value="">
             <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
         </form>
         <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
@@ -47,6 +48,7 @@
         <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="source" value="home_low_balance">
+            <input type="hidden" name="ph_sid" value="">
             <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">Buy minutes</button>
         </form>
         <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
@@ -62,6 +64,7 @@
         <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="source" value="home_banner">
+            <input type="hidden" name="ph_sid" value="">
             <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
         </form>
         <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
@@ -296,11 +299,14 @@
         }
         hidden('csrf_token', CSRF_TOKEN);
         hidden('source', source || 'home_error');
+        var sid = '';
+        try { if (window.posthog) sid = posthog.get_session_id() || ''; } catch (e) { sid = ''; }
+        hidden('ph_sid', sid);
         document.body.appendChild(form);
         form.submit();
     }
 
-    function setError(text, actionUrl, actionLabel, buyAvailable) {
+    function setError(text, actionUrl, actionLabel, buyAvailable, paywallReason) {
         clearResults();
         resultsDiv.style.color = 'var(--error)';
         resultsDiv.style.padding = '12px 0';
@@ -321,6 +327,13 @@
             buyBtn.textContent = BUY_LABEL;
             buyBtn.addEventListener('click', function() { postBuyForm('home_error'); });
             actions.appendChild(buyBtn);
+            if (typeof window.podskriftPaywallShown === 'function') {
+                window.podskriftPaywallShown(
+                    'home_error',
+                    paywallReason || 'trial_exhausted',
+                    {trial_remaining_min: TRIAL_REMAINING_MIN, paid_remaining_min: PAID_REMAINING_MIN}
+                );
+            }
         }
         var keyUrl = SETTINGS_OPENAI;
         var keyLabel = 'Add OpenAI key →';
@@ -444,7 +457,8 @@
                             res.data.error || 'Could not start transcription.',
                             res.data.action_url,
                             res.data.action_label,
-                            res.data.buy_available
+                            res.data.buy_available,
+                            res.data.paywall_reason
                         );
                     }
                 })
@@ -570,6 +584,22 @@
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(doSearch, 400);
     });
+
+    {% if trial and not trial.on_own_key and trial.stripe_buy %}
+    (function fireHomePaywall() {
+        if (typeof window.podskriftPaywallShown !== 'function') return;
+        var props = {
+            trial_remaining_min: {{ trial.remaining_minutes|tojson }},
+            paid_remaining_min: {{ trial.paid_minutes|tojson }}
+        };
+        {% if trial.exhausted %}
+        var reason = {% if trial.used_minutes > 0 %}'trial_exhausted'{% else %}'paid_exhausted'{% endif %};
+        window.podskriftPaywallShown('home_banner', reason, props);
+        {% elif trial.low_balance %}
+        window.podskriftPaywallShown('home_low_balance', 'low_balance', props);
+        {% endif %}
+    })();
+    {% endif %}
 })();
 </script>
 {% endblock %}

@@ -787,7 +787,7 @@
                 </a>
                 {% endif %}
                 {% if nav_show_buy %}
-                <a href="{{ url_for('settings') }}#credits" class="nav-buy">
+                <a href="{{ url_for('settings') }}?from=header_pill#credits" class="nav-buy" id="navBuyPill">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
                     Buy minutes
                 </a>
@@ -882,6 +882,7 @@
     posthog.init({{ posthog_key | tojson }}, {
         api_host: {{ posthog_host | tojson }},
         person_profiles: 'identified_only',
+        capture_exceptions: true,
         // Pageviews + autocapture stay on (PostHog defaults).
         session_recording: {
             maskAllInputs: true,
@@ -904,6 +905,7 @@
             }
         }
     });
+    posthog.register({app: 'podskrift'});
     (function () {
         try {
             var params = new URLSearchParams(window.location.search);
@@ -919,6 +921,66 @@
         // Internal user id only — never email or name as person properties.
         posthog.identify({{ posthog_user_id | tojson }});
         {% endif %}
+
+        // Once-per page+location paywall / offer dual-fire.
+        var _paywallSeen = window.__podskriftPaywallSeen || (window.__podskriftPaywallSeen = new Set());
+        window.podskriftPaywallShown = function (location, reason, props) {
+            try {
+                if (!window.posthog || !location) return;
+                var key = String(location);
+                if (_paywallSeen.has(key)) return;
+                _paywallSeen.add(key);
+                var p = props || {};
+                var payload = {
+                    location: location,
+                    reason: reason || '',
+                    trial_remaining_min: p.trial_remaining_min != null ? p.trial_remaining_min : null,
+                    paid_remaining_min: p.paid_remaining_min != null ? p.paid_remaining_min : null
+                };
+                posthog.capture('paywall_shown', payload);
+                posthog.capture('offer_shown', Object.assign({variant: 'buy_or_key'}, payload));
+            } catch (e) { /* ignore */ }
+        };
+
+        // Buy form submit: stamp ph_sid + buy_clicked (sendBeacon when available).
+        document.addEventListener('submit', function (ev) {
+            try {
+                var form = ev.target;
+                if (!form || !form.getAttribute) return;
+                var action = form.getAttribute('action') || '';
+                if (action.indexOf('/billing/checkout') === -1) return;
+                var sid = '';
+                try { sid = posthog.get_session_id() || ''; } catch (e) { sid = ''; }
+                var ph = form.querySelector('input[name="ph_sid"]');
+                if (!ph) {
+                    ph = document.createElement('input');
+                    ph.type = 'hidden';
+                    ph.name = 'ph_sid';
+                    form.appendChild(ph);
+                }
+                ph.value = sid;
+                var sourceEl = form.querySelector('input[name="source"]');
+                var loc = sourceEl ? sourceEl.value : '';
+                var opts = {};
+                if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+                    opts.transport = 'sendBeacon';
+                }
+                posthog.capture('buy_clicked', {location: loc, transport: 'sendBeacon'}, opts);
+            } catch (e) { /* ignore */ }
+        }, true);
+
+        var navBuy = document.getElementById('navBuyPill');
+        if (navBuy) {
+            navBuy.addEventListener('click', function () {
+                try {
+                    var opts = {};
+                    if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+                        opts.transport = 'sendBeacon';
+                    }
+                    posthog.capture('buy_clicked', {location: 'header_pill', transport: 'sendBeacon'}, opts);
+                } catch (e) { /* ignore */ }
+            });
+        }
     })();
     </script>
     {% endif %}
