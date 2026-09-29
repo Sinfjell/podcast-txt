@@ -30,11 +30,30 @@
     <span>
         {% if trial.exhausted %}
         Your free trial is used up.
+        {% if trial.stripe_buy %}
+        <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="source" value="home_banner">
+            <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
+        </form>
+        or
+        {% endif %}
         <a href="{{ url_for('settings') }}#openai">Add your own OpenAI API key</a>
         — the app is free; OpenAI bills you.
         {% else %}
         Free trial: <strong>{{ trial.remaining_minutes }} minutes</strong> left on our key.
-        Or <a href="{{ url_for('settings') }}#openai">add your own key</a>
+        {% if trial.paid_minutes %}
+        · <strong>{{ trial.paid_minutes }} paid</strong> left.
+        {% endif %}
+        {% if trial.stripe_buy %}
+        <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="source" value="home_banner">
+            <button type="submit" class="btn btn-sm btn-ghost" style="margin: 0 4px;">{{ trial.buy_label }}</button>
+        </form>
+        or
+        {% endif %}
+        <a href="{{ url_for('settings') }}#openai">add your own key</a>
         — Podskrift stays free; OpenAI bills you for Whisper.
         {% endif %}
     </span>
@@ -199,14 +218,26 @@
     var PENDING_URL = '{{ url_for("pending_transcription") }}';
     var IS_AUTHENTICATED = {{ 'true' if current_user.is_authenticated else 'false' }};
     var TRIAL_REMAINING_MIN = {{ trial_badge_remaining_min|tojson }};
+    var PAID_REMAINING_MIN = {{ trial_badge_paid_min|tojson }};
     var TRIAL_MAX_EPISODE_MIN = {{ trial_max_episode_min|tojson }};
+    var STRIPE_BUY = {{ stripe_buy_enabled|tojson }};
+    var BUY_LABEL = {{ credit_pack_label|tojson }};
+    var BUY_URL = {{ url_for('billing_checkout')|tojson }};
+    {# Only mint CSRF when a logged-in user can actually submit Buy — otherwise
+       an anonymous homepage visit would get a session cookie for nothing. #}
+    var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
+    var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
 
     function episodeNeedsOwnKey(durationMin) {
         if (TRIAL_REMAINING_MIN === null || durationMin == null) return false;
         var estimateSec = Math.max(60, Math.floor(Number(durationMin) * 60));
         if (!(estimateSec > 0)) return false;
-        if (TRIAL_MAX_EPISODE_MIN && estimateSec > TRIAL_MAX_EPISODE_MIN * 60) return true;
-        return estimateSec > TRIAL_REMAINING_MIN * 60;
+        var paidSec = Math.max(0, Number(PAID_REMAINING_MIN) || 0) * 60;
+        var freeSec = Math.max(0, Number(TRIAL_REMAINING_MIN) || 0) * 60;
+        if (TRIAL_MAX_EPISODE_MIN && estimateSec > TRIAL_MAX_EPISODE_MIN * 60) {
+            return estimateSec > paidSec;
+        }
+        return estimateSec > freeSec + paidSec;
     }
 
     function clearResults() {
@@ -220,7 +251,24 @@
         resultsDiv.style.padding = '12px 0';
     }
 
-    function setError(text, actionUrl, actionLabel) {
+    function postBuyForm(source) {
+        var form = document.createElement('form');
+        form.method = 'POST';
+        form.action = BUY_URL;
+        function hidden(name, value) {
+            var input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = name;
+            input.value = value;
+            form.appendChild(input);
+        }
+        hidden('csrf_token', CSRF_TOKEN);
+        hidden('source', source || 'home_error');
+        document.body.appendChild(form);
+        form.submit();
+    }
+
+    function setError(text, actionUrl, actionLabel, buyAvailable) {
         clearResults();
         resultsDiv.style.color = 'var(--error)';
         resultsDiv.style.padding = '12px 0';
@@ -228,14 +276,32 @@
         wrap.style.lineHeight = '1.6';
         wrap.textContent = text;
         resultsDiv.appendChild(wrap);
-        if (actionUrl) {
-            var link = document.createElement('a');
-            link.href = actionUrl;
-            link.textContent = actionLabel || 'Add OpenAI key →';
-            link.style.display = 'inline-block';
-            link.style.marginTop = '8px';
-            resultsDiv.appendChild(link);
+        var actions = document.createElement('div');
+        actions.style.marginTop = '10px';
+        actions.style.display = 'flex';
+        actions.style.flexWrap = 'wrap';
+        actions.style.gap = '8px';
+        var showBuy = (typeof buyAvailable === 'boolean') ? buyAvailable : false;
+        if (showBuy && STRIPE_BUY) {
+            var buyBtn = document.createElement('button');
+            buyBtn.type = 'button';
+            buyBtn.className = 'btn btn-sm btn-primary';
+            buyBtn.textContent = BUY_LABEL;
+            buyBtn.addEventListener('click', function() { postBuyForm('home_error'); });
+            actions.appendChild(buyBtn);
         }
+        var keyUrl = SETTINGS_OPENAI;
+        var keyLabel = 'Add OpenAI key →';
+        if (actionUrl && !(showBuy && actionLabel && actionLabel.indexOf('Buy') === 0)) {
+            keyUrl = actionUrl;
+            keyLabel = actionLabel || keyLabel;
+        }
+        var link = document.createElement('a');
+        link.href = keyUrl;
+        link.textContent = keyLabel;
+        link.className = 'btn btn-sm btn-ghost';
+        actions.appendChild(link);
+        resultsDiv.appendChild(actions);
     }
 
     function postForm(action, fields) {
@@ -296,7 +362,8 @@
         if (item.type === 'episode' && episodeNeedsOwnKey(item.duration_min)) {
             var warn = document.createElement('span');
             warn.className = 'badge badge-needs-key';
-            warn.textContent = 'Needs own key \u00B7 ' + Math.round(item.duration_min) + ' min';
+            warn.textContent = (STRIPE_BUY ? 'Needs key or pack' : 'Needs own key')
+                + ' \u00B7 ' + Math.round(item.duration_min) + ' min';
             badges.appendChild(warn);
         }
 
@@ -344,7 +411,8 @@
                         setError(
                             res.data.error || 'Could not start transcription.',
                             res.data.action_url,
-                            res.data.action_label
+                            res.data.action_label,
+                            res.data.buy_available
                         );
                     }
                 })

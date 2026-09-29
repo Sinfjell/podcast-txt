@@ -58,6 +58,10 @@ PODSKRIFT_EVENTS = (
     'transcript_completed',
     'transcript_failed',
     'trial_limit_hit',
+    'offer_shown',
+    'checkout_started',
+    'purchase_completed',
+    'paid_minutes_exhausted',
 )
 
 PT_HOSTS = ('productivitytech.io', 'www.productivitytech.io')

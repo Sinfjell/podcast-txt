@@ -57,7 +57,7 @@
                 {% if episode.duration_min %} · {{ episode.duration_min }} min{% endif %}
                 {% if episode.estimated_cost %} · ~${{ "%.3f"|format(episode.estimated_cost) }}{% endif %}
                 {% if episode.needs_own_key %}
-                · <span class="badge badge-needs-key">Needs own key · {{ episode.duration_min|round|int }} min</span>
+                · <span class="badge badge-needs-key">{% if stripe_buy_enabled %}Needs key or pack{% else %}Needs own key{% endif %} · {{ episode.duration_min|round|int }} min</span>
                 {% endif %}
             </div>
             {% if episode.description %}
@@ -70,9 +70,17 @@
     {% if needs_api_key %}
     <div class="card mt-2" style="border-color: var(--accent-border);">
         <div class="card-body text-center">
-            <p style="font-weight: 600; font-size: 14px;">No API key configured</p>
+            <p style="font-weight: 600; font-size: 14px;">Out of free minutes</p>
             <p class="form-hint">
-                Add your OpenAI API key in <a href="{{ url_for('settings') }}">Settings</a>
+                {% if stripe_buy_enabled %}
+                <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline-block; margin: 8px 6px;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="source" value="episode_selection">
+                    <button type="submit" class="btn btn-sm btn-primary">{{ credit_pack_label }}</button>
+                </form>
+                or
+                {% endif %}
+                <a href="{{ url_for('settings') }}#openai">Add your OpenAI API key</a>
                 — the app is free; OpenAI bills you.
             </p>
         </div>
@@ -137,14 +145,24 @@ document.addEventListener('DOMContentLoaded', function() {
     var IS_AUTHENTICATED = {{ 'true' if current_user.is_authenticated else 'false' }};
     var PENDING_URL = '{{ url_for("pending_transcription") }}';
     var TRIAL_REMAINING_MIN = {{ trial_badge_remaining_min|tojson }};
+    var PAID_REMAINING_MIN = {{ trial_badge_paid_min|tojson }};
     var TRIAL_MAX_EPISODE_MIN = {{ trial_max_episode_min|tojson }};
+    var STRIPE_BUY = {{ stripe_buy_enabled|tojson }};
+    var BUY_LABEL = {{ credit_pack_label|tojson }};
+    var BUY_URL = {{ url_for('billing_checkout')|tojson }};
+    var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
+    var BADGE_PREFIX = STRIPE_BUY ? 'Needs key or pack' : 'Needs own key';
 
     function episodeNeedsOwnKey(durationMin) {
         if (TRIAL_REMAINING_MIN === null || durationMin == null) return false;
         var estimateSec = Math.max(60, Math.floor(Number(durationMin) * 60));
         if (!(estimateSec > 0)) return false;
-        if (TRIAL_MAX_EPISODE_MIN && estimateSec > TRIAL_MAX_EPISODE_MIN * 60) return true;
-        return estimateSec > TRIAL_REMAINING_MIN * 60;
+        var paidSec = Math.max(0, Number(PAID_REMAINING_MIN) || 0) * 60;
+        var freeSec = Math.max(0, Number(TRIAL_REMAINING_MIN) || 0) * 60;
+        if (TRIAL_MAX_EPISODE_MIN && estimateSec > TRIAL_MAX_EPISODE_MIN * 60) {
+            return estimateSec > paidSec;
+        }
+        return estimateSec > freeSec + paidSec;
     }
 
     // Remember the language across pages so episode search on the home page
@@ -197,7 +215,7 @@ document.addEventListener('DOMContentLoaded', function() {
             meta.appendChild(document.createTextNode(' \u00B7 '));
             var warn = document.createElement('span');
             warn.className = 'badge badge-needs-key';
-            warn.textContent = 'Needs own key \u00B7 ' + Math.round(ep.duration_min) + ' min';
+            warn.textContent = BADGE_PREFIX + ' \u00B7 ' + Math.round(ep.duration_min) + ' min';
             meta.appendChild(warn);
         }
         card.appendChild(meta);
@@ -270,11 +288,31 @@ document.addEventListener('DOMContentLoaded', function() {
                     window.location.href = '/transcription/' + res.data.task_id;
                 } else {
                     var msg = res.data.error || 'Error';
-                    if (res.data.action_url) {
+                    if (res.data.buy_available && STRIPE_BUY) {
+                        if (confirm(msg + '\n\n' + BUY_LABEL + '?')) {
+                            var form = document.createElement('form');
+                            form.method = 'POST';
+                            form.action = BUY_URL;
+                            function hidden(name, value) {
+                                var input = document.createElement('input');
+                                input.type = 'hidden';
+                                input.name = name;
+                                input.value = value;
+                                form.appendChild(input);
+                            }
+                            hidden('csrf_token', CSRF_TOKEN);
+                            hidden('source', 'episode_selection');
+                            document.body.appendChild(form);
+                            form.submit();
+                            return;
+                        }
+                    } else if (res.data.action_url) {
                         msg += '\n\n' + (res.data.action_label || 'Add OpenAI key →')
                             + ': ' + res.data.action_url;
+                        alert(msg);
+                    } else {
+                        alert(msg);
                     }
-                    alert(msg);
                     transcribeBtn.disabled = false;
                     transcribeBtn.textContent = 'Start Transcription';
                 }

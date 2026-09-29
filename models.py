@@ -24,6 +24,11 @@ class User(UserMixin, db.Model):
     trial_seconds_limit = db.Column(db.Integer, nullable=True)
     trial_seconds_used = db.Column(db.Integer, nullable=False, default=0,
                                    server_default='0')
+    # Paid credit-pack balance (seconds). Credited only from a verified Stripe
+    # webhook; spent after free trial minutes, never counted against the
+    # global free-trial ceiling.
+    paid_seconds_balance = db.Column(db.Integer, nullable=False, default=0,
+                                     server_default='0')
 
     # Customer HTTP API key (v1: one active key per user). Plaintext is shown
     # once on generate and never stored — only the SHA-256 hash + a short
@@ -35,6 +40,8 @@ class User(UserMixin, db.Model):
 
     feeds = db.relationship('SavedFeed', backref='user', lazy=True, cascade='all, delete-orphan')
     tasks = db.relationship('TranscriptionTask', backref='user', lazy=True, cascade='all, delete-orphan')
+    credit_purchases = db.relationship('CreditPurchase', backref='user', lazy=True,
+                                       cascade='all, delete-orphan')
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -95,14 +102,35 @@ class TranscriptionTask(db.Model):
     # Seconds of audio currently reserved against the owner's trial allowance.
     # NULL for tasks run on the user's own key.
     trial_seconds_charged = db.Column(db.Integer, nullable=True)
+    # Seconds reserved against paid credit-pack balance. NULL/0 when none used.
+    paid_seconds_charged = db.Column(db.Integer, nullable=True)
     # Set once the charge above is final. The pro-rata refund computes a
     # fraction OF trial_seconds_charged and then overwrites it, so a second
     # refund would re-apply the fraction to the already-reduced value and hand
     # back seconds that had been spent. Settling is the claim; the amount is not.
+    # Also covers paid_seconds_charged: both are settled together.
     # server_default matches the ALTER TABLE in USER/TASK_COLUMN_MIGRATIONS, so a
     # freshly created database and a migrated one have the same schema.
     trial_settled = db.Column(db.Boolean, nullable=False, default=False,
                               server_default='0')
+
+
+class CreditPurchase(db.Model):
+    """One Stripe Checkout payment that credited paid minutes.
+
+    Idempotency is the unique stripe_session_id: a duplicate webhook must not
+    credit the pack twice.
+    """
+    __tablename__ = 'credit_purchases'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    stripe_session_id = db.Column(db.String(255), unique=True, nullable=False)
+    stripe_event_id = db.Column(db.String(255), nullable=True)
+    amount_cents = db.Column(db.Integer, nullable=False)
+    currency = db.Column(db.String(16), nullable=False, default='usd')
+    minutes = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 #: Columns added after the first release, applied via ALTER TABLE on startup.
@@ -120,6 +148,7 @@ TASK_COLUMN_MIGRATIONS = {
     'bytes_total': 'BIGINT',
     'heartbeat_at': 'DATETIME',
     'trial_seconds_charged': 'INTEGER',
+    'paid_seconds_charged': 'INTEGER',
     'trial_settled': 'BOOLEAN NOT NULL DEFAULT 0',
 }
 
@@ -127,6 +156,7 @@ TASK_COLUMN_MIGRATIONS = {
 USER_COLUMN_MIGRATIONS = {
     'trial_seconds_limit': 'INTEGER',
     'trial_seconds_used': 'INTEGER NOT NULL DEFAULT 0',
+    'paid_seconds_balance': 'INTEGER NOT NULL DEFAULT 0',
     'api_key_hash': 'VARCHAR(64)',
     'api_key_prefix': 'VARCHAR(16)',
     'api_key_created_at': 'DATETIME',
