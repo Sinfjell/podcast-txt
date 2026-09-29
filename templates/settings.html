@@ -54,9 +54,9 @@
     </div>
 
     {% if trial %}
-    <div class="card" style="margin-top: 16px;">
+    <div class="card" style="margin-top: 16px;" id="credits">
         <div class="card-header">
-            <h5>Free trial</h5>
+            <h5>Free trial{% if trial.paid_minutes %} &amp; paid minutes{% endif %}</h5>
         </div>
         <div class="card-body">
             {% if trial.on_own_key %}
@@ -65,29 +65,66 @@
                 directly (about ${{ openai_hourly_cost }} per hour of audio). Nothing is counted against the trial.
                 {{ trial.remaining_minutes }} of {{ trial.limit_minutes }} trial minutes are still
                 unused if you ever remove your key.
+                {% if trial.paid_minutes %}
+                You also have <strong>{{ trial.paid_minutes }}</strong> paid minutes waiting.
+                {% endif %}
             </p>
             {% else %}
             <p style="font-size: 14px; margin-bottom: 10px;">
                 <strong>{{ trial.remaining_minutes }}</strong> of {{ trial.limit_minutes }} free
                 audio minutes left.
+                {% if trial.paid_minutes %}
+                · <strong>{{ trial.paid_minutes }}</strong> paid minutes left.
+                {% endif %}
             </p>
+            {% if trial.limit_minutes %}
             <div style="height: 8px; border-radius: 4px; background: var(--border); overflow: hidden;">
                 <div style="height: 100%; border-radius: 4px; background: {% if trial.exhausted %}var(--error){% else %}var(--accent-bright){% endif %};
                             width: {{ (100 * trial.used_minutes / trial.limit_minutes) if trial.limit_minutes else 0 }}%;"></div>
             </div>
-            <p class="form-hint" style="margin-top: 10px;">
-                {% if trial.exhausted %}
-                Your trial is used up. Add your own OpenAI API key above —
-                the app is free; OpenAI bills you (about ${{ openai_hourly_cost }} per hour of audio).
-                {% else %}
-                Trial minutes run on our OpenAI key, and are counted on the audio we
-                actually transcribed. A job that fails part-way keeps only the minutes
-                already sent for transcription; one that fails before it starts costs
-                you nothing. Prefer your own key? Add it above — Podskrift stays free;
-                OpenAI bills you for Whisper.
-                {% endif %}
-            </p>
             {% endif %}
+            <div class="form-hint" style="margin-top: 10px;">
+                {% if trial.exhausted %}
+                <p style="margin: 0 0 8px;">Your trial is used up.</p>
+                {% if trial.stripe_buy %}
+                <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline-block; margin: 0 8px 8px 0;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="source" value="settings">
+                    <button type="submit" class="btn btn-primary">{{ trial.buy_label }}</button>
+                </form>
+                {% endif %}
+                <a href="#openai">Add your own OpenAI API key</a>
+                — the app is free; OpenAI bills you (about ${{ openai_hourly_cost }} per hour of audio).
+                {% else %}
+                <p style="margin: 0;">
+                Trial minutes run on our OpenAI key, and are counted on the audio we
+                actually transcribed. Paid minutes are used after free trial minutes.
+                A job that fails part-way keeps only the minutes already sent for
+                transcription; one that fails before it starts costs you nothing.
+                Prefer your own key? Add it above — Podskrift stays free;
+                OpenAI bills you for Whisper.
+                </p>
+                {% if trial.stripe_buy %}
+                <form method="POST" action="{{ url_for('billing_checkout') }}" style="margin-top: 12px;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="source" value="settings">
+                    <button type="submit" class="btn btn-ghost">{{ trial.buy_label }}</button>
+                </form>
+                {% endif %}
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    {% elif stripe_buy_enabled and current_user.is_authenticated and not current_user.openai_api_key %}
+    <div class="card" style="margin-top: 16px;" id="credits">
+        <div class="card-header"><h5>Paid minutes</h5></div>
+        <div class="card-body">
+            <form method="POST" action="{{ url_for('billing_checkout') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="source" value="settings">
+                <button type="submit" class="btn btn-primary">{{ credit_pack_label }}</button>
+            </form>
         </div>
     </div>
     {% endif %}

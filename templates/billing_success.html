@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Payment received — Podskrift{% endblock %}
+
+{% block content %}
+<div style="max-width: 500px; margin: 48px auto; text-align: center;">
+    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 12px;">
+        Payment received
+    </h1>
+    <p style="color: var(--muted); font-size: 15px; line-height: 1.6; margin-bottom: 24px;">
+        Minutes are being added to your account. This usually takes a few seconds.
+        You can keep browsing — when the balance updates, it will show in Settings.
+    </p>
+    <a href="{{ url_for('settings') }}#credits" class="btn btn-primary">Back to Settings</a>
+    <a href="{{ url_for('index') }}" class="btn btn-ghost" style="margin-left: 8px;">Transcribe</a>
+</div>
+{% endblock %}

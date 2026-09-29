@@ -4818,9 +4818,10 @@ def test_customer_settings_generate_and_revoke(trial_on):
     assert b'/docs/api' in page.data
     assert b'How to use' in page.data
     assert b'>Docs<' in page.data or b'Docs</a>' in page.data
-    # Growth UI: no credits / pricing / multi-key chrome
+    # Growth UI: no multi-key / "Buy more" chrome when Stripe is unset.
+    # The #credits trial-balance section is intentional (shows remaining minutes).
     assert b'Buy more' not in page.data
-    assert b'credits' not in page.data.lower()
+    assert b'Buy 5 hours for $5' not in page.data
     # A dedicated "Developers" product surface is not part of settings; the
     # developer-only card title is intentional so OpenAI-key users do not
     # confuse the psk_ key with sk-.
@@ -5744,3 +5745,246 @@ def test_null_limit_accounts_pick_up_the_raised_default(monkeypatch, trial_on):
     assert limit == 180 * 60
     assert used == 600
     assert remaining == 180 * 60 - 600
+
+
+# --------------------------------------------------------------------------
+# Stripe credit pack
+# --------------------------------------------------------------------------
+
+def _paid(user_id):
+    from models import db, User
+    with A.app.app_context():
+        return db.session.get(User, user_id).paid_seconds_balance or 0
+
+
+def _set_paid(user_id, seconds):
+    from models import db, User
+    with A.app.app_context():
+        u = db.session.get(User, user_id)
+        u.paid_seconds_balance = int(seconds)
+        db.session.commit()
+
+
+@pytest.fixture
+def stripe_on(monkeypatch, trial_on):
+    """Enable Stripe checkout + webhook with a fake SDK surface."""
+    monkeypatch.setattr(A, 'STRIPE_SECRET_KEY', 'sk_test_fake')
+    monkeypatch.setattr(A, 'STRIPE_WEBHOOK_SECRET', 'whsec_test_fake')
+    monkeypatch.setattr(A, 'STRIPE_PRICE_ID', '')
+
+    class FakeSession:
+        def __init__(self, url='https://checkout.stripe.test/session'):
+            self.url = url
+            self.id = 'cs_test_123'
+
+    class FakeCheckout:
+        class Session:
+            @staticmethod
+            def create(**kwargs):
+                FakeCheckout.Session.last_kwargs = kwargs
+                return FakeSession()
+
+    class FakeWebhook:
+        @staticmethod
+        def construct_event(payload, sig_header, secret):
+            raise AssertionError('tests must monkeypatch construct_event')
+
+    class FakeStripe:
+        api_key = None
+        checkout = FakeCheckout
+        Webhook = FakeWebhook
+
+    monkeypatch.setattr(A, 'stripe', FakeStripe)
+    return FakeStripe
+
+
+def test_buy_hidden_when_stripe_unconfigured(trial_on):
+    uid = _make_user('nostripe@test.com', limit=600, used=600)
+    body = _login(uid).get('/settings').data.decode()
+    assert 'Buy 5 hours for $5' not in body
+    assert A.stripe_checkout_enabled() is False
+
+
+def test_buy_shown_when_stripe_configured(stripe_on):
+    uid = _make_user('withstripe@test.com', limit=600, used=600)
+    body = _login(uid).get('/settings').data.decode()
+    assert 'Buy 5 hours for $5' in body
+    assert 'billing/checkout' in body
+    assert 'csrf_token' in body
+
+
+def test_checkout_session_creation(stripe_on, ph_events):
+    uid = _make_user('checkout@test.com', limit=600, used=0)
+    client = _login(uid)
+    # Seed CSRF via a GET that runs the context processor.
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    assert token
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token,
+        'source': 'settings',
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers['Location'] == 'https://checkout.stripe.test/session'
+    kw = A.stripe.checkout.Session.last_kwargs
+    assert kw['mode'] == 'payment'
+    assert kw['client_reference_id'] == str(uid)
+    assert kw['metadata']['user_id'] == str(uid)
+    assert kw['metadata']['minutes'] == str(A.CREDIT_PACK_MINUTES)
+    assert kw['line_items'][0]['price_data']['unit_amount'] == 500
+    started = [e for e in ph_events.events if e['event'] == 'checkout_started']
+    assert started and started[-1]['distinct_id'] == str(uid)
+
+
+def test_checkout_rejects_bad_csrf(stripe_on):
+    uid = _make_user('csrf@test.com')
+    client = _login(uid)
+    client.get('/settings')
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': 'wrong',
+        'source': 'settings',
+    }, follow_redirects=True)
+    assert b'form expired' in resp.data.lower() or b'expired' in resp.data.lower()
+
+
+def test_webhook_rejects_bad_signature(stripe_on):
+    class SignatureVerificationError(Exception):
+        pass
+
+    def boom(payload, sig, secret):
+        raise SignatureVerificationError('bad sig')
+
+    A.stripe.Webhook.construct_event = staticmethod(boom)
+    resp = A.app.test_client().post(
+        '/stripe/webhook',
+        data=b'{}',
+        headers={'Stripe-Signature': 't=1,v1=x'},
+    )
+    assert resp.status_code == 400
+
+
+def test_webhook_credits_once_on_duplicate_event(stripe_on, ph_events):
+    uid = _make_user('creditonce@test.com', limit=600, used=0)
+    assert _paid(uid) == 0
+
+    session_obj = {
+        'id': 'cs_test_dup_1',
+        'payment_status': 'paid',
+        'amount_total': 500,
+        'currency': 'usd',
+        'client_reference_id': str(uid),
+        'metadata': {'user_id': str(uid), 'minutes': '300'},
+    }
+    event = {
+        'id': 'evt_1',
+        'type': 'checkout.session.completed',
+        'data': {'object': session_obj},
+    }
+
+    A.stripe.Webhook.construct_event = staticmethod(
+        lambda payload, sig, secret: event)
+
+    client = A.app.test_client()
+    r1 = client.post('/stripe/webhook', data=b'{}',
+                     headers={'Stripe-Signature': 't=1,v1=ok'})
+    r2 = client.post('/stripe/webhook', data=b'{}',
+                     headers={'Stripe-Signature': 't=1,v1=ok'})
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert _paid(uid) == 300 * 60
+    from models import db, CreditPurchase
+    with A.app.app_context():
+        rows = CreditPurchase.query.filter_by(stripe_session_id='cs_test_dup_1').all()
+        assert len(rows) == 1
+    purchased = [e for e in ph_events.events if e['event'] == 'purchase_completed']
+    assert len(purchased) == 1
+    assert purchased[0]['properties']['minutes'] == 300
+
+
+def test_settlement_charges_trial_then_paid(trial_on):
+    uid = _make_user('split@test.com', limit=600, used=0)  # 10 min trial
+    _set_paid(uid, 1800)  # 30 min paid
+    with A.app.app_context():
+        split = A.platform_reserve(uid, 1200)  # 20 min
+        assert split == (600, 600)
+    assert _used(uid) == 600
+    assert _paid(uid) == 1200
+
+
+def test_paid_only_covers_over_long_episode(trial_on, monkeypatch):
+    """Episodes over the free per-episode cap must not burn free trial."""
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 1800)
+    uid = _make_user('overlong@test.com', limit=3600, used=0)
+    _set_paid(uid, 7200)  # 120 min
+    with A.app.app_context():
+        assert A.platform_reserve(uid, 3600, paid_only=True) == (0, 3600)
+    assert _used(uid) == 0
+    assert _paid(uid) == 3600
+
+
+def test_paid_not_limited_by_global_trial_ceiling(trial_on, monkeypatch):
+    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 0)
+    uid = _make_user('paidglobal@test.com', limit=3600, used=0)
+    _set_paid(uid, 600)
+    with A.app.app_context():
+        # Free trial blocked by global ceiling; paid still works.
+        assert A.trial_reserve(uid, 60) is False
+        assert A.platform_reserve(uid, 300) == (0, 300)
+    assert _paid(uid) == 300
+
+
+def test_failed_job_refunds_paid_pro_rata(trial_on):
+    from models import db, TranscriptionTask
+    uid = _make_user('paidrefund@test.com', limit=600, used=0)
+    _set_paid(uid, 1800)
+    with A.app.app_context():
+        A.platform_reserve(uid, 1200)  # 600 trial + 600 paid
+        db.session.add(TranscriptionTask(
+            id='paid-refund-1', user_id=uid, episode_title='x',
+            status='error', trial_seconds_charged=600, paid_seconds_charged=600,
+            chunk_total=4, chunk_index=1, trial_settled=False))
+        db.session.commit()
+        task = db.session.get(TranscriptionTask, 'paid-refund-1')
+        # 2 of 4 chunks sent → spend 600 of 1200; trial first → spend all 600
+        # trial + 0 paid; refund 0 trial + 600 paid.
+        assert A.trial_refund_task(task) == 600
+    assert _used(uid) == 600
+    assert _paid(uid) == 1800  # 1800 - 600 reserved + 600 refunded
+
+
+def test_privacy_mentions_stripe():
+    body = A.app.test_client().get('/privacy').data.decode().lower()
+    assert 'stripe' in body
+
+
+def test_offer_shown_on_limit_when_stripe_on(stripe_on, ph_events, monkeypatch):
+    uid = _make_user('offer@test.com', limit=600, used=600)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Ep', 'duration_min': '30', 'language': 'no',
+    })
+    assert resp.status_code == 402
+    body = resp.get_json()
+    assert body.get('buy_available') is True
+    assert body.get('buy_label') == 'Buy 5 hours for $5'
+    offers = [e for e in ph_events.events if e['event'] == 'offer_shown']
+    assert offers and offers[-1]['properties']['variant'] == 'buy_or_key'
+
+
+def test_enqueue_uses_paid_after_trial(trial_on, monkeypatch):
+    uid = _make_user('enqueue-paid@test.com', limit=300, used=0)  # 5 min
+    _set_paid(uid, 1800)  # 30 min
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Ep', 'duration_min': '10', 'language': 'no',
+    })
+    assert resp.status_code == 200, resp.get_json()
+    assert _used(uid) == 300
+    assert _paid(uid) == 1800 - 300  # 5 min from paid
+    from models import db, TranscriptionTask
+    with A.app.app_context():
+        task = TranscriptionTask.query.filter_by(user_id=uid).order_by(
+            TranscriptionTask.started_at.desc()).first()
+        assert task.trial_seconds_charged == 300
+        assert task.paid_seconds_charged == 300

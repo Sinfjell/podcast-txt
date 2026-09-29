@@ -45,13 +45,19 @@ from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError, APITimeoutError
 
 from sqlalchemy import (event as sa_event, func as sa_func, inspect as sa_inspect, text,
-                        update as sa_update)
+                        update as sa_update, or_ as sa_or_)
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError as SaIntegrityError
 
-from models import (db, User, SavedFeed, TranscriptionTask,
+from models import (db, User, SavedFeed, TranscriptionTask, CreditPurchase,
                     TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS)
 from observability import init_sentry, report_stale_task, report_task_failure
 import analytics as product_analytics
+
+try:
+    import stripe
+except ImportError:  # pragma: no cover - production must pip install; tests mock
+    stripe = None
 
 load_dotenv()
 # Before the app exists, so the Flask integration hooks it, and before the boot
@@ -232,10 +238,12 @@ def trial_estimate_seconds(duration_min):
     return max(60, int((duration_min or 0) * 60) or TRIAL_UNKNOWN_ESTIMATE_SECONDS)
 
 
-def episode_needs_own_key(duration_min, remaining_minutes):
-    """True when a trial user (or anon) cannot cover this episode on free minutes.
+def episode_needs_own_key(duration_min, remaining_minutes, paid_minutes=0):
+    """True when a platform user cannot cover this episode on free+paid minutes.
 
     No estimate → no badge. Own-key users pass remaining_minutes=None.
+    Episodes over the free per-episode cap need paid minutes (or BYOK) covering
+    the full length — free trial alone cannot take them.
     """
     if duration_min is None or remaining_minutes is None:
         return False
@@ -246,29 +254,49 @@ def episode_needs_own_key(duration_min, remaining_minutes):
     if duration_min <= 0:
         return False
     estimate = trial_estimate_seconds(duration_min)
+    paid_sec = max(0, int(paid_minutes or 0)) * 60
+    free_sec = max(0, int(remaining_minutes)) * 60
     if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
-        return True
-    return estimate > int(remaining_minutes) * 60
+        return estimate > paid_sec
+    return estimate > free_sec + paid_sec
 
 
 def trial_badge_remaining_minutes():
-    """Minutes of free trial left for the needs-own-key badge, or None to hide it.
+    """Free trial minutes left for the needs-own-key badge, or None to hide it.
 
     Anonymous visitors see the new-account grant. Logged-in trial users see
-    what they have left. Own-key users and a disabled trial get None.
+    what they have left. Own-key users get None (badge hidden). Paid minutes
+    are exposed separately via trial_badge_paid_minutes().
     """
-    if not trial_available():
+    if current_user.is_authenticated and current_user.openai_api_key:
+        return None
+    if not trial_available() and not (
+            current_user.is_authenticated and paid_balance_seconds(current_user) > 0):
         return None
     if current_user.is_authenticated:
-        if current_user.openai_api_key:
-            return None
-        return trial_status(current_user)[2] // 60
-    return TRIAL_DEFAULT_SECONDS // 60
+        if trial_available():
+            return trial_status(current_user)[2] // 60
+        return 0
+    if trial_available():
+        return TRIAL_DEFAULT_SECONDS // 60
+    return None
+
+
+def trial_badge_paid_minutes():
+    """Paid credit minutes for the badge, or 0 when none / own-key / anon."""
+    if not current_user.is_authenticated or current_user.openai_api_key:
+        return 0
+    return paid_balance_seconds(current_user) // 60
 
 
 def settings_openai_url():
     """In-app link to the OpenAI key field on Settings."""
     return url_for('settings') + '#openai'
+
+
+def settings_credits_url():
+    """In-app link to the paid-credits / buy section on Settings."""
+    return url_for('settings') + '#credits'
 
 # Keep a hanging Whisper call inside the stale-task window, so the client gives
 # up before _fail_if_stale() presumes the task dead. Sized against the 900s floor
@@ -451,6 +479,28 @@ TRIAL_MAX_EPISODE_SECONDS = _env_minutes(
 #: Kill switch. Set TRIAL_ENABLED=0 to stop handing out our key entirely.
 TRIAL_ENABLED = os.getenv('TRIAL_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 
+# ---------------------------------------------------------------------------
+# Stripe credit pack (optional; unset keys hide Buy and skip webhook wiring)
+# ---------------------------------------------------------------------------
+STRIPE_SECRET_KEY = (os.getenv('STRIPE_SECRET_KEY') or '').strip()
+STRIPE_WEBHOOK_SECRET = (os.getenv('STRIPE_WEBHOOK_SECRET') or '').strip()
+STRIPE_PRICE_ID = (os.getenv('STRIPE_PRICE_ID') or '').strip()
+#: One-time pack: 300 minutes (5 hours) for $5.00 USD.
+CREDIT_PACK_MINUTES = 300
+CREDIT_PACK_SECONDS = CREDIT_PACK_MINUTES * 60
+CREDIT_PACK_AMOUNT_CENTS = 500
+CREDIT_PACK_CURRENCY = 'usd'
+CREDIT_PACK_LABEL = 'Buy 5 hours for $5'
+
+
+def stripe_checkout_enabled():
+    """True when Buy can create a Checkout Session. Webhook secret is separate."""
+    return bool(STRIPE_SECRET_KEY and stripe is not None)
+
+
+def stripe_webhook_enabled():
+    return bool(STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET and stripe is not None)
+
 
 class TrialExhausted(Exception):
     """Raised when a job would cost more trial allowance than is left.
@@ -499,13 +549,23 @@ def resolve_openai_key(user):
     """Return (key, source) where source is 'user', 'trial', or None.
 
     A user's own key always wins -- it costs us nothing and has no cap.
+    Otherwise the platform key is used when the free trial is on OR the user
+    still has paid credit-pack minutes (paid runs on the same platform key).
     """
     own = getattr(user, 'openai_api_key', None) if user is not None else None
     if own:
         return own, 'user'
-    if trial_available():
+    paid = paid_balance_seconds(user) if user is not None else 0
+    if GLOBAL_OPENAI_KEY and (trial_available() or paid > 0):
         return GLOBAL_OPENAI_KEY, 'trial'
     return None, None
+
+
+def paid_balance_seconds(user):
+    """Paid credit-pack seconds remaining for `user`."""
+    if user is None:
+        return 0
+    return max(0, int(getattr(user, 'paid_seconds_balance', 0) or 0))
 
 
 def trial_reserve(user_id, seconds):
@@ -548,6 +608,78 @@ def trial_release(user_id, seconds):
     db.session.commit()
 
 
+def paid_reserve(user_id, seconds):
+    """Atomically debit paid credit-pack seconds. True only if granted.
+
+    Not subject to the free-trial global ceiling — the user already paid.
+    """
+    seconds = int(math.ceil(seconds))
+    if seconds <= 0:
+        return True
+    result = db.session.execute(text("""
+        UPDATE users
+           SET paid_seconds_balance = COALESCE(paid_seconds_balance, 0) - :n
+         WHERE id = :uid
+           AND COALESCE(paid_seconds_balance, 0) >= :n
+    """), {'n': seconds, 'uid': user_id})
+    db.session.commit()
+    return result.rowcount == 1
+
+
+def paid_release(user_id, seconds):
+    """Hand back paid seconds that were reserved but not spent."""
+    seconds = int(seconds)
+    if seconds <= 0:
+        return
+    db.session.execute(text("""
+        UPDATE users
+           SET paid_seconds_balance = COALESCE(paid_seconds_balance, 0) + :n
+         WHERE id = :uid
+    """), {'n': seconds, 'uid': user_id})
+    db.session.commit()
+
+
+def platform_reserve(user_id, seconds, *, paid_only=False):
+    """Reserve platform minutes: free trial first, then paid.
+
+    Returns (trial_seconds, paid_seconds) on success, or None if the full
+    amount cannot be covered. `paid_only` skips the free trial (used for
+    episodes over the free per-episode cap — those must not burn free minutes).
+
+    Paid minutes are never limited by TRIAL_GLOBAL_SECONDS.
+    """
+    seconds = int(math.ceil(seconds))
+    if seconds <= 0:
+        return (0, 0)
+
+    if paid_only:
+        return (0, seconds) if paid_reserve(user_id, seconds) else None
+
+    if trial_reserve(user_id, seconds):
+        return (seconds, 0)
+
+    user = db.session.get(User, user_id)
+    if user is None:
+        return None
+    _, _, trial_rem = trial_status(user)
+    global_rem = max(0, TRIAL_GLOBAL_SECONDS - trial_global_used_seconds())
+    trial_take = min(seconds, trial_rem, global_rem)
+    if trial_take > 0 and not trial_reserve(user_id, trial_take):
+        trial_take = 0
+    paid_need = seconds - trial_take
+    if paid_need > 0 and not paid_reserve(user_id, paid_need):
+        if trial_take:
+            trial_release(user_id, trial_take)
+        return None
+    return (trial_take, paid_need)
+
+
+def platform_release(user_id, trial_seconds, paid_seconds):
+    """Hand back a platform reservation that never reached Whisper spend."""
+    trial_release(user_id, trial_seconds or 0)
+    paid_release(user_id, paid_seconds or 0)
+
+
 def _claim_task_charge(task_id, expected, new):
     """Move a task's reserved amount from `expected` to `new`. True if we won.
 
@@ -563,6 +695,30 @@ def _claim_task_charge(task_id, expected, new):
     return result.rowcount == 1
 
 
+def _claim_task_platform_charges(task_id, expected_trial, expected_paid,
+                                 new_trial, new_paid, settle=False):
+    """Atomically rewrite trial+paid charges (and optionally settle). True if won."""
+    settled_clause = ', trial_settled = 1' if settle else ''
+    # Compare with COALESCE so NULL paid reads as 0 for own-key-adjacent rows.
+    result = db.session.execute(text(f"""
+        UPDATE transcription_tasks
+           SET trial_seconds_charged = :new_trial,
+               paid_seconds_charged = :new_paid
+               {settled_clause}
+         WHERE id = :tid AND trial_settled = 0
+           AND COALESCE(trial_seconds_charged, 0) = :exp_trial
+           AND COALESCE(paid_seconds_charged, 0) = :exp_paid
+    """), {
+        'tid': task_id,
+        'new_trial': int(new_trial),
+        'new_paid': int(new_paid),
+        'exp_trial': int(expected_trial or 0),
+        'exp_paid': int(expected_paid or 0),
+    })
+    db.session.commit()
+    return result.rowcount == 1
+
+
 def trial_refund_task(task):
     """Refund the part of a failed task we did not actually spend.
 
@@ -572,19 +728,26 @@ def trial_refund_task(task):
     several chunks in. Refund the unstarted remainder instead, pro-rata on
     chunk progress. Safe to call repeatedly: the conditional UPDATE on the
     task is what decides which caller may move the balance.
+
+    Spend is applied to free trial first, then paid (matching charge order).
+    Unspent minutes are released to the same buckets.
     """
     # Read the row rather than trusting the caller's copy. /status hands us an
     # object loaded at the top of the request; if the worker reconciled the
     # charge in between, a claim against the stale value silently matches
     # nothing and the user forfeits the allowance with no path to get it back.
     row = db.session.execute(text(
-        'SELECT user_id, trial_seconds_charged, chunk_total, chunk_index, trial_settled '
+        'SELECT user_id, trial_seconds_charged, paid_seconds_charged, '
+        'chunk_total, chunk_index, trial_settled '
         'FROM transcription_tasks WHERE id = :tid'
     ), {'tid': task.id}).first()
     if row is None:
         return 0
-    user_id, charged, chunk_total, chunk_index, settled = row
-    if settled or not charged or charged <= 0:
+    user_id, trial_charged, paid_charged, chunk_total, chunk_index, settled = row
+    trial_charged = int(trial_charged or 0)
+    paid_charged = int(paid_charged or 0)
+    total_charged = trial_charged + paid_charged
+    if settled or total_charged <= 0:
         return 0
 
     if (chunk_total or 0) > 0 and chunk_index is not None:
@@ -594,26 +757,22 @@ def trial_refund_task(task):
         # Whisper is exactly how a swept single-chunk episode -- every episode
         # under 24 MB, so the common case -- came out free.
         started = min(chunk_total, max(0, chunk_index) + 1)
-        spent = int(charged * started / chunk_total)
+        spent = int(total_charged * started / chunk_total)
     else:
         spent = 0  # nothing reached Whisper yet
 
-    # Settling is the claim, and it also pins the amount we read: a row whose
-    # charge moved under us (reconcile) or that someone else already settled
-    # does not match, so only one caller ever moves the balance -- and never
-    # twice, which a claim on the amount alone could not guarantee once the
-    # refund became pro-rata.
-    claimed = db.session.execute(text("""
-        UPDATE transcription_tasks
-           SET trial_seconds_charged = :spent, trial_settled = 1
-         WHERE id = :tid AND trial_settled = 0 AND trial_seconds_charged = :charged
-    """), {'tid': task.id, 'spent': spent, 'charged': charged}).rowcount == 1
-    db.session.commit()
-    if not claimed:
+    spent_trial = min(trial_charged, spent)
+    spent_paid = spent - spent_trial
+
+    # Settling is the claim, and it also pins the amounts we read.
+    if not _claim_task_platform_charges(
+            task.id, trial_charged, paid_charged, spent_trial, spent_paid,
+            settle=True):
         return 0
-    refund = charged - spent
-    trial_release(user_id, refund)
-    return refund
+    refund_trial = trial_charged - spent_trial
+    refund_paid = paid_charged - spent_paid
+    platform_release(user_id, refund_trial, refund_paid)
+    return refund_trial + refund_paid
 
 
 def settle_stranded_charges():
@@ -632,7 +791,10 @@ def settle_stranded_charges():
     stranded = TranscriptionTask.query.filter(
         TranscriptionTask.status.in_(TERMINAL_STATUSES),
         TranscriptionTask.trial_settled == False,      # noqa: E712 - SQL, not Python
-        TranscriptionTask.trial_seconds_charged > 0,
+        sa_or_(
+            TranscriptionTask.trial_seconds_charged > 0,
+            TranscriptionTask.paid_seconds_charged > 0,
+        ),
     ).all()
     for task in stranded:
         trial_refund_task(task)
@@ -645,35 +807,91 @@ def trial_reconcile_task(task_id, actual_seconds):
     Runs after the download but BEFORE the first Whisper call, so an episode
     that turns out longer than the feed claimed costs us bandwidth, never API
     spend. Raises TrialExhausted when the real length will not fit.
+
+    Charge order: free trial first, then paid. Episodes over the free
+    per-episode cap must be covered by paid minutes (or BYOK) — they do not
+    burn free trial, and paid is not subject to the global free-trial ceiling.
     """
     task = db.session.get(TranscriptionTask, task_id)
-    if not task or task.trial_settled or not task.trial_seconds_charged:
-        # NULL is an own-key task, nothing metered. Settled means the sweeper
-        # got here first -- re-opening the charge would bill the user for an
-        # episode that goes on to send nothing.
+    if not task or task.trial_settled:
         return
-    reserved = int(task.trial_seconds_charged)
+    trial_reserved = int(task.trial_seconds_charged or 0)
+    paid_reserved = int(task.paid_seconds_charged or 0)
+    if trial_reserved <= 0 and paid_reserved <= 0:
+        # NULL/0 on both is an own-key task, nothing metered. Settled means the
+        # sweeper got here first -- re-opening the charge would bill the user
+        # for an episode that goes on to send nothing.
+        return
+    total_reserved = trial_reserved + paid_reserved
     actual = int(math.ceil(max(0.0, actual_seconds or 0.0)))
     user_id = task.user_id
+    over_free_cap = bool(
+        TRIAL_MAX_EPISODE_SECONDS and actual > TRIAL_MAX_EPISODE_SECONDS)
 
-    if TRIAL_MAX_EPISODE_SECONDS and actual > TRIAL_MAX_EPISODE_SECONDS:
+    if over_free_cap and paid_reserved <= 0 and trial_reserved > 0:
+        # Started as a free-trial job; real audio exceeds the free per-episode
+        # cap. Paid credits can still save it if they cover the full length;
+        # otherwise refuse without mutating the reservation — the worker's
+        # refund settles, matching the pre-credits behaviour.
         estimate_min = actual // 60
         cost = openai_whisper_cost_usd(estimate_min)
-        raise TrialExhausted(
-            f'This episode is {estimate_min} minutes — too long for the free trial '
-            f'(max {TRIAL_MAX_EPISODE_SECONDS // 60}). Add your own OpenAI API key to '
-            f'transcribe it (about ${cost} at OpenAI\'s rate).',
-            scope='episode_length',
-        )
+        owner = db.session.get(User, user_id)
+        if paid_balance_seconds(owner) < actual:
+            raise TrialExhausted(
+                f'This episode is {estimate_min} minutes — too long for the free '
+                f'trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). '
+                f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
+                f'or add your own OpenAI API key (about ${cost} at OpenAI\'s rate).',
+                scope='episode_length',
+            )
+        if not _claim_task_platform_charges(
+                task_id, trial_reserved, 0, 0, 0):
+            raise TrialExhausted(
+                f'This episode is {estimate_min} minutes — too long for the free '
+                f'trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). Add your own '
+                f'OpenAI API key to transcribe it (about ${cost} at OpenAI\'s rate).',
+                scope='episode_length',
+            )
+        trial_release(user_id, trial_reserved)
+        if not paid_reserve(user_id, actual):
+            # Race: balance moved. Restore the trial reservation shape so the
+            # worker refund path can settle cleanly.
+            trial_reserve(user_id, trial_reserved)
+            _claim_task_platform_charges(task_id, 0, 0, trial_reserved, 0)
+            raise TrialExhausted(
+                f'This episode is {estimate_min} minutes — too long for the free '
+                f'trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). '
+                f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
+                f'or add your own OpenAI API key (about ${cost} at OpenAI\'s rate).',
+                scope='episode_length',
+            )
+        if not _claim_task_platform_charges(task_id, 0, 0, 0, actual):
+            paid_release(user_id, actual)
+            trial_reserve(user_id, trial_reserved)
+            _claim_task_platform_charges(task_id, 0, 0, trial_reserved, 0)
+            raise TrialExhausted(
+                f'This episode is {estimate_min} minutes — too long for the free '
+                f'trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). Add your own '
+                f'OpenAI API key to transcribe it (about ${cost} at OpenAI\'s rate).',
+                scope='episode_length',
+            )
+        return
 
-    if actual > reserved:
-        extra = actual - reserved
-        if not trial_reserve(user_id, extra):
-            # Read-only, after the refusal: which cap it was, for analytics.
+    if actual > total_reserved:
+        extra = actual - total_reserved
+        split = platform_reserve(user_id, extra, paid_only=over_free_cap)
+        if split is None:
             owner = db.session.get(User, user_id)
             estimate_min = actual // 60
             _, _, remaining = trial_status(owner) if owner else (0, 0, 0)
             cost = openai_whisper_cost_usd(estimate_min)
+            if over_free_cap:
+                raise TrialExhausted(
+                    f'This episode is {estimate_min} minutes — longer than the paid '
+                    f'minutes you have left. {CREDIT_PACK_LABEL}, or add your own '
+                    f'OpenAI API key (about ${cost} for this one, billed by OpenAI).',
+                    scope='user',
+                )
             raise TrialExhausted(
                 f'This episode is about {estimate_min} minutes — longer than the '
                 f'{remaining // 60} free minutes you have left. Pick a shorter '
@@ -681,13 +899,22 @@ def trial_reconcile_task(task_id, actual_seconds):
                 f'one, billed by OpenAI).',
                 scope=trial_refusal_scope(owner, extra) if owner else 'user',
             )
-        if not _claim_task_charge(task_id, reserved, actual):
-            # Someone else settled the task while we were topping up; give the
-            # top-up straight back rather than leaking it against the user.
-            trial_release(user_id, extra)
-    elif actual < reserved:
-        if _claim_task_charge(task_id, reserved, actual):
-            trial_release(user_id, reserved - actual)
+        extra_trial, extra_paid = split
+        new_trial = trial_reserved + extra_trial
+        new_paid = paid_reserved + extra_paid
+        if not _claim_task_platform_charges(
+                task_id, trial_reserved, paid_reserved, new_trial, new_paid):
+            platform_release(user_id, extra_trial, extra_paid)
+    elif actual < total_reserved:
+        # Shrink paid first (LIFO), then trial — reverse of charge order.
+        shrink = total_reserved - actual
+        new_paid = max(0, paid_reserved - shrink)
+        shrink_paid = paid_reserved - new_paid
+        shrink_trial = shrink - shrink_paid
+        new_trial = trial_reserved - shrink_trial
+        if _claim_task_platform_charges(
+                task_id, trial_reserved, paid_reserved, new_trial, new_paid):
+            platform_release(user_id, shrink_trial, shrink_paid)
 
 
 # ---------------------------------------------------------------------------
@@ -1880,6 +2107,94 @@ def _openai_key_hint(user):
     return key[-4:]
 
 
+def generate_csrf_token():
+    """Session CSRF token for state-changing POSTs (billing checkout)."""
+    token = session.get('_csrf_token')
+    if not token:
+        token = secrets.token_hex(32)
+        session['_csrf_token'] = token
+    return token
+
+
+def validate_csrf_token():
+    """True when the submitted csrf_token matches the session value."""
+    expected = session.get('_csrf_token')
+    got = (request.form.get('csrf_token')
+           or request.headers.get('X-CSRF-Token')
+           or '')
+    if not expected or not got:
+        return False
+    return hmac.compare_digest(str(expected), str(got))
+
+
+def credit_user_from_checkout_session(session_obj, event_id=None):
+    """Credit paid minutes from a verified Checkout Session. Idempotent.
+
+    Returns True when this call newly credited the user; False if the session
+    was already recorded (duplicate webhook) or the payload is not payable.
+    """
+    if not session_obj:
+        return False
+    payment_status = session_obj.get('payment_status')
+    if payment_status and payment_status != 'paid':
+        return False
+    session_id = session_obj.get('id')
+    if not session_id:
+        return False
+    metadata = session_obj.get('metadata') or {}
+    ref = session_obj.get('client_reference_id') or metadata.get('user_id')
+    try:
+        user_id = int(ref)
+    except (TypeError, ValueError):
+        app.logger.error('Stripe session %s missing user id', session_id)
+        return False
+    try:
+        minutes = int(metadata.get('minutes') or CREDIT_PACK_MINUTES)
+    except (TypeError, ValueError):
+        minutes = CREDIT_PACK_MINUTES
+    minutes = max(0, minutes)
+    amount = int(session_obj.get('amount_total') or CREDIT_PACK_AMOUNT_CENTS)
+    currency = (session_obj.get('currency') or CREDIT_PACK_CURRENCY).lower()
+
+    purchase = CreditPurchase(
+        user_id=user_id,
+        stripe_session_id=session_id,
+        stripe_event_id=event_id,
+        amount_cents=amount,
+        currency=currency,
+        minutes=minutes,
+    )
+    db.session.add(purchase)
+    try:
+        db.session.flush()
+    except SaIntegrityError:
+        # Unique stripe_session_id — already credited.
+        db.session.rollback()
+        return False
+
+    result = db.session.execute(text("""
+        UPDATE users
+           SET paid_seconds_balance = COALESCE(paid_seconds_balance, 0) + :n
+         WHERE id = :uid
+    """), {'n': minutes * 60, 'uid': user_id})
+    if result.rowcount != 1:
+        db.session.rollback()
+        app.logger.error('Stripe session %s: no user %s to credit',
+                         session_id, user_id)
+        return False
+    try:
+        db.session.commit()
+    except SaIntegrityError:
+        db.session.rollback()
+        return False
+    product_analytics.capture(
+        'purchase_completed',
+        user_id,
+        {'amount_cents': amount, 'minutes': minutes, 'currency': currency},
+    )
+    return True
+
+
 @app.route('/settings', methods=['GET', 'POST'])
 @login_required
 def settings():
@@ -1919,12 +2234,129 @@ def settings():
     # One-shot plaintext after generate (session, not DB).
     new_api_key = session.pop('new_api_key', None)
     product_analytics.capture('settings_viewed', current_user.id)
+    trial_ctx = _trial_context()
+    if trial_ctx and trial_ctx.get('exhausted') and stripe_checkout_enabled():
+        product_analytics.capture(
+            'offer_shown', current_user.id,
+            {'variant': 'buy_or_key', 'location': 'settings'},
+        )
     return render_template(
         'settings.html',
-        trial=_trial_context(),
+        trial=trial_ctx,
         new_api_key=new_api_key,
         openai_key_hint=_openai_key_hint(current_user),
     )
+
+
+@app.route('/billing/checkout', methods=['POST'])
+@login_required
+def billing_checkout():
+    """Create a Stripe Checkout Session for the one-time credit pack."""
+    if not stripe_checkout_enabled():
+        flash('Card payments are not available right now.', 'error')
+        return redirect(url_for('settings') + '#credits')
+    if not validate_csrf_token():
+        flash('That form expired. Please try again.', 'error')
+        return redirect(url_for('settings') + '#credits')
+    if current_user.openai_api_key:
+        flash('You are on your own OpenAI key — paid minutes are not needed.', 'info')
+        return redirect(url_for('settings'))
+
+    source = (request.form.get('source') or 'settings').strip()[:64]
+    product_analytics.capture(
+        'checkout_started', current_user.id, {'source': source})
+
+    success_url = url_for('billing_success', _external=True) + '?session_id={CHECKOUT_SESSION_ID}'
+    cancel_url = request.form.get('cancel_url') or (url_for('settings') + '#credits')
+    # Only allow relative cancel paths back into this app.
+    cancel_url = safe_next_url(cancel_url, url_for('settings') + '#credits')
+    if PUBLIC_BASE_URL:
+        success_url = PUBLIC_BASE_URL.rstrip('/') + '/billing/success?session_id={CHECKOUT_SESSION_ID}'
+        if cancel_url.startswith('/'):
+            cancel_abs = PUBLIC_BASE_URL.rstrip('/') + cancel_url
+        else:
+            cancel_abs = PUBLIC_BASE_URL.rstrip('/') + url_for('settings') + '#credits'
+    else:
+        cancel_abs = url_for('settings', _external=True) + '#credits'
+        if cancel_url.startswith('/'):
+            cancel_abs = request.host_url.rstrip('/') + cancel_url
+
+    line_item = {'quantity': 1}
+    if STRIPE_PRICE_ID:
+        line_item['price'] = STRIPE_PRICE_ID
+    else:
+        line_item['price_data'] = {
+            'currency': CREDIT_PACK_CURRENCY,
+            'unit_amount': CREDIT_PACK_AMOUNT_CENTS,
+            'product_data': {
+                'name': f'Podskrift — {CREDIT_PACK_MINUTES} minutes',
+                'description': f'{CREDIT_PACK_MINUTES} minutes of transcription '
+                               f'({CREDIT_PACK_MINUTES // 60} hours)',
+            },
+        }
+
+    try:
+        stripe.api_key = STRIPE_SECRET_KEY
+        checkout_session = stripe.checkout.Session.create(
+            mode='payment',
+            line_items=[line_item],
+            success_url=success_url,
+            cancel_url=cancel_abs,
+            client_reference_id=str(current_user.id),
+            customer_email=current_user.email,
+            metadata={
+                'user_id': str(current_user.id),
+                'minutes': str(CREDIT_PACK_MINUTES),
+            },
+        )
+    except Exception:  # noqa: BLE001 - never surface Stripe internals
+        app.logger.exception('Stripe Checkout Session create failed')
+        flash('Could not start checkout. Please try again in a moment.', 'error')
+        return redirect(url_for('settings') + '#credits')
+
+    return redirect(checkout_session.url, code=303)
+
+
+@app.route('/billing/success')
+@login_required
+def billing_success():
+    """Landing after Checkout. Does NOT credit — the webhook does."""
+    return render_template('billing_success.html')
+
+
+@app.route('/stripe/webhook', methods=['POST'])
+def stripe_webhook():
+    """Verify and handle Stripe events. Credits only on checkout.session.completed."""
+    if not stripe_webhook_enabled():
+        return jsonify({'error': 'Stripe webhook not configured'}), 503
+    payload = request.get_data(cache=False, as_text=False)
+    sig_header = request.headers.get('Stripe-Signature', '')
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except ValueError:
+        return jsonify({'error': 'invalid payload'}), 400
+    except Exception as exc:  # SignatureVerificationError and friends
+        # stripe.error.SignatureVerificationError when the SDK is installed.
+        name = type(exc).__name__
+        if 'Signature' in name or 'signature' in str(exc).lower():
+            return jsonify({'error': 'invalid signature'}), 400
+        app.logger.exception('Stripe webhook construct_event failed')
+        return jsonify({'error': 'webhook error'}), 400
+
+    if event.get('type') == 'checkout.session.completed':
+        session_obj = event['data']['object']
+        # stripe objects behave like dicts; normalize.
+        if hasattr(session_obj, 'to_dict'):
+            session_obj = session_obj.to_dict()
+        elif not isinstance(session_obj, dict):
+            session_obj = dict(session_obj)
+        try:
+            credit_user_from_checkout_session(session_obj, event_id=event.get('id'))
+        except Exception:
+            app.logger.exception('Failed to credit Stripe session')
+            return jsonify({'error': 'credit failed'}), 500
+    return jsonify({'received': True}), 200
 
 
 @app.route('/settings/openai-key/remove', methods=['POST'])
@@ -2043,33 +2475,82 @@ def use_feed(feed_id):
 
 
 def _trial_context():
-    """Trial figures for the templates, or None when there is no trial."""
-    if not (trial_available() and current_user.is_authenticated):
+    """Trial / paid figures for the templates, or None when neither applies."""
+    if not current_user.is_authenticated:
         return None
-    limit, used, remaining = trial_status(current_user)
+    on_own_key = bool(current_user.openai_api_key)
+    paid_seconds = paid_balance_seconds(current_user)
+    paid_minutes = paid_seconds // 60
+    if not trial_available() and paid_seconds <= 0 and not on_own_key:
+        return None
+    if trial_available():
+        limit, used, remaining = trial_status(current_user)
+    else:
+        limit = used = remaining = 0
+    exhausted = (remaining <= 0 and paid_seconds <= 0)
     return {
         'limit_minutes': limit // 60,
         'used_minutes': used // 60,
         'remaining_minutes': remaining // 60,
-        'exhausted': remaining <= 0,
-        'on_own_key': bool(current_user.openai_api_key),
+        'paid_minutes': paid_minutes,
+        'exhausted': exhausted,
+        'on_own_key': on_own_key,
+        'stripe_buy': stripe_checkout_enabled(),
+        'buy_label': CREDIT_PACK_LABEL,
     }
 
 
 def _user_has_api_key():
     """Can the current user actually start a transcription right now?
 
-    True on their own key, or on trial allowance they still have left. An
-    exhausted trial counts as no key, which is what puts the "add your key"
-    prompt in front of exactly the people who need to see it.
+    True on their own key, remaining free trial, or paid credit minutes. An
+    exhausted trial with no paid balance counts as no key, which is what puts
+    the "add your key / buy" prompt in front of the people who need it.
     """
     if not current_user.is_authenticated:
         return False
     if current_user.openai_api_key:
         return True
+    if paid_balance_seconds(current_user) > 0:
+        return True
     if trial_available():
         return trial_status(current_user)[2] > 0
     return False
+
+
+def _minutes_limit_actions(user_id, location='enqueue'):
+    """CTA payload for out-of-minutes messages: Buy (if configured) + add key."""
+    actions = []
+    if stripe_checkout_enabled():
+        actions.append({
+            'label': CREDIT_PACK_LABEL,
+            'url': url_for('billing_checkout'),
+            'method': 'POST',
+        })
+        product_analytics.capture(
+            'offer_shown', user_id,
+            {'variant': 'buy_or_key', 'location': location},
+        )
+    actions.append({
+        'label': 'Add OpenAI key →',
+        'url': settings_openai_url(),
+        'method': 'GET',
+    })
+    # Keep the legacy single-action fields pointing at the primary CTA.
+    primary = actions[0]
+    return {
+        'actions': actions,
+        'action_url': primary['url'] if primary['method'] == 'GET' else settings_credits_url(),
+        'action_label': primary['label'],
+        'buy_available': stripe_checkout_enabled(),
+        'buy_label': CREDIT_PACK_LABEL if stripe_checkout_enabled() else None,
+        'buy_url': url_for('billing_checkout') if stripe_checkout_enabled() else None,
+    }
+
+
+def _capture_paid_minutes_exhausted(user_id, source):
+    product_analytics.capture(
+        'paid_minutes_exhausted', user_id, {'source': source})
 
 
 # ---------------------------------------------------------------------------
@@ -2095,8 +2576,10 @@ def index():
 def _annotate_episodes_for_trial(episodes):
     """Attach needs_own_key on each episode dict for the selection UI badge."""
     remaining = trial_badge_remaining_minutes()
+    paid = trial_badge_paid_minutes()
     for ep in episodes:
-        ep['needs_own_key'] = episode_needs_own_key(ep.get('duration_min'), remaining)
+        ep['needs_own_key'] = episode_needs_own_key(
+            ep.get('duration_min'), remaining, paid_minutes=paid)
     return episodes
 
 
@@ -2206,54 +2689,85 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
         # behind. The feed's duration is only an estimate; trial_reconcile_task()
         # corrects it against the real audio before anything reaches Whisper.
         trial_charge = None
+        paid_charge = None
         if key_source == 'trial':
-            # Floored at a minute: trial_seconds_charged == 0 means "settled", so a
-            # zero reservation would quietly make the task unmetered.
+            # Floored at a minute: a zero reservation would quietly make the
+            # task look unmetered (NULL/0 charges).
             estimate = trial_estimate_seconds(meta.get('duration_min'))
             estimate_min = estimate // 60
-            if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
-                _, _, remaining = trial_status(user)
-                _capture_trial_limit_hit(
-                    user_id, 'episode_length', 'start', source,
-                    estimate_min=estimate_min, remaining_min=remaining // 60)
-                cost = openai_whisper_cost_usd(estimate_min)
-                return {
-                    'error': (
-                        f'This episode is {estimate_min} minutes — too long for the '
-                        f'free trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). Add your '
-                        f'own OpenAI API key to transcribe it (about ${cost} at '
-                        f'OpenAI\'s rate).'
-                    ),
-                    'action_url': settings_openai_url(),
-                    'action_label': 'Add OpenAI key →',
-                }, 402
-            if not trial_reserve(user_id, estimate):
-                _, _, remaining = trial_status(user)
-                scope = trial_refusal_scope(user, estimate)
-                _capture_trial_limit_hit(
-                    user_id, scope, 'start', source,
-                    estimate_min=estimate_min, remaining_min=remaining // 60)
-                if scope == 'user':
+            over_free_cap = bool(
+                TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS)
+            if over_free_cap:
+                # Free trial must not cover over-long episodes; paid credits can.
+                split = platform_reserve(user_id, estimate, paid_only=True)
+                if split is None:
+                    _, _, remaining = trial_status(user)
+                    _capture_trial_limit_hit(
+                        user_id, 'episode_length', 'start', source,
+                        estimate_min=estimate_min, remaining_min=remaining // 60)
+                    if paid_balance_seconds(user) <= 0:
+                        _capture_paid_minutes_exhausted(user_id, source)
                     cost = openai_whisper_cost_usd(estimate_min)
-                    message = (
-                        f'This episode is about {estimate_min} minutes — longer than '
-                        f'the {remaining // 60} free minutes you have left. Pick a '
-                        f'shorter episode, or add your own OpenAI API key '
-                        f'(about ${cost} for this one, billed by OpenAI).'
-                    )
-                else:
-                    # The user still has room; the service as a whole does not.
-                    # Saying "you have 60 minutes left" here would contradict itself.
-                    message = (
-                        'Podskrift has handed out all the free minutes it has budgeted. '
-                        'Add your own OpenAI API key in Settings to keep transcribing.'
-                    )
-                return {
-                    'error': message,
-                    'action_url': settings_openai_url(),
-                    'action_label': 'Add OpenAI key →',
-                }, 402
-            trial_charge = estimate
+                    payload = {
+                        'error': (
+                            f'This episode is {estimate_min} minutes — too long for the '
+                            f'free trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). '
+                            f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
+                            f'or add your own OpenAI API key (about ${cost} at '
+                            f'OpenAI\'s rate).'
+                        ),
+                    }
+                    payload.update(_minutes_limit_actions(user_id, 'enqueue_episode_length'))
+                    return payload, 402
+                trial_charge, paid_charge = split
+            else:
+                split = platform_reserve(user_id, estimate)
+                if split is None:
+                    _, _, remaining = trial_status(user)
+                    scope = trial_refusal_scope(user, estimate)
+                    # If free trial still has room but paid+trial couldn't cover,
+                    # the global ceiling ate the free path — keep that scope.
+                    if remaining >= estimate and paid_balance_seconds(user) <= 0:
+                        scope = 'global'
+                    _capture_trial_limit_hit(
+                        user_id, scope, 'start', source,
+                        estimate_min=estimate_min, remaining_min=remaining // 60)
+                    if paid_balance_seconds(user) <= 0 and remaining <= 0:
+                        _capture_paid_minutes_exhausted(user_id, source)
+                    if scope == 'user':
+                        cost = openai_whisper_cost_usd(estimate_min)
+                        paid_left = paid_balance_seconds(user) // 60
+                        paid_bit = (
+                            f' (and {paid_left} paid)' if paid_left else '')
+                        buy_bit = (
+                            f'{CREDIT_PACK_LABEL.lower()}, or '
+                            if stripe_checkout_enabled() else '')
+                        message = (
+                            f'This episode is about {estimate_min} minutes — longer than '
+                            f'the {remaining // 60} free minutes you have left{paid_bit}. '
+                            f'Pick a shorter episode, or {buy_bit}'
+                            f'add your own OpenAI API key '
+                            f'(about ${cost} for this one, billed by OpenAI).'
+                        )
+                    else:
+                        # The user still has room; the service as a whole does not.
+                        # Saying "you have 60 minutes left" here would contradict itself.
+                        if stripe_checkout_enabled():
+                            message = (
+                                'Podskrift has handed out all the free minutes it has '
+                                f'budgeted. {CREDIT_PACK_LABEL}, or add your own OpenAI '
+                                'API key in Settings to keep transcribing.'
+                            )
+                        else:
+                            message = (
+                                'Podskrift has handed out all the free minutes it has '
+                                'budgeted. Add your own OpenAI API key in Settings to '
+                                'keep transcribing.'
+                            )
+                    payload = {'error': message}
+                    payload.update(_minutes_limit_actions(user_id, 'enqueue'))
+                    return payload, 402
+                trial_charge, paid_charge = split
 
         task_id = str(uuid.uuid4())
         try:
@@ -2273,13 +2787,14 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                 audio_duration=(meta['duration_min'] * 60) if meta.get('duration_min') else None,
                 language=language or None,
                 trial_seconds_charged=trial_charge,
+                paid_seconds_charged=paid_charge,
             )
             db.session.add(task)
             db.session.commit()
         except Exception:
             db.session.rollback()
-            if trial_charge:
-                trial_release(user_id, trial_charge)
+            if trial_charge or paid_charge:
+                platform_release(user_id, trial_charge or 0, paid_charge or 0)
             raise
 
         parsed_url = urlparse(meta['audio_url'])
@@ -3785,15 +4300,19 @@ def inject_language_count():
 
 @app.context_processor
 def inject_trial_badge():
-    """Remaining free minutes for the needs-own-key badge on episode rows."""
+    """Remaining free/paid minutes for the needs-own-key badge on episode rows."""
     return {
         'trial_badge_remaining_min': trial_badge_remaining_minutes(),
+        'trial_badge_paid_min': trial_badge_paid_minutes(),
         'trial_max_episode_min': (
             TRIAL_MAX_EPISODE_SECONDS // 60 if TRIAL_MAX_EPISODE_SECONDS else None
         ),
         'whisper_cost_per_minute': WHISPER_COST_PER_MINUTE,
         'openai_hourly_cost': f'{openai_whisper_cost_usd(60):.2f}',
         'openai_90min_cost': f'{openai_whisper_cost_usd(90):.2f}',
+        'stripe_buy_enabled': stripe_checkout_enabled(),
+        'credit_pack_label': CREDIT_PACK_LABEL,
+        'csrf_token': generate_csrf_token,
     }
 
 
