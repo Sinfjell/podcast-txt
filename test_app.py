@@ -6520,3 +6520,84 @@ def test_ensure_credit_purchases_table_is_idempotent(trial_on):
         assert 'status' in cols
         assert 'stripe_payment_intent_id' in cols
         assert 'seconds_clawed_back' in cols
+
+
+# --------------------------------------------------------------------------
+# Managed Payments and concurrent refund handling
+# --------------------------------------------------------------------------
+
+def _start_checkout(uid):
+    client = _login(uid)
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    return client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'settings'}, follow_redirects=False)
+
+
+def test_checkout_uses_managed_payments_when_enabled(stripe_on, monkeypatch):
+    """Stripe as merchant of record. Managed Payments rejects automatic_tax,
+    so it must not be sent even when STRIPE_AUTOMATIC_TAX is also on."""
+    monkeypatch.setattr(A, 'STRIPE_MANAGED_PAYMENTS', True)
+    monkeypatch.setattr(A, 'STRIPE_AUTOMATIC_TAX', True)
+    uid = _make_user('managed@test.com', limit=600, used=0)
+    assert _start_checkout(uid).status_code == 303
+    params = stripe_on['last_create_params']
+    assert params['managed_payments'] == {'enabled': True}
+    assert 'automatic_tax' not in params
+    price_data = params['line_items'][0]['price_data']
+    assert price_data['tax_behavior'] == 'inclusive'
+    assert price_data['product_data']['tax_code'] == A.STRIPE_TAX_CODE
+
+
+def test_checkout_omits_managed_payments_by_default(stripe_on):
+    uid = _make_user('unmanaged@test.com', limit=600, used=0)
+    assert _start_checkout(uid).status_code == 303
+    assert 'managed_payments' not in stripe_on['last_create_params']
+
+
+def _stale(purchase, **values):
+    """Make ``purchase`` look as it did before another worker's commit."""
+    from sqlalchemy.orm.attributes import set_committed_value
+    for key, value in values.items():
+        set_committed_value(purchase, key, value)
+
+
+def test_concurrent_refund_redelivery_claws_back_once(stripe_on):
+    """Two workers get the same charge.refunded. Worker A commits the half
+    refund; worker B read the purchase before that commit. Without the
+    snapshot claim, B also claws back 150 minutes the customer still owns."""
+    from models import CreditPurchase
+    uid = _make_user('racerefund@test.com', limit=600, used=0)
+    assert _register_and_post(stripe_on, _pack_session(uid, 'cs_race_1')).status_code == 200
+    charge = {'id': 'ch_race', 'payment_intent': 'pi_cs_race_1',
+              'amount': 500, 'amount_captured': 500, 'amount_refunded': 250}
+    with A.app.app_context():
+        purchase = CreditPurchase.query.filter_by(stripe_session_id='cs_race_1').one()
+        assert A.handle_charge_refunded(dict(charge)) is True  # worker A
+        assert _paid(uid) == 150 * 60
+        _stale(purchase, amount_refunded_cents=0, seconds_clawed_back=0,
+               status='credited')  # worker B's view
+        with pytest.raises(RuntimeError):
+            A.handle_charge_refunded(dict(charge))
+    assert _paid(uid) == 150 * 60
+
+
+def test_concurrent_dispute_claws_back_once(stripe_on):
+    from models import CreditPurchase
+    uid = _make_user('racedispute@test.com', limit=600, used=0)
+    assert _register_and_post(stripe_on, _pack_session(uid, 'cs_race_2')).status_code == 200
+    dispute = {'id': 'dp_race', 'payment_intent': 'pi_cs_race_2'}
+    with A.app.app_context():
+        purchase = CreditPurchase.query.filter_by(stripe_session_id='cs_race_2').one()
+        assert A.handle_dispute(dict(dispute), 'charge.dispute.created') is True
+        # The customer bought 10 minutes elsewhere; B must not take them.
+        A.db.session.execute(A.text(
+            'UPDATE users SET paid_seconds_balance = 600 WHERE id = :u'), {'u': uid})
+        A.db.session.commit()
+        A.db.session.expire_all()
+        _stale(purchase, seconds_clawed_back=0, status='credited',
+               amount_refunded_cents=0)
+        with pytest.raises(RuntimeError):
+            A.handle_dispute(dict(dispute), 'charge.dispute.created')
+    assert _paid(uid) == 600
