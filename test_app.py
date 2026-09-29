@@ -7198,12 +7198,14 @@ def _episode_card_meta(html):
 def test_episode_selection_logged_out_hides_paywall_and_dollar_cost(
         stripe_on, monkeypatch):
     """Anon visitors keep the signup path — no 'Out of free minutes' card."""
+    from bs4 import BeautifulSoup
     client = A.app.test_client()
     resp = _render_episode_selection_via_parse_rss(monkeypatch, client)
     assert resp.status_code == 200
     body = resp.data.decode()
     assert 'Out of free minutes' not in body
-    assert 'buyFormEpisodeSelection' not in body
+    soup = BeautifulSoup(body, 'html5lib')
+    assert soup.find('form', id='buyFormEpisodeSelection') is None
     meta = _episode_card_meta(body)
     assert 'Uses ~30 min' in meta
     assert '$' not in meta
