@@ -50,7 +50,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError as SaIntegrityError
 
 from models import (db, User, SavedFeed, TranscriptionTask, CreditPurchase,
-                    TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS)
+                    TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS,
+                    PURCHASE_COLUMN_MIGRATIONS)
 from observability import init_sentry, report_stale_task, report_task_failure
 import analytics as product_analytics
 
@@ -491,6 +492,14 @@ CREDIT_PACK_SECONDS = CREDIT_PACK_MINUTES * 60
 CREDIT_PACK_AMOUNT_CENTS = 500
 CREDIT_PACK_CURRENCY = 'usd'
 CREDIT_PACK_LABEL = 'Buy 5 hours for $5'
+#: Managed Payments makes Stripe the merchant of record, so it computes and
+#: remits VAT/sales tax. It needs an eligible tax code on the product; this is
+#: "AI as a Service - cloud based - personal use".
+CREDIT_PACK_TAX_CODE = 'txcd_10105001'
+#: Checkout events that can carry a completed payment. Delayed methods (Pix,
+#: UPI) complete as unpaid and settle later via async_payment_succeeded.
+STRIPE_CREDIT_EVENTS = ('checkout.session.completed',
+                        'checkout.session.async_payment_succeeded')
 
 
 def stripe_checkout_enabled():
@@ -2136,18 +2145,26 @@ def credit_user_from_checkout_session(session_obj, event_id=None):
         return False
     # Amount and currency must match the configured pack. Do not fall back to
     # defaults that would credit minutes for a mismatched Checkout Session.
+    # The subtotal is the price we set, before tax: amount_total grows by the
+    # VAT when a price is tax-exclusive, and a paid pack must still credit.
+    # Adaptive Pricing leaves both in our currency (API 2025-03-31.basil+);
+    # what the customer saw lives under presentment_details.
+    try:
+        subtotal = int(session_obj.get('amount_subtotal'))
+    except (TypeError, ValueError):
+        app.logger.error('Stripe session %s missing amount_subtotal', session_id)
+        return False
+    currency = (session_obj.get('currency') or '').lower()
+    if subtotal != CREDIT_PACK_AMOUNT_CENTS or currency != CREDIT_PACK_CURRENCY:
+        app.logger.error(
+            'Stripe session %s amount/currency mismatch: %s %s (expected %s %s)',
+            session_id, subtotal, currency,
+            CREDIT_PACK_AMOUNT_CENTS, CREDIT_PACK_CURRENCY)
+        return False
     try:
         amount = int(session_obj.get('amount_total'))
     except (TypeError, ValueError):
-        app.logger.error('Stripe session %s missing amount_total', session_id)
-        return False
-    currency = (session_obj.get('currency') or '').lower()
-    if amount != CREDIT_PACK_AMOUNT_CENTS or currency != CREDIT_PACK_CURRENCY:
-        app.logger.error(
-            'Stripe session %s amount/currency mismatch: %s %s (expected %s %s)',
-            session_id, amount, currency,
-            CREDIT_PACK_AMOUNT_CENTS, CREDIT_PACK_CURRENCY)
-        return False
+        amount = subtotal
     metadata = session_obj.get('metadata') or {}
     ref = session_obj.get('client_reference_id') or metadata.get('user_id')
     try:
@@ -2165,6 +2182,7 @@ def credit_user_from_checkout_session(session_obj, event_id=None):
         amount_cents=amount,
         currency=currency,
         minutes=minutes,
+        stripe_payment_intent_id=session_obj.get('payment_intent') or None,
     )
     db.session.add(purchase)
     try:
@@ -2195,6 +2213,104 @@ def credit_user_from_checkout_session(session_obj, event_id=None):
         {'amount_cents': amount, 'minutes': minutes, 'currency': currency},
     )
     return True
+
+
+def _stripe_id(value):
+    """An object reference as its id, whether Stripe sent it expanded or not."""
+    if isinstance(value, dict):
+        value = value.get('id')
+    return value or None
+
+
+def _purchase_for_payment_intent(payment_intent_id):
+    """The credit purchase a PaymentIntent paid for, or None if it is not ours.
+
+    Purchases recorded before the PaymentIntent was stored are found through
+    the Checkout Session that created it, and backfilled.
+    """
+    purchase = CreditPurchase.query.filter_by(
+        stripe_payment_intent_id=payment_intent_id).first()
+    if purchase is not None:
+        return purchase
+    stripe.api_key = STRIPE_SECRET_KEY
+    sessions = stripe.checkout.Session.list(payment_intent=payment_intent_id, limit=1)
+    data = sessions.get('data') if isinstance(sessions, dict) else sessions.data
+    if not data:
+        return None
+    purchase = CreditPurchase.query.filter_by(
+        stripe_session_id=_stripe_id(data[0])).first()
+    if purchase is not None and not purchase.stripe_payment_intent_id:
+        purchase.stripe_payment_intent_id = payment_intent_id
+    return purchase
+
+
+def claw_back_refunded_charge(charge):
+    """Take back paid minutes in proportion to what a charge has refunded.
+
+    Managed Payments lets Stripe refund on its own within 60 days, so a refund
+    must not leave the minutes behind. ``amount_refunded`` is cumulative, so the
+    target is recomputed from it and only the increase over ``refunded_seconds``
+    is debited: a replayed or out-of-order event takes nothing twice. Minutes
+    already spent cannot be recovered; the balance floors at zero.
+
+    Returns the seconds newly taken back.
+    """
+    payment_intent_id = _stripe_id(charge.get('payment_intent'))
+    try:
+        amount = int(charge.get('amount'))
+        refunded = int(charge.get('amount_refunded') or 0)
+    except (TypeError, ValueError):
+        return 0
+    if not payment_intent_id or amount <= 0 or refunded <= 0:
+        return 0
+    purchase = _purchase_for_payment_intent(payment_intent_id)
+    if purchase is None:
+        app.logger.warning('Refund on %s matches no credit purchase', payment_intent_id)
+        db.session.rollback()
+        return 0
+    pack_seconds = purchase.minutes * 60
+    target = min(pack_seconds, pack_seconds * refunded // amount)
+    purchase_id, user_id = purchase.id, purchase.user_id
+    delta = _advance_refunded_seconds(purchase_id, target)
+    if not delta:
+        db.session.rollback()
+        return 0
+    db.session.execute(text("""
+        UPDATE users
+           SET paid_seconds_balance = MAX(0, COALESCE(paid_seconds_balance, 0) - :n)
+         WHERE id = :uid
+    """), {'n': delta, 'uid': user_id})
+    db.session.commit()
+    product_analytics.capture(
+        'purchase_refunded', user_id,
+        {'seconds': delta, 'amount_refunded_cents': refunded},
+    )
+    return delta
+
+
+def _advance_refunded_seconds(purchase_id, target):
+    """Raise a purchase's refunded_seconds to ``target``; return the increase.
+
+    Compare-and-set on the old value, so two workers handling two refund events
+    never debit the same increase. Losing the race re-reads and retries — the
+    winner may have moved to a lower target than ours. Leaves the transaction
+    open for the caller to commit with the balance debit.
+    """
+    for _ in range(3):
+        already = db.session.execute(text(
+            'SELECT COALESCE(refunded_seconds, 0) FROM credit_purchases WHERE id = :pid'
+        ), {'pid': purchase_id}).scalar()
+        if already is None or target <= already:
+            return 0
+        moved = db.session.execute(text("""
+            UPDATE credit_purchases SET refunded_seconds = :target
+             WHERE id = :pid AND COALESCE(refunded_seconds, 0) = :already
+        """), {'target': target, 'pid': purchase_id, 'already': already})
+        if moved.rowcount == 1:
+            return target - already
+        db.session.rollback()
+    # A 500 makes Stripe redeliver the event, which retries from scratch.
+    raise RuntimeError(f'refund claw-back on purchase {purchase_id} kept losing the race')
 
 
 @app.route('/settings', methods=['GET', 'POST'])
@@ -2250,6 +2366,28 @@ def settings():
     )
 
 
+def credit_pack_line_item():
+    """The Checkout line item for one credit pack.
+
+    Tax-inclusive, so the customer pays the $5 on the button in every country
+    and Stripe carves the VAT out of it. A dashboard Price (STRIPE_PRICE_ID)
+    must carry the same tax code and inclusive tax behavior itself.
+    """
+    if STRIPE_PRICE_ID:
+        return {'quantity': 1, 'price': STRIPE_PRICE_ID}
+    return {'quantity': 1, 'price_data': {
+        'currency': CREDIT_PACK_CURRENCY,
+        'unit_amount': CREDIT_PACK_AMOUNT_CENTS,
+        'tax_behavior': 'inclusive',
+        'product_data': {
+            'name': f'Podskrift — {CREDIT_PACK_MINUTES} minutes',
+            'description': f'{CREDIT_PACK_MINUTES} minutes of transcription '
+                           f'({CREDIT_PACK_MINUTES // 60} hours)',
+            'tax_code': CREDIT_PACK_TAX_CODE,
+        },
+    }}
+
+
 @app.route('/billing/checkout', methods=['POST'])
 @login_required
 def billing_checkout():
@@ -2283,25 +2421,12 @@ def billing_checkout():
         if cancel_url.startswith('/'):
             cancel_abs = request.host_url.rstrip('/') + cancel_url
 
-    line_item = {'quantity': 1}
-    if STRIPE_PRICE_ID:
-        line_item['price'] = STRIPE_PRICE_ID
-    else:
-        line_item['price_data'] = {
-            'currency': CREDIT_PACK_CURRENCY,
-            'unit_amount': CREDIT_PACK_AMOUNT_CENTS,
-            'product_data': {
-                'name': f'Podskrift — {CREDIT_PACK_MINUTES} minutes',
-                'description': f'{CREDIT_PACK_MINUTES} minutes of transcription '
-                               f'({CREDIT_PACK_MINUTES // 60} hours)',
-            },
-        }
-
     try:
         stripe.api_key = STRIPE_SECRET_KEY
         checkout_session = stripe.checkout.Session.create(
             mode='payment',
-            line_items=[line_item],
+            managed_payments={'enabled': True},
+            line_items=[credit_pack_line_item()],
             success_url=success_url,
             cancel_url=cancel_abs,
             client_reference_id=str(current_user.id),
@@ -2328,7 +2453,7 @@ def billing_success():
 
 @app.route('/stripe/webhook', methods=['POST'])
 def stripe_webhook():
-    """Verify and handle Stripe events. Credits only on checkout.session.completed."""
+    """Verify and handle Stripe events: credit completed payments, claw back refunds."""
     if not stripe_webhook_enabled():
         # Not configured: look like a missing route rather than a soft outage.
         return jsonify({'error': 'not found'}), 404
@@ -2347,18 +2472,22 @@ def stripe_webhook():
         app.logger.exception('Stripe webhook construct_event failed')
         return jsonify({'error': 'webhook error'}), 400
 
-    if event.get('type') == 'checkout.session.completed':
-        session_obj = event['data']['object']
-        # stripe objects behave like dicts; normalize.
-        if hasattr(session_obj, 'to_dict'):
-            session_obj = session_obj.to_dict()
-        elif not isinstance(session_obj, dict):
-            session_obj = dict(session_obj)
-        try:
-            credit_user_from_checkout_session(session_obj, event_id=event.get('id'))
-        except Exception:
-            app.logger.exception('Failed to credit Stripe session')
-            return jsonify({'error': 'credit failed'}), 500
+    # stripe-python 13+ returns a StripeObject that is not a dict: .get() raises
+    # AttributeError. to_dict() converts the whole tree.
+    if hasattr(event, 'to_dict'):
+        event = event.to_dict()
+    event_type = event.get('type')
+    obj = (event.get('data') or {}).get('object') or {}
+    try:
+        if event_type in STRIPE_CREDIT_EVENTS:
+            credit_user_from_checkout_session(obj, event_id=event.get('id'))
+        elif event_type == 'charge.refunded':
+            claw_back_refunded_charge(obj)
+    except Exception:
+        # A 500 makes Stripe redeliver; both handlers are idempotent.
+        db.session.rollback()
+        app.logger.exception('Failed to handle Stripe event %s', event_type)
+        return jsonify({'error': 'handling failed'}), 500
     return jsonify({'received': True}), 200
 
 
@@ -5024,7 +5153,8 @@ def apply_column_migrations():
     inspector = sa_inspect(db.engine)
     added = []
     for table, migrations in (('transcription_tasks', TASK_COLUMN_MIGRATIONS),
-                              ('users', USER_COLUMN_MIGRATIONS)):
+                              ('users', USER_COLUMN_MIGRATIONS),
+                              ('credit_purchases', PURCHASE_COLUMN_MIGRATIONS)):
         existing = {c['name'] for c in inspector.get_columns(table)}
         for column, ddl_type in migrations.items():
             if column in existing:

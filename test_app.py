@@ -5871,6 +5871,7 @@ def test_webhook_credits_once_on_duplicate_event(stripe_on, ph_events):
     session_obj = {
         'id': 'cs_test_dup_1',
         'payment_status': 'paid',
+        'amount_subtotal': 500,
         'amount_total': 500,
         'currency': 'usd',
         'client_reference_id': str(uid),
@@ -6019,6 +6020,7 @@ def test_webhook_rejects_unpaid_or_wrong_amount(stripe_on):
         'client_reference_id': str(uid),
         'metadata': {'user_id': str(uid), 'minutes': '300'},
         'currency': 'usd',
+        'amount_subtotal': 500,
         'amount_total': 500,
         'payment_status': 'paid',
     }
@@ -6031,7 +6033,18 @@ def test_webhook_rejects_unpaid_or_wrong_amount(stripe_on):
     assert post_session(missing_status).status_code == 200
     assert _paid(uid) == 0
 
-    wrong_amount = dict(base, id='cs_wrong_amt', amount_total=100)
+    wrong_amount = dict(base, id='cs_wrong_amt', amount_subtotal=100, amount_total=100)
+    assert post_session(wrong_amount).status_code == 200
+    assert _paid(uid) == 0
+
+    # The subtotal is the check; a session that never priced the pack must not
+    # credit just because amount_total happens to equal it.
+    no_subtotal = dict(base, id='cs_no_subtotal')
+    del no_subtotal['amount_subtotal']
+    assert post_session(no_subtotal).status_code == 200
+    assert _paid(uid) == 0
+
+    wrong_amount = dict(base, id='cs_wrong_amt2', amount_subtotal=100)
     assert post_session(wrong_amount).status_code == 200
     assert _paid(uid) == 0
 
@@ -6141,3 +6154,252 @@ def test_ensure_credit_purchases_table_is_idempotent(trial_on):
             "AND name='credit_purchases'"
         )).fetchall()
         assert len(rows) == 1
+
+
+# --------------------------------------------------------------------------
+# Managed Payments: tax, delayed payments, refunds
+# --------------------------------------------------------------------------
+
+def _post_event(event):
+    """Deliver ``event`` to the webhook as if Stripe had signed it."""
+    A.stripe.Webhook.construct_event = staticmethod(
+        lambda payload, sig, secret: event)
+    return A.app.test_client().post(
+        '/stripe/webhook', data=b'{}', headers={'Stripe-Signature': 't=1,v1=ok'})
+
+
+def _paid_session(uid, session_id, **overrides):
+    obj = {
+        'id': session_id,
+        'payment_status': 'paid',
+        'amount_subtotal': 500,
+        'amount_total': 500,
+        'currency': 'usd',
+        'payment_intent': 'pi_' + session_id,
+        'client_reference_id': str(uid),
+        'metadata': {'user_id': str(uid), 'minutes': '300'},
+    }
+    obj.update(overrides)
+    return obj
+
+
+def _event(event_type, obj, event_id=None):
+    return {'id': event_id or f'evt_{event_type}_{obj.get("id")}',
+            'type': event_type, 'data': {'object': obj}}
+
+
+def _refund(pi, refunded, amount=500):
+    return _event('charge.refunded', {
+        'id': 'ch_' + pi, 'payment_intent': pi,
+        'amount': amount, 'amount_refunded': refunded,
+    }, event_id=f'evt_refund_{pi}_{refunded}')
+
+
+def test_checkout_session_uses_managed_payments(stripe_on):
+    """Stripe is merchant of record: it computes and remits VAT, so the session
+    must enable Managed Payments, carry an eligible tax code, and keep the
+    price tax-inclusive so the button's $5 is what every customer pays."""
+    uid = _make_user('managed@test.com', limit=600, used=600)
+    client = _login(uid)
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    resp = client.post('/billing/checkout', data={'csrf_token': token})
+    assert resp.status_code == 303
+    kw = A.stripe.checkout.Session.last_kwargs
+    assert kw['managed_payments'] == {'enabled': True}
+    price_data = kw['line_items'][0]['price_data']
+    assert price_data['tax_behavior'] == 'inclusive'
+    assert price_data['product_data']['tax_code'] == 'txcd_10105001'
+    # Managed Payments rejects these; Stripe owns tax, invoices and methods.
+    for banned in ('automatic_tax', 'tax_id_collection', 'invoice_creation',
+                   'payment_method_types', 'adaptive_pricing'):
+        assert banned not in kw
+
+
+def test_dashboard_price_is_used_as_is(stripe_on, monkeypatch):
+    monkeypatch.setattr(A, 'STRIPE_PRICE_ID', 'price_123')
+    assert A.credit_pack_line_item() == {'quantity': 1, 'price': 'price_123'}
+
+
+def test_tax_exclusive_pack_still_credits(stripe_on):
+    """With tax on top, amount_total is 625 for a 25% VAT customer. The pack
+    was paid in full and must credit; checking amount_total would take the
+    money and leave the customer with nothing."""
+    uid = _make_user('taxexcl@test.com')
+    obj = _paid_session(uid, 'cs_tax_excl', amount_total=625)
+    assert _post_event(_event('checkout.session.completed', obj)).status_code == 200
+    assert _paid(uid) == 300 * 60
+
+
+def test_real_sdk_event_is_handled(stripe_on, monkeypatch):
+    """stripe-python 13+ returns an Event that is not a dict, so event.get()
+    raised AttributeError and every real webhook answered 500. The fake SDK in
+    the other tests hands back a dict and hid it; this one signs a payload
+    and runs the real construct_event."""
+    import hashlib
+    import hmac
+    import json
+    import time
+    import stripe as real_stripe
+    uid = _make_user('realsdk@test.com')
+    monkeypatch.setattr(A, 'stripe', real_stripe)
+    payload = json.dumps({
+        'id': 'evt_real_1', 'object': 'event',
+        'type': 'checkout.session.completed',
+        'data': {'object': dict(_paid_session(uid, 'cs_real_1'),
+                                object='checkout.session')},
+    })
+    ts = int(time.time())
+    sig = hmac.new(b'whsec_test_fake', f'{ts}.{payload}'.encode(),
+                   hashlib.sha256).hexdigest()
+    resp = A.app.test_client().post(
+        '/stripe/webhook', data=payload,
+        headers={'Stripe-Signature': f't={ts},v1={sig}'})
+    assert resp.status_code == 200
+    assert _paid(uid) == 300 * 60
+
+
+def test_delayed_payment_credits_when_it_settles(stripe_on):
+    """Pix/UPI complete the session unpaid and settle later. Only the
+    async_payment_succeeded event carries the money, and it must credit once."""
+    uid = _make_user('async@test.com')
+    pending = _paid_session(uid, 'cs_async', payment_status='unpaid')
+    assert _post_event(_event('checkout.session.completed', pending)).status_code == 200
+    assert _paid(uid) == 0
+    settled = _paid_session(uid, 'cs_async')
+    for _ in range(2):
+        resp = _post_event(_event('checkout.session.async_payment_succeeded', settled))
+        assert resp.status_code == 200
+    assert _paid(uid) == 300 * 60
+
+
+def test_async_payment_failed_credits_nothing(stripe_on):
+    uid = _make_user('asyncfail@test.com')
+    failed = _paid_session(uid, 'cs_async_fail', payment_status='unpaid')
+    assert _post_event(_event('checkout.session.async_payment_failed', failed)).status_code == 200
+    assert _paid(uid) == 0
+
+
+def test_full_refund_takes_the_pack_back_once(stripe_on, ph_events):
+    uid = _make_user('refundfull@test.com')
+    _post_event(_event('checkout.session.completed', _paid_session(uid, 'cs_rf')))
+    assert _paid(uid) == 18000
+    for _ in range(2):  # Stripe redelivers
+        assert _post_event(_refund('pi_cs_rf', 500)).status_code == 200
+    assert _paid(uid) == 0
+    refunded = [e for e in ph_events.events if e['event'] == 'purchase_refunded']
+    assert len(refunded) == 1 and refunded[0]['properties']['seconds'] == 18000
+
+
+def test_partial_refunds_are_pro_rata_and_order_safe(stripe_on):
+    """amount_refunded is cumulative. A half refund takes half; the full
+    refund takes only the rest; a late half-refund event takes nothing."""
+    uid = _make_user('refundpart@test.com')
+    _post_event(_event('checkout.session.completed', _paid_session(uid, 'cs_rp')))
+    _post_event(_refund('pi_cs_rp', 250))
+    assert _paid(uid) == 9000
+    _post_event(_refund('pi_cs_rp', 500))
+    assert _paid(uid) == 0
+    _post_event(_refund('pi_cs_rp', 250))
+    assert _paid(uid) == 0
+    from models import CreditPurchase
+    with A.app.app_context():
+        purchase = CreditPurchase.query.filter_by(stripe_session_id='cs_rp').one()
+        assert purchase.refunded_seconds == 18000
+
+
+def test_refund_after_spending_floors_at_zero(stripe_on):
+    """Minutes already transcribed are gone; the balance never goes negative."""
+    uid = _make_user('refundspent@test.com')
+    _post_event(_event('checkout.session.completed', _paid_session(uid, 'cs_spent')))
+    _set_paid(uid, 600)  # 290 of 300 minutes spent
+    assert _post_event(_refund('pi_cs_spent', 500)).status_code == 200
+    assert _paid(uid) == 0
+
+
+def test_refund_only_touches_the_refunded_purchase(stripe_on):
+    uid = _make_user('refundtwo@test.com')
+    _post_event(_event('checkout.session.completed', _paid_session(uid, 'cs_one')))
+    _post_event(_event('checkout.session.completed', _paid_session(uid, 'cs_two')))
+    assert _paid(uid) == 36000
+    _post_event(_refund('pi_cs_one', 500))
+    _post_event(_refund('pi_cs_one', 500))
+    assert _paid(uid) == 18000
+
+
+def test_refund_finds_a_purchase_recorded_before_payment_intents(stripe_on):
+    """Purchases credited before this change have no payment_intent stored.
+    The refund must find them through their Checkout Session, and backfill."""
+    from models import db, CreditPurchase
+    uid = _make_user('refundlegacy@test.com')
+    _post_event(_event('checkout.session.completed',
+                       _paid_session(uid, 'cs_legacy', payment_intent=None)))
+    assert _paid(uid) == 18000
+
+    class Listed:
+        data = [{'id': 'cs_legacy'}]
+
+    A.stripe.checkout.Session.list = staticmethod(
+        lambda **kw: Listed if kw.get('payment_intent') == 'pi_legacy' else None)
+    assert _post_event(_refund('pi_legacy', 500)).status_code == 200
+    assert _paid(uid) == 0
+    with A.app.app_context():
+        purchase = CreditPurchase.query.filter_by(stripe_session_id='cs_legacy').one()
+        assert purchase.stripe_payment_intent_id == 'pi_legacy'
+
+
+def test_refund_for_an_unknown_charge_changes_nothing(stripe_on):
+    uid = _make_user('refundother@test.com')
+    _post_event(_event('checkout.session.completed', _paid_session(uid, 'cs_mine')))
+
+    class Empty:
+        data = []
+
+    A.stripe.checkout.Session.list = staticmethod(lambda **kw: Empty)
+    assert _post_event(_refund('pi_not_ours', 500)).status_code == 200
+    assert _paid(uid) == 18000
+
+
+def test_refund_lookup_failure_asks_stripe_to_retry(stripe_on):
+    """A Stripe API outage during lookup must not swallow the refund: a 500
+    makes Stripe redeliver the event."""
+    uid = _make_user('refundretry@test.com')
+    _post_event(_event('checkout.session.completed',
+                       _paid_session(uid, 'cs_retry', payment_intent=None)))
+
+    def down(**kw):
+        raise RuntimeError('stripe down')
+
+    A.stripe.checkout.Session.list = staticmethod(down)
+    assert _post_event(_refund('pi_retry', 500)).status_code == 500
+    assert _paid(uid) == 18000
+
+
+def test_every_purchase_column_added_after_release_has_a_migration():
+    """credit_purchases shipped with the raw CREATE in
+    ensure_credit_purchases_table(); anything since needs a migration entry."""
+    from models import CreditPurchase, PURCHASE_COLUMN_MIGRATIONS
+    original = {'id', 'user_id', 'stripe_session_id', 'stripe_event_id',
+                'amount_cents', 'currency', 'minutes', 'created_at'}
+    added = {c.name for c in CreditPurchase.__table__.columns} - original
+    assert added == set(PURCHASE_COLUMN_MIGRATIONS), (
+        f'missing migrations for {added - set(PURCHASE_COLUMN_MIGRATIONS)}'
+    )
+
+
+def test_purchase_columns_are_added_to_an_existing_table(trial_on):
+    """Prod's credit_purchases predates the refund columns. Boot must add them."""
+    from models import db
+    with A.app.app_context():
+        db.session.execute(A.text(
+            'ALTER TABLE credit_purchases DROP COLUMN stripe_payment_intent_id'))
+        db.session.execute(A.text(
+            'ALTER TABLE credit_purchases DROP COLUMN refunded_seconds'))
+        db.session.commit()
+        # Boot runs in a fresh process; pooled connections from earlier tests
+        # still hold the old schema and would report the column as present.
+        db.engine.dispose()
+        added = A.apply_column_migrations()
+        assert set(added) == {'credit_purchases.stripe_payment_intent_id',
+                              'credit_purchases.refunded_seconds'}

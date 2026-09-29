@@ -119,7 +119,9 @@ class CreditPurchase(db.Model):
     """One Stripe Checkout payment that credited paid minutes.
 
     Idempotency is the unique stripe_session_id: a duplicate webhook must not
-    credit the pack twice.
+    credit the pack twice. ``refunded_seconds`` is how much of the pack a
+    refund has already taken back, so a repeated charge.refunded event claws
+    back only the difference.
     """
     __tablename__ = 'credit_purchases'
 
@@ -130,6 +132,8 @@ class CreditPurchase(db.Model):
     amount_cents = db.Column(db.Integer, nullable=False)
     currency = db.Column(db.String(16), nullable=False, default='usd')
     minutes = db.Column(db.Integer, nullable=False)
+    stripe_payment_intent_id = db.Column(db.String(255), nullable=True)
+    refunded_seconds = db.Column(db.Integer, nullable=False, default=0)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -160,4 +164,10 @@ USER_COLUMN_MIGRATIONS = {
     'api_key_hash': 'VARCHAR(64)',
     'api_key_prefix': 'VARCHAR(16)',
     'api_key_created_at': 'DATETIME',
+}
+
+#: Same, for the credit_purchases table.
+PURCHASE_COLUMN_MIGRATIONS = {
+    'stripe_payment_intent_id': 'VARCHAR(255)',
+    'refunded_seconds': 'INTEGER NOT NULL DEFAULT 0',
 }

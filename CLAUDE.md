@@ -58,7 +58,8 @@ before merging, regardless of how many files the diff has.
 ### Data
 - `data/podcast.db` holds real user accounts. Tests must never touch it — the
   suite points `DATABASE_URL` at a temp file *before* importing `app`.
-- Schema changes go in `TASK_COLUMN_MIGRATIONS` / `USER_COLUMN_MIGRATIONS`,
+- Schema changes go in `TASK_COLUMN_MIGRATIONS` / `USER_COLUMN_MIGRATIONS` /
+  `PURCHASE_COLUMN_MIGRATIONS`,
   applied by the startup `ALTER TABLE` block. There is no migration framework.
 - Take a backup before any deploy that migrates: `ops/backup-db.sh`.
 
