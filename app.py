@@ -155,8 +155,90 @@ def free_disk_bytes(path='.'):
         return None
 
 
-# Whisper pricing, used for the cost estimates shown in the UI
+# Whisper pricing, used for the cost estimates shown in the UI and in
+# trial-limit / settings copy. OpenAI's published rate; keep every "$0.36/hr"
+# style figure derived from this constant so they cannot drift.
 WHISPER_COST_PER_MINUTE = 0.006
+
+
+def openai_whisper_cost_usd(minutes):
+    """Rough USD cost at OpenAI's Whisper rate for `minutes` of audio."""
+    return round(float(minutes) * WHISPER_COST_PER_MINUTE, 2)
+
+
+#: Session key for an episode an anonymous visitor picked before signing up.
+#: Cleared after resume (success or failure) so a stale stash cannot fire later.
+PENDING_TRANSCRIPTION_KEY = 'pending_transcription'
+
+
+def safe_next_url(candidate, default=None):
+    """Allow only same-origin relative paths. Reject open redirects.
+
+    Absolute URLs, protocol-relative `//evil`, and empty values fall back to
+    `default` (or the homepage). Flask-Login and our register/login forms all
+    pass `?next=` through here.
+    """
+    fallback = default if default is not None else '/'
+    if not candidate or not isinstance(candidate, str):
+        return fallback
+    candidate = candidate.strip()
+    # Path-only, same origin: starts with a single slash, never //host.
+    if not candidate.startswith('/') or candidate.startswith('//'):
+        return fallback
+    parsed = urlparse(candidate)
+    if parsed.scheme or parsed.netloc:
+        return fallback
+    return candidate
+
+
+def trial_estimate_seconds(duration_min):
+    """Seconds the enqueue path would reserve for a feed/iTunes duration.
+
+    Matches enqueue_transcription: floored at one minute (a zero charge would
+    look settled), falling back to TRIAL_UNKNOWN_ESTIMATE_SECONDS when the
+    feed gave no length. Callers that only have a display estimate and want
+    "no badge without a length" should check duration_min themselves first.
+    """
+    return max(60, int((duration_min or 0) * 60) or TRIAL_UNKNOWN_ESTIMATE_SECONDS)
+
+
+def episode_needs_own_key(duration_min, remaining_minutes):
+    """True when a trial user (or anon) cannot cover this episode on free minutes.
+
+    No estimate → no badge. Own-key users pass remaining_minutes=None.
+    """
+    if duration_min is None or remaining_minutes is None:
+        return False
+    try:
+        duration_min = float(duration_min)
+    except (TypeError, ValueError):
+        return False
+    if duration_min <= 0:
+        return False
+    estimate = trial_estimate_seconds(duration_min)
+    if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
+        return True
+    return estimate > int(remaining_minutes) * 60
+
+
+def trial_badge_remaining_minutes():
+    """Minutes of free trial left for the needs-own-key badge, or None to hide it.
+
+    Anonymous visitors see the new-account grant. Logged-in trial users see
+    what they have left. Own-key users and a disabled trial get None.
+    """
+    if not trial_available():
+        return None
+    if current_user.is_authenticated:
+        if current_user.openai_api_key:
+            return None
+        return trial_status(current_user)[2] // 60
+    return TRIAL_DEFAULT_SECONDS // 60
+
+
+def settings_openai_url():
+    """In-app link to the OpenAI key field on Settings."""
+    return url_for('settings') + '#openai'
 
 # Keep a hanging Whisper call inside the stale-task window, so the client gives
 # up before _fail_if_stale() presumes the task dead. Sized against the 900s floor
@@ -541,10 +623,12 @@ def trial_reconcile_task(task_id, actual_seconds):
     user_id = task.user_id
 
     if TRIAL_MAX_EPISODE_SECONDS and actual > TRIAL_MAX_EPISODE_SECONDS:
+        estimate_min = actual // 60
+        cost = openai_whisper_cost_usd(estimate_min)
         raise TrialExhausted(
-            f'This episode runs {actual // 60} minutes, past the '
-            f'{TRIAL_MAX_EPISODE_SECONDS // 60}-minute per-episode limit of the free '
-            'trial. Add your own OpenAI API key in Settings to transcribe it.',
+            f'This episode is {estimate_min} minutes — too long for the free trial '
+            f'(max {TRIAL_MAX_EPISODE_SECONDS // 60}). Add your own OpenAI API key to '
+            f'transcribe it (about ${cost} at OpenAI\'s rate).',
             scope='episode_length',
         )
 
@@ -553,10 +637,14 @@ def trial_reconcile_task(task_id, actual_seconds):
         if not trial_reserve(user_id, extra):
             # Read-only, after the refusal: which cap it was, for analytics.
             owner = db.session.get(User, user_id)
+            estimate_min = actual // 60
+            _, _, remaining = trial_status(owner) if owner else (0, 0, 0)
+            cost = openai_whisper_cost_usd(estimate_min)
             raise TrialExhausted(
-                f'This episode runs {actual // 60} minutes and your free trial has '
-                'less than that left. Add your own OpenAI API key in Settings to '
-                'keep transcribing.',
+                f'This episode is about {estimate_min} minutes — longer than the '
+                f'{remaining // 60} free minutes you have left. Pick a shorter '
+                f'episode, or add your own OpenAI API key (about ${cost} for this '
+                f'one, billed by OpenAI).',
                 scope=trial_refusal_scope(owner, extra) if owner else 'user',
             )
         if not _claim_task_charge(task_id, reserved, actual):
@@ -676,11 +764,20 @@ def describe_openai_error(exc, context='transcription'):
     """
     status = getattr(exc, 'status_code', None)
     if status == 401:
-        return ('Your OpenAI API key was rejected. Check it in Settings — it should '
-                'start with "sk-" and come from platform.openai.com/api-keys.')
+        return ('OpenAI rejected this key. It may have been deleted, or copied '
+                'incompletely. Create a new one at platform.openai.com/api-keys '
+                'and paste the whole thing.')
     if status == 429:
-        return ('Your OpenAI account is out of credit, or you have hit its rate limit. '
-                'Add billing at platform.openai.com/account/billing, then try again.')
+        if context == 'verify':
+            # verify_openai_key replaces this with a fuller "Key saved — but…"
+            # message; kept here so any other verify caller still gets billing help.
+            return ('Your OpenAI account has no credit yet, so transcription won\'t '
+                    'work. Add a payment method or prepaid credit at '
+                    'platform.openai.com/account/billing.')
+        return ('OpenAI refused the job: your OpenAI account has no credit left '
+                '(or hit a rate limit). Add credit at '
+                'platform.openai.com/account/billing — it can take a minute to '
+                'activate — then press Start over. Nothing was charged by Podskrift.')
     if status == 403:
         return ('Your OpenAI key is not allowed to use the Whisper API. Check its '
                 'permissions at platform.openai.com.')
@@ -714,9 +811,9 @@ def verify_openai_key(key):
     waiting through a download. 15 of 16 production failures were this.
     """
     if not looks_like_openai_key(key):
-        return False, ('That does not look like an OpenAI API key. Keys start with '
-                       '"sk-" and come from platform.openai.com/api-keys — it is not '
-                       'your OpenAI password.'), 'invalid_key'
+        return False, ('That\'s not an OpenAI API key. OpenAI keys start with "sk-" '
+                       'and are created at platform.openai.com/api-keys. (Not your '
+                       'OpenAI password, and not the Podskrift "psk_" key below.)'), 'invalid_key'
     try:
         OpenAI(api_key=key, timeout=15.0, max_retries=0).models.list()
     except Exception as e:
@@ -733,11 +830,18 @@ def verify_openai_key(key):
             # The key authenticated; the account is just out of credit or rate
             # limited. Refusing the save would leave them unable to store a
             # working key at all.
-            return True, ('Key saved. Note: ' +
-                          describe_openai_error(e, context='verify')), 'no_billing'
+            return True, (
+                'Key saved — but your OpenAI account has no credit yet, so '
+                'transcription won\'t work. Add a payment method or prepaid credit '
+                'at platform.openai.com/account/billing, then start your transcript.'
+            ), 'no_billing'
         return (False, describe_openai_error(e, context='verify'),
                 product_analytics.openai_fail_reason(e, looks_like_key=True))
-    return True, 'API key verified.', 'verified'
+    return True, (
+        'Key saved and accepted by OpenAI. If this is a new OpenAI account, make '
+        'sure it has credit (platform.openai.com/account/billing) — otherwise the '
+        'first transcript will fail.'
+    ), 'verified'
 
 
 # ---------------------------------------------------------------------------
@@ -1498,13 +1602,34 @@ def get_episodes_from_rss(rss_url):
 # Auth routes
 # ---------------------------------------------------------------------------
 
+def _auth_next_arg():
+    """Raw next= from query or form; validated later via safe_next_url."""
+    return request.values.get('next') or ''
+
+
+def _redirect_after_auth():
+    """Send a newly authenticated user to a safe next URL, or resume a stash."""
+    if session.get(PENDING_TRANSCRIPTION_KEY):
+        return redirect(url_for('resume_transcription'))
+    return redirect(safe_next_url(_auth_next_arg(), url_for('index')))
+
+
+def _register_template(**extra):
+    return render_template(
+        'register.html',
+        next=_auth_next_arg(),
+        trial_minutes=(TRIAL_DEFAULT_SECONDS // 60 if trial_available() else None),
+        **extra,
+    )
+
+
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if current_user.is_authenticated:
-        return redirect(url_for('index'))
+        return _redirect_after_auth()
 
     if request.method != 'POST':
-        return render_template('register.html')
+        return _register_template()
 
     email = request.form.get('email', '').strip().lower()
     password = request.form.get('password', '')
@@ -1512,13 +1637,13 @@ def register():
 
     if not email or not password:
         flash('Email and password are required.', 'error')
-        return render_template('register.html')
+        return _register_template()
 
     ip = _client_ip()
     slot = register_reserve_slot(ip)
     if slot is None:
         flash('Too many accounts created from this address. Try again later.', 'error')
-        return render_template('register.html')
+        return _register_template()
 
     # The slot is held for the rest of this request and released unless an
     # account is actually created, so validation failures cost the user nothing
@@ -1527,23 +1652,23 @@ def register():
     try:
         if is_disposable_email(email):
             flash('Please register with a real email address.', 'error')
-            return render_template('register.html')
+            return _register_template()
 
         if '@' not in email or '.' not in email.rsplit('@', 1)[-1]:
             flash('Please enter a valid email address.', 'error')
-            return render_template('register.html')
+            return _register_template()
 
         if password != password2:
             flash('Passwords do not match.', 'error')
-            return render_template('register.html')
+            return _register_template()
 
         if len(password) < 8:
             flash('Password must be at least 8 characters.', 'error')
-            return render_template('register.html')
+            return _register_template()
 
         if User.query.filter_by(email=email).first():
             flash('An account with this email already exists.', 'error')
-            return render_template('register.html')
+            return _register_template()
 
         user = User(email=email)
         user.set_password(password)
@@ -1553,9 +1678,16 @@ def register():
 
         login_user(user)
         product_analytics.capture('user_signed_up', user.id)
-        flash('Account created! Add your OpenAI API key in Settings to use your own quota.',
-              'success')
-        return redirect(url_for('index'))
+        if session.get(PENDING_TRANSCRIPTION_KEY):
+            flash('Account created — starting your transcript.', 'success')
+        else:
+            minutes = TRIAL_DEFAULT_SECONDS // 60
+            flash(
+                f'Account created — you have {minutes} free minutes. '
+                'Paste your link again to start.',
+                'success',
+            )
+        return _redirect_after_auth()
     finally:
         if not created:
             register_release_slot(ip, slot)
@@ -1564,7 +1696,7 @@ def register():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
-        return redirect(url_for('index'))
+        return _redirect_after_auth()
 
     if request.method == 'POST':
         email = request.form.get('email', '').strip().lower()
@@ -1573,12 +1705,123 @@ def login():
         user = User.query.filter_by(email=email).first()
         if user and user.check_password(password):
             login_user(user, remember=True)
-            next_page = request.args.get('next')
-            return redirect(next_page or url_for('index'))
+            return _redirect_after_auth()
 
         flash('Invalid email or password.', 'error')
 
-    return render_template('login.html')
+    return render_template('login.html', next=_auth_next_arg())
+
+
+def _stash_pending_from_request():
+    """Pull episode fields off the request into the session. Returns an error or None."""
+    language = request.form.get('language', '')
+    if language not in VALID_LANGUAGE_CODES:
+        language = ''
+
+    audio_url = (request.form.get('audio_url') or '').strip()
+    rss_url = (request.form.get('rss_url') or '').strip() or None
+    episode_index_raw = request.form.get('episode_index')
+
+    pending = {
+        'language': language,
+        'rss_url': rss_url,
+        'episode_index': None,
+        'title': (request.form.get('episode_title') or '').strip() or 'Episode',
+        'audio_url': audio_url,
+        'podcast_name': (request.form.get('podcast_name') or '').strip() or None,
+        'artwork': (request.form.get('artwork') or '').strip() or None,
+        'published': (request.form.get('published') or '').strip() or None,
+        'duration_min': _positive_float_or_none(request.form.get('duration_min')),
+    }
+
+    if audio_url:
+        if not _is_fetchable_url(audio_url):
+            return 'That audio URL cannot be fetched.'
+    elif rss_url and episode_index_raw not in (None, ''):
+        try:
+            pending['episode_index'] = int(episode_index_raw)
+        except (TypeError, ValueError):
+            return 'Invalid episode selection'
+        parsed = urlparse(rss_url)
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+            return 'Invalid episode selection'
+    else:
+        return 'Pick an episode first'
+
+    session[PENDING_TRANSCRIPTION_KEY] = pending
+    session.modified = True
+    return None
+
+
+@app.route('/pending-transcription', methods=['POST'])
+def pending_transcription():
+    """Stash the chosen episode, then send anonymous visitors to sign up.
+
+    ChatGPT visitors paste a Spotify link, hit Transcribe, and used to land on
+    /login with the episode gone. We keep the pick in the session and resume
+    after register/login.
+    """
+    err = _stash_pending_from_request()
+    if err:
+        flash(err, 'error')
+        return redirect(url_for('index'))
+
+    if current_user.is_authenticated:
+        return redirect(url_for('resume_transcription'))
+
+    # Prefer signup: every ChatGPT visitor in the sample signed up, not logged in.
+    return redirect(url_for('register', next=url_for('resume_transcription')))
+
+
+@app.route('/resume-transcription', methods=['GET', 'POST'])
+@login_required
+def resume_transcription():
+    """Start the episode stashed before signup/login, if any."""
+    pending = session.pop(PENDING_TRANSCRIPTION_KEY, None)
+    if not pending:
+        flash('Nothing to resume — search for an episode to transcribe.', 'info')
+        return redirect(url_for('index'))
+
+    language = pending.get('language') or ''
+    rss_url = pending.get('rss_url')
+    episode_index = pending.get('episode_index')
+
+    if rss_url is not None and episode_index is not None:
+        episodes, error = get_episodes_from_rss(rss_url)
+        if error or episode_index < 0 or episode_index >= len(episodes):
+            flash(error or 'Invalid episode selection', 'error')
+            return redirect(url_for('index'))
+        episode = episodes[episode_index]
+        meta = {
+            'title': episode['title'],
+            'audio_url': episode['audio_url'],
+            'podcast_name': pending.get('podcast_name') or episode.get('podcast_name'),
+            'artwork': episode.get('artwork') or pending.get('artwork'),
+            'published': episode.get('published'),
+            'duration_min': _positive_float_or_none(episode.get('duration_min')),
+        }
+    else:
+        audio_url = (pending.get('audio_url') or '').strip()
+        if not audio_url or not _is_fetchable_url(audio_url):
+            flash('That audio URL cannot be fetched.', 'error')
+            return redirect(url_for('index'))
+        meta = {
+            'title': pending.get('title') or 'Episode',
+            'audio_url': audio_url,
+            'podcast_name': pending.get('podcast_name'),
+            'artwork': pending.get('artwork'),
+            'published': pending.get('published'),
+            'duration_min': _positive_float_or_none(pending.get('duration_min')),
+        }
+
+    payload, status = enqueue_transcription(
+        current_user, meta, rss_url=rss_url, language=language)
+    if status != 200:
+        # Surface the refusal (trial limit, capacity, …) the same way a direct
+        # start would via flash, since this is a browser redirect not XHR.
+        flash(payload.get('error') or 'Could not start transcription.', 'error')
+        return redirect(url_for('index'))
+    return redirect(url_for('transcription_page', task_id=payload['task_id']))
 
 
 @app.route('/logout')
@@ -1748,6 +1991,7 @@ def use_feed(feed_id):
         flash(error, 'error')
         return redirect(url_for('feeds'))
 
+    _annotate_episodes_for_trial(episodes)
     episodes_to_show = episodes[:10]
     has_more = len(episodes) > 10
     return render_template(
@@ -1814,6 +2058,14 @@ def index():
                            structured_data=_structured_data())
 
 
+def _annotate_episodes_for_trial(episodes):
+    """Attach needs_own_key on each episode dict for the selection UI badge."""
+    remaining = trial_badge_remaining_minutes()
+    for ep in episodes:
+        ep['needs_own_key'] = episode_needs_own_key(ep.get('duration_min'), remaining)
+    return episodes
+
+
 @app.route('/parse_rss', methods=['POST'])
 def parse_rss():
     rss_url = request.form.get('rss_url')
@@ -1826,6 +2078,7 @@ def parse_rss():
         flash(error, 'error')
         return redirect(url_for('index'))
 
+    _annotate_episodes_for_trial(episodes)
     episodes_to_show = episodes[:10]
     has_more = len(episodes) > 10
     return render_template(
@@ -1841,14 +2094,19 @@ def parse_rss():
     )
 
 
-def _capture_trial_limit_hit(user_id, scope, stage, source):
+def _capture_trial_limit_hit(user_id, scope, stage, source,
+                             estimate_min=None, remaining_min=None):
     """The buying signal: a trial user wanted more than the free allowance gives.
 
     scope: episode_length | user | global. stage: start (refused before the job
     existed) or reconcile (the real audio turned out longer than the feed said).
     """
-    product_analytics.capture(
-        'trial_limit_hit', user_id, {'scope': scope, 'stage': stage, 'source': source})
+    props = {'scope': scope, 'stage': stage, 'source': source}
+    if estimate_min is not None:
+        props['estimate_min'] = int(estimate_min)
+    if remaining_min is not None:
+        props['remaining_min'] = int(remaining_min)
+    product_analytics.capture('trial_limit_hit', user_id, props)
 
 
 def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
@@ -1917,24 +2175,37 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
         if key_source == 'trial':
             # Floored at a minute: trial_seconds_charged == 0 means "settled", so a
             # zero reservation would quietly make the task unmetered.
-            estimate = max(60, int((meta.get('duration_min') or 0) * 60)
-                           or TRIAL_UNKNOWN_ESTIMATE_SECONDS)
+            estimate = trial_estimate_seconds(meta.get('duration_min'))
+            estimate_min = estimate // 60
             if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
-                _capture_trial_limit_hit(user_id, 'episode_length', 'start', source)
-                return {'error': (
-                    f'This episode runs {estimate // 60} minutes, past the '
-                    f'{TRIAL_MAX_EPISODE_SECONDS // 60}-minute per-episode limit of the '
-                    'free trial. Add your own OpenAI API key in Settings to transcribe it.'
-                )}, 402
+                _, _, remaining = trial_status(user)
+                _capture_trial_limit_hit(
+                    user_id, 'episode_length', 'start', source,
+                    estimate_min=estimate_min, remaining_min=remaining // 60)
+                cost = openai_whisper_cost_usd(estimate_min)
+                return {
+                    'error': (
+                        f'This episode is {estimate_min} minutes — too long for the '
+                        f'free trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). Add your '
+                        f'own OpenAI API key to transcribe it (about ${cost} at '
+                        f'OpenAI\'s rate).'
+                    ),
+                    'action_url': settings_openai_url(),
+                    'action_label': 'Add OpenAI key →',
+                }, 402
             if not trial_reserve(user_id, estimate):
                 _, _, remaining = trial_status(user)
                 scope = trial_refusal_scope(user, estimate)
-                _capture_trial_limit_hit(user_id, scope, 'start', source)
+                _capture_trial_limit_hit(
+                    user_id, scope, 'start', source,
+                    estimate_min=estimate_min, remaining_min=remaining // 60)
                 if scope == 'user':
+                    cost = openai_whisper_cost_usd(estimate_min)
                     message = (
-                        f'Your free trial has {remaining // 60} minutes left, and this '
-                        f'episode needs about {estimate // 60}. Add your own OpenAI API '
-                        'key in Settings to keep transcribing.'
+                        f'This episode is about {estimate_min} minutes — longer than '
+                        f'the {remaining // 60} free minutes you have left. Pick a '
+                        f'shorter episode, or add your own OpenAI API key '
+                        f'(about ${cost} for this one, billed by OpenAI).'
                     )
                 else:
                     # The user still has room; the service as a whole does not.
@@ -1943,7 +2214,11 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                         'Podskrift has handed out all the free minutes it has budgeted. '
                         'Add your own OpenAI API key in Settings to keep transcribing.'
                     )
-                return {'error': message}, 402
+                return {
+                    'error': message,
+                    'action_url': settings_openai_url(),
+                    'action_label': 'Add OpenAI key →',
+                }, 402
             trial_charge = estimate
 
         task_id = str(uuid.uuid4())
@@ -2010,8 +2285,16 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                             trial_refund_task(failed)
                             if isinstance(e, TrialExhausted):
                                 reason = 'trial_exhausted'
+                                est_min = None
+                                rem_min = None
+                                if failed.audio_duration:
+                                    est_min = int(failed.audio_duration) // 60
+                                owner = db.session.get(User, failed.user_id)
+                                if owner:
+                                    rem_min = trial_status(owner)[2] // 60
                                 _capture_trial_limit_hit(
-                                    failed.user_id, e.scope, 'reconcile', source)
+                                    failed.user_id, e.scope, 'reconcile', source,
+                                    estimate_min=est_min, remaining_min=rem_min)
                             elif _is_openai_error(e):
                                 reason = product_analytics.openai_fail_reason(e)
                             else:
@@ -3408,14 +3691,16 @@ def faq_entries():
     kept saying so after the grant changed.
     """
     minutes = TRIAL_DEFAULT_SECONDS // 60
-    hourly = f'${60 * WHISPER_COST_PER_MINUTE:.2f}'
+    hourly = f'${openai_whisper_cost_usd(60):.2f}'
+    cost_90 = f'${openai_whisper_cost_usd(90):.2f}'
     # trial_available() is the predicate the code actually enforces. Copy that
     # promises free minutes while the kill switch is on is a promise the app
     # then refuses at /start_transcription.
     if trial_available():
-        free = (f'New accounts get {minutes} minutes of audio free, on our OpenAI key. '
-                'After that you add your own OpenAI API key and pay OpenAI directly at '
-                f'their rate -- about {hourly} per hour of audio. There is no subscription.')
+        free = (f'The free trial covers {minutes} minutes of audio in total, so one '
+                f'episode up to about an hour. For longer episodes, add your own '
+                f'OpenAI API key: a 90-minute episode costs about {cost_90} at '
+                f'OpenAI\'s rate.')
         need_key = ('Not to start. The free trial runs on ours. Add your own key when the '
                     'trial runs out and there is no limit beyond what you spend at OpenAI.')
     else:
@@ -3426,13 +3711,15 @@ def faq_entries():
                     'for your own transcriptions.')
     return [
         ('How do I transcribe a podcast episode to text?',
-         'Search for the podcast or the episode by name, pick the episode, and Podskrift '
-         'downloads the audio and transcribes it with OpenAI Whisper. You get the full text '
-         'plus an .srt subtitle file. No file to upload and no feed URL to find first.'),
+         'Paste a Spotify episode link, or search for the podcast or episode by name. '
+         'Podskrift downloads the audio and transcribes it with OpenAI Whisper. You get '
+         'the full text plus an .srt subtitle file. No file to upload and no feed URL to '
+         'find first.'),
         ('Hvordan transkriberer jeg en norsk podcast til tekst?',
-         'Søk opp podkasten eller episoden på navn, velg episoden, og Podskrift laster ned '
-         'lyden og transkriberer den med OpenAI Whisper. Du får hele teksten og en .srt-fil '
-         'med teksting. Velg norsk i språkvelgeren, så slipper du at den gjetter feil.'),
+         'Lim inn en Spotify-lenke, eller søk opp podkasten eller episoden på navn. '
+         'Podskrift laster ned lyden og transkriberer den med OpenAI Whisper. Du får '
+         'hele teksten og en .srt-fil med teksting. Velg norsk i språkvelgeren, så '
+         'slipper du at den gjetter feil.'),
         ('Which languages does it handle well?',
          f'{len(LANGUAGE_ENGLISH_NAMES)} languages, from English, Spanish and Mandarin to '
          'Norwegian, Ukrainian and Vietnamese. You can name the language rather than relying '
@@ -3459,6 +3746,20 @@ def inject_language_count():
     meta tags beside a comment claiming the derived form existed so they could
     not drift."""
     return {'language_count': len(LANGUAGE_ENGLISH_NAMES)}
+
+
+@app.context_processor
+def inject_trial_badge():
+    """Remaining free minutes for the needs-own-key badge on episode rows."""
+    return {
+        'trial_badge_remaining_min': trial_badge_remaining_minutes(),
+        'trial_max_episode_min': (
+            TRIAL_MAX_EPISODE_SECONDS // 60 if TRIAL_MAX_EPISODE_SECONDS else None
+        ),
+        'whisper_cost_per_minute': WHISPER_COST_PER_MINUTE,
+        'openai_hourly_cost': f'{openai_whisper_cost_usd(60):.2f}',
+        'openai_90min_cost': f'{openai_whisper_cost_usd(90):.2f}',
+    }
 
 
 @app.context_processor

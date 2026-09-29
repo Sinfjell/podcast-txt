@@ -6,7 +6,8 @@
     <h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">Log in</h2>
     <div class="card">
         <div class="card-body">
-            <form method="POST">
+            <form method="POST" action="{{ url_for('login', next=next) if next else url_for('login') }}">
+                {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
                 <div class="form-group">
                     <label class="form-label" for="email">Email</label>
                     <input type="email" class="form-input ph-no-capture" id="email" name="email"
@@ -22,7 +23,8 @@
         </div>
     </div>
     <p class="text-center text-muted mt-2 text-sm">
-        Don't have an account? <a href="{{ url_for('register') }}">Sign up</a>
+        Don't have an account?
+        <a href="{{ url_for('register', next=next) if next else url_for('register') }}">Sign up</a>
     </p>
 </div>
 {% endblock %}

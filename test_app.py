@@ -552,13 +552,13 @@ class _Status(Exception):
 
 @pytest.mark.parametrize('status,expect', [
     (401, 'rejected'),
-    (429, 'out of credit'),
+    (429, 'credit'),
     (403, 'not allowed'),
     (500, 'server error'),
 ])
 def test_openai_errors_become_human_messages(status, expect):
     msg = A.describe_openai_error(_Status(status))
-    assert expect in msg
+    assert expect in msg.lower()
 
 
 def test_provider_text_is_never_echoed_back():
@@ -901,7 +901,7 @@ def test_register_route_enforces_the_limit():
     created = 0
     for e in emails:
         body = _signup(client, e).data.decode()
-        if 'Add your OpenAI API key' in body:
+        if 'Account created' in body:
             created += 1
             client = _new_session()
     _purge(emails)
@@ -922,7 +922,7 @@ def test_register_route_releases_the_slot_on_validation_failure():
     created = 0
     for e in emails:
         body = _signup(client, e).data.decode()
-        if 'Add your OpenAI API key' in body:
+        if 'Account created' in body:
             created += 1
             client = _new_session()
     _purge(emails)
@@ -1089,7 +1089,7 @@ def test_duplicate_email_gives_the_slot_back():
     A._register_attempts.clear()
     _purge(['dupe@example.com'])
     client = _fresh_client()
-    assert 'Add your OpenAI API key' in _signup(client, 'dupe@example.com').data.decode()
+    assert 'Account created' in _signup(client, 'dupe@example.com').data.decode()
 
     client = _new_session()
     for _ in range(4):
@@ -1123,7 +1123,7 @@ def test_register_route_is_atomic_under_a_parallel_burst():
             body = client.post('/register', data={
                 'email': email, 'password': 'abcdefgh1', 'password2': 'abcdefgh1',
             }, follow_redirects=True).data.decode()
-            results.append('Add your OpenAI API key' in body)
+            results.append('Account created' in body)
         except Exception as exc:            # noqa: BLE001 - reported below
             errors.append(f'{email}: {type(exc).__name__}: {exc}')
 
@@ -1702,7 +1702,10 @@ def test_start_transcription_refuses_an_exhausted_trial(trial_on, monkeypatch):
                              'episode_title': 'Ep', 'duration_min': '30',
                              'language': 'no'})
     assert resp.status_code == 402
-    assert 'trial' in resp.get_json()['error'].lower()
+    error = resp.get_json()['error'].lower()
+    assert 'free minutes' in error
+    assert 'openai api key' in error
+    assert f'${A.openai_whisper_cost_usd(30):.2f}' in resp.get_json()['error']
 
 
 def test_exhausted_trial_reads_as_no_key(trial_on):
@@ -3364,7 +3367,9 @@ def test_the_page_says_what_it_is_before_asking_for_anything(trial_on):
     hero = hero.group(0)
     assert 'Built for' not in hero, 'the hero fences the product to a language group'
     assert 'English-first' not in hero, 'the hero still claims an edge we cannot evidence'
-    assert f'{len(A.LANGUAGE_ENGLISH_NAMES)} languages' in hero
+    # Language count lives in meta / FAQ, not the ChatGPT-facing hero (which leads
+    # with Spotify). Still required somewhere visible on the page.
+    assert f'{len(A.LANGUAGE_ENGLISH_NAMES)} languages' in body
 
     # And nowhere quotes a count it typed by hand. It was hardcoded in three
     # meta tags next to a comment claiming the derived form existed so they
@@ -4807,8 +4812,8 @@ def test_customer_settings_generate_and_revoke(trial_on):
 
     page = client.get('/settings')
     assert page.status_code == 200
-    assert b'>API key<' in page.data or b'API key' in page.data
-    assert b'Use this key with scripts or agents' in page.data
+    assert b'Podskrift API key (developers only)' in page.data
+    assert b'transcribe on the website' in page.data
     assert b'Create' in page.data
     assert b'/docs/api' in page.data
     assert b'How to use' in page.data
@@ -4816,7 +4821,10 @@ def test_customer_settings_generate_and_revoke(trial_on):
     # Growth UI: no credits / pricing / multi-key chrome
     assert b'Buy more' not in page.data
     assert b'credits' not in page.data.lower()
-    assert b'Developers' not in page.data
+    # A dedicated "Developers" product surface is not part of settings; the
+    # developer-only card title is intentional so OpenAI-key users do not
+    # confuse the psk_ key with sk-.
+    assert b'>Developers<' not in page.data
 
     gen = client.post('/settings/api-key/generate', follow_redirects=True)
     assert gen.status_code == 200
@@ -5355,7 +5363,16 @@ def test_trial_limit_hit_when_the_account_is_short(ph_events, monkeypatch, trial
     hits = _limit_hits(ph_events)
     assert len(hits) == 1
     assert hits[0]['distinct_id'] == str(uid)
-    assert hits[0]['properties'] == {'scope': 'user', 'stage': 'start', 'source': 'web'}
+    assert hits[0]['properties'] == {
+        'scope': 'user', 'stage': 'start', 'source': 'web',
+        'estimate_min': 5, 'remaining_min': 1,
+    }
+    body = resp.get_json()
+    assert 'about 5 minutes' in body['error']
+    assert '1 free minutes' in body['error']
+    assert f'${A.openai_whisper_cost_usd(5):.2f}' in body['error']
+    assert body.get('action_label') == 'Add OpenAI key →'
+    assert body.get('action_url', '').endswith('/settings#openai')
     assert not [e for e in ph_events.events if e['event'] == 'transcript_started']
 
 
@@ -5382,7 +5399,14 @@ def test_trial_limit_hit_for_an_over_long_episode(ph_events, monkeypatch, trial_
     })
     assert resp.status_code == 402
     hits = _limit_hits(ph_events)
-    assert [h['properties']['scope'] for h in hits] == ['episode_length']
+    assert len(hits) == 1
+    assert hits[0]['properties']['scope'] == 'episode_length'
+    assert hits[0]['properties']['estimate_min'] == 60
+    assert 'remaining_min' in hits[0]['properties']
+    body = resp.get_json()
+    assert 'too long for the free trial' in body['error']
+    assert f'${A.openai_whisper_cost_usd(60):.2f}' in body['error']
+    assert body.get('action_url', '').endswith('#openai')
 
 
 def test_no_trial_limit_hit_on_a_granted_reservation(ph_events, monkeypatch, trial_on):
@@ -5443,7 +5467,8 @@ def test_worker_reports_trial_exhausted_at_reconcile(ph_events, monkeypatch, tri
     assert [f['properties'] for f in failed] == [
         {'key_source': 'trial', 'source': 'web', 'reason': 'trial_exhausted'}]
     assert [h['properties'] for h in _limit_hits(ph_events)] == [
-        {'scope': 'user', 'stage': 'reconcile', 'source': 'web'}]
+        {'scope': 'user', 'stage': 'reconcile', 'source': 'web',
+         'estimate_min': 1, 'remaining_min': 60}]
     assert _used(uid) == 0  # refunded in full: nothing reached Whisper
 
 
@@ -5485,3 +5510,208 @@ def test_reconcile_names_the_global_cap(trial_on, monkeypatch):
             A.trial_reconcile_task('trial-recon-global', 1200)
         assert refused.value.scope == 'global'
     assert _used(uid) == 600
+
+
+# --- ChatGPT landing: signup keeps episode, badges, copy -----------------------
+
+def test_safe_next_url_rejects_off_site_targets():
+    with A.app.test_request_context('/'):
+        assert A.safe_next_url('/resume-transcription') == '/resume-transcription'
+        assert A.safe_next_url('/settings#openai') == '/settings#openai'
+        assert A.safe_next_url('https://evil.example/phish') == '/'
+        assert A.safe_next_url('//evil.example/phish') == '/'
+        assert A.safe_next_url('https://evil.example/phish', default='/x') == '/x'
+        assert A.safe_next_url(None) == '/'
+        assert A.safe_next_url('') == '/'
+
+
+def test_whisper_cost_constant_matches_copy_figures():
+    """$0.36/hr and $0.54/90min must come from WHISPER_COST_PER_MINUTE."""
+    assert A.WHISPER_COST_PER_MINUTE == 0.006
+    assert A.openai_whisper_cost_usd(60) == 0.36
+    assert A.openai_whisper_cost_usd(90) == 0.54
+
+
+def test_episode_needs_own_key_badge_logic(trial_on):
+    assert A.episode_needs_own_key(None, 60) is False
+    assert A.episode_needs_own_key(95, None) is False
+    assert A.episode_needs_own_key(45, 60) is False
+    assert A.episode_needs_own_key(95, 60) is True
+    assert A.episode_needs_own_key(200, 300) is True
+
+
+def test_anonymous_pending_transcription_goes_to_register(monkeypatch, trial_on):
+    """Transcribe while logged out stashes the episode and opens /register."""
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    client = A.app.test_client()
+    resp = client.post('/pending-transcription', data={
+        'audio_url': 'https://cdn.example.com/ep.mp3',
+        'episode_title': 'ChatGPT Ep',
+        'podcast_name': 'Show',
+        'duration_min': '42',
+        'language': 'en',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    loc = resp.headers['Location']
+    assert '/register' in loc
+    assert 'next=' in loc
+    assert 'resume-transcription' in loc
+    with client.session_transaction() as sess:
+        pending = sess.get(A.PENDING_TRANSCRIPTION_KEY)
+        assert pending is not None
+        assert pending['audio_url'] == 'https://cdn.example.com/ep.mp3'
+        assert pending['title'] == 'ChatGPT Ep'
+        assert pending['duration_min'] == 42.0
+
+
+def test_register_rejects_off_site_next_and_keeps_flash(monkeypatch, trial_on):
+    A._register_attempts.clear()
+    email = 'nextsafe@example.com'
+    _purge([email])
+    client = _fresh_client()
+    resp = client.post(
+        '/register?next=https://evil.example/steal',
+        data={'email': email, 'password': 'abcdefgh1', 'password2': 'abcdefgh1'},
+        follow_redirects=True,
+    )
+    body = resp.data.decode()
+    assert 'Account created' in body
+    assert f'{A.TRIAL_DEFAULT_SECONDS // 60} free minutes' in body
+    assert 'evil.example' not in resp.request.url
+    assert resp.request.path == '/'
+    _purge([email])
+
+
+def test_register_with_pending_episode_resumes_and_flashes(monkeypatch, trial_on):
+    """After signup with a stashed episode, resume starts the job."""
+    A._register_attempts.clear()
+    email = 'resume-ep@example.com'
+    _purge([email])
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+
+    started = {}
+
+    def fake_enqueue(user, meta, rss_url=None, language='', source='web'):
+        started['meta'] = meta
+        started['user_id'] = user.id
+        return {'task_id': 'task-from-resume'}, 200
+
+    monkeypatch.setattr(A, 'enqueue_transcription', fake_enqueue)
+
+    client = _fresh_client()
+    client.post('/pending-transcription', data={
+        'audio_url': 'https://cdn.example.com/kept.mp3',
+        'episode_title': 'Kept Episode',
+        'duration_min': '12',
+    })
+    resp = client.post(
+        '/register?next=/resume-transcription',
+        data={'email': email, 'password': 'abcdefgh1', 'password2': 'abcdefgh1'},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (302, 303)
+    with client.session_transaction() as sess:
+        flashes = sess.get('_flashes') or []
+        assert any('starting your transcript' in msg for _cat, msg in flashes)
+        assert A.PENDING_TRANSCRIPTION_KEY in sess
+
+    resume = client.get('/resume-transcription', follow_redirects=False)
+    assert resume.status_code in (302, 303)
+    assert '/transcription/task-from-resume' in resume.headers['Location']
+    assert started.get('meta', {}).get('audio_url') == 'https://cdn.example.com/kept.mp3'
+    assert started.get('meta', {}).get('title') == 'Kept Episode'
+    with client.session_transaction() as sess:
+        assert A.PENDING_TRANSCRIPTION_KEY not in sess
+    _purge([email])
+
+
+def test_login_with_pending_episode_resumes(monkeypatch, trial_on):
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+    uid = _make_user('login-resume@test.com')
+    started = {}
+
+    def fake_enqueue(user, meta, rss_url=None, language='', source='web'):
+        started['title'] = meta.get('title')
+        return {'task_id': 'login-resume-task'}, 200
+
+    monkeypatch.setattr(A, 'enqueue_transcription', fake_enqueue)
+
+    from models import User
+    with A.app.app_context():
+        email = A.db.session.get(User, uid).email
+
+    client = A.app.test_client()
+    client.post('/pending-transcription', data={
+        'audio_url': 'https://cdn.example.com/login.mp3',
+        'episode_title': 'After Login',
+        'duration_min': '8',
+    })
+    resp = client.post(
+        '/login?next=/resume-transcription',
+        data={'email': email, 'password': 'password123'},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (302, 303)
+    assert 'resume-transcription' in resp.headers['Location']
+    resume = client.get('/resume-transcription', follow_redirects=False)
+    assert '/transcription/login-resume-task' in resume.headers['Location']
+    assert started.get('title') == 'After Login'
+
+
+def test_homepage_copy_leads_with_spotify(trial_on):
+    body = A.app.test_client().get('/').data.decode()
+    assert 'Spotify & podcast transcripts' in body
+    assert 'even on Spotify' in body
+    assert 'Paste a Spotify link or search a podcast' in body
+    assert 'badge-needs-key' in body
+    assert 'Your first' in body and 'minutes run on our key' in body
+    assert 'Download .txt or .srt transcript' not in body
+    assert f'${A.openai_whisper_cost_usd(90):.2f}' in body
+    assert f'${A.openai_whisper_cost_usd(60):.2f}' in body
+
+
+def test_register_helper_text_mentions_free_minutes(trial_on):
+    body = A.app.test_client().get('/register').data.decode()
+    assert f'{A.TRIAL_DEFAULT_SECONDS // 60} free minutes' in body
+    assert 'no OpenAI key needed' in body
+
+
+def test_settings_renames_developer_api_key_card(trial_on):
+    uid = _make_user('devcard@test.com')
+    body = _login(uid).get('/settings').data.decode()
+    assert 'Podskrift API key (developers only)' in body
+    assert 'id="openai"' in body
+    assert 'transcribe on the website' in body
+
+
+def test_verify_openai_key_copy(monkeypatch):
+    ok, msg, status = A.verify_openai_key('psk_looks_like_ours_but_isnt')
+    assert ok is False and status == 'invalid_key'
+    assert 'psk_' in msg
+    assert 'sk-' in msg
+
+    class Client:
+        def __init__(self, *a, **kw):
+            self.models = self
+
+        def list(self):
+            return []
+
+    monkeypatch.setattr(A, 'OpenAI', Client)
+    ok, msg, status = A.verify_openai_key('sk-' + 'v' * 40)
+    assert ok and status == 'verified'
+    assert 'Key saved and accepted by OpenAI' in msg
+    assert 'billing' in msg.lower()
+
+
+def test_own_key_user_gets_null_trial_badge(trial_on):
+    uid = _make_user('badge-own@test.com', key='sk-' + 'o' * 40)
+    body = _login(uid).get('/').data.decode()
+    assert 'var TRIAL_REMAINING_MIN = null;' in body
+
+
+def test_anon_homepage_exposes_new_account_trial_badge(trial_on):
+    body = A.app.test_client().get('/').data.decode()
+    assert f'var TRIAL_REMAINING_MIN = {A.TRIAL_DEFAULT_SECONDS // 60};' in body
