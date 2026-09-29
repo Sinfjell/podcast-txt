@@ -54,8 +54,13 @@
             <div class="episode-title">{{ episode.title }}</div>
             <div class="episode-meta">
                 {{ episode.published }}
-                {% if episode.duration_min %} · {{ episode.duration_min }} min{% endif %}
-                {% if episode.estimated_cost %} · ~${{ "%.3f"|format(episode.estimated_cost) }}{% endif %}
+                {% if episode.duration_min %}
+                  {% if show_openai_cost %}
+                  · {{ episode.duration_min }} min{% if episode.estimated_cost %} · ~${{ "%.3f"|format(episode.estimated_cost) }}{% endif %}
+                  {% else %}
+                  · Uses ~{{ episode.duration_min|round|int }} min
+                  {% endif %}
+                {% endif %}
                 {% if episode.needs_own_key %}
                 · <span class="badge badge-needs-key">{% if stripe_buy_enabled %}Needs key or pack{% else %}Needs own key{% endif %} · {{ episode.duration_min|round|int }} min</span>
                 {% endif %}
@@ -73,11 +78,14 @@
             <p style="font-weight: 600; font-size: 14px;">Out of free minutes</p>
             <p class="form-hint">
                 {% if stripe_buy_enabled %}
-                <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline-block; margin: 8px 6px;">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <input type="hidden" name="source" value="episode_selection">
-                    <button type="submit" class="btn btn-sm btn-primary">{{ credit_pack_label }}</button>
-                </form>
+                {# Buy submits via form= — must not nest a <form> inside episodeForm
+                   or browsers drop the inner form and close episodeForm early,
+                   leaving #transcribeBtn outside any form. #}
+                <button type="submit" class="btn btn-sm btn-primary"
+                        form="buyFormEpisodeSelection"
+                        style="display: inline-block; margin: 8px 6px;">
+                    {{ credit_pack_label }}
+                </button>
                 <span class="form-hint" style="display: block; margin: 4px 0 8px;">{{ credit_pack_subline }}</span>
                 or
                 {% endif %}
@@ -104,6 +112,13 @@
     </div>
     {% endif %}
 </form>
+
+{% if needs_api_key and stripe_buy_enabled %}
+<form id="buyFormEpisodeSelection" method="POST" action="{{ url_for('billing_checkout') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="source" value="episode_selection">
+</form>
+{% endif %}
 
 <!-- Save Feed Dialog -->
 {% if current_user.is_authenticated %}
@@ -155,6 +170,7 @@ document.addEventListener('DOMContentLoaded', function() {
     var BUY_URL = {{ url_for('billing_checkout')|tojson }};
     var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
     var BADGE_PREFIX = STRIPE_BUY ? 'Needs key or pack' : 'Needs own key';
+    var SHOW_OPENAI_COST = {{ (show_openai_cost|default(false))|tojson }};
     var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
     var startError = document.getElementById('startError');
 
@@ -269,8 +285,14 @@ document.addEventListener('DOMContentLoaded', function() {
         var meta = document.createElement('div');
         meta.className = 'episode-meta';
         var metaText = ep.published;
-        if (ep.duration_min) metaText += ' \u00B7 ' + ep.duration_min + ' min';
-        if (ep.estimated_cost) metaText += ' \u00B7 ~$' + ep.estimated_cost.toFixed(3);
+        if (ep.duration_min) {
+            if (SHOW_OPENAI_COST) {
+                metaText += ' \u00B7 ' + ep.duration_min + ' min';
+                if (ep.estimated_cost) metaText += ' \u00B7 ~$' + ep.estimated_cost.toFixed(3);
+            } else {
+                metaText += ' \u00B7 Uses ~' + Math.round(ep.duration_min) + ' min';
+            }
+        }
         meta.textContent = metaText;
         if (ep.needs_own_key || episodeNeedsOwnKey(ep.duration_min)) {
             meta.appendChild(document.createTextNode(' \u00B7 '));

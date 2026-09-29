@@ -6850,3 +6850,141 @@ def test_episode_selection_uses_inline_error_not_confirm(stripe_on):
     assert 'setStartError' in src
     assert 'startError' in src
     assert 'Add OpenAI key' in src
+
+
+def test_episode_selection_buy_form_not_nested_in_episode_form(stripe_on):
+    """Buy must not nest inside #episodeForm — browsers drop the inner form and
+    close episodeForm early, leaving #transcribeBtn outside any form."""
+    from bs4 import BeautifulSoup
+    from flask import render_template
+
+    episodes = [{
+        'index': 0,
+        'title': 'Ep One',
+        'published': '2024-01-01',
+        'duration_min': 30,
+        'estimated_cost': 0.01,
+        'description': '',
+        'needs_own_key': False,
+    }]
+    with A.app.test_request_context('/'):
+        html = render_template(
+            'episode_selection.html',
+            episodes=episodes,
+            all_episodes=episodes,
+            rss_url='https://example.com/feed.xml',
+            feed_name='Test Feed',
+            has_more=False,
+            needs_api_key=True,
+            show_openai_cost=False,
+            podcast_name='Test Feed',
+            artwork='',
+            languages=[('en', 'English')],
+        )
+    soup = BeautifulSoup(html, 'html5lib')
+    episode_form = soup.find('form', id='episodeForm')
+    assert episode_form is not None
+    # Nested <form> inside <form> is invalid HTML; after a real parse the Buy
+    # form must be a sibling of episodeForm, not a descendant.
+    nested = episode_form.find_all('form')
+    assert nested == [], f'nested form(s) inside #episodeForm: {nested}'
+    buy_form = soup.find('form', id='buyFormEpisodeSelection')
+    assert buy_form is not None
+    assert buy_form.find_parent('form') is None
+    assert buy_form.get('action', '').endswith('/billing/checkout')
+    assert buy_form.find('input', {'name': 'source', 'value': 'episode_selection'})
+    # HTML5 form= associates the Buy button with buyForm without nesting.
+    buy_btn = soup.find('button', attrs={'form': 'buyFormEpisodeSelection'})
+    assert buy_btn is not None
+    assert buy_btn.get('type') == 'submit'
+    # Start Transcription must remain a submit control of episodeForm.
+    transcribe = soup.find(id='transcribeBtn')
+    assert transcribe is not None
+    assert transcribe.find_parent('form', id='episodeForm') is not None
+    assert transcribe.get('type') == 'submit'
+
+
+def _render_episode_selection_via_parse_rss(monkeypatch, client, *, duration_min=30.0):
+    """POST /parse_rss with a stubbed feed and return the rendered HTML."""
+    episodes = [{
+        'index': 0,
+        'title': 'Ep One',
+        'published': '2024-01-01',
+        'audio_url': 'https://example.com/ep.mp3',
+        'description': '',
+        'duration_min': duration_min,
+        'estimated_cost': round(duration_min * A.WHISPER_COST_PER_MINUTE, 3),
+        'artwork': '',
+        'podcast_name': 'Test Feed',
+    }]
+    monkeypatch.setattr(
+        A, 'get_episodes_from_rss',
+        lambda url: (episodes, None))
+    return client.post('/parse_rss', data={
+        'rss_url': 'https://example.com/feed.xml',
+    }, follow_redirects=True)
+
+
+def _episode_card_meta(html):
+    """Episode-card meta text from the server-rendered grid (not the JS source)."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, 'html5lib')
+    meta = soup.select_one('.episode-card .episode-meta')
+    assert meta is not None
+    return meta.get_text(' ', strip=True)
+
+
+def test_episode_selection_logged_out_hides_paywall_and_dollar_cost(
+        stripe_on, monkeypatch):
+    """Anon visitors keep the signup path — no 'Out of free minutes' card."""
+    client = A.app.test_client()
+    resp = _render_episode_selection_via_parse_rss(monkeypatch, client)
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'Out of free minutes' not in body
+    assert 'buyFormEpisodeSelection' not in body
+    meta = _episode_card_meta(body)
+    assert 'Uses ~30 min' in meta
+    assert '$' not in meta
+    assert 'Start Transcription' in body
+
+
+def test_episode_selection_trial_with_minutes_hides_paywall(
+        stripe_on, monkeypatch):
+    uid = _make_user('trial-ok@test.com', limit=600, used=0)
+    client = _login(uid)
+    resp = _render_episode_selection_via_parse_rss(monkeypatch, client)
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'Out of free minutes' not in body
+    meta = _episode_card_meta(body)
+    assert 'Uses ~30 min' in meta
+    assert '$' not in meta
+
+
+def test_episode_selection_trial_exhausted_shows_paywall(
+        stripe_on, monkeypatch):
+    uid = _make_user('trial-done@test.com', limit=600, used=600)
+    client = _login(uid)
+    resp = _render_episode_selection_via_parse_rss(monkeypatch, client)
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'Out of free minutes' in body
+    assert 'buyFormEpisodeSelection' in body
+    meta = _episode_card_meta(body)
+    assert 'Uses ~30 min' in meta
+    assert '$' not in meta
+
+
+def test_episode_selection_own_key_shows_dollar_cost_not_paywall(
+        stripe_on, monkeypatch):
+    uid = _make_user('byok@test.com', key='sk-' + 'u' * 40, limit=600, used=600)
+    client = _login(uid)
+    resp = _render_episode_selection_via_parse_rss(monkeypatch, client)
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'Out of free minutes' not in body
+    meta = _episode_card_meta(body)
+    assert 'Uses ~' not in meta
+    assert '~$' in meta
+    assert '30.0 min' in meta or '30 min' in meta
