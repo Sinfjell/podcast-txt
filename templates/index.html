@@ -62,9 +62,9 @@
         <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="source" value="home_banner">
-            <button type="submit" class="btn btn-sm btn-ghost" style="margin: 0 4px;">{{ trial.buy_label }}</button>
+            <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
         </form>
-        <span class="form-hint" style="display: inline; margin: 0 4px 0 0;">{{ credit_pack_subline }}</span>
+        <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
         or
         {% endif %}
         <a href="{{ url_for('settings') }}#openai">add your own key</a>
