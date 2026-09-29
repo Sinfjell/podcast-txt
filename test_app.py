@@ -2103,27 +2103,23 @@ def test_column_migrations_survive_two_workers_racing():
         # Everything is already applied, so a second pass adds nothing.
         assert A.apply_column_migrations() == []
 
-        # Now force the race: the column is gone from the inspector's view but
+        # Now force the race: the column is gone from the schema read but
         # present in the table, which is exactly what the loser sees.
         table = 'transcription_tasks'
         column = next(iter(A.TASK_COLUMN_MIGRATIONS))
-        real_inspect = A.sa_inspect
+        real_live_columns = A._live_columns
 
-        class BlindInspector:
-            def __init__(self, inner):
-                self._inner = inner
+        def blind_live_columns(name):
+            cols = real_live_columns(name)
+            if name == table:
+                return cols - {column}
+            return cols
 
-            def get_columns(self, name):
-                cols = self._inner.get_columns(name)
-                if name == table:
-                    return [c for c in cols if c['name'] != column]
-                return cols
-
-        A.sa_inspect = lambda engine: BlindInspector(real_inspect(engine))
+        A._live_columns = blind_live_columns
         try:
             assert A.apply_column_migrations() == [], 'the losing ALTER was not tolerated'
         finally:
-            A.sa_inspect = real_inspect
+            A._live_columns = real_live_columns
 
         # A genuinely broken migration still raises rather than being swallowed.
         A.TASK_COLUMN_MIGRATIONS['not_a_real_column'] = 'NOT VALID SQL HERE'
@@ -6572,6 +6568,57 @@ def test_ensure_credit_purchases_table_upgrades_legacy_table(trial_on):
             A.db.engine.dispose()
             A.db.create_all()
             A.ensure_credit_purchases_table()
+
+
+def test_ensure_credit_purchases_table_upgrades_with_stale_pooled_connections(trial_on):
+    """Same legacy upgrade, but WITHOUT disposing the pool first: other
+    pooled connections may still hold the old (full) schema. The column check
+    must read the schema on the connection that runs the ALTERs, so no
+    column is skipped (PODSKRIFT-6 follow-up)."""
+    with A.app.app_context():
+        # Warm other pooled connections with the current full schema, the way
+        # earlier requests/tests leave them in a long-lived process.
+        conns = [A.db.engine.connect() for _ in range(3)]
+        for c in conns:
+            c.execute(A.text('SELECT stripe_payment_intent_id FROM credit_purchases LIMIT 1'))
+            c.commit()
+        for c in conns:
+            c.close()
+        A.db.session.execute(A.text('DROP TABLE IF EXISTS credit_purchases'))
+        A.db.session.execute(A.text("""
+            CREATE TABLE credit_purchases (
+                id INTEGER NOT NULL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                stripe_session_id VARCHAR(255) NOT NULL UNIQUE,
+                stripe_event_id VARCHAR(255),
+                amount_cents INTEGER NOT NULL,
+                currency VARCHAR(16) NOT NULL,
+                minutes INTEGER NOT NULL,
+                created_at DATETIME
+            )
+        """))
+        A.db.session.commit()
+        try:
+            A.ensure_credit_purchases_table()
+            cols = A._live_columns('credit_purchases')
+            for col in A.CREDIT_PURCHASE_COLUMN_MIGRATIONS:
+                assert col in cols
+            idx = {r[0] for r in A.db.session.execute(A.text(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND tbl_name='credit_purchases'")).fetchall()}
+            assert 'ix_credit_purchases_stripe_payment_intent_id' in idx
+        finally:
+            A.db.session.execute(A.text('DROP TABLE IF EXISTS credit_purchases'))
+            A.db.session.commit()
+            A.db.session.remove()
+            A.db.engine.dispose()
+            A.db.create_all()
+            A.ensure_credit_purchases_table()
+
+
+def test_live_columns_is_empty_for_missing_table():
+    with A.app.app_context():
+        assert A._live_columns('no_such_table_here') == set()
 
 
 # --------------------------------------------------------------------------
