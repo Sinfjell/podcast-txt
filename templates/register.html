@@ -6,7 +6,8 @@
     <h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">Create account</h2>
     <div class="card">
         <div class="card-body">
-            <form method="POST">
+            <form method="POST" action="{{ url_for('register', next=next) if next else url_for('register') }}">
+                {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
                 <div class="form-group">
                     <label class="form-label" for="email">Email</label>
                     <input type="email" class="form-input ph-no-capture" id="email" name="email"
@@ -26,13 +27,17 @@
                 <button type="submit" class="btn btn-primary w-full" style="justify-content: center;">Create account</button>
             </form>
             <p class="form-hint" style="margin-top: 14px; margin-bottom: 0;">
-                Free account — no Podskrift subscription. Optional: add your own OpenAI
-                API key later and you only pay OpenAI for Whisper.
+                {% if trial_minutes %}
+                Create a free account to start your transcript. Includes {{ trial_minutes }} free minutes of audio{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} — no card, no OpenAI key needed.
+                {% else %}
+                Create a free account to start your transcript. Add your own OpenAI API key in Settings — you only pay OpenAI for Whisper.
+                {% endif %}
             </p>
         </div>
     </div>
     <p class="text-center text-muted mt-2 text-sm">
-        Already have an account? <a href="{{ url_for('login') }}">Log in</a>
+        Already have an account?
+        <a href="{{ url_for('login', next=next) if next else url_for('login') }}">Log in</a>
     </p>
 </div>
 {% endblock %}

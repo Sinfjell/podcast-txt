@@ -1,21 +1,25 @@
 {% extends "base.html" %}
 
-{% block title %}Podskrift — Podcast to Text{% endblock %}
+{% block title %}Spotify & podcast transcripts — Podskrift{% endblock %}
+{% block meta_description %}Paste a Spotify episode link or search any podcast, and get the full transcript as text and .srt. {{ language_count }} languages, powered by OpenAI Whisper.{% if trial_minutes %} First {{ trial_minutes }} minutes free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.{% endif %}{% endblock %}
+{% block og_title %}Spotify & podcast transcripts — Podskrift{% endblock %}
+{% block og_description %}Paste a Spotify link or search any podcast — get the full transcript.{% if trial_minutes %} First {{ trial_minutes }} minutes free.{% endif %}{% endblock %}
 
 {% block content %}
 <!-- Hero -->
 <div style="margin-bottom: 32px;">
     <h1 style="font-size: clamp(28px, 5vw, 40px); font-weight: 700; letter-spacing: -0.04em; line-height: 1.15;">
-        Transcribe any podcast<br>
-        <span style="color: var(--accent-bright);">in minutes</span>
+        Get the transcript of any podcast episode
+        <span style="color: var(--accent-bright);">— even on Spotify</span>
     </h1>
     <p style="color: var(--muted); font-size: 16px; margin-top: 10px; max-width: 520px; line-height: 1.6;">
-        Search for a podcast, pick an episode, get the full transcript.
-        {{ language_count }} languages, powered by OpenAI Whisper.{% if trial_minutes %}
-        First {{ trial_minutes }} minutes free on our key.
-        Or add your own OpenAI API key — Podskrift stays free; you only pay OpenAI for Whisper.{% else %}
-        Add your own OpenAI API key — Podskrift stays free; you only pay OpenAI for Whisper.{% endif %}
+        Paste a Spotify episode link, or search by podcast name. You get the full text and an .srt file in a few minutes.
     </p>
+    {% if trial_minutes %}
+    <p style="color: var(--muted); font-size: 14px; margin-top: 6px; max-width: 520px; line-height: 1.5; opacity: 0.85;">
+        First {{ trial_minutes }} minutes of audio free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} — no card, no OpenAI key needed to start.
+    </p>
+    {% endif %}
 </div>
 
 {% if trial and not trial.on_own_key %}
@@ -26,11 +30,11 @@
     <span>
         {% if trial.exhausted %}
         Your free trial is used up.
-        <a href="{{ url_for('settings') }}">Add your own OpenAI API key</a>
+        <a href="{{ url_for('settings') }}#openai">Add your own OpenAI API key</a>
         — the app is free; OpenAI bills you.
         {% else %}
         Free trial: <strong>{{ trial.remaining_minutes }} minutes</strong> left on our key.
-        Or <a href="{{ url_for('settings') }}">add your own key</a>
+        Or <a href="{{ url_for('settings') }}#openai">add your own key</a>
         — Podskrift stays free; OpenAI bills you for Whisper.
         {% endif %}
     </span>
@@ -58,7 +62,7 @@
 <!-- Search -->
 <div class="card">
     <div class="card-header">
-        <h3>Find a podcast or episode</h3>
+        <h3>Paste a Spotify link or search a podcast</h3>
     </div>
     <div class="card-body">
         <div class="tabs" id="searchTabs">
@@ -67,11 +71,11 @@
         </div>
         <div class="input-group">
             <input type="text" class="form-input form-input-lg" id="podcastSearch"
-                   placeholder="Search podcasts by name, or paste a Spotify link..." autocomplete="off">
+                   placeholder="https://open.spotify.com/episode/…  or  podcast name" autocomplete="off">
             <button class="btn btn-primary" type="button" id="searchBtn">Search</button>
         </div>
         <p class="form-hint" id="searchHint">
-            Search by name, or paste a Spotify episode or show link (public feeds only).
+            Works with open.spotify.com/episode/… links and any public podcast. Spotify-exclusive shows can't be transcribed.
         </p>
         <div id="episodeLangRow" class="hidden" style="margin-top: 12px;">
             <label class="form-label" for="searchLanguage">Spoken language</label>
@@ -82,6 +86,13 @@
             </select>
         </div>
         <div id="searchResults"></div>
+        {% if trial_minutes %}
+        <p class="form-hint" style="margin-top: 12px;">
+            The free trial covers {{ trial_minutes }} minutes of audio in total{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.
+            For longer episodes, or once the trial is used up, add your own OpenAI API key:
+            a 90-minute episode costs about ${{ openai_90min_cost }} at OpenAI's rate.
+        </p>
+        {% endif %}
     </div>
 </div>
 
@@ -105,14 +116,13 @@
 <div class="card" style="margin-top: 16px;">
     <div class="card-body text-center" style="padding: 32px 20px;">
         <p class="text-muted mb-1">
-            Free account — no Podskrift subscription.
             {% if trial_minutes %}
-            First {{ trial_minutes }} minutes on our key, or add your own OpenAI API key
-            and you only pay OpenAI for Whisper.
+            Free account, {{ trial_minutes }} free minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}. After that, add your own OpenAI key
+            and pay OpenAI directly — about ${{ openai_hourly_cost }} per hour of audio. No subscription.
             {% else %}
-            Add your own OpenAI API key and you only pay OpenAI for Whisper.
+            Free account — no Podskrift subscription. Add your own OpenAI API key
+            and you only pay OpenAI for Whisper.
             {% endif %}
-            Save feeds and keep transcription history.
         </p>
         <div class="flex-center" style="gap: 12px; justify-content: center; margin-top: 12px;">
             <a href="{{ url_for('register') }}" class="btn btn-accent">Create free account</a>
@@ -126,16 +136,20 @@
     <p class="section-label">How it works</p>
     <div class="grid grid-2" style="gap: 8px;">
         <div style="font-size: 13.5px; color: var(--muted); padding: 8px 0;">
-            <span style="color: var(--accent-bright); font-weight: 600;">1.</span> Search by podcast name — or jump straight to an episode
+            <span style="color: var(--accent-bright); font-weight: 600;">1.</span>
+            Paste a Spotify episode link — or search by podcast name.
         </div>
         <div style="font-size: 13.5px; color: var(--muted); padding: 8px 0;">
-            <span style="color: var(--accent-bright); font-weight: 600;">2.</span> Select the episode to transcribe
+            <span style="color: var(--accent-bright); font-weight: 600;">2.</span>
+            {% if trial_minutes %}
+            Create a free account and press Transcribe. Your first {{ trial_minutes }} minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} run on our key.
+            {% else %}
+            Create a free account, add your OpenAI key, and press Transcribe.
+            {% endif %}
         </div>
         <div style="font-size: 13.5px; color: var(--muted); padding: 8px 0;">
-            <span style="color: var(--accent-bright); font-weight: 600;">3.</span> Watch it run — it keeps going if you close the page
-        </div>
-        <div style="font-size: 13.5px; color: var(--muted); padding: 8px 0;">
-            <span style="color: var(--accent-bright); font-weight: 600;">4.</span> Download .txt or .srt transcript
+            <span style="color: var(--accent-bright); font-weight: 600;">3.</span>
+            Read, copy or download the transcript (.txt or .srt). It keeps running if you close the page.
         </div>
     </div>
 </div>
@@ -182,8 +196,18 @@
 
     var PARSE_RSS_URL = '{{ url_for("parse_rss") }}';
     var START_URL = '{{ url_for("start_transcription") }}';
+    var PENDING_URL = '{{ url_for("pending_transcription") }}';
     var IS_AUTHENTICATED = {{ 'true' if current_user.is_authenticated else 'false' }};
-    var LOGIN_URL = '{{ url_for("login") }}';
+    var TRIAL_REMAINING_MIN = {{ trial_badge_remaining_min|tojson }};
+    var TRIAL_MAX_EPISODE_MIN = {{ trial_max_episode_min|tojson }};
+
+    function episodeNeedsOwnKey(durationMin) {
+        if (TRIAL_REMAINING_MIN === null || durationMin == null) return false;
+        var estimateSec = Math.max(60, Math.floor(Number(durationMin) * 60));
+        if (!(estimateSec > 0)) return false;
+        if (TRIAL_MAX_EPISODE_MIN && estimateSec > TRIAL_MAX_EPISODE_MIN * 60) return true;
+        return estimateSec > TRIAL_REMAINING_MIN * 60;
+    }
 
     function clearResults() {
         while (resultsDiv.firstChild) resultsDiv.removeChild(resultsDiv.firstChild);
@@ -194,6 +218,24 @@
         resultsDiv.textContent = text;
         resultsDiv.style.color = color || 'var(--muted)';
         resultsDiv.style.padding = '12px 0';
+    }
+
+    function setError(text, actionUrl, actionLabel) {
+        clearResults();
+        resultsDiv.style.color = 'var(--error)';
+        resultsDiv.style.padding = '12px 0';
+        var wrap = document.createElement('div');
+        wrap.style.lineHeight = '1.6';
+        wrap.textContent = text;
+        resultsDiv.appendChild(wrap);
+        if (actionUrl) {
+            var link = document.createElement('a');
+            link.href = actionUrl;
+            link.textContent = actionLabel || 'Add OpenAI key →';
+            link.style.display = 'inline-block';
+            link.style.marginTop = '8px';
+            resultsDiv.appendChild(link);
+        }
     }
 
     function postForm(action, fields) {
@@ -245,10 +287,24 @@
         info.appendChild(sub);
         row.appendChild(info);
 
+        var badges = document.createElement('div');
+        badges.style.display = 'flex';
+        badges.style.flexDirection = 'column';
+        badges.style.alignItems = 'flex-end';
+        badges.style.gap = '4px';
+
+        if (item.type === 'episode' && episodeNeedsOwnKey(item.duration_min)) {
+            var warn = document.createElement('span');
+            warn.className = 'badge badge-needs-key';
+            warn.textContent = 'Needs own key \u00B7 ' + Math.round(item.duration_min) + ' min';
+            badges.appendChild(warn);
+        }
+
         var badge = document.createElement('span');
         badge.className = 'badge';
         badge.textContent = item.type === 'episode' ? 'Transcribe' : 'Episodes';
-        row.appendChild(badge);
+        badges.appendChild(badge);
+        row.appendChild(badges);
 
         row.addEventListener('click', function() {
             if (item.type !== 'episode') {
@@ -257,28 +313,39 @@
             }
             // Episode hits carry the audio URL already -- no need to find the
             // episode a second time inside its feed.
+            var fields = {
+                audio_url: item.audio_url,
+                episode_title: item.name,
+                podcast_name: item.artist || '',
+                artwork: item.artwork || '',
+                published: item.released || '',
+                language: langSelect.value
+            };
+            if (item.duration_min) fields.duration_min = item.duration_min;
+
             if (!IS_AUTHENTICATED) {
-                window.location.href = LOGIN_URL;
+                // Stash the episode, then /register?next=/resume-transcription.
+                postForm(PENDING_URL, fields);
                 return;
             }
             badge.textContent = 'Starting…';
             var body = new FormData();
-            body.append('audio_url', item.audio_url);
-            body.append('episode_title', item.name);
-            body.append('podcast_name', item.artist || '');
-            body.append('artwork', item.artwork || '');
-            body.append('published', item.released || '');
-            if (item.duration_min) body.append('duration_min', item.duration_min);
-            body.append('language', langSelect.value);
+            Object.keys(fields).forEach(function(k) { body.append(k, fields[k]); });
 
             fetch(START_URL, { method: 'POST', body: body })
-                .then(function(r) { return r.json(); })
-                .then(function(data) {
-                    if (data.task_id) {
-                        window.location.href = '/transcription/' + data.task_id;
+                .then(function(r) { return r.json().then(function(data) {
+                    return { status: r.status, data: data };
+                }); })
+                .then(function(res) {
+                    if (res.data.task_id) {
+                        window.location.href = '/transcription/' + res.data.task_id;
                     } else {
                         badge.textContent = 'Transcribe';
-                        setMessage(data.error || 'Could not start transcription.', 'var(--error)');
+                        setError(
+                            res.data.error || 'Could not start transcription.',
+                            res.data.action_url,
+                            res.data.action_label
+                        );
                     }
                 })
                 .catch(function() {
@@ -388,10 +455,10 @@
         langRow.classList.toggle('hidden', searchType !== 'episode');
         searchInput.placeholder = searchType === 'episode'
             ? 'Search episodes by title or topic...'
-            : 'Search podcasts by name, or paste a Spotify link...';
+            : 'https://open.spotify.com/episode/\u2026  or  podcast name';
         hint.textContent = searchType === 'episode'
             ? 'Finds individual episodes and starts transcribing the one you pick.'
-            : 'Search by name, or paste a Spotify episode or show link (public feeds only).';
+            : 'Works with open.spotify.com/episode/\u2026 links and any public podcast. Spotify-exclusive shows can\'t be transcribed.';
         if (searchInput.value.trim().length >= 2) doSearch();
     });
 

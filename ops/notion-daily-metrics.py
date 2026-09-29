@@ -45,7 +45,7 @@ DEFAULT_APP_DIR = '/var/www/vhosts/podskrift.nettsmed.dev/app'
 DEFAULT_DATABASE_ID = '0d846d9fc2a4441ba5d542eb4e7609da'
 NOTION_VERSION = '2022-06-28'
 # Matches app.py TRIAL_MINUTES default when users.trial_seconds_limit is NULL.
-DEFAULT_TRIAL_MINUTES = 60
+DEFAULT_TRIAL_MINUTES = 180
 
 
 def _script_dir() -> Path:

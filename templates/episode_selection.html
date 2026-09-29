@@ -48,13 +48,17 @@
     <p class="text-muted text-sm mb-1 hidden" id="filterCount"></p>
     <div class="grid grid-2">
         {% for episode in episodes %}
-        <div class="episode-card" data-episode-index="{{ episode.index }}" data-listener-attached="true">
+        <div class="episode-card" data-episode-index="{{ episode.index }}" data-listener-attached="true"
+             {% if episode.duration_min is not none %}data-duration-min="{{ episode.duration_min }}"{% endif %}>
             <input type="radio" name="episode" value="{{ episode.index }}" id="ep_{{ episode.index }}" style="display: none;">
             <div class="episode-title">{{ episode.title }}</div>
             <div class="episode-meta">
                 {{ episode.published }}
                 {% if episode.duration_min %} · {{ episode.duration_min }} min{% endif %}
                 {% if episode.estimated_cost %} · ~${{ "%.3f"|format(episode.estimated_cost) }}{% endif %}
+                {% if episode.needs_own_key %}
+                · <span class="badge badge-needs-key">Needs own key · {{ episode.duration_min|round|int }} min</span>
+                {% endif %}
             </div>
             {% if episode.description %}
             <div class="episode-desc">{{ episode.description }}</div>
@@ -130,6 +134,18 @@ document.addEventListener('DOMContentLoaded', function() {
 
     var ALL_EPISODES = {{ all_episodes|tojson }};
     var renderedCount = {{ episodes|length }};
+    var IS_AUTHENTICATED = {{ 'true' if current_user.is_authenticated else 'false' }};
+    var PENDING_URL = '{{ url_for("pending_transcription") }}';
+    var TRIAL_REMAINING_MIN = {{ trial_badge_remaining_min|tojson }};
+    var TRIAL_MAX_EPISODE_MIN = {{ trial_max_episode_min|tojson }};
+
+    function episodeNeedsOwnKey(durationMin) {
+        if (TRIAL_REMAINING_MIN === null || durationMin == null) return false;
+        var estimateSec = Math.max(60, Math.floor(Number(durationMin) * 60));
+        if (!(estimateSec > 0)) return false;
+        if (TRIAL_MAX_EPISODE_MIN && estimateSec > TRIAL_MAX_EPISODE_MIN * 60) return true;
+        return estimateSec > TRIAL_REMAINING_MIN * 60;
+    }
 
     // Remember the language across pages so episode search on the home page
     // starts transcribing with the same choice.
@@ -159,6 +175,7 @@ document.addEventListener('DOMContentLoaded', function() {
         var card = document.createElement('div');
         card.className = 'episode-card';
         card.dataset.episodeIndex = ep.index;
+        if (ep.duration_min != null) card.dataset.durationMin = ep.duration_min;
 
         var radio = document.createElement('input');
         radio.type = 'radio'; radio.name = 'episode'; radio.value = ep.index;
@@ -176,6 +193,13 @@ document.addEventListener('DOMContentLoaded', function() {
         if (ep.duration_min) metaText += ' \u00B7 ' + ep.duration_min + ' min';
         if (ep.estimated_cost) metaText += ' \u00B7 ~$' + ep.estimated_cost.toFixed(3);
         meta.textContent = metaText;
+        if (ep.needs_own_key || episodeNeedsOwnKey(ep.duration_min)) {
+            meta.appendChild(document.createTextNode(' \u00B7 '));
+            var warn = document.createElement('span');
+            warn.className = 'badge badge-needs-key';
+            warn.textContent = 'Needs own key \u00B7 ' + Math.round(ep.duration_min) + ' min';
+            meta.appendChild(warn);
+        }
         card.appendChild(meta);
 
         if (ep.description) {
@@ -226,16 +250,31 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('episodeForm').addEventListener('submit', function(e) {
         e.preventDefault();
         if (!grid.querySelector('input[name="episode"]:checked')) return;
+
+        if (!IS_AUTHENTICATED) {
+            // Same stash-then-register path as homepage Transcribe.
+            this.action = PENDING_URL;
+            this.submit();
+            return;
+        }
+
         transcribeBtn.disabled = true;
         transcribeBtn.textContent = 'Starting...';
 
         fetch('/start_transcription', { method: 'POST', body: new FormData(this) })
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                if (data.task_id) {
-                    window.location.href = '/transcription/' + data.task_id;
+            .then(function(r) { return r.json().then(function(data) {
+                return { status: r.status, data: data };
+            }); })
+            .then(function(res) {
+                if (res.data.task_id) {
+                    window.location.href = '/transcription/' + res.data.task_id;
                 } else {
-                    alert(data.error || 'Error');
+                    var msg = res.data.error || 'Error';
+                    if (res.data.action_url) {
+                        msg += '\n\n' + (res.data.action_label || 'Add OpenAI key →')
+                            + ': ' + res.data.action_url;
+                    }
+                    alert(msg);
                     transcribeBtn.disabled = false;
                     transcribeBtn.textContent = 'Start Transcription';
                 }

@@ -12,7 +12,7 @@
                     <input type="email" class="form-input ph-no-capture" value="{{ current_user.email }}"
                            disabled style="opacity: 0.5;" autocomplete="email">
                 </div>
-                <div class="form-group">
+                <div class="form-group" id="openai">
                     <label class="form-label" for="openai_api_key">OpenAI API Key</label>
                     <input type="password" class="form-input ph-no-capture" id="openai_api_key" name="openai_api_key"
                            value=""
@@ -20,7 +20,7 @@
                            autocomplete="off" data-ph-no-capture>
                     <p class="form-hint">
                         With your own key, Podskrift stays free — OpenAI bills you for Whisper
-                        (about $0.36 per hour of audio).
+                        (about ${{ openai_hourly_cost }} per hour of audio).
                         <a href="https://platform.openai.com/api-keys" target="_blank">Get a key</a>.
                         {% if current_user.openai_api_key %}
                         <br>Key saved{% if openai_key_hint %} (ends in {{ openai_key_hint }}){% endif %}.
@@ -28,9 +28,14 @@
                         You're on your own key; nothing is metered against the trial.
                         {% else %}
                         <br><span style="color: var(--warning);">
-                            {% if trial %}No key saved — you're on the free trial below.
-                            Add your key anytime to keep going without a Podskrift charge.
+                            {% if trial %}Needed only after the free trial. Create a key at
+                            platform.openai.com/api-keys — it starts with "sk-". Your OpenAI
+                            account also needs credit: add a payment method or prepaid credit at
+                            platform.openai.com/account/billing first.
                             {% else %}No key saved — add one to start transcribing.
+                            Create a key at platform.openai.com/api-keys — it starts with "sk-".
+                            Your OpenAI account also needs credit at
+                            platform.openai.com/account/billing.
                             Podskrift doesn't charge; you pay OpenAI directly.{% endif %}
                         </span>
                         {% endif %}
@@ -57,7 +62,7 @@
             {% if trial.on_own_key %}
             <p style="color: var(--muted); font-size: 14px; line-height: 1.6;">
                 You're on your own OpenAI key, so Podskrift is free — OpenAI bills you
-                directly (about $0.36 per hour of audio). Nothing is counted against the trial.
+                directly (about ${{ openai_hourly_cost }} per hour of audio). Nothing is counted against the trial.
                 {{ trial.remaining_minutes }} of {{ trial.limit_minutes }} trial minutes are still
                 unused if you ever remove your key.
             </p>
@@ -73,7 +78,7 @@
             <p class="form-hint" style="margin-top: 10px;">
                 {% if trial.exhausted %}
                 Your trial is used up. Add your own OpenAI API key above —
-                the app is free; OpenAI bills you (about $0.36 per hour of audio).
+                the app is free; OpenAI bills you (about ${{ openai_hourly_cost }} per hour of audio).
                 {% else %}
                 Trial minutes run on our OpenAI key, and are counted on the audio we
                 actually transcribed. A job that fails part-way keeps only the minutes
@@ -89,13 +94,13 @@
 
     <div class="card" style="margin-top: 16px;">
         <div class="card-header">
-            <h5>API key</h5>
+            <h5>Podskrift API key (developers only)</h5>
             <a href="{{ url_for('api_docs') }}" class="btn btn-sm btn-ghost">Docs</a>
         </div>
         <div class="card-body">
             <p style="color: var(--muted); font-size: 14px; line-height: 1.6; margin-bottom: 12px;">
-                Use this key with scripts or agents to search episodes and fetch
-                transcripts from your account.
+                For scripts and agents calling the Podskrift API. You don't need this to
+                transcribe on the website — for that, use the OpenAI API key above.
                 <a href="{{ url_for('api_docs') }}">How to use</a>
             </p>
 
