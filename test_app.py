@@ -5819,13 +5819,14 @@ def stripe_on(monkeypatch, trial_on):
         def construct_event(payload, sig_header, secret):
             raise AssertionError('tests must monkeypatch construct_event')
 
+    _sve = SignatureVerificationError
+
     class FakeStripe:
         api_key = None
         api_version = '2026-08-26.dahlia'
         Webhook = FakeWebhook
-        SignatureVerificationError = SignatureVerificationError
-        StripeClient = lambda *a, **k: client  # noqa: E731
 
+    FakeStripe.SignatureVerificationError = _sve
     monkeypatch.setattr(A, 'stripe', FakeStripe)
     store['client'] = client
     store['FakeStripe'] = FakeStripe

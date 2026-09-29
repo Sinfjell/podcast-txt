@@ -5430,9 +5430,11 @@ def apply_column_migrations():
         ('credit_purchases', CREDIT_PURCHASE_COLUMN_MIGRATIONS),
     )
     for table, migrations in tables:
-        if table not in inspector.get_table_names():
+        try:
+            existing = {c['name'] for c in inspector.get_columns(table)}
+        except Exception:
+            # Table not created yet (or inspector stub without the table).
             continue
-        existing = {c['name'] for c in inspector.get_columns(table)}
         for column, ddl_type in migrations.items():
             if column in existing:
                 continue
@@ -5507,9 +5509,10 @@ def ensure_credit_purchases_table():
     # Additive column upgrades for tables created by the first Stripe ship.
     from sqlalchemy.exc import OperationalError
     inspector = sa_inspect(db.engine)
-    if 'credit_purchases' not in inspector.get_table_names():
+    try:
+        existing = {c['name'] for c in inspector.get_columns('credit_purchases')}
+    except Exception:
         return
-    existing = {c['name'] for c in inspector.get_columns('credit_purchases')}
     for column, ddl_type in CREDIT_PURCHASE_COLUMN_MIGRATIONS.items():
         if column in existing:
             continue
