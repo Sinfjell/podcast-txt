@@ -5767,35 +5767,125 @@ def _set_paid(user_id, seconds):
 
 @pytest.fixture
 def stripe_on(monkeypatch, trial_on):
-    """Enable Stripe checkout + webhook with a fake SDK surface."""
+    """Enable Stripe checkout + webhook with a fake StripeClient surface."""
     monkeypatch.setattr(A, 'STRIPE_SECRET_KEY', 'sk_test_fake')
     monkeypatch.setattr(A, 'STRIPE_WEBHOOK_SECRET', 'whsec_test_fake')
     monkeypatch.setattr(A, 'STRIPE_PRICE_ID', '')
+    monkeypatch.setattr(A, 'STRIPE_AUTOMATIC_TAX', False)
+    monkeypatch.setattr(A, 'CREDIT_PACK_TAX_BEHAVIOR', 'inclusive')
 
-    class FakeSession:
-        def __init__(self, url='https://checkout.stripe.test/session'):
-            self.url = url
-            self.id = 'cs_test_123'
+    store = {'sessions': {}, 'last_create_params': None, 'last_create_options': None}
 
-    class FakeCheckout:
-        class Session:
-            @staticmethod
-            def create(**kwargs):
-                FakeCheckout.Session.last_kwargs = kwargs
-                return FakeSession()
+    class FakeSessionObj:
+        def __init__(self, data):
+            self._data = data
+            self.url = data.get('url', 'https://checkout.stripe.test/session')
+            self.id = data['id']
+
+        def to_dict(self):
+            return dict(self._data)
+
+    class FakeSessionsAPI:
+        def create(self, params=None, options=None):
+            store['last_create_params'] = params
+            store['last_create_options'] = options
+            data = {
+                'id': 'cs_test_123',
+                'url': 'https://checkout.stripe.test/session',
+                'mode': 'payment',
+                'payment_status': 'unpaid',
+            }
+            return FakeSessionObj(data)
+
+        def retrieve(self, session_id, params=None, options=None):
+            if session_id not in store['sessions']:
+                raise Exception(f'unknown session {session_id}')
+            return FakeSessionObj(store['sessions'][session_id])
+
+    class FakeClient:
+        def __init__(self):
+            self.v1 = type('V1', (), {})()
+            self.v1.checkout = type('Checkout', (), {})()
+            self.v1.checkout.sessions = FakeSessionsAPI()
+
+    client = FakeClient()
+    monkeypatch.setattr(A, 'stripe_client', lambda: client)
+
+    class SignatureVerificationError(Exception):
+        pass
 
     class FakeWebhook:
         @staticmethod
         def construct_event(payload, sig_header, secret):
             raise AssertionError('tests must monkeypatch construct_event')
 
+    _sve = SignatureVerificationError
+
     class FakeStripe:
         api_key = None
-        checkout = FakeCheckout
+        api_version = '2026-08-26.dahlia'
         Webhook = FakeWebhook
 
+    FakeStripe.SignatureVerificationError = _sve
     monkeypatch.setattr(A, 'stripe', FakeStripe)
-    return FakeStripe
+    store['client'] = client
+    store['FakeStripe'] = FakeStripe
+    return store
+
+
+def _pack_session(uid, session_id='cs_test_1', **overrides):
+    """Build a retrieved Checkout Session dict that matches the credit pack."""
+    base = {
+        'id': session_id,
+        'object': 'checkout.session',
+        'mode': 'payment',
+        'payment_status': 'paid',
+        'currency': 'usd',
+        'amount_subtotal': 500,
+        'amount_total': 500,
+        'client_reference_id': str(uid),
+        'payment_intent': 'pi_' + session_id,
+        'metadata': {
+            'user_id': str(uid),
+            'minutes': '300',
+            'pack': A.CREDIT_PACK_SKU,
+        },
+        'total_details': {'amount_tax': 0, 'amount_discount': 0},
+        'customer_details': {'address': {'country': 'US'}},
+        'line_items': {
+            'data': [{
+                'quantity': 1,
+                'price': {
+                    'id': 'price_inline',
+                    'unit_amount': 500,
+                    'tax_behavior': 'inclusive',
+                },
+            }],
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def _ns_event(etype, obj_id, eid='evt_1', obj=None):
+    """Event-shaped namespace using attribute access (stripe-python >= 15)."""
+    from types import SimpleNamespace
+    if obj is None:
+        obj = SimpleNamespace(id=obj_id)
+    return SimpleNamespace(id=eid, type=etype, data=SimpleNamespace(object=obj))
+
+
+def _register_and_post(stripe_on, session_dict, etype='checkout.session.completed',
+                       eid=None):
+    """Put session in fake retrieve store and POST a webhook event for it."""
+    stripe_on['sessions'][session_dict['id']] = session_dict
+    eid = eid or ('evt_' + session_dict['id'])
+    event = _ns_event(etype, session_dict['id'], eid=eid)
+    A.stripe.Webhook.construct_event = staticmethod(
+        lambda payload, sig, secret: event)
+    return A.app.test_client().post(
+        '/stripe/webhook', data=b'{}',
+        headers={'Stripe-Signature': 't=1,v1=ok'})
 
 
 def test_buy_hidden_when_stripe_unconfigured(trial_on):
@@ -5805,12 +5895,23 @@ def test_buy_hidden_when_stripe_unconfigured(trial_on):
     assert A.stripe_checkout_enabled() is False
 
 
+def test_buy_hidden_when_only_secret_key_set(trial_on, monkeypatch):
+    """Buy must stay hidden until the webhook secret is also configured."""
+    monkeypatch.setattr(A, 'STRIPE_SECRET_KEY', 'sk_test_only')
+    monkeypatch.setattr(A, 'STRIPE_WEBHOOK_SECRET', '')
+    assert A.stripe_checkout_enabled() is False
+    uid = _make_user('halfstripe@test.com', limit=600, used=600)
+    body = _login(uid).get('/settings').data.decode()
+    assert 'Buy 5 hours for $5' not in body
+
+
 def test_buy_shown_when_stripe_configured(stripe_on):
     uid = _make_user('withstripe@test.com', limit=600, used=600)
     body = _login(uid).get('/settings').data.decode()
     assert 'Buy 5 hours for $5' in body
     assert 'billing/checkout' in body
     assert 'csrf_token' in body
+    assert '/terms' in body
 
 
 def test_checkout_session_creation(stripe_on, ph_events):
@@ -5827,14 +5928,34 @@ def test_checkout_session_creation(stripe_on, ph_events):
     }, follow_redirects=False)
     assert resp.status_code == 303
     assert resp.headers['Location'] == 'https://checkout.stripe.test/session'
-    kw = A.stripe.checkout.Session.last_kwargs
+    kw = stripe_on['last_create_params']
     assert kw['mode'] == 'payment'
     assert kw['client_reference_id'] == str(uid)
     assert kw['metadata']['user_id'] == str(uid)
     assert kw['metadata']['minutes'] == str(A.CREDIT_PACK_MINUTES)
+    assert kw['metadata']['pack'] == A.CREDIT_PACK_SKU
+    assert kw['customer_creation'] == 'always'
+    assert kw['billing_address_collection'] == 'required'
     assert kw['line_items'][0]['price_data']['unit_amount'] == 500
+    assert kw['line_items'][0]['price_data']['tax_behavior'] == 'inclusive'
+    assert kw['line_items'][0]['price_data']['product_data']['tax_code']
+    assert 'automatic_tax' not in kw
     started = [e for e in ph_events.events if e['event'] == 'checkout_started']
     assert started and started[-1]['distinct_id'] == str(uid)
+
+
+def test_checkout_passes_automatic_tax_when_enabled(stripe_on, monkeypatch):
+    monkeypatch.setattr(A, 'STRIPE_AUTOMATIC_TAX', True)
+    uid = _make_user('taxcheckout@test.com', limit=600, used=0)
+    client = _login(uid)
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'settings',
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    assert stripe_on['last_create_params']['automatic_tax'] == {'enabled': True}
 
 
 def test_checkout_rejects_bad_csrf(stripe_on):
@@ -5864,32 +5985,61 @@ def test_webhook_rejects_bad_signature(stripe_on):
     assert resp.status_code == 400
 
 
+def test_webhook_real_sdk_construct_event_attribute_access(stripe_on, monkeypatch):
+    """Signed payload must survive real stripe.Webhook.construct_event.
+
+    Catches the stripe-python >= 15 regression where Event has no .get().
+    """
+    import json
+    import stripe as real_stripe
+
+    uid = _make_user('realsdk@test.com', limit=600, used=0)
+    session = _pack_session(uid, 'cs_real_sdk_1')
+    stripe_on['sessions'][session['id']] = session
+
+    secret = 'whsec_test_real_sdk_secret'
+    monkeypatch.setattr(A, 'STRIPE_WEBHOOK_SECRET', secret)
+    monkeypatch.setattr(A, 'stripe', real_stripe)
+
+    payload_obj = {
+        'id': 'evt_real_sdk_1',
+        'object': 'event',
+        'api_version': '2026-08-26.dahlia',
+        'type': 'checkout.session.completed',
+        'data': {'object': {
+            'id': session['id'],
+            'object': 'checkout.session',
+            'payment_status': 'paid',
+        }},
+    }
+    payload = json.dumps(payload_obj)
+    header = real_stripe.WebhookSignature.generate_signature_header(
+        payload=payload, secret=secret)
+
+    # Prove the class of bug: attribute access works; .get does not.
+    event = real_stripe.Webhook.construct_event(payload, header, secret)
+    assert event.type == 'checkout.session.completed'
+    assert event.id == 'evt_real_sdk_1'
+    assert event.data.object.id == session['id']
+    with pytest.raises(AttributeError):
+        event.get('type')
+
+    resp = A.app.test_client().post(
+        '/stripe/webhook',
+        data=payload.encode('utf-8'),
+        headers={'Stripe-Signature': header,
+                 'Content-Type': 'application/json'},
+    )
+    assert resp.status_code == 200
+    assert _paid(uid) == 300 * 60
+
+
 def test_webhook_credits_once_on_duplicate_event(stripe_on, ph_events):
     uid = _make_user('creditonce@test.com', limit=600, used=0)
     assert _paid(uid) == 0
-
-    session_obj = {
-        'id': 'cs_test_dup_1',
-        'payment_status': 'paid',
-        'amount_total': 500,
-        'currency': 'usd',
-        'client_reference_id': str(uid),
-        'metadata': {'user_id': str(uid), 'minutes': '300'},
-    }
-    event = {
-        'id': 'evt_1',
-        'type': 'checkout.session.completed',
-        'data': {'object': session_obj},
-    }
-
-    A.stripe.Webhook.construct_event = staticmethod(
-        lambda payload, sig, secret: event)
-
-    client = A.app.test_client()
-    r1 = client.post('/stripe/webhook', data=b'{}',
-                     headers={'Stripe-Signature': 't=1,v1=ok'})
-    r2 = client.post('/stripe/webhook', data=b'{}',
-                     headers={'Stripe-Signature': 't=1,v1=ok'})
+    session = _pack_session(uid, 'cs_test_dup_1')
+    r1 = _register_and_post(stripe_on, session, eid='evt_1')
+    r2 = _register_and_post(stripe_on, session, eid='evt_1')
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert _paid(uid) == 300 * 60
@@ -5897,9 +6047,109 @@ def test_webhook_credits_once_on_duplicate_event(stripe_on, ph_events):
     with A.app.app_context():
         rows = CreditPurchase.query.filter_by(stripe_session_id='cs_test_dup_1').all()
         assert len(rows) == 1
+        assert rows[0].status == 'credited'
+        assert rows[0].stripe_payment_intent_id == 'pi_cs_test_dup_1'
     purchased = [e for e in ph_events.events if e['event'] == 'purchase_completed']
     assert len(purchased) == 1
     assert purchased[0]['properties']['minutes'] == 300
+
+
+def test_async_payment_succeeded_credits(stripe_on):
+    uid = _make_user('asyncpay@test.com', limit=600, used=0)
+    session = _pack_session(uid, 'cs_async_1')
+    resp = _register_and_post(
+        stripe_on, session, etype='checkout.session.async_payment_succeeded')
+    assert resp.status_code == 200
+    assert _paid(uid) == 300 * 60
+
+
+def test_completed_unpaid_does_not_credit(stripe_on):
+    uid = _make_user('unpaid@test.com', limit=600, used=0)
+    session = _pack_session(uid, 'cs_unpaid_1', payment_status='unpaid')
+    resp = _register_and_post(stripe_on, session)
+    assert resp.status_code == 200
+    assert _paid(uid) == 0
+
+
+def test_inclusive_taxed_session_credits(stripe_on):
+    """Inclusive tax: customer still pays 500; amount_tax > 0 is fine."""
+    uid = _make_user('incltax@test.com', limit=600, used=0)
+    session = _pack_session(
+        uid, 'cs_incl_1',
+        amount_subtotal=500,
+        amount_total=500,
+        total_details={'amount_tax': 100, 'amount_discount': 0},
+        line_items={'data': [{
+            'quantity': 1,
+            'price': {
+                'id': 'price_incl',
+                'unit_amount': 500,
+                'tax_behavior': 'inclusive',
+            },
+        }]},
+        customer_details={'address': {'country': 'NO'}},
+    )
+    assert _register_and_post(stripe_on, session).status_code == 200
+    assert _paid(uid) == 300 * 60
+    from models import db, CreditPurchase
+    with A.app.app_context():
+        row = CreditPurchase.query.filter_by(stripe_session_id='cs_incl_1').one()
+        assert row.amount_tax_cents == 100
+        assert row.customer_country == 'NO'
+        assert row.status == 'credited'
+
+
+def test_exclusive_taxed_session_credits(stripe_on):
+    """Exclusive tax: subtotal 500, total = subtotal + tax."""
+    uid = _make_user('excltax@test.com', limit=600, used=0)
+    session = _pack_session(
+        uid, 'cs_excl_1',
+        amount_subtotal=500,
+        amount_total=625,
+        total_details={'amount_tax': 125, 'amount_discount': 0},
+        line_items={'data': [{
+            'quantity': 1,
+            'price': {
+                'id': 'price_excl',
+                'unit_amount': 500,
+                'tax_behavior': 'exclusive',
+            },
+        }]},
+    )
+    assert _register_and_post(stripe_on, session).status_code == 200
+    assert _paid(uid) == 300 * 60
+
+
+def test_wrong_price_needs_review_and_sentry(stripe_on, monkeypatch):
+    uid = _make_user('badprice@test.com', limit=600, used=0)
+    monkeypatch.setattr(A, 'STRIPE_PRICE_ID', 'price_expected')
+    captured = []
+
+    def capture(msg, level='error', **kwargs):
+        captured.append((msg, level, kwargs))
+
+    monkeypatch.setattr(A, '_sentry_capture_message', capture)
+    session = _pack_session(
+        uid, 'cs_badprice_1',
+        line_items={'data': [{
+            'quantity': 1,
+            'price': {
+                'id': 'price_wrong',
+                'unit_amount': 500,
+                'tax_behavior': 'inclusive',
+            },
+        }]},
+    )
+    resp = _register_and_post(stripe_on, session)
+    assert resp.status_code == 200
+    assert _paid(uid) == 0
+    from models import CreditPurchase
+    with A.app.app_context():
+        row = CreditPurchase.query.filter_by(stripe_session_id='cs_badprice_1').one()
+        assert row.status == 'needs_review'
+        assert row.minutes == 0
+    assert captured and 'not credited' in captured[0][0]
+    assert captured[0][1] == 'error'
 
 
 def test_settlement_charges_trial_then_paid(trial_on):
@@ -5958,6 +6208,13 @@ def test_privacy_mentions_stripe():
     assert 'stripe' in body
 
 
+def test_terms_page_mentions_refunds():
+    body = A.app.test_client().get('/terms').data.decode().lower()
+    assert 'refund' in body
+    assert '14 days' in body or '14-day' in body
+    assert 'productivitytech.io/contact' in body
+
+
 def test_offer_shown_on_limit_when_stripe_on(stripe_on, ph_events, monkeypatch):
     uid = _make_user('offer@test.com', limit=600, used=600)
     resp = _post_start(monkeypatch, uid, {
@@ -6000,44 +6257,161 @@ def test_webhook_unconfigured_returns_404():
     assert resp.status_code == 404
 
 
-def test_webhook_rejects_unpaid_or_wrong_amount(stripe_on):
+def test_webhook_rejects_unpaid_or_wrong_amount(stripe_on, monkeypatch):
     uid = _make_user('badpay@test.com')
+    captured = []
+    monkeypatch.setattr(
+        A, '_sentry_capture_message',
+        lambda msg, level='error', **kw: captured.append(msg))
 
-    def post_session(session_obj):
-        event = {
-            'id': 'evt_' + session_obj['id'],
-            'type': 'checkout.session.completed',
-            'data': {'object': session_obj},
+    unpaid = _pack_session(uid, 'cs_unpaid', payment_status='unpaid')
+    assert _register_and_post(stripe_on, unpaid).status_code == 200
+    assert _paid(uid) == 0
+
+    missing_status = _pack_session(uid, 'cs_nostatus')
+    del missing_status['payment_status']
+    assert _register_and_post(stripe_on, missing_status).status_code == 200
+    assert _paid(uid) == 0
+
+    wrong_amount = _pack_session(
+        uid, 'cs_wrong_amt',
+        amount_total=100, amount_subtotal=100,
+        line_items={'data': [{
+            'quantity': 1,
+            'price': {'id': 'p', 'unit_amount': 100, 'tax_behavior': 'inclusive'},
+        }]},
+    )
+    assert _register_and_post(stripe_on, wrong_amount).status_code == 200
+    assert _paid(uid) == 0
+    from models import CreditPurchase
+    with A.app.app_context():
+        row = CreditPurchase.query.filter_by(stripe_session_id='cs_wrong_amt').one()
+        assert row.status == 'needs_review'
+    assert any('cs_wrong_amt' in m for m in captured)
+
+    wrong_currency = _pack_session(uid, 'cs_wrong_cur', currency='eur')
+    assert _register_and_post(stripe_on, wrong_currency).status_code == 200
+    assert _paid(uid) == 0
+
+
+def test_charge_refunded_claws_back_pro_rata(stripe_on, ph_events):
+    uid = _make_user('clawback@test.com', limit=600, used=0)
+    session = _pack_session(uid, 'cs_refund_1')
+    assert _register_and_post(stripe_on, session).status_code == 200
+    assert _paid(uid) == 300 * 60
+
+    # Spend half the pack so clawback cannot reclaim used minutes below zero…
+    # (clawback takes min(balance, pro-rata); after spending 150 min, balance
+    # is 150 min; full refund should take all 150 remaining, not invent more.)
+    _set_paid(uid, 150 * 60)
+
+    from types import SimpleNamespace
+    charge = {
+        'id': 'ch_1',
+        'payment_intent': 'pi_cs_refund_1',
+        'amount': 500,
+        'amount_captured': 500,
+        'amount_refunded': 500,
+    }
+    event = _ns_event(
+        'charge.refunded', 'ch_1', eid='evt_ref_1',
+        obj=SimpleNamespace(id='ch_1', to_dict=lambda: charge))
+    A.stripe.Webhook.construct_event = staticmethod(
+        lambda payload, sig, secret: event)
+    r1 = A.app.test_client().post(
+        '/stripe/webhook', data=b'{}',
+        headers={'Stripe-Signature': 't=1,v1=ok'})
+    r2 = A.app.test_client().post(
+        '/stripe/webhook', data=b'{}',
+        headers={'Stripe-Signature': 't=1,v1=ok'})
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert _paid(uid) == 0
+    from models import CreditPurchase
+    with A.app.app_context():
+        row = CreditPurchase.query.filter_by(stripe_session_id='cs_refund_1').one()
+        assert row.status == 'refunded'
+        assert row.seconds_clawed_back == 150 * 60
+        assert row.amount_refunded_cents == 500
+    refunded = [e for e in ph_events.events if e['event'] == 'purchase_refunded']
+    assert len(refunded) == 1
+
+
+def test_partial_refund_pro_rata_idempotent(stripe_on):
+    uid = _make_user('partialref@test.com', limit=600, used=0)
+    session = _pack_session(uid, 'cs_partial_1')
+    assert _register_and_post(stripe_on, session).status_code == 200
+    assert _paid(uid) == 300 * 60
+
+    from types import SimpleNamespace
+
+    def post_refund(amount_refunded, eid):
+        charge = {
+            'id': 'ch_partial',
+            'payment_intent': 'pi_cs_partial_1',
+            'amount': 500,
+            'amount_captured': 500,
+            'amount_refunded': amount_refunded,
         }
+        event = _ns_event(
+            'charge.refunded', 'ch_partial', eid=eid,
+            obj=SimpleNamespace(id='ch_partial', to_dict=lambda: charge))
         A.stripe.Webhook.construct_event = staticmethod(
             lambda payload, sig, secret: event)
         return A.app.test_client().post(
             '/stripe/webhook', data=b'{}',
             headers={'Stripe-Signature': 't=1,v1=ok'})
 
-    base = {
-        'client_reference_id': str(uid),
-        'metadata': {'user_id': str(uid), 'minutes': '300'},
-        'currency': 'usd',
-        'amount_total': 500,
-        'payment_status': 'paid',
+    assert post_refund(250, 'evt_p1').status_code == 200
+    # Half refund → half of 300 min = 150 min = 9000 seconds.
+    assert _paid(uid) == 150 * 60
+    assert post_refund(250, 'evt_p1_dup').status_code == 200  # idempotent
+    assert _paid(uid) == 150 * 60
+    assert post_refund(500, 'evt_p2').status_code == 200
+    assert _paid(uid) == 0
+
+
+def test_dispute_created_full_clawback(stripe_on, ph_events):
+    uid = _make_user('dispute@test.com', limit=600, used=0)
+    session = _pack_session(uid, 'cs_disp_1')
+    assert _register_and_post(stripe_on, session).status_code == 200
+    assert _paid(uid) == 300 * 60
+
+    from types import SimpleNamespace
+    dispute = {
+        'id': 'dp_1',
+        'payment_intent': 'pi_cs_disp_1',
+        'amount': 500,
     }
-    unpaid = dict(base, id='cs_unpaid', payment_status='unpaid')
-    assert post_session(unpaid).status_code == 200
+    event = _ns_event(
+        'charge.dispute.created', 'dp_1', eid='evt_dp_1',
+        obj=SimpleNamespace(id='dp_1', to_dict=lambda: dispute))
+    A.stripe.Webhook.construct_event = staticmethod(
+        lambda payload, sig, secret: event)
+    assert A.app.test_client().post(
+        '/stripe/webhook', data=b'{}',
+        headers={'Stripe-Signature': 't=1,v1=ok'}).status_code == 200
+    # Second delivery must not double-claw.
+    assert A.app.test_client().post(
+        '/stripe/webhook', data=b'{}',
+        headers={'Stripe-Signature': 't=1,v1=ok'}).status_code == 200
     assert _paid(uid) == 0
+    from models import CreditPurchase
+    with A.app.app_context():
+        row = CreditPurchase.query.filter_by(stripe_session_id='cs_disp_1').one()
+        assert row.status == 'disputed'
+        assert row.seconds_clawed_back == 300 * 60
 
-    missing_status = dict(base, id='cs_nostatus')
-    del missing_status['payment_status']
-    assert post_session(missing_status).status_code == 200
-    assert _paid(uid) == 0
 
-    wrong_amount = dict(base, id='cs_wrong_amt', amount_total=100)
-    assert post_session(wrong_amount).status_code == 200
-    assert _paid(uid) == 0
-
-    wrong_currency = dict(base, id='cs_wrong_cur', currency='eur')
-    assert post_session(wrong_currency).status_code == 200
-    assert _paid(uid) == 0
+def test_billing_success_fulfills_checkout(stripe_on):
+    uid = _make_user('successpage@test.com', limit=600, used=0)
+    session = _pack_session(uid, 'cs_success_1')
+    stripe_on['sessions'][session['id']] = session
+    client = _login(uid)
+    resp = client.get(f'/billing/success?session_id={session["id"]}')
+    assert resp.status_code == 200
+    assert _paid(uid) == 300 * 60
+    assert b'Payment received' in resp.data or b'paid' in resp.data.lower()
 
 
 def test_reconcile_over_cap_keeps_trial_when_paid_debit_fails(trial_on, monkeypatch):
@@ -6141,3 +6515,8 @@ def test_ensure_credit_purchases_table_is_idempotent(trial_on):
             "AND name='credit_purchases'"
         )).fetchall()
         assert len(rows) == 1
+        cols = {c['name'] for c in A.sa_inspect(A.db.engine).get_columns(
+            'credit_purchases')}
+        assert 'status' in cols
+        assert 'stripe_payment_intent_id' in cols
+        assert 'seconds_clawed_back' in cols

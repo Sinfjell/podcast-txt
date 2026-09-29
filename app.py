@@ -50,7 +50,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError as SaIntegrityError
 
 from models import (db, User, SavedFeed, TranscriptionTask, CreditPurchase,
-                    TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS)
+                    TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS,
+                    CREDIT_PURCHASE_COLUMN_MIGRATIONS)
 from observability import init_sentry, report_stale_task, report_task_failure
 import analytics as product_analytics
 
@@ -58,6 +59,11 @@ try:
     import stripe
 except ImportError:  # pragma: no cover - production must pip install; tests mock
     stripe = None
+
+try:
+    import sentry_sdk
+except ImportError:  # pragma: no cover
+    sentry_sdk = None
 
 load_dotenv()
 # Before the app exists, so the Flask integration hooks it, and before the boot
@@ -485,21 +491,53 @@ TRIAL_ENABLED = os.getenv('TRIAL_ENABLED', '1').strip().lower() not in ('0', 'fa
 STRIPE_SECRET_KEY = (os.getenv('STRIPE_SECRET_KEY') or '').strip()
 STRIPE_WEBHOOK_SECRET = (os.getenv('STRIPE_WEBHOOK_SECRET') or '').strip()
 STRIPE_PRICE_ID = (os.getenv('STRIPE_PRICE_ID') or '').strip()
+STRIPE_API_VERSION = (os.getenv('STRIPE_API_VERSION') or '2026-08-26.dahlia').strip()
+STRIPE_AUTOMATIC_TAX = os.getenv('STRIPE_AUTOMATIC_TAX', '0').strip().lower() in (
+    '1', 'true', 'yes', 'on')
+STRIPE_TAX_CODE = (os.getenv('STRIPE_TAX_CODE') or 'txcd_10103000').strip()
+STRIPE_TAX_BEHAVIOR = (os.getenv('STRIPE_TAX_BEHAVIOR') or 'inclusive').strip().lower()
 #: One-time pack: 300 minutes (5 hours) for $5.00 USD.
 CREDIT_PACK_MINUTES = 300
 CREDIT_PACK_SECONDS = CREDIT_PACK_MINUTES * 60
 CREDIT_PACK_AMOUNT_CENTS = 500
 CREDIT_PACK_CURRENCY = 'usd'
 CREDIT_PACK_LABEL = 'Buy 5 hours for $5'
+CREDIT_PACK_SKU = 'minutes_300_usd500_v1'
+CREDIT_PACK_TAX_BEHAVIOR = STRIPE_TAX_BEHAVIOR if STRIPE_TAX_BEHAVIOR in (
+    'inclusive', 'exclusive') else 'inclusive'
 
-
-def stripe_checkout_enabled():
-    """True when Buy can create a Checkout Session. Webhook secret is separate."""
-    return bool(STRIPE_SECRET_KEY and stripe is not None)
+if stripe is not None and STRIPE_API_VERSION:
+    stripe.api_version = STRIPE_API_VERSION
 
 
 def stripe_webhook_enabled():
     return bool(STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET and stripe is not None)
+
+
+def stripe_checkout_enabled():
+    """True only when both secrets are set — never sell without a webhook."""
+    return stripe_webhook_enabled()
+
+
+def stripe_client():
+    """Pinned StripeClient for Checkout retrieve/create. None when unconfigured."""
+    if not STRIPE_SECRET_KEY or stripe is None:
+        return None
+    return stripe.StripeClient(
+        STRIPE_SECRET_KEY,
+        stripe_version=STRIPE_API_VERSION,
+        max_network_retries=2,
+    )
+
+
+def _sentry_capture_message(message, level='error', **kwargs):
+    """Best-effort Sentry message; never raises into the request path."""
+    if sentry_sdk is None:
+        return
+    try:
+        sentry_sdk.capture_message(message, level=level, **kwargs)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class TrialExhausted(Exception):
@@ -2120,57 +2158,187 @@ def validate_csrf_token():
     return hmac.compare_digest(str(expected), str(got))
 
 
-def credit_user_from_checkout_session(session_obj, event_id=None):
-    """Credit paid minutes from a verified Checkout Session. Idempotent.
+def _int_or_none(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
-    Returns True when this call newly credited the user; False if the session
-    was already recorded (duplicate webhook) or the payload is not payable.
+
+def _session_payment_intent_id(session_dict):
+    pi = session_dict.get('payment_intent')
+    if isinstance(pi, dict):
+        return pi.get('id')
+    if isinstance(pi, str) and pi:
+        return pi
+    return None
+
+
+def _session_customer_country(session_dict):
+    details = session_dict.get('customer_details') or {}
+    address = details.get('address') or {}
+    country = (address.get('country') or '').strip().upper()
+    return country[:2] or None
+
+
+def pack_session_matches(d):
+    """Validate a retrieved Checkout Session bought our credit pack.
+
+    Checks what was bought (line item / unit amount / pack marker), not only
+    amount_total — so inclusive Stripe Tax (total stays 500) and exclusive
+    tax (subtotal 500, total = subtotal + tax) both credit correctly.
     """
-    if not session_obj:
-        return False
-    # Require an explicit paid status — never credit on absent/unpaid.
-    if session_obj.get('payment_status') != 'paid':
-        return False
-    session_id = session_obj.get('id')
+    if (d.get('currency') or '').lower() != CREDIT_PACK_CURRENCY:
+        return False, 'currency'
+    if (d.get('metadata') or {}).get('pack') != CREDIT_PACK_SKU:
+        return False, 'pack_marker'
+    items = ((d.get('line_items') or {}).get('data') or [])
+    if len(items) != 1 or items[0].get('quantity') != 1:
+        return False, 'line_items'
+    price = items[0].get('price') or {}
+    if isinstance(price, str):
+        return False, 'price_unexpanded'
+    if STRIPE_PRICE_ID and price.get('id') != STRIPE_PRICE_ID:
+        return False, 'price_id'
+    if price.get('unit_amount') != CREDIT_PACK_AMOUNT_CENTS:
+        return False, 'unit_amount'
+    td = d.get('total_details') or {}
+    if (td.get('amount_discount') or 0) != 0:
+        return False, 'discount'
+    tax = td.get('amount_tax') or 0
+    total, subtotal = d.get('amount_total'), d.get('amount_subtotal')
+    behavior = (price.get('tax_behavior') or CREDIT_PACK_TAX_BEHAVIOR or '').lower()
+    if behavior == 'inclusive':
+        ok = total == CREDIT_PACK_AMOUNT_CENTS
+    else:
+        ok = (
+            subtotal == CREDIT_PACK_AMOUNT_CENTS
+            and total is not None
+            and total == (subtotal or 0) + tax
+        )
+    if ok:
+        return True, 'ok'
+    return False, f'amount total={total} subtotal={subtotal} tax={tax}'
+
+
+def _record_needs_review(session_dict, user_id, event_id, reason):
+    """Persist a paid-but-unfulfillable session for manual reconciliation.
+
+    Never changes the balance. Unique on stripe_session_id so duplicates are
+    no-ops. Returns True when a new row was written.
+    """
+    session_id = session_dict.get('id')
     if not session_id:
         return False
-    # Amount and currency must match the configured pack. Do not fall back to
-    # defaults that would credit minutes for a mismatched Checkout Session.
+    td = session_dict.get('total_details') or {}
+    subtotal = session_dict.get('amount_subtotal')
+    tax = td.get('amount_tax')
+    total = session_dict.get('amount_total')
     try:
-        amount = int(session_obj.get('amount_total'))
+        amount_cents = int(subtotal if subtotal is not None else (total or 0))
     except (TypeError, ValueError):
-        app.logger.error('Stripe session %s missing amount_total', session_id)
+        amount_cents = 0
+    purchase = CreditPurchase(
+        user_id=user_id,
+        stripe_session_id=session_id,
+        stripe_event_id=event_id,
+        stripe_payment_intent_id=_session_payment_intent_id(session_dict),
+        amount_cents=amount_cents,
+        amount_subtotal_cents=_int_or_none(subtotal),
+        amount_tax_cents=_int_or_none(tax),
+        amount_total_cents=_int_or_none(total),
+        currency=(session_dict.get('currency') or CREDIT_PACK_CURRENCY).lower(),
+        customer_country=_session_customer_country(session_dict),
+        minutes=0,
+        status='needs_review',
+    )
+    db.session.add(purchase)
+    try:
+        db.session.commit()
+        return True
+    except SaIntegrityError:
+        db.session.rollback()
         return False
-    currency = (session_obj.get('currency') or '').lower()
-    if amount != CREDIT_PACK_AMOUNT_CENTS or currency != CREDIT_PACK_CURRENCY:
+    except Exception:
+        db.session.rollback()
+        app.logger.exception(
+            'Failed to record needs_review for Stripe session %s (%s)',
+            session_id, reason)
+        return False
+
+
+def fulfill_checkout(session_id, event_id=None):
+    """Retrieve and fulfill a Checkout Session. Idempotent; safe from webhook
+    and from /billing/success.
+
+    Credits only when payment_status=='paid' and pack_session_matches.
+    Mismatched paid sessions are recorded as needs_review + Sentry, and this
+    still returns False so the webhook can reply 2xx (retries will not help).
+    """
+    if not session_id or not str(session_id).startswith('cs_'):
+        return False
+    client = stripe_client()
+    if client is None:
+        return False
+    try:
+        session_obj = client.v1.checkout.sessions.retrieve(
+            session_id, params={'expand': ['line_items.data.price']})
+    except Exception:
+        app.logger.exception('Stripe Checkout Session retrieve failed (%s)', session_id)
+        raise
+    d = session_obj.to_dict() if hasattr(session_obj, 'to_dict') else dict(session_obj)
+    if d.get('mode') and d.get('mode') != 'payment':
+        return False
+    if d.get('payment_status') != 'paid':
+        # Async methods complete unpaid first; wait for async_payment_succeeded.
+        return False
+
+    ok, reason = pack_session_matches(d)
+    metadata = d.get('metadata') or {}
+    user_id = _int_or_none(d.get('client_reference_id') or metadata.get('user_id'))
+    if not ok or user_id is None:
+        fail_reason = reason if not ok else 'missing_user'
         app.logger.error(
-            'Stripe session %s amount/currency mismatch: %s %s (expected %s %s)',
-            session_id, amount, currency,
-            CREDIT_PACK_AMOUNT_CENTS, CREDIT_PACK_CURRENCY)
+            'Stripe session %s not credited: %s', session_id, fail_reason)
+        _record_needs_review(d, user_id, event_id, fail_reason)
+        _sentry_capture_message(
+            f'Stripe session {session_id} not credited: {fail_reason}',
+            level='error',
+            contexts={'stripe': {'session_id': session_id, 'reason': fail_reason}},
+        )
         return False
-    metadata = session_obj.get('metadata') or {}
-    ref = session_obj.get('client_reference_id') or metadata.get('user_id')
+
+    td = d.get('total_details') or {}
+    subtotal = d.get('amount_subtotal')
+    tax = td.get('amount_tax')
+    total = d.get('amount_total')
     try:
-        user_id = int(ref)
+        amount_for_legacy = int(
+            subtotal if subtotal is not None else total)
     except (TypeError, ValueError):
-        app.logger.error('Stripe session %s missing user id', session_id)
-        return False
-    # Credited minutes follow the pack, not attacker-controlled metadata.
+        amount_for_legacy = CREDIT_PACK_AMOUNT_CENTS
+    currency = (d.get('currency') or CREDIT_PACK_CURRENCY).lower()
     minutes = CREDIT_PACK_MINUTES
 
     purchase = CreditPurchase(
         user_id=user_id,
         stripe_session_id=session_id,
         stripe_event_id=event_id,
-        amount_cents=amount,
+        stripe_payment_intent_id=_session_payment_intent_id(d),
+        amount_cents=amount_for_legacy,
+        amount_subtotal_cents=_int_or_none(subtotal),
+        amount_tax_cents=_int_or_none(tax),
+        amount_total_cents=_int_or_none(total),
         currency=currency,
+        customer_country=_session_customer_country(d),
         minutes=minutes,
+        status='credited',
     )
     db.session.add(purchase)
     try:
         db.session.flush()
     except SaIntegrityError:
-        # Unique stripe_session_id — already credited.
+        # Unique stripe_session_id — already fulfilled.
         db.session.rollback()
         return False
 
@@ -2181,8 +2349,14 @@ def credit_user_from_checkout_session(session_obj, event_id=None):
     """), {'n': minutes * 60, 'uid': user_id})
     if result.rowcount != 1:
         db.session.rollback()
-        app.logger.error('Stripe session %s: no user %s to credit',
-                         session_id, user_id)
+        app.logger.error(
+            'Stripe session %s: no user %s to credit', session_id, user_id)
+        _record_needs_review(d, user_id, event_id, 'user_missing')
+        _sentry_capture_message(
+            f'Stripe session {session_id} not credited: user_missing',
+            level='error',
+            contexts={'stripe': {'session_id': session_id, 'user_id': user_id}},
+        )
         return False
     try:
         db.session.commit()
@@ -2192,8 +2366,168 @@ def credit_user_from_checkout_session(session_obj, event_id=None):
     product_analytics.capture(
         'purchase_completed',
         user_id,
-        {'amount_cents': amount, 'minutes': minutes, 'currency': currency},
+        {'amount_cents': amount_for_legacy, 'minutes': minutes, 'currency': currency},
     )
+    return True
+
+
+def credit_user_from_checkout_session(session_obj, event_id=None):
+    """Thin wrapper: fulfill by session id (retrieves from Stripe)."""
+    if not session_obj:
+        return False
+    if isinstance(session_obj, dict):
+        session_id = session_obj.get('id')
+    else:
+        session_id = getattr(session_obj, 'id', None)
+    return fulfill_checkout(session_id, event_id=event_id)
+
+
+def _clawback_paid_seconds(user_id, seconds):
+    """Subtract up to `seconds` from paid balance; never below zero.
+
+    Returns the number of seconds actually removed.
+    """
+    if not user_id or seconds <= 0:
+        return 0
+    user = db.session.get(User, user_id)
+    if user is None:
+        return 0
+    balance = int(user.paid_seconds_balance or 0)
+    take = min(balance, int(seconds))
+    if take <= 0:
+        return 0
+    db.session.execute(text("""
+        UPDATE users
+           SET paid_seconds_balance = CASE
+                 WHEN COALESCE(paid_seconds_balance, 0) < :n THEN 0
+                 ELSE paid_seconds_balance - :n
+               END
+         WHERE id = :uid
+    """), {'n': take, 'uid': user_id})
+    return take
+
+
+def handle_charge_refunded(charge_dict, event_id=None):
+    """Claw back unused paid minutes pro rata to the newly refunded fraction.
+
+    Idempotent on cumulative charge.amount_refunded vs purchase.amount_refunded_cents.
+    Never pushes paid_seconds_balance below zero.
+    """
+    if not charge_dict:
+        return False
+    pi = charge_dict.get('payment_intent')
+    if isinstance(pi, dict):
+        pi = pi.get('id')
+    if not pi:
+        app.logger.error('charge.refunded missing payment_intent (event %s)', event_id)
+        return False
+    purchase = CreditPurchase.query.filter_by(
+        stripe_payment_intent_id=pi, status='credited').first()
+    if purchase is None:
+        # Already fully refunded/disputed, or never credited (needs_review).
+        purchase = CreditPurchase.query.filter_by(
+            stripe_payment_intent_id=pi).order_by(CreditPurchase.id.desc()).first()
+        if purchase is None or purchase.status == 'needs_review':
+            return False
+    try:
+        amount_refunded = int(charge_dict.get('amount_refunded') or 0)
+    except (TypeError, ValueError):
+        amount_refunded = 0
+    try:
+        amount_captured = int(
+            charge_dict.get('amount_captured')
+            or charge_dict.get('amount')
+            or purchase.amount_total_cents
+            or purchase.amount_cents
+            or 0)
+    except (TypeError, ValueError):
+        amount_captured = 0
+    already = int(purchase.amount_refunded_cents or 0)
+    delta = amount_refunded - already
+    if delta <= 0 or amount_captured <= 0:
+        return False
+    pack_seconds = int(purchase.minutes or 0) * 60
+    remaining = pack_seconds - int(purchase.seconds_clawed_back or 0)
+    if remaining <= 0:
+        purchase.amount_refunded_cents = amount_refunded
+        if amount_refunded >= amount_captured:
+            purchase.status = 'refunded'
+            purchase.refunded_at = purchase.refunded_at or datetime.now(timezone.utc)
+        db.session.commit()
+        return False
+    # Pro-rata on the newly refunded fraction of the captured amount.
+    claw_secs = min(remaining, (pack_seconds * delta) // amount_captured)
+    taken = _clawback_paid_seconds(purchase.user_id, claw_secs)
+    purchase.seconds_clawed_back = int(purchase.seconds_clawed_back or 0) + taken
+    purchase.amount_refunded_cents = amount_refunded
+    if amount_refunded >= amount_captured:
+        purchase.status = 'refunded'
+        purchase.refunded_at = datetime.now(timezone.utc)
+    db.session.commit()
+    if purchase.user_id is not None:
+        product_analytics.capture(
+            'purchase_refunded',
+            purchase.user_id,
+            {
+                'seconds_clawed_back': taken,
+                'amount_refunded_cents': amount_refunded,
+                'payment_intent': pi,
+            },
+        )
+    return True
+
+
+def handle_dispute(dispute_dict, event_type, event_id=None):
+    """Treat dispute.created like a full refund of remaining pack minutes."""
+    if event_type != 'charge.dispute.created':
+        app.logger.info('Stripe dispute event %s ignored (%s)', event_type, event_id)
+        return False
+    if not dispute_dict:
+        return False
+    pi = dispute_dict.get('payment_intent')
+    if isinstance(pi, dict):
+        pi = pi.get('id')
+    # Some dispute payloads only carry the charge id; charge.payment_intent is
+    # preferred when present on an expanded charge. Fall back to looking up by
+    # charge id stored nowhere — require payment_intent.
+    if not pi:
+        app.logger.error(
+            'charge.dispute.created missing payment_intent (event %s)', event_id)
+        _sentry_capture_message(
+            f'Stripe dispute {dispute_dict.get("id")} missing payment_intent',
+            level='error',
+        )
+        return False
+    purchase = CreditPurchase.query.filter_by(
+        stripe_payment_intent_id=pi).order_by(CreditPurchase.id.desc()).first()
+    if purchase is None or purchase.status == 'needs_review':
+        return False
+    if purchase.status == 'disputed':
+        return False
+    pack_seconds = int(purchase.minutes or 0) * 60
+    remaining = pack_seconds - int(purchase.seconds_clawed_back or 0)
+    taken = _clawback_paid_seconds(purchase.user_id, remaining)
+    purchase.seconds_clawed_back = int(purchase.seconds_clawed_back or 0) + taken
+    purchase.status = 'disputed'
+    purchase.refunded_at = datetime.now(timezone.utc)
+    # Treat as fully refunded for amount tracking.
+    captured = (
+        purchase.amount_total_cents
+        or purchase.amount_cents
+        or CREDIT_PACK_AMOUNT_CENTS)
+    purchase.amount_refunded_cents = max(
+        int(purchase.amount_refunded_cents or 0), int(captured))
+    db.session.commit()
+    if purchase.user_id is not None:
+        product_analytics.capture(
+            'purchase_refunded',
+            purchase.user_id,
+            {
+                'seconds_clawed_back': taken,
+                'reason': 'dispute',
+                'payment_intent': pi,
+            },
+        )
     return True
 
 
@@ -2290,26 +2624,46 @@ def billing_checkout():
         line_item['price_data'] = {
             'currency': CREDIT_PACK_CURRENCY,
             'unit_amount': CREDIT_PACK_AMOUNT_CENTS,
+            'tax_behavior': CREDIT_PACK_TAX_BEHAVIOR,
             'product_data': {
                 'name': f'Podskrift — {CREDIT_PACK_MINUTES} minutes',
                 'description': f'{CREDIT_PACK_MINUTES} minutes of transcription '
                                f'({CREDIT_PACK_MINUTES // 60} hours)',
+                'tax_code': STRIPE_TAX_CODE,
             },
         }
 
-    try:
-        stripe.api_key = STRIPE_SECRET_KEY
-        checkout_session = stripe.checkout.Session.create(
-            mode='payment',
-            line_items=[line_item],
-            success_url=success_url,
-            cancel_url=cancel_abs,
-            client_reference_id=str(current_user.id),
-            customer_email=current_user.email,
-            metadata={
+    params = {
+        'mode': 'payment',
+        'line_items': [line_item],
+        'success_url': success_url,
+        'cancel_url': cancel_abs,
+        'client_reference_id': str(current_user.id),
+        'customer_email': current_user.email,
+        'customer_creation': 'always',
+        'billing_address_collection': 'required',
+        'metadata': {
+            'user_id': str(current_user.id),
+            'minutes': str(CREDIT_PACK_MINUTES),
+            'pack': CREDIT_PACK_SKU,
+        },
+        'payment_intent_data': {
+            'metadata': {
                 'user_id': str(current_user.id),
-                'minutes': str(CREDIT_PACK_MINUTES),
+                'pack': CREDIT_PACK_SKU,
             },
+        },
+    }
+    if STRIPE_AUTOMATIC_TAX:
+        params['automatic_tax'] = {'enabled': True}
+
+    try:
+        client = stripe_client()
+        if client is None:
+            raise RuntimeError('Stripe client unavailable')
+        checkout_session = client.v1.checkout.sessions.create(
+            params=params,
+            options={'idempotency_key': f'checkout-{current_user.id}-{uuid.uuid4()}'},
         )
     except Exception:  # noqa: BLE001 - never surface Stripe internals
         app.logger.exception('Stripe Checkout Session create failed')
@@ -2322,13 +2676,42 @@ def billing_checkout():
 @app.route('/billing/success')
 @login_required
 def billing_success():
-    """Landing after Checkout. Does NOT credit — the webhook does."""
-    return render_template('billing_success.html')
+    """Landing after Checkout. Also triggers fulfill_checkout (idempotent)."""
+    session_id = (request.args.get('session_id') or '').strip()
+    paid_ready = False
+    pending = False
+    if session_id.startswith('cs_') and stripe_checkout_enabled():
+        try:
+            fulfill_checkout(session_id)
+        except Exception:
+            app.logger.exception(
+                'billing_success fulfill_checkout failed for %s', session_id)
+        # Re-read from Stripe for the UI; never trust the query string alone.
+        try:
+            client = stripe_client()
+            if client is not None:
+                s = client.v1.checkout.sessions.retrieve(session_id)
+                d = s.to_dict() if hasattr(s, 'to_dict') else dict(s)
+                ref = str(d.get('client_reference_id') or '')
+                if ref == str(current_user.id):
+                    if d.get('payment_status') == 'paid':
+                        paid_ready = True
+                    else:
+                        pending = True
+        except Exception:
+            app.logger.exception(
+                'billing_success session retrieve failed for %s', session_id)
+    return render_template(
+        'billing_success.html',
+        paid_ready=paid_ready,
+        pending=pending,
+        paid_minutes=(current_user.paid_seconds_balance or 0) // 60,
+    )
 
 
 @app.route('/stripe/webhook', methods=['POST'])
 def stripe_webhook():
-    """Verify and handle Stripe events. Credits only on checkout.session.completed."""
+    """Verify and handle Stripe events. Credits via fulfill_checkout."""
     if not stripe_webhook_enabled():
         # Not configured: look like a missing route rather than a soft outage.
         return jsonify({'error': 'not found'}), 404
@@ -2340,25 +2723,37 @@ def stripe_webhook():
     except ValueError:
         return jsonify({'error': 'invalid payload'}), 400
     except Exception as exc:  # SignatureVerificationError and friends
-        # stripe.error.SignatureVerificationError when the SDK is installed.
+        # stripe.SignatureVerificationError when the SDK is installed.
         name = type(exc).__name__
         if 'Signature' in name or 'signature' in str(exc).lower():
             return jsonify({'error': 'invalid signature'}), 400
         app.logger.exception('Stripe webhook construct_event failed')
         return jsonify({'error': 'webhook error'}), 400
 
-    if event.get('type') == 'checkout.session.completed':
-        session_obj = event['data']['object']
-        # stripe objects behave like dicts; normalize.
-        if hasattr(session_obj, 'to_dict'):
-            session_obj = session_obj.to_dict()
-        elif not isinstance(session_obj, dict):
-            session_obj = dict(session_obj)
-        try:
-            credit_user_from_checkout_session(session_obj, event_id=event.get('id'))
-        except Exception:
-            app.logger.exception('Failed to credit Stripe session')
-            return jsonify({'error': 'credit failed'}), 500
+    # stripe-python >= 15: Event is not a dict — use attribute access.
+    etype = event.type
+    obj = event.data.object
+    obj_id = obj.id if hasattr(obj, 'id') else (obj.get('id') if isinstance(obj, dict) else None)
+    try:
+        if etype in (
+            'checkout.session.completed',
+            'checkout.session.async_payment_succeeded',
+        ):
+            fulfill_checkout(obj_id, event_id=event.id)
+        elif etype == 'checkout.session.async_payment_failed':
+            app.logger.info('Async payment failed for %s', obj_id)
+        elif etype == 'charge.refunded':
+            charge = obj.to_dict() if hasattr(obj, 'to_dict') else (
+                obj if isinstance(obj, dict) else dict(obj))
+            handle_charge_refunded(charge, event_id=event.id)
+        elif etype in ('charge.dispute.created', 'charge.dispute.closed'):
+            dispute = obj.to_dict() if hasattr(obj, 'to_dict') else (
+                obj if isinstance(obj, dict) else dict(obj))
+            handle_dispute(dispute, etype, event_id=event.id)
+    except Exception:
+        app.logger.exception(
+            'Stripe webhook handling failed (%s %s)', etype, obj_id)
+        return jsonify({'error': 'handler failed'}), 500
     return jsonify({'received': True}), 200
 
 
@@ -4544,6 +4939,12 @@ def privacy():
     return render_template('privacy.html')
 
 
+@app.route('/terms')
+def terms():
+    """Short terms + refund policy for the prepaid credit pack."""
+    return render_template('terms.html')
+
+
 CUSTOMER_API_DOC_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'docs', 'customer-api.md')
 
@@ -5023,9 +5424,17 @@ def apply_column_migrations():
 
     inspector = sa_inspect(db.engine)
     added = []
-    for table, migrations in (('transcription_tasks', TASK_COLUMN_MIGRATIONS),
-                              ('users', USER_COLUMN_MIGRATIONS)):
-        existing = {c['name'] for c in inspector.get_columns(table)}
+    tables = (
+        ('transcription_tasks', TASK_COLUMN_MIGRATIONS),
+        ('users', USER_COLUMN_MIGRATIONS),
+        ('credit_purchases', CREDIT_PURCHASE_COLUMN_MIGRATIONS),
+    )
+    for table, migrations in tables:
+        try:
+            existing = {c['name'] for c in inspector.get_columns(table)}
+        except Exception:
+            # Table not created yet (or inspector stub without the table).
+            continue
         for column, ddl_type in migrations.items():
             if column in existing:
                 continue
@@ -5050,6 +5459,10 @@ def ensure_credit_purchases_table():
     ``db.create_all()`` uses check-then-create, so two workers that both see the
     table as absent can both run CREATE and the loser dies on "already exists".
     ``CREATE TABLE IF NOT EXISTS`` makes that race a no-op.
+
+    Also applies CREDIT_PURCHASE_COLUMN_MIGRATIONS and the payment_intent index
+    so an existing table from the first Stripe ship picks up the hardening
+    columns without a separate migration framework.
     """
     from sqlalchemy.exc import OperationalError
 
@@ -5057,12 +5470,21 @@ def ensure_credit_purchases_table():
         db.session.execute(text("""
             CREATE TABLE IF NOT EXISTS credit_purchases (
                 id INTEGER NOT NULL PRIMARY KEY,
-                user_id INTEGER NOT NULL,
+                user_id INTEGER,
                 stripe_session_id VARCHAR(255) NOT NULL UNIQUE,
                 stripe_event_id VARCHAR(255),
+                stripe_payment_intent_id VARCHAR(255),
                 amount_cents INTEGER NOT NULL,
+                amount_subtotal_cents INTEGER,
+                amount_tax_cents INTEGER,
+                amount_total_cents INTEGER,
                 currency VARCHAR(16) NOT NULL,
+                customer_country VARCHAR(2),
                 minutes INTEGER NOT NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'credited',
+                seconds_clawed_back INTEGER NOT NULL DEFAULT 0,
+                amount_refunded_cents INTEGER NOT NULL DEFAULT 0,
+                refunded_at DATETIME,
                 created_at DATETIME,
                 FOREIGN KEY(user_id) REFERENCES users (id)
             )
@@ -5070,6 +5492,10 @@ def ensure_credit_purchases_table():
         db.session.execute(text(
             'CREATE INDEX IF NOT EXISTS ix_credit_purchases_user_id '
             'ON credit_purchases (user_id)'
+        ))
+        db.session.execute(text(
+            'CREATE INDEX IF NOT EXISTS ix_credit_purchases_stripe_payment_intent_id '
+            'ON credit_purchases (stripe_payment_intent_id)'
         ))
         db.session.commit()
     except OperationalError as exc:
@@ -5080,12 +5506,47 @@ def ensure_credit_purchases_table():
         app.logger.info(
             'credit_purchases was created by another worker; continuing')
 
+    # Additive column upgrades for tables created by the first Stripe ship.
+    from sqlalchemy.exc import OperationalError
+    inspector = sa_inspect(db.engine)
+    try:
+        existing = {c['name'] for c in inspector.get_columns('credit_purchases')}
+    except Exception:
+        return
+    for column, ddl_type in CREDIT_PURCHASE_COLUMN_MIGRATIONS.items():
+        if column in existing:
+            continue
+        try:
+            db.session.execute(text(
+                f'ALTER TABLE credit_purchases ADD COLUMN {column} {ddl_type}'
+            ))
+            db.session.commit()
+        except OperationalError as exc:
+            db.session.rollback()
+            if 'duplicate column name' not in str(exc).lower():
+                raise
+            app.logger.info(
+                'credit_purchases.%s was added by another worker; continuing',
+                column)
+    try:
+        db.session.execute(text(
+            'CREATE INDEX IF NOT EXISTS ix_credit_purchases_stripe_payment_intent_id '
+            'ON credit_purchases (stripe_payment_intent_id)'
+        ))
+        db.session.commit()
+    except OperationalError:
+        db.session.rollback()
+
 
 with app.app_context():
     db.create_all()
     ensure_credit_purchases_table()
 
     apply_column_migrations()
+    if STRIPE_AUTOMATIC_TAX and not STRIPE_PRICE_ID:
+        app.logger.warning(
+            'STRIPE_AUTOMATIC_TAX is on but STRIPE_PRICE_ID is unset; '
+            'prefer a Dashboard Price with tax_behavior set explicitly')
     inspector = sa_inspect(db.engine)
 
     # Transcription runs in a daemon thread, so a deploy or crash leaves tasks
