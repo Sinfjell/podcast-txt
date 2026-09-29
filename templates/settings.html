@@ -4,7 +4,91 @@
 {% block content %}
 <div style="max-width: 500px; margin: 24px auto;">
     <h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">Settings</h2>
-    <div class="card">
+
+    {% if trial %}
+    <div class="card" id="credits">
+        <div class="card-header">
+            <h5>Minutes{% if trial.paid_minutes or trial.stripe_buy %} &amp; credits{% endif %}</h5>
+        </div>
+        <div class="card-body">
+            {% if trial.on_own_key %}
+            <p style="color: var(--muted); font-size: 14px; line-height: 1.6;">
+                You're on your own OpenAI key, so Podskrift is free — OpenAI bills you
+                directly (about ${{ openai_hourly_cost }} per hour of audio). Nothing is counted against the trial.
+                {{ trial.remaining_minutes }} of {{ trial.limit_minutes }} trial minutes are still
+                unused if you ever remove your key.
+                {% if trial.paid_minutes %}
+                You also have <strong>{{ trial.paid_minutes }}</strong> paid minutes waiting.
+                {% endif %}
+            </p>
+            {% else %}
+            <p style="font-size: 15px; margin-bottom: 6px;">
+                <strong>{{ trial.total_minutes }}</strong> minutes available
+                <span style="color: var(--muted); font-size: 13px;">
+                    ({{ trial.remaining_minutes }} free
+                    {% if trial.paid_minutes %}+ {{ trial.paid_minutes }} paid{% endif %})
+                </span>
+            </p>
+            {% if trial.limit_minutes %}
+            <div style="height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; margin-bottom: 12px;">
+                <div style="height: 100%; border-radius: 4px; background: {% if trial.exhausted %}var(--error){% elif trial.low_balance %}var(--warning){% else %}var(--accent-bright){% endif %};
+                            width: {{ (100 * trial.used_minutes / trial.limit_minutes) if trial.limit_minutes else 0 }}%;"></div>
+            </div>
+            {% endif %}
+            {% if trial.stripe_buy %}
+            <p style="font-size: 14px; margin-bottom: 10px;">
+                ${{ credit_pack_price_usd }} · {{ credit_pack_minutes }} minutes · one-time · VAT included
+            </p>
+            <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline-block; margin: 0 8px 8px 0;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="source" value="settings">
+                <button type="submit" class="btn btn-primary">{{ trial.buy_label }}</button>
+            </form>
+            <p class="form-hint" style="display: inline; margin: 0;">{{ credit_pack_subline }}</p>
+            <p class="form-hint" style="margin-top: 10px;">
+                <a href="{{ url_for('terms') }}">Terms &amp; refunds</a>
+                · <a href="{{ url_for('pricing') }}">Pricing</a>
+            </p>
+            {% endif %}
+            <div class="form-hint" style="margin-top: 12px;">
+                {% if trial.exhausted %}
+                <p style="margin: 0 0 8px;">Your trial is used up.
+                <a href="#openai">Add your own OpenAI API key</a>
+                — the app is free; OpenAI bills you (about ${{ openai_hourly_cost }} per hour of audio).</p>
+                {% else %}
+                <p style="margin: 0;">
+                Trial minutes run on our OpenAI key, and are counted on the audio we
+                actually transcribed. Paid minutes are used after free trial minutes.
+                Prefer your own key? Add it below — Podskrift stays free;
+                OpenAI bills you for Whisper.
+                </p>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    {% elif stripe_buy_enabled and current_user.is_authenticated and not current_user.openai_api_key %}
+    <div class="card" id="credits">
+        <div class="card-header"><h5>Paid minutes</h5></div>
+        <div class="card-body">
+            <p style="font-size: 14px; margin-bottom: 10px;">
+                ${{ credit_pack_price_usd }} · {{ credit_pack_minutes }} minutes · one-time · VAT included
+            </p>
+            <form method="POST" action="{{ url_for('billing_checkout') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="source" value="settings">
+                <button type="submit" class="btn btn-primary">{{ credit_pack_label }}</button>
+            </form>
+            <p class="form-hint" style="margin-top: 8px;">{{ credit_pack_subline }}</p>
+            <p class="form-hint" style="margin-top: 10px;">
+                <a href="{{ url_for('terms') }}">Terms &amp; refunds</a>
+                · <a href="{{ url_for('pricing') }}">Pricing</a>
+            </p>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="card" style="margin-top: 16px;">
         <div class="card-body">
             <form method="POST">
                 <div class="form-group">
@@ -52,91 +136,6 @@
             {% endif %}
         </div>
     </div>
-
-    {% if trial %}
-    <div class="card" style="margin-top: 16px;" id="credits">
-        <div class="card-header">
-            <h5>Free trial{% if trial.paid_minutes %} &amp; paid minutes{% endif %}</h5>
-        </div>
-        <div class="card-body">
-            {% if trial.on_own_key %}
-            <p style="color: var(--muted); font-size: 14px; line-height: 1.6;">
-                You're on your own OpenAI key, so Podskrift is free — OpenAI bills you
-                directly (about ${{ openai_hourly_cost }} per hour of audio). Nothing is counted against the trial.
-                {{ trial.remaining_minutes }} of {{ trial.limit_minutes }} trial minutes are still
-                unused if you ever remove your key.
-                {% if trial.paid_minutes %}
-                You also have <strong>{{ trial.paid_minutes }}</strong> paid minutes waiting.
-                {% endif %}
-            </p>
-            {% else %}
-            <p style="font-size: 14px; margin-bottom: 10px;">
-                <strong>{{ trial.remaining_minutes }}</strong> of {{ trial.limit_minutes }} free
-                audio minutes left.
-                {% if trial.paid_minutes %}
-                · <strong>{{ trial.paid_minutes }}</strong> paid minutes left.
-                {% endif %}
-            </p>
-            {% if trial.limit_minutes %}
-            <div style="height: 8px; border-radius: 4px; background: var(--border); overflow: hidden;">
-                <div style="height: 100%; border-radius: 4px; background: {% if trial.exhausted %}var(--error){% else %}var(--accent-bright){% endif %};
-                            width: {{ (100 * trial.used_minutes / trial.limit_minutes) if trial.limit_minutes else 0 }}%;"></div>
-            </div>
-            {% endif %}
-            <div class="form-hint" style="margin-top: 10px;">
-                {% if trial.exhausted %}
-                <p style="margin: 0 0 8px;">Your trial is used up.</p>
-                {% if trial.stripe_buy %}
-                <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline-block; margin: 0 8px 8px 0;">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <input type="hidden" name="source" value="settings">
-                    <button type="submit" class="btn btn-primary">{{ trial.buy_label }}</button>
-                </form>
-                <span class="form-hint" style="display: inline; margin: 0;">
-                    <a href="{{ url_for('terms') }}">Terms &amp; refunds</a>
-                </span>
-                {% endif %}
-                <a href="#openai">Add your own OpenAI API key</a>
-                — the app is free; OpenAI bills you (about ${{ openai_hourly_cost }} per hour of audio).
-                {% else %}
-                <p style="margin: 0;">
-                Trial minutes run on our OpenAI key, and are counted on the audio we
-                actually transcribed. Paid minutes are used after free trial minutes.
-                A job that fails part-way keeps only the minutes already sent for
-                transcription; one that fails before it starts costs you nothing.
-                Prefer your own key? Add it above — Podskrift stays free;
-                OpenAI bills you for Whisper.
-                </p>
-                {% if trial.stripe_buy %}
-                <form method="POST" action="{{ url_for('billing_checkout') }}" style="margin-top: 12px;">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <input type="hidden" name="source" value="settings">
-                    <button type="submit" class="btn btn-ghost">{{ trial.buy_label }}</button>
-                </form>
-                <p class="form-hint" style="margin-top: 8px;">
-                    <a href="{{ url_for('terms') }}">Terms &amp; refunds</a>
-                </p>
-                {% endif %}
-                {% endif %}
-            </div>
-            {% endif %}
-        </div>
-    </div>
-    {% elif stripe_buy_enabled and current_user.is_authenticated and not current_user.openai_api_key %}
-    <div class="card" style="margin-top: 16px;" id="credits">
-        <div class="card-header"><h5>Paid minutes</h5></div>
-        <div class="card-body">
-            <form method="POST" action="{{ url_for('billing_checkout') }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <input type="hidden" name="source" value="settings">
-                <button type="submit" class="btn btn-primary">{{ credit_pack_label }}</button>
-            </form>
-            <p class="form-hint" style="margin-top: 10px;">
-                <a href="{{ url_for('terms') }}">Terms &amp; refunds</a>
-            </p>
-        </div>
-    </div>
-    {% endif %}
 
     <div class="card" style="margin-top: 16px;">
         <div class="card-header">

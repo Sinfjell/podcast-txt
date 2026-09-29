@@ -6700,3 +6700,153 @@ def test_concurrent_dispute_claws_back_once(stripe_on):
         with pytest.raises(RuntimeError):
             A.handle_dispute(dict(dispute), 'charge.dispute.created')
     assert _paid(uid) == 600
+
+
+# ---------------------------------------------------------------------------
+# Make paying obvious — nav, pricing, low-balance, minutes-error actions
+# ---------------------------------------------------------------------------
+
+def test_nav_shows_minutes_pill_and_buy_when_stripe_on(stripe_on):
+    uid = _make_user('navpill@test.com', limit=180 * 60, used=60 * 60)
+    body = _login(uid).get('/').data.decode()
+    assert 'class="nav-balance"' in body
+    assert '120 min left' in body  # 180 - 60
+    assert 'class="nav-buy"' in body
+    assert 'Buy minutes' in body
+    assert '/settings#credits' in body
+
+
+def test_nav_hides_buy_when_stripe_off(trial_on):
+    uid = _make_user('navnobuy@test.com', limit=180 * 60, used=0)
+    body = _login(uid).get('/').data.decode()
+    assert 'class="nav-balance"' in body
+    assert 'class="nav-buy"' not in body
+
+
+def test_nav_hides_pill_and_buy_for_own_key_users(stripe_on):
+    uid = _make_user('navkey@test.com', key='sk-' + 'n' * 40, limit=180 * 60, used=0)
+    body = _login(uid).get('/').data.decode()
+    assert 'class="nav-balance"' not in body
+    assert 'class="nav-buy"' not in body
+    assert 'Buy minutes' not in body
+
+
+def test_anon_nav_has_pricing_link(trial_on):
+    body = A.app.test_client().get('/').data.decode()
+    assert 'href="/pricing"' in body or "/pricing" in body
+    assert '>Pricing<' in body
+
+
+def test_pricing_page_renders_without_stripe(trial_on):
+    resp = A.app.test_client().get('/pricing')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'Free trial' in body
+    assert '300' in body and '$5' in body
+    assert 'VAT' in body
+    assert 'one-time' in body.lower() or 'One-time' in body
+    assert 'Create free account' in body or 'own OpenAI' in body
+    assert 'Buy 5 hours for $5' not in body  # Buy POST only when configured + logged in
+    assert '/terms' in body
+
+
+def test_pricing_page_buy_when_logged_in_with_stripe(stripe_on):
+    uid = _make_user('pricebuy@test.com', limit=600, used=0)
+    body = _login(uid).get('/pricing').data.decode()
+    assert 'Buy 5 hours for $5' in body
+    assert 'billing/checkout' in body
+    assert 'csrf_token' in body
+    assert 'One-time · 300 min · VAT incl.' in body
+
+
+def test_pricing_hides_buy_for_own_key_user(stripe_on):
+    uid = _make_user('pricekey@test.com', key='sk-' + 'p' * 40, limit=600, used=0)
+    body = _login(uid).get('/pricing').data.decode()
+    assert 'Buy 5 hours for $5' not in body
+    assert 'Add OpenAI key' in body or 'own OpenAI' in body
+
+
+def test_pricing_in_sitemap_and_llms(trial_on):
+    sitemap = A.app.test_client().get('/sitemap.xml').data.decode()
+    assert '/pricing' in sitemap
+    llms = A.app.test_client().get('/llms.txt').data.decode()
+    assert 'Pricing' in llms
+    assert '/pricing' in llms
+
+
+def test_low_balance_banner_on_index(stripe_on):
+    # 20 min left (< 30) → gentle Running low nudge
+    uid = _make_user('lowbal@test.com', limit=180 * 60, used=160 * 60)
+    body = _login(uid).get('/').data.decode()
+    assert 'Running low' in body
+    assert 'Buy minutes' in body
+
+
+def test_settings_credits_above_openai_and_primary_buy(stripe_on):
+    uid = _make_user('setcred@test.com', limit=600, used=0)
+    body = _login(uid).get('/settings').data.decode()
+    credits_at = body.index('id="credits"')
+    openai_at = body.index('id="openai"')
+    assert credits_at < openai_at, 'credits card should sit above the OpenAI key form'
+    assert 'btn-primary' in body[credits_at:openai_at]
+    assert '$5 · 300 minutes · one-time · VAT included' in body
+    assert 'minutes available' in body
+
+
+def test_transcription_status_flags_minutes_error(stripe_on):
+    from models import db, TranscriptionTask
+    uid = _make_user('minerr@test.com', limit=600, used=600)
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='min-err-1', user_id=uid, episode_title='Ep',
+            status='error', phase='error',
+            error_message=(
+                'This episode is about 45 minutes — longer than the 0 free '
+                'minutes you have left. Pick a shorter episode, Buy 5 hours '
+                'for $5, or add your own OpenAI API key.'
+            ),
+        ))
+        db.session.commit()
+    client = _login(uid)
+    resp = client.get('/status/min-err-1')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data.get('minutes_error') is True
+    assert data.get('buy_available') is True
+    assert data.get('buy_label') == 'Buy 5 hours for $5'
+
+
+def test_transcription_status_no_minutes_flag_on_generic_error(stripe_on):
+    from models import db, TranscriptionTask
+    uid = _make_user('generr@test.com', limit=600, used=0)
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='gen-err-1', user_id=uid, episode_title='Ep',
+            status='error', phase='error',
+            error_message='Download failed: connection reset',
+        ))
+        db.session.commit()
+    data = _login(uid).get('/status/gen-err-1').get_json()
+    assert data.get('minutes_error') is not True
+    assert data.get('buy_available') is None
+
+
+def test_index_mentions_pack_when_stripe_on(stripe_on):
+    body = A.app.test_client().get('/').data.decode()
+    assert '$5' in body
+    assert '300' in body
+    assert 'Pricing' in body or '/pricing' in body
+
+
+def test_episode_selection_uses_inline_error_not_confirm(stripe_on):
+    """402 on Start must show an inline box with Buy — not window.confirm()."""
+    # Render path needs a session with episodes; assert the script shape instead.
+    from models import db, User
+    uid = _make_user('epsel@test.com', limit=600, used=600)
+    # Build a minimal episode_selection by posting parse_rss stub… skip network:
+    # the template source is what ships the confirm→inline change.
+    src = open('templates/episode_selection.html').read()
+    assert 'confirm(' not in src
+    assert 'setStartError' in src
+    assert 'startError' in src
+    assert 'Add OpenAI key' in src

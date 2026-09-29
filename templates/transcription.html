@@ -98,6 +98,7 @@
     <div class="alert alert-error" style="flex-direction: column; align-items: flex-start;">
         <strong>Error</strong>
         <span id="errorMessage" class="text-sm" style="margin-top: 4px;"></span>
+        <div id="errorActions" class="hidden" style="margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px;"></div>
     </div>
     <div class="text-center mt-2">
         <a href="{{ url_for('index') }}" class="btn btn-ghost">Start over</a>
@@ -128,12 +129,58 @@
     var maxRetries = 5;
     var transcriptText = '';
     var PHASE_ORDER = ['downloading', 'splitting', 'transcribing', 'completed'];
+    var STRIPE_BUY = {{ stripe_buy_enabled|tojson }};
+    var BUY_LABEL = {{ credit_pack_label|tojson }};
+    var BUY_URL = {{ url_for('billing_checkout')|tojson }};
+    var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
+    var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
 
     var el = function(id) { return document.getElementById(id); };
 
     function show(node, visible) {
         node.classList.toggle('hidden', !visible);
         node.style.display = visible ? '' : 'none';
+    }
+
+    function postBuyForm(source) {
+        var form = document.createElement('form');
+        form.method = 'POST';
+        form.action = BUY_URL;
+        function hidden(name, value) {
+            var input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = name;
+            input.value = value;
+            form.appendChild(input);
+        }
+        hidden('csrf_token', CSRF_TOKEN);
+        hidden('source', source || 'transcription_error');
+        document.body.appendChild(form);
+        form.submit();
+    }
+
+    function renderMinutesActions(d) {
+        var actions = el('errorActions');
+        while (actions.firstChild) actions.removeChild(actions.firstChild);
+        var showActions = !!(d.minutes_error || d.buy_available);
+        if (!showActions) {
+            show(actions, false);
+            return;
+        }
+        if (d.buy_available && STRIPE_BUY) {
+            var buyBtn = document.createElement('button');
+            buyBtn.type = 'button';
+            buyBtn.className = 'btn btn-sm btn-primary';
+            buyBtn.textContent = d.buy_label || BUY_LABEL;
+            buyBtn.addEventListener('click', function() { postBuyForm('transcription_error'); });
+            actions.appendChild(buyBtn);
+        }
+        var keyLink = document.createElement('a');
+        keyLink.href = SETTINGS_OPENAI;
+        keyLink.textContent = 'Add OpenAI key →';
+        keyLink.className = 'btn btn-sm btn-ghost';
+        actions.appendChild(keyLink);
+        show(actions, true);
     }
 
     function fmtDuration(secs) {
@@ -234,6 +281,7 @@
             show(el('progressCard'), false);
             show(el('errorContainer'), true);
             el('errorMessage').textContent = d.error || 'Unknown error';
+            renderMinutesActions(d);
             return;
         }
 
