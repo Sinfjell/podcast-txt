@@ -5442,6 +5442,22 @@ def resolve_spotify():
 # Init
 # ---------------------------------------------------------------------------
 
+def _live_columns(table):
+    """Column names of ``table`` as seen by the session's own connection.
+
+    Uses ``PRAGMA table_info`` through ``db.session`` -- the same connection
+    that runs the ALTER TABLEs -- instead of ``sa_inspect(db.engine)``, which
+    checks out a *different* pooled connection. With WAL and several pooled
+    SQLite connections, that other connection can report a stale schema, so
+    a missing column looked present and was silently skipped (PODSKRIFT-6
+    follow-up). Returns an empty set when the table does not exist.
+    ``table`` is always a hard-coded name, never user input.
+    """
+    rows = db.session.execute(text(f'PRAGMA table_info({table})')).fetchall()
+    db.session.commit()
+    return {row[1] for row in rows}
+
+
 def apply_column_migrations():
     """Add columns missing from an existing database. Safe to run concurrently.
 
@@ -5459,7 +5475,6 @@ def apply_column_migrations():
     """
     from sqlalchemy.exc import OperationalError
 
-    inspector = sa_inspect(db.engine)
     added = []
     tables = (
         ('transcription_tasks', TASK_COLUMN_MIGRATIONS),
@@ -5467,10 +5482,9 @@ def apply_column_migrations():
         ('credit_purchases', CREDIT_PURCHASE_COLUMN_MIGRATIONS),
     )
     for table, migrations in tables:
-        try:
-            existing = {c['name'] for c in inspector.get_columns(table)}
-        except Exception:
-            # Table not created yet (or inspector stub without the table).
+        existing = _live_columns(table)
+        if not existing:
+            # Table not created yet.
             continue
         for column, ddl_type in migrations.items():
             if column in existing:
@@ -5543,11 +5557,9 @@ def ensure_credit_purchases_table():
             'credit_purchases was created by another worker; continuing')
 
     # Additive column upgrades for tables created by the first Stripe ship.
-    from sqlalchemy.exc import OperationalError
-    inspector = sa_inspect(db.engine)
-    try:
-        existing = {c['name'] for c in inspector.get_columns('credit_purchases')}
-    except Exception:
+    # Read on the session's connection, the one that runs the ALTERs below.
+    existing = _live_columns('credit_purchases')
+    if not existing:
         return
     for column, ddl_type in CREDIT_PURCHASE_COLUMN_MIGRATIONS.items():
         if column in existing:
