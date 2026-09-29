@@ -5518,9 +5518,18 @@ def test_safe_next_url_rejects_off_site_targets():
     with A.app.test_request_context('/'):
         assert A.safe_next_url('/resume-transcription') == '/resume-transcription'
         assert A.safe_next_url('/settings#openai') == '/settings#openai'
-        assert A.safe_next_url('https://evil.example/phish') == '/'
-        assert A.safe_next_url('//evil.example/phish') == '/'
+        assert A.safe_next_url('/some/path?x=1') == '/some/path?x=1'
+        assert A.safe_next_url('/') == '/'
+        # Absolute / protocol-relative
+        assert A.safe_next_url('https://evil.com') == '/'
+        assert A.safe_next_url('//evil.com') == '/'
         assert A.safe_next_url('https://evil.example/phish', default='/x') == '/x'
+        # Backslash open-redirect tricks (browsers treat \ as /)
+        assert A.safe_next_url('/\\evil.com') == '/'
+        assert A.safe_next_url('/\\/evil.com') == '/'
+        assert A.safe_next_url('/%5Cevil.com') == '/'
+        assert A.safe_next_url('/%5C/evil.com') == '/'
+        assert A.safe_next_url('/%255Cevil.com') == '/'  # double-encoded \
         assert A.safe_next_url(None) == '/'
         assert A.safe_next_url('') == '/'
 
@@ -5718,9 +5727,11 @@ def test_anon_homepage_exposes_new_account_trial_badge(trial_on):
 
 
 def test_default_trial_grant_is_three_hours():
-    """New-account allowance is 180 minutes; the per-episode cap stays 180 too."""
+    """New-account allowance is 180 minutes; the per-episode cap stays in lockstep.
+    Global lifetime ceiling is 1800 minutes (~10 full grants)."""
     assert A.TRIAL_DEFAULT_SECONDS == 180 * 60
-    assert A.TRIAL_MAX_EPISODE_SECONDS == 180 * 60
+    assert A.TRIAL_MAX_EPISODE_SECONDS == A.TRIAL_DEFAULT_SECONDS
+    assert A.TRIAL_GLOBAL_SECONDS == 1800 * 60
 
 
 def test_null_limit_accounts_pick_up_the_raised_default(monkeypatch, trial_on):

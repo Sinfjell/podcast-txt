@@ -37,9 +37,9 @@ if not os.path.exists(certifi.where()):
         os.environ.setdefault('REQUESTS_CA_BUNDLE', _sys_ca)
         os.environ.setdefault('SSL_CERT_FILE', _sys_ca)
 from flask import (Flask, render_template, request, jsonify, send_file, flash,
-                   redirect, url_for, Response, g, session)
+                   redirect, url_for, Response, g, session, has_request_context)
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, unquote
 import uuid
 from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError, APITimeoutError
@@ -174,21 +174,51 @@ PENDING_TRANSCRIPTION_KEY = 'pending_transcription'
 def safe_next_url(candidate, default=None):
     """Allow only same-origin relative paths. Reject open redirects.
 
-    Absolute URLs, protocol-relative `//evil`, and empty values fall back to
-    `default` (or the homepage). Flask-Login and our register/login forms all
-    pass `?next=` through here.
+    Absolute URLs, protocol-relative `//evil`, backslash tricks that browsers
+    treat as `/` (`/\\evil.com`, `/%5Cevil.com`), and control characters all
+    fall back to `default` (or the homepage). Flask-Login and our
+    register/login forms all pass `?next=` through here.
     """
     fallback = default if default is not None else '/'
     if not candidate or not isinstance(candidate, str):
         return fallback
-    candidate = candidate.strip()
-    # Path-only, same origin: starts with a single slash, never //host.
-    if not candidate.startswith('/') or candidate.startswith('//'):
+    raw = candidate.strip()
+    # Decode twice so /%5Cevil and /%255Cevil are caught the same as /\evil.
+    decoded = unquote(unquote(raw))
+    if any(ord(ch) < 32 or ch == '\\' for ch in decoded):
         return fallback
-    parsed = urlparse(candidate)
+    # Path-only: a single leading slash, then a character that is not / or \.
+    if not decoded.startswith('/') or len(decoded) < 2 or decoded[1] in '/\\':
+        # "/" alone is fine (home); anything else must be /<non-slash>.
+        if decoded != '/':
+            return fallback
+    parsed = urlparse(decoded)
     if parsed.scheme or parsed.netloc:
         return fallback
-    return candidate
+    # Rebuild from path/query/fragment only — never trust a smuggled host.
+    path = parsed.path or '/'
+    if any(ord(ch) < 32 or ch == '\\' for ch in path):
+        return fallback
+    if not path.startswith('/') or path.startswith('//'):
+        return fallback
+    if path != '/' and path[1:2] in ('/', '\\'):
+        return fallback
+    safe = path
+    if parsed.query:
+        if any(ord(ch) < 32 or ch == '\\' for ch in parsed.query):
+            return fallback
+        safe += '?' + parsed.query
+    if parsed.fragment:
+        if any(ord(ch) < 32 or ch == '\\' for ch in parsed.fragment):
+            return fallback
+        safe += '#' + parsed.fragment
+    # When a request is active, resolve against the current host and require
+    # the netloc to stay put (catches any remaining join tricks).
+    if has_request_context():
+        absolute = urljoin(request.host_url, safe)
+        if urlparse(absolute).netloc.lower() != urlparse(request.host_url).netloc.lower():
+            return fallback
+    return safe
 
 
 def trial_estimate_seconds(duration_min):
@@ -407,13 +437,17 @@ def _env_minutes(name, default):
 TRIAL_DEFAULT_SECONDS = _env_minutes('TRIAL_MINUTES', 180) * 60
 #: Hard ceiling on trial minutes across ALL accounts. Without this, the per-user
 #: cap bounds nothing -- signups are free, so N accounts cost N x the grant.
-TRIAL_GLOBAL_SECONDS = _env_minutes('TRIAL_GLOBAL_MINUTES', 600) * 60
+#: Lifetime (not daily/monthly): nothing resets it on a schedule. Counts minutes
+#: actually spent; a refused/failed-before-Whisper job releases its reservation.
+TRIAL_GLOBAL_SECONDS = _env_minutes('TRIAL_GLOBAL_MINUTES', 1800) * 60
 #: What to reserve when the feed publishes no itunes:duration. Reconciled
 #: against the real duration after download, before a single Whisper call.
 TRIAL_UNKNOWN_ESTIMATE_SECONDS = _env_minutes('TRIAL_UNKNOWN_ESTIMATE_MINUTES', 30) * 60
-#: Longest single episode the trial will take on, so one four-hour interview
-#: cannot swallow an entire allowance in one go.
-TRIAL_MAX_EPISODE_SECONDS = _env_minutes('TRIAL_MAX_EPISODE_MINUTES', 180) * 60
+#: Longest single episode the trial will take on. Default tracks TRIAL_MINUTES
+#: so a new account's grant can cover one max-length episode; set the env var
+#: explicitly if you want them different.
+TRIAL_MAX_EPISODE_SECONDS = _env_minutes(
+    'TRIAL_MAX_EPISODE_MINUTES', TRIAL_DEFAULT_SECONDS // 60) * 60
 #: Kill switch. Set TRIAL_ENABLED=0 to stop handing out our key entirely.
 TRIAL_ENABLED = os.getenv('TRIAL_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 
