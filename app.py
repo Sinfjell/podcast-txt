@@ -496,6 +496,11 @@ STRIPE_AUTOMATIC_TAX = os.getenv('STRIPE_AUTOMATIC_TAX', '0').strip().lower() in
     '1', 'true', 'yes', 'on')
 STRIPE_TAX_CODE = (os.getenv('STRIPE_TAX_CODE') or 'txcd_10103000').strip()
 STRIPE_TAX_BEHAVIOR = (os.getenv('STRIPE_TAX_BEHAVIOR') or 'inclusive').strip().lower()
+#: Stripe as merchant of record: it computes, collects and remits VAT/sales
+#: tax, so we need no OSS/UK/MVA registrations. Needs Managed Payments enabled
+#: in the Dashboard first, and replaces STRIPE_AUTOMATIC_TAX when both are on.
+STRIPE_MANAGED_PAYMENTS = os.getenv('STRIPE_MANAGED_PAYMENTS', '0').strip().lower() in (
+    '1', 'true', 'yes', 'on')
 #: One-time pack: 300 minutes (5 hours) for $5.00 USD.
 CREDIT_PACK_MINUTES = 300
 CREDIT_PACK_SECONDS = CREDIT_PACK_MINUTES * 60
@@ -2407,6 +2412,33 @@ def _clawback_paid_seconds(user_id, seconds):
     return take
 
 
+def _claim_purchase_snapshot(purchase):
+    """Lock the refund state this worker computed from, or fail loudly.
+
+    Refund and dispute handlers read the purchase, compute a claw-back from
+    it, then write. Two gunicorn workers handling a redelivered event both read
+    the same snapshot and would both claw back. This conditional UPDATE takes
+    SQLite's write lock and only matches if nobody moved the row since we read
+    it; the loser raises, the webhook answers 500, and Stripe's redelivery
+    recomputes from the winner's state.
+    """
+    moved = db.session.execute(text("""
+        UPDATE credit_purchases SET status = status
+         WHERE id = :pid
+           AND COALESCE(amount_refunded_cents, 0) = :refunded
+           AND COALESCE(seconds_clawed_back, 0) = :clawed
+           AND status = :status
+    """), {
+        'pid': purchase.id,
+        'refunded': int(purchase.amount_refunded_cents or 0),
+        'clawed': int(purchase.seconds_clawed_back or 0),
+        'status': purchase.status,
+    })
+    if moved.rowcount != 1:
+        db.session.rollback()
+        raise RuntimeError(f'purchase {purchase.id} changed under a concurrent refund')
+
+
 def handle_charge_refunded(charge_dict, event_id=None):
     """Claw back unused paid minutes pro rata to the newly refunded fraction.
 
@@ -2446,6 +2478,7 @@ def handle_charge_refunded(charge_dict, event_id=None):
     delta = amount_refunded - already
     if delta <= 0 or amount_captured <= 0:
         return False
+    _claim_purchase_snapshot(purchase)
     pack_seconds = int(purchase.minutes or 0) * 60
     remaining = pack_seconds - int(purchase.seconds_clawed_back or 0)
     if remaining <= 0:
@@ -2504,6 +2537,7 @@ def handle_dispute(dispute_dict, event_type, event_id=None):
         return False
     if purchase.status == 'disputed':
         return False
+    _claim_purchase_snapshot(purchase)
     pack_seconds = int(purchase.minutes or 0) * 60
     remaining = pack_seconds - int(purchase.seconds_clawed_back or 0)
     taken = _clawback_paid_seconds(purchase.user_id, remaining)
@@ -2654,7 +2688,10 @@ def billing_checkout():
             },
         },
     }
-    if STRIPE_AUTOMATIC_TAX:
+    if STRIPE_MANAGED_PAYMENTS:
+        # Managed Payments rejects automatic_tax: Stripe owns the tax.
+        params['managed_payments'] = {'enabled': True}
+    elif STRIPE_AUTOMATIC_TAX:
         params['automatic_tax'] = {'enabled': True}
 
     try:
@@ -5544,6 +5581,10 @@ with app.app_context():
     ensure_credit_purchases_table()
 
     apply_column_migrations()
+    if STRIPE_MANAGED_PAYMENTS and STRIPE_AUTOMATIC_TAX:
+        app.logger.warning(
+            'STRIPE_MANAGED_PAYMENTS and STRIPE_AUTOMATIC_TAX are both on; '
+            'Managed Payments wins and automatic_tax is not sent')
     if STRIPE_AUTOMATIC_TAX and not STRIPE_PRICE_ID:
         app.logger.warning(
             'STRIPE_AUTOMATIC_TAX is on but STRIPE_PRICE_ID is unset; '
