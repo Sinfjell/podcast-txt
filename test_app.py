@@ -6337,11 +6337,14 @@ def test_refund_finds_a_purchase_recorded_before_payment_intents(stripe_on):
                        _paid_session(uid, 'cs_legacy', payment_intent=None)))
     assert _paid(uid) == 18000
 
-    class Listed:
-        data = [{'id': 'cs_legacy'}]
-
+    import stripe as real_stripe
+    # The real SDK's list items are Session objects, not dicts.
+    listed = real_stripe.ListObject.construct_from(
+        {'object': 'list', 'data': [{'id': 'cs_legacy', 'object': 'checkout.session'}]},
+        'sk_test_fake')
+    assert not isinstance(listed.data[0], dict)
     A.stripe.checkout.Session.list = staticmethod(
-        lambda **kw: Listed if kw.get('payment_intent') == 'pi_legacy' else None)
+        lambda **kw: listed if kw.get('payment_intent') == 'pi_legacy' else None)
     assert _post_event(_refund('pi_legacy', 500)).status_code == 200
     assert _paid(uid) == 0
     with A.app.app_context():
@@ -6403,3 +6406,54 @@ def test_purchase_columns_are_added_to_an_existing_table(trial_on):
         added = A.apply_column_migrations()
         assert set(added) == {'credit_purchases.stripe_payment_intent_id',
                               'credit_purchases.refunded_seconds'}
+
+
+def test_pre_basil_endpoint_payload_still_credits(stripe_on):
+    """Webhook payloads render in the endpoint's API version. Before basil,
+    Adaptive Pricing put the customer's currency in `currency` and ours under
+    currency_conversion; a Norwegian buyer must still get the pack."""
+    uid = _make_user('prebasil@test.com')
+    obj = _paid_session(uid, 'cs_prebasil', currency='nok',
+                        amount_subtotal=5400, amount_total=5400,
+                        currency_conversion={'source_currency': 'usd',
+                                             'amount_subtotal': 500,
+                                             'amount_total': 500})
+    assert _post_event(_event('checkout.session.completed', obj)).status_code == 200
+    assert _paid(uid) == 300 * 60
+    wrong = _paid_session(uid, 'cs_prebasil_wrong', currency='nok',
+                          amount_subtotal=500,
+                          currency_conversion={'source_currency': 'usd',
+                                               'amount_subtotal': 100})
+    assert _post_event(_event('checkout.session.completed', wrong)).status_code == 200
+    assert _paid(uid) == 300 * 60
+
+
+def test_refund_compare_and_set_survives_a_concurrent_worker(stripe_on, monkeypatch):
+    """Two workers: this one reads refunded_seconds=0, then the other commits
+    9000 before our UPDATE. Without the compare-and-set on the old value we
+    would debit 18000 - 0 and take the other worker's 9000 a second time."""
+    from models import db, CreditPurchase
+    uid = _make_user('refundrace@test.com')
+    _post_event(_event('checkout.session.completed', _paid_session(uid, 'cs_race')))
+    with A.app.app_context():
+        pid = CreditPurchase.query.filter_by(stripe_session_id='cs_race').one().id
+        db.session.execute(A.text(
+            'UPDATE credit_purchases SET refunded_seconds = 9000 WHERE id = :pid'),
+            {'pid': pid})
+        db.session.commit()
+        real_execute = db.session.execute
+        stale = {'served': False}
+
+        class StaleRead:
+            def scalar(self):
+                return 0
+
+        def execute(stmt, *args, **kwargs):
+            if 'SELECT COALESCE(refunded_seconds' in str(stmt) and not stale['served']:
+                stale['served'] = True  # first read predates the other commit
+                return StaleRead()
+            return real_execute(stmt, *args, **kwargs)
+
+        monkeypatch.setattr(db.session, 'execute', execute)
+        assert A._advance_refunded_seconds(pid, 18000) == 9000
+        assert stale['served']

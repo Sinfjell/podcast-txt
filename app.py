@@ -2147,14 +2147,18 @@ def credit_user_from_checkout_session(session_obj, event_id=None):
     # defaults that would credit minutes for a mismatched Checkout Session.
     # The subtotal is the price we set, before tax: amount_total grows by the
     # VAT when a price is tax-exclusive, and a paid pack must still credit.
-    # Adaptive Pricing leaves both in our currency (API 2025-03-31.basil+);
-    # what the customer saw lives under presentment_details.
+    # Adaptive Pricing leaves both in our currency from API 2025-03-31.basil.
+    # Payloads render in the webhook endpoint's API version, so an older
+    # endpoint reports the customer's currency and keeps ours under
+    # currency_conversion.
+    source = session_obj.get('currency_conversion') or {}
+    priced = source if source.get('source_currency') else session_obj
     try:
-        subtotal = int(session_obj.get('amount_subtotal'))
+        subtotal = int(priced.get('amount_subtotal'))
     except (TypeError, ValueError):
         app.logger.error('Stripe session %s missing amount_subtotal', session_id)
         return False
-    currency = (session_obj.get('currency') or '').lower()
+    currency = (priced.get('source_currency') or priced.get('currency') or '').lower()
     if subtotal != CREDIT_PACK_AMOUNT_CENTS or currency != CREDIT_PACK_CURRENCY:
         app.logger.error(
             'Stripe session %s amount/currency mismatch: %s %s (expected %s %s)',
@@ -2162,7 +2166,7 @@ def credit_user_from_checkout_session(session_obj, event_id=None):
             CREDIT_PACK_AMOUNT_CENTS, CREDIT_PACK_CURRENCY)
         return False
     try:
-        amount = int(session_obj.get('amount_total'))
+        amount = int(priced.get('amount_total'))
     except (TypeError, ValueError):
         amount = subtotal
     metadata = session_obj.get('metadata') or {}
@@ -2216,9 +2220,14 @@ def credit_user_from_checkout_session(session_obj, event_id=None):
 
 
 def _stripe_id(value):
-    """An object reference as its id, whether Stripe sent it expanded or not."""
+    """An object reference as its id: a bare id, a dict, or an SDK object.
+
+    stripe-python 13+ objects are not dicts, so both shapes need handling.
+    """
     if isinstance(value, dict):
         value = value.get('id')
+    elif value is not None and not isinstance(value, str):
+        value = getattr(value, 'id', None)
     return value or None
 
 
@@ -2234,7 +2243,7 @@ def _purchase_for_payment_intent(payment_intent_id):
         return purchase
     stripe.api_key = STRIPE_SECRET_KEY
     sessions = stripe.checkout.Session.list(payment_intent=payment_intent_id, limit=1)
-    data = sessions.get('data') if isinstance(sessions, dict) else sessions.data
+    data = sessions.get('data') if isinstance(sessions, dict) else getattr(sessions, 'data', None)
     if not data:
         return None
     purchase = CreditPurchase.query.filter_by(
