@@ -49,8 +49,9 @@ def init_posthog(**overrides):
     options = dict(
         project_api_key=key,
         host=host,
-        # Privacy: do not sync person properties we never set; events carry
-        # distinct_id only.
+        # sync_mode=False: queue events and flush asynchronously (default SDK
+        # behaviour). True would flush each capture() synchronously before
+        # returning — slower request paths, not a person-property privacy flag.
         sync_mode=False,
     )
     options.update(overrides)
@@ -66,20 +67,28 @@ def get_client():
     return None if _client is False else _client
 
 
-def capture(event, distinct_id, properties=None):
+def capture(event, distinct_id, properties=None, uuid=None):
     """Fire a named event. Never raises. No-op when disabled.
 
     Callers must not pass email, keys, passwords, or transcript text.
+    Optional `uuid` is passed through for idempotent dedupe when the SDK
+    supports it.
     """
-    client = get_client()
-    if client is None or not distinct_id:
+    if not distinct_id:
         return
     try:
-        client.capture(
-            event,
-            distinct_id=str(distinct_id),
-            properties=dict(properties or {}),
-        )
+        client = get_client()
+        if client is None:
+            return
+        props = dict(properties or {})
+        props['app'] = 'podskrift'
+        kwargs = {
+            'distinct_id': str(distinct_id),
+            'properties': props,
+        }
+        if uuid is not None:
+            kwargs['uuid'] = str(uuid)
+        client.capture(event, **kwargs)
     except Exception:  # noqa: BLE001 - analytics must never break a request
         logging.getLogger(__name__).exception('posthog capture failed for %s', event)
 

@@ -4999,11 +4999,12 @@ class _FakePosthog:
     def __init__(self):
         self.events = []
 
-    def capture(self, event, distinct_id=None, properties=None, **kwargs):
+    def capture(self, event, distinct_id=None, properties=None, uuid=None, **kwargs):
         self.events.append({
             'event': event,
             'distinct_id': distinct_id,
             'properties': dict(properties or {}),
+            'uuid': uuid,
         })
 
 
@@ -5036,6 +5037,10 @@ def test_posthog_snippet_renders_when_key_is_set(monkeypatch):
     assert 'https://eu.i.posthog.com' in body
     assert 'maskAllInputs: true' in body
     assert "maskTextSelector: '.ph-no-capture, .transcript-pane'" in body
+    assert 'capture_exceptions: true' in body
+    assert "posthog.register({app: 'podskrift'})" in body
+    assert 'podskriftPaywallShown' in body
+    assert 'buy_clicked' in body
 
 
 def test_openai_key_field_is_marked_for_replay_masking():
@@ -5921,6 +5926,7 @@ def test_checkout_session_creation(stripe_on, ph_events):
     resp = client.post('/billing/checkout', data={
         'csrf_token': token,
         'source': 'settings',
+        'ph_sid': 'ph_sess_test_1',
     }, follow_redirects=False)
     assert resp.status_code == 303
     assert resp.headers['Location'] == 'https://checkout.stripe.test/session'
@@ -5930,14 +5936,33 @@ def test_checkout_session_creation(stripe_on, ph_events):
     assert kw['metadata']['user_id'] == str(uid)
     assert kw['metadata']['minutes'] == str(A.CREDIT_PACK_MINUTES)
     assert kw['metadata']['pack'] == A.CREDIT_PACK_SKU
+    assert kw['metadata']['location'] == 'settings'
+    assert kw['metadata']['ph_sid'] == 'ph_sess_test_1'
+    assert kw['payment_intent_data']['metadata']['location'] == 'settings'
+    assert kw['payment_intent_data']['metadata']['ph_sid'] == 'ph_sess_test_1'
     assert kw['customer_creation'] == 'always'
     assert kw['billing_address_collection'] == 'required'
     assert kw['line_items'][0]['price_data']['unit_amount'] == 500
     assert kw['line_items'][0]['price_data']['tax_behavior'] == 'inclusive'
     assert kw['line_items'][0]['price_data']['product_data']['tax_code']
     assert 'automatic_tax' not in kw
+    assert '/billing/cancel' in kw['cancel_url']
+    assert 'next=' in kw['cancel_url']
     started = [e for e in ph_events.events if e['event'] == 'checkout_started']
     assert started and started[-1]['distinct_id'] == str(uid)
+    props = started[-1]['properties']
+    assert props['location'] == 'settings'
+    assert props['source'] == 'settings'
+    assert props['checkout_session_id'] == 'cs_test_123'
+    assert props['amount_cents'] == A.CREDIT_PACK_AMOUNT_CENTS
+    assert props['pack_sku'] == A.CREDIT_PACK_SKU
+    assert props['$session_id'] == 'ph_sess_test_1'
+    assert props.get('app') == 'podskrift'
+    assert 'email' not in props
+    assert '@' not in str(props)
+    import uuid as _uuid
+    assert started[-1]['uuid'] == str(
+        _uuid.uuid5(_uuid.NAMESPACE_URL, 'cs_test_123'))
 
 
 def test_checkout_passes_automatic_tax_when_enabled(stripe_on, monkeypatch):
@@ -5954,7 +5979,7 @@ def test_checkout_passes_automatic_tax_when_enabled(stripe_on, monkeypatch):
     assert stripe_on['last_create_params']['automatic_tax'] == {'enabled': True}
 
 
-def test_checkout_rejects_bad_csrf(stripe_on):
+def test_checkout_rejects_bad_csrf(stripe_on, ph_events):
     uid = _make_user('csrf@test.com')
     client = _login(uid)
     client.get('/settings')
@@ -5963,9 +5988,26 @@ def test_checkout_rejects_bad_csrf(stripe_on):
         'source': 'settings',
     }, follow_redirects=True)
     assert b'form expired' in resp.data.lower() or b'expired' in resp.data.lower()
+    failed = [e for e in ph_events.events if e['event'] == 'purchase_failed']
+    assert failed and failed[-1]['properties']['reason'] == 'csrf_invalid'
+    assert failed[-1]['properties']['stage'] == 'checkout_create'
+    assert failed[-1]['distinct_id'] == str(uid)
+    assert 'email' not in failed[-1]['properties']
 
 
-def test_webhook_rejects_bad_signature(stripe_on):
+def test_billing_cancel_fires_checkout_returned(stripe_on, ph_events):
+    uid = _make_user('cancelroute@test.com')
+    client = _login(uid)
+    resp = client.get(
+        '/billing/cancel?next=/settings%23credits', follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    assert '/settings' in resp.headers['Location']
+    returned = [e for e in ph_events.events if e['event'] == 'checkout_returned']
+    assert returned and returned[-1]['properties']['status'] == 'cancelled'
+    assert returned[-1]['distinct_id'] == str(uid)
+
+
+def test_webhook_rejects_bad_signature(stripe_on, ph_events):
     class SignatureVerificationError(Exception):
         pass
 
@@ -5979,6 +6021,10 @@ def test_webhook_rejects_bad_signature(stripe_on):
         headers={'Stripe-Signature': 't=1,v1=x'},
     )
     assert resp.status_code == 400
+    errs = [e for e in ph_events.events if e['event'] == 'stripe_webhook_error']
+    assert errs and errs[-1]['properties']['reason'] == 'signature_invalid'
+    assert errs[-1]['distinct_id'] == 'system:stripe-webhook'
+    assert errs[-1]['properties'].get('$process_person_profile') is False
 
 
 def test_webhook_real_sdk_construct_event_attribute_access(stripe_on, monkeypatch):
@@ -6048,6 +6094,15 @@ def test_webhook_credits_once_on_duplicate_event(stripe_on, ph_events):
     purchased = [e for e in ph_events.events if e['event'] == 'purchase_completed']
     assert len(purchased) == 1
     assert purchased[0]['properties']['minutes'] == 300
+    props = purchased[0]['properties']
+    assert props.get('checkout_session_id') == 'cs_test_dup_1'
+    assert props.get('is_first_purchase') is True
+    assert props.get('fulfilled_via') == 'webhook'
+    assert props.get('$set') == {'has_purchased': True}
+    assert 'email' not in props
+    import uuid as _uuid
+    assert purchased[0]['uuid'] == str(
+        _uuid.uuid5(_uuid.NAMESPACE_URL, 'cs_test_dup_1'))
 
 
 def test_async_payment_succeeded_credits(stripe_on):
@@ -6057,6 +6112,20 @@ def test_async_payment_succeeded_credits(stripe_on):
         stripe_on, session, etype='checkout.session.async_payment_succeeded')
     assert resp.status_code == 200
     assert _paid(uid) == 300 * 60
+
+
+def test_async_payment_failed_captures_purchase_failed(stripe_on, ph_events):
+    uid = _make_user('asyncfail@test.com', limit=600, used=0)
+    session = _pack_session(uid, 'cs_async_fail_1', payment_status='unpaid')
+    resp = _register_and_post(
+        stripe_on, session, etype='checkout.session.async_payment_failed')
+    assert resp.status_code == 200
+    assert _paid(uid) == 0
+    failed = [e for e in ph_events.events if e['event'] == 'purchase_failed']
+    assert failed and failed[-1]['properties']['reason'] == 'async_payment_failed'
+    assert failed[-1]['properties']['stage'] == 'async_payment'
+    assert failed[-1]['distinct_id'] == 'stripe:cs_async_fail_1'
+    assert failed[-1]['properties'].get('$process_person_profile') is False
 
 
 def test_completed_unpaid_does_not_credit(stripe_on):
@@ -6211,7 +6280,8 @@ def test_terms_page_mentions_refunds():
     assert 'productivitytech.io/contact' in body
 
 
-def test_offer_shown_on_limit_when_stripe_on(stripe_on, ph_events, monkeypatch):
+def test_offer_shown_no_longer_server_fired_on_limit(stripe_on, ph_events, monkeypatch):
+    """Paywall/offer analytics moved to the browser; server must not dual-fire."""
     uid = _make_user('offer@test.com', limit=600, used=600)
     resp = _post_start(monkeypatch, uid, {
         'audio_url': 'https://example.com/ep.mp3',
@@ -6221,8 +6291,27 @@ def test_offer_shown_on_limit_when_stripe_on(stripe_on, ph_events, monkeypatch):
     body = resp.get_json()
     assert body.get('buy_available') is True
     assert body.get('buy_label') == 'Buy 5 hours for $5'
+    assert body.get('paywall_reason') in (
+        'trial_exhausted', 'low_balance', 'paid_exhausted', 'global_cap',
+        'episode_too_long')
     offers = [e for e in ph_events.events if e['event'] == 'offer_shown']
-    assert offers and offers[-1]['properties']['variant'] == 'buy_or_key'
+    assert offers == []
+    paywalls = [e for e in ph_events.events if e['event'] == 'paywall_shown']
+    assert paywalls == []
+
+
+def test_minutes_exhausted_on_depleting_reserve(trial_on, ph_events):
+    uid = _make_user('minexhausted@test.com', limit=600, used=0)
+    with A.app.app_context():
+        before_t, before_p = A._platform_remaining_seconds(uid)
+        assert before_t == 600
+        split = A.platform_reserve(uid, 600)
+        assert split == (600, 0)
+        A._capture_minutes_exhausted_if_depleted(uid, 'web', before_t, before_p)
+    exhausted = [e for e in ph_events.events if e['event'] == 'minutes_exhausted']
+    assert exhausted and exhausted[-1]['properties']['kind'] == 'trial'
+    dual = [e for e in ph_events.events if e['event'] == 'paid_minutes_exhausted']
+    assert dual
 
 
 def test_enqueue_uses_paid_after_trial(trial_on, monkeypatch):
@@ -6331,6 +6420,14 @@ def test_charge_refunded_claws_back_pro_rata(stripe_on, ph_events):
         assert row.amount_refunded_cents == 500
     refunded = [e for e in ph_events.events if e['event'] == 'purchase_refunded']
     assert len(refunded) == 1
+    processed = [e for e in ph_events.events if e['event'] == 'refund_processed']
+    assert len(processed) == 1
+    props = processed[0]['properties']
+    assert props['kind'] == 'refund'
+    assert props['seconds_clawed_back'] == 150 * 60
+    assert props['full_refund'] is True
+    assert 'email' not in props
+    assert processed[0]['uuid']
 
 
 def test_partial_refund_pro_rata_idempotent(stripe_on):
@@ -6365,6 +6462,50 @@ def test_partial_refund_pro_rata_idempotent(stripe_on):
     assert _paid(uid) == 150 * 60
     assert post_refund(500, 'evt_p2').status_code == 200
     assert _paid(uid) == 0
+
+
+def test_refund_processed_when_no_seconds_left(stripe_on, ph_events):
+    uid = _make_user('refundzero@test.com', limit=600, used=0)
+    session = _pack_session(uid, 'cs_refund_zero')
+    assert _register_and_post(stripe_on, session).status_code == 200
+    # Fully claw via a first refund, then a second delta that finds remaining<=0.
+    from types import SimpleNamespace
+    from models import db, CreditPurchase
+
+    def post_refund(amount_refunded, eid):
+        charge = {
+            'id': 'ch_zero',
+            'payment_intent': 'pi_cs_refund_zero',
+            'amount': 500,
+            'amount_captured': 500,
+            'amount_refunded': amount_refunded,
+        }
+        event = _ns_event(
+            'charge.refunded', 'ch_zero', eid=eid,
+            obj=SimpleNamespace(id='ch_zero', to_dict=lambda: charge))
+        A.stripe.Webhook.construct_event = staticmethod(
+            lambda payload, sig, secret: event)
+        return A.app.test_client().post(
+            '/stripe/webhook', data=b'{}',
+            headers={'Stripe-Signature': 't=1,v1=ok'})
+
+    assert post_refund(500, 'evt_rz1').status_code == 200
+    assert _paid(uid) == 0
+    with A.app.app_context():
+        row = CreditPurchase.query.filter_by(stripe_session_id='cs_refund_zero').one()
+        # Simulate a redelivery that increases amount_refunded while remaining is 0
+        # by resetting amount_refunded tracking without restoring seconds.
+        row.amount_refunded_cents = 400
+        row.status = 'credited'
+        row.refunded_at = None
+        db.session.commit()
+    ph_events.events.clear()
+    assert post_refund(500, 'evt_rz2').status_code == 200
+    processed = [e for e in ph_events.events if e['event'] == 'refund_processed']
+    assert processed
+    assert processed[-1]['properties']['seconds_clawed_back'] == 0
+    refunded = [e for e in ph_events.events if e['event'] == 'purchase_refunded']
+    assert refunded
 
 
 def test_dispute_created_full_clawback(stripe_on, ph_events):

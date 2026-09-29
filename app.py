@@ -898,6 +898,7 @@ def trial_reconcile_task(task_id, actual_seconds):
         )
         if paid_balance_seconds(owner) < actual:
             raise TrialExhausted(refuse_msg, scope='episode_length')
+        before_trial, before_paid = _platform_remaining_seconds(user_id)
         if not paid_reserve(user_id, actual):
             # Race: paid balance moved after the read. Keep the trial charge.
             raise TrialExhausted(refuse_msg, scope='episode_length')
@@ -910,10 +911,13 @@ def trial_reconcile_task(task_id, actual_seconds):
             raise TrialExhausted(refuse_msg, scope='episode_length')
         # Paid is now on the task; only now release the free-trial reservation.
         trial_release(user_id, trial_reserved)
+        _capture_minutes_exhausted_if_depleted(
+            user_id, 'reconcile', before_trial, before_paid)
         return
 
     if actual > total_reserved:
         extra = actual - total_reserved
+        before_trial, before_paid = _platform_remaining_seconds(user_id)
         split = platform_reserve(user_id, extra, paid_only=over_free_cap)
         if split is None:
             owner = db.session.get(User, user_id)
@@ -944,6 +948,9 @@ def trial_reconcile_task(task_id, actual_seconds):
         if not _claim_task_platform_charges(
                 task_id, trial_reserved, paid_reserved, new_trial, new_paid):
             platform_release(user_id, extra_trial, extra_paid)
+        else:
+            _capture_minutes_exhausted_if_depleted(
+                user_id, 'reconcile', before_trial, before_paid)
     elif actual < total_reserved:
         # Shrink paid first (LIFO), then trial — reverse of charge order.
         shrink = total_reserved - actual
@@ -2280,7 +2287,135 @@ def _record_needs_review(session_dict, user_id, event_id, reason):
         return False
 
 
-def fulfill_checkout(session_id, event_id=None):
+def _ph_uuid5(name):
+    """Stable PostHog event uuid from a durable Stripe/object id."""
+    return uuid.uuid5(uuid.NAMESPACE_URL, str(name))
+
+
+def _capture_purchase_failed(reason, *, stage, user_id=None, session_id=None,
+                             extra=None):
+    """purchase_failed — never include email/key/card. Anonymous → stripe:<cs_id>."""
+    props = {'stage': stage, 'reason': reason}
+    if extra:
+        props.update(extra)
+    if user_id is not None:
+        distinct_id = user_id
+    elif session_id:
+        distinct_id = f'stripe:{session_id}'
+        props['$process_person_profile'] = False
+    else:
+        distinct_id = 'stripe:unknown'
+        props['$process_person_profile'] = False
+    if session_id:
+        props.setdefault('checkout_session_id', session_id)
+    product_analytics.capture('purchase_failed', distinct_id, props)
+
+
+def _capture_checkout_returned(status, *, user_id, session_id=None, location=None,
+                               extra=None):
+    props = {'status': status}
+    if session_id:
+        props['checkout_session_id'] = session_id
+    if location:
+        props['location'] = location
+    if extra:
+        props.update(extra)
+    product_analytics.capture('checkout_returned', user_id, props)
+
+
+def _capture_stripe_webhook_error(reason, *, event_type=None, extra=None):
+    props = {
+        'reason': reason,
+        '$process_person_profile': False,
+    }
+    if event_type:
+        props['event_type'] = event_type
+    if extra:
+        props.update(extra)
+    product_analytics.capture(
+        'stripe_webhook_error', 'system:stripe-webhook', props)
+
+
+def _platform_remaining_seconds(user_id):
+    """Combined free-trial + paid seconds remaining for a user id."""
+    user = db.session.get(User, user_id)
+    if user is None:
+        return 0, 0
+    if trial_available():
+        trial_rem = trial_status(user)[2]
+    else:
+        trial_rem = 0
+    paid_rem = paid_balance_seconds(user)
+    return max(0, int(trial_rem)), max(0, int(paid_rem))
+
+
+def _capture_minutes_exhausted_if_depleted(user_id, source, before_trial, before_paid):
+    """Fire minutes_exhausted only when a charge took trial+paid from >0 to 0.
+
+    Dual-fires paid_minutes_exhausted for now. kind is trial|paid|both based on
+    which balances crossed to zero.
+    """
+    after_trial, after_paid = _platform_remaining_seconds(user_id)
+    before_total = before_trial + before_paid
+    after_total = after_trial + after_paid
+    if before_total <= 0 or after_total > 0:
+        return
+    trial_hit = before_trial > 0 and after_trial == 0
+    paid_hit = before_paid > 0 and after_paid == 0
+    if trial_hit and paid_hit:
+        kind = 'both'
+    elif paid_hit:
+        kind = 'paid'
+    else:
+        kind = 'trial'
+    props = {'kind': kind, 'source': source}
+    product_analytics.capture('minutes_exhausted', user_id, props)
+    product_analytics.capture('paid_minutes_exhausted', user_id, props)
+
+
+def _days_since_purchase(purchase):
+    created = purchase.created_at
+    if created is None:
+        return None
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    delta = datetime.now(timezone.utc) - created
+    return max(0, int(delta.total_seconds() // 86400))
+
+
+def _capture_refund_processed(purchase, *, kind, refund_delta_cents,
+                              amount_refunded_cents, full_refund,
+                              seconds_clawed_back, claw_target, payment_intent,
+                              event_id_for_uuid):
+    """refund_processed + dual-fire purchase_refunded. Never email/key/card."""
+    if purchase.user_id is None:
+        return
+    shortfall = max(0, int(claw_target) - int(seconds_clawed_back))
+    props = {
+        'kind': kind,
+        'refund_delta_cents': int(refund_delta_cents),
+        'amount_refunded_cents': int(amount_refunded_cents),
+        'full_refund': bool(full_refund),
+        'seconds_clawed_back': int(seconds_clawed_back),
+        'seconds_shortfall': shortfall,
+        'days_since_purchase': _days_since_purchase(purchase),
+        'payment_intent': payment_intent,
+    }
+    event_uuid = _ph_uuid5(f'{event_id_for_uuid}:{amount_refunded_cents}')
+    product_analytics.capture(
+        'refund_processed', purchase.user_id, props, uuid=event_uuid)
+    refunded_props = {
+        'seconds_clawed_back': int(seconds_clawed_back),
+        'amount_refunded_cents': int(amount_refunded_cents),
+        'payment_intent': payment_intent,
+    }
+    if kind == 'dispute':
+        refunded_props['reason'] = 'dispute'
+    product_analytics.capture(
+        'purchase_refunded', purchase.user_id, refunded_props, uuid=event_uuid)
+
+
+def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
     """Retrieve and fulfill a Checkout Session. Idempotent; safe from webhook
     and from /billing/success.
 
@@ -2298,6 +2433,8 @@ def fulfill_checkout(session_id, event_id=None):
             session_id, params={'expand': ['line_items.data.price']})
     except Exception:
         app.logger.exception('Stripe Checkout Session retrieve failed (%s)', session_id)
+        _capture_purchase_failed(
+            'retrieve_error', stage='fulfill', session_id=session_id)
         raise
     d = session_obj.to_dict() if hasattr(session_obj, 'to_dict') else dict(session_obj)
     if d.get('mode') and d.get('mode') != 'payment':
@@ -2319,6 +2456,8 @@ def fulfill_checkout(session_id, event_id=None):
             level='error',
             contexts={'stripe': {'session_id': session_id, 'reason': fail_reason}},
         )
+        _capture_purchase_failed(
+            fail_reason, stage='fulfill', user_id=user_id, session_id=session_id)
         return False
 
     td = d.get('total_details') or {}
@@ -2332,18 +2471,25 @@ def fulfill_checkout(session_id, event_id=None):
         amount_for_legacy = CREDIT_PACK_AMOUNT_CENTS
     currency = (d.get('currency') or CREDIT_PACK_CURRENCY).lower()
     minutes = CREDIT_PACK_MINUTES
+    customer_country = _session_customer_country(d)
+    payment_intent = _session_payment_intent_id(d)
+    location = (metadata.get('location') or metadata.get('source') or '')[:64] or None
+    ph_sid = (metadata.get('ph_sid') or '')[:128] or None
+
+    prior_credited = CreditPurchase.query.filter_by(
+        user_id=user_id, status='credited').count()
 
     purchase = CreditPurchase(
         user_id=user_id,
         stripe_session_id=session_id,
         stripe_event_id=event_id,
-        stripe_payment_intent_id=_session_payment_intent_id(d),
+        stripe_payment_intent_id=payment_intent,
         amount_cents=amount_for_legacy,
         amount_subtotal_cents=_int_or_none(subtotal),
         amount_tax_cents=_int_or_none(tax),
         amount_total_cents=_int_or_none(total),
         currency=currency,
-        customer_country=_session_customer_country(d),
+        customer_country=customer_country,
         minutes=minutes,
         status='credited',
     )
@@ -2370,16 +2516,41 @@ def fulfill_checkout(session_id, event_id=None):
             level='error',
             contexts={'stripe': {'session_id': session_id, 'user_id': user_id}},
         )
+        _capture_purchase_failed(
+            'user_missing', stage='fulfill', user_id=user_id, session_id=session_id)
         return False
     try:
         db.session.commit()
     except SaIntegrityError:
         db.session.rollback()
         return False
+
+    amount_total_cents = _int_or_none(total)
+    amount_subtotal_cents = _int_or_none(subtotal)
+    amount_tax_cents = _int_or_none(tax)
+    completed_props = {
+        'amount_cents': amount_for_legacy,
+        'amount_total_cents': amount_total_cents,
+        'amount_subtotal_cents': amount_subtotal_cents,
+        'amount_tax_cents': amount_tax_cents,
+        'minutes': minutes,
+        'currency': currency,
+        'country': customer_country,
+        'checkout_session_id': session_id,
+        'payment_intent': payment_intent,
+        'fulfilled_via': fulfilled_via,
+        'location': location,
+        'is_first_purchase': prior_credited == 0,
+        'revenue': (amount_total_cents or amount_for_legacy or 0) / 100.0,
+        '$set': {'has_purchased': True},
+    }
+    if ph_sid:
+        completed_props['$session_id'] = ph_sid
     product_analytics.capture(
         'purchase_completed',
         user_id,
-        {'amount_cents': amount_for_legacy, 'minutes': minutes, 'currency': currency},
+        completed_props,
+        uuid=_ph_uuid5(session_id),
     )
     return True
 
@@ -2489,32 +2660,46 @@ def handle_charge_refunded(charge_dict, event_id=None):
     _claim_purchase_snapshot(purchase)
     pack_seconds = int(purchase.minutes or 0) * 60
     remaining = pack_seconds - int(purchase.seconds_clawed_back or 0)
+    charge_id = charge_dict.get('id') or pi
+    full_refund = amount_refunded >= amount_captured
     if remaining <= 0:
         purchase.amount_refunded_cents = amount_refunded
-        if amount_refunded >= amount_captured:
+        if full_refund:
             purchase.status = 'refunded'
             purchase.refunded_at = purchase.refunded_at or datetime.now(timezone.utc)
         db.session.commit()
+        _capture_refund_processed(
+            purchase,
+            kind='refund',
+            refund_delta_cents=delta,
+            amount_refunded_cents=amount_refunded,
+            full_refund=full_refund,
+            seconds_clawed_back=0,
+            claw_target=0,
+            payment_intent=pi,
+            event_id_for_uuid=f'{charge_id}:{amount_refunded}',
+        )
         return False
     # Pro-rata on the newly refunded fraction of the captured amount.
     claw_secs = min(remaining, (pack_seconds * delta) // amount_captured)
     taken = _clawback_paid_seconds(purchase.user_id, claw_secs)
     purchase.seconds_clawed_back = int(purchase.seconds_clawed_back or 0) + taken
     purchase.amount_refunded_cents = amount_refunded
-    if amount_refunded >= amount_captured:
+    if full_refund:
         purchase.status = 'refunded'
         purchase.refunded_at = datetime.now(timezone.utc)
     db.session.commit()
-    if purchase.user_id is not None:
-        product_analytics.capture(
-            'purchase_refunded',
-            purchase.user_id,
-            {
-                'seconds_clawed_back': taken,
-                'amount_refunded_cents': amount_refunded,
-                'payment_intent': pi,
-            },
-        )
+    _capture_refund_processed(
+        purchase,
+        kind='refund',
+        refund_delta_cents=delta,
+        amount_refunded_cents=amount_refunded,
+        full_refund=full_refund,
+        seconds_clawed_back=taken,
+        claw_target=claw_secs,
+        payment_intent=pi,
+        event_id_for_uuid=f'{charge_id}:{amount_refunded}',
+    )
     return True
 
 
@@ -2557,19 +2742,23 @@ def handle_dispute(dispute_dict, event_type, event_id=None):
         purchase.amount_total_cents
         or purchase.amount_cents
         or CREDIT_PACK_AMOUNT_CENTS)
-    purchase.amount_refunded_cents = max(
-        int(purchase.amount_refunded_cents or 0), int(captured))
+    already = int(purchase.amount_refunded_cents or 0)
+    purchase.amount_refunded_cents = max(already, int(captured))
+    amount_refunded = int(purchase.amount_refunded_cents or 0)
+    delta = max(0, amount_refunded - already)
     db.session.commit()
-    if purchase.user_id is not None:
-        product_analytics.capture(
-            'purchase_refunded',
-            purchase.user_id,
-            {
-                'seconds_clawed_back': taken,
-                'reason': 'dispute',
-                'payment_intent': pi,
-            },
-        )
+    dispute_id = dispute_dict.get('id') or pi
+    _capture_refund_processed(
+        purchase,
+        kind='dispute',
+        refund_delta_cents=delta,
+        amount_refunded_cents=amount_refunded,
+        full_refund=True,
+        seconds_clawed_back=taken,
+        claw_target=remaining,
+        payment_intent=pi,
+        event_id_for_uuid=f'{dispute_id}:{amount_refunded}',
+    )
     return True
 
 
@@ -2613,16 +2802,14 @@ def settings():
     new_api_key = session.pop('new_api_key', None)
     product_analytics.capture('settings_viewed', current_user.id)
     trial_ctx = _trial_context()
-    if trial_ctx and trial_ctx.get('exhausted') and stripe_checkout_enabled():
-        product_analytics.capture(
-            'offer_shown', current_user.id,
-            {'variant': 'buy_or_key', 'location': 'settings'},
-        )
+    buy_source = (
+        'header_pill' if request.args.get('from') == 'header_pill' else 'settings')
     return render_template(
         'settings.html',
         trial=trial_ctx,
         new_api_key=new_api_key,
         openai_key_hint=_openai_key_hint(current_user),
+        buy_source=buy_source,
     )
 
 
@@ -2634,30 +2821,38 @@ def billing_checkout():
         flash('Card payments are not available right now.', 'error')
         return redirect(url_for('settings') + '#credits')
     if not validate_csrf_token():
+        _capture_purchase_failed(
+            'csrf_invalid', stage='checkout_create', user_id=current_user.id)
         flash('That form expired. Please try again.', 'error')
         return redirect(url_for('settings') + '#credits')
     if current_user.openai_api_key:
+        _capture_purchase_failed(
+            'byok_user', stage='checkout_create', user_id=current_user.id)
         flash('You are on your own OpenAI key — paid minutes are not needed.', 'info')
         return redirect(url_for('settings'))
 
     source = (request.form.get('source') or 'settings').strip()[:64]
-    product_analytics.capture(
-        'checkout_started', current_user.id, {'source': source})
+    ph_sid = (request.form.get('ph_sid') or '').strip()[:128]
+    trial_ctx = _trial_context() or {}
+    trial_remaining_min = trial_ctx.get('remaining_minutes')
+    paid_remaining_min = trial_ctx.get('paid_minutes')
 
-    success_url = url_for('billing_success', _external=True) + '?session_id={CHECKOUT_SESSION_ID}'
-    cancel_url = request.form.get('cancel_url') or (url_for('settings') + '#credits')
-    # Only allow relative cancel paths back into this app.
-    cancel_url = safe_next_url(cancel_url, url_for('settings') + '#credits')
+    next_path = safe_next_url(
+        request.form.get('cancel_url') or (url_for('settings') + '#credits'),
+        url_for('settings') + '#credits',
+    )
     if PUBLIC_BASE_URL:
-        success_url = PUBLIC_BASE_URL.rstrip('/') + '/billing/success?session_id={CHECKOUT_SESSION_ID}'
-        if cancel_url.startswith('/'):
-            cancel_abs = PUBLIC_BASE_URL.rstrip('/') + cancel_url
-        else:
-            cancel_abs = PUBLIC_BASE_URL.rstrip('/') + url_for('settings') + '#credits'
+        success_url = (
+            PUBLIC_BASE_URL.rstrip('/')
+            + '/billing/success?session_id={CHECKOUT_SESSION_ID}')
+        cancel_abs = (
+            PUBLIC_BASE_URL.rstrip('/')
+            + url_for('billing_cancel', next=next_path))
     else:
-        cancel_abs = url_for('settings', _external=True) + '#credits'
-        if cancel_url.startswith('/'):
-            cancel_abs = request.host_url.rstrip('/') + cancel_url
+        success_url = (
+            url_for('billing_success', _external=True)
+            + '?session_id={CHECKOUT_SESSION_ID}')
+        cancel_abs = url_for('billing_cancel', next=next_path, _external=True)
 
     line_item = {'quantity': 1}
     if STRIPE_PRICE_ID:
@@ -2675,6 +2870,23 @@ def billing_checkout():
             },
         }
 
+    meta = {
+        'user_id': str(current_user.id),
+        'minutes': str(CREDIT_PACK_MINUTES),
+        'pack': CREDIT_PACK_SKU,
+        'location': source,
+        'source': source,
+    }
+    if ph_sid:
+        meta['ph_sid'] = ph_sid
+    pi_meta = {
+        'user_id': str(current_user.id),
+        'pack': CREDIT_PACK_SKU,
+        'location': source,
+    }
+    if ph_sid:
+        pi_meta['ph_sid'] = ph_sid
+
     params = {
         'mode': 'payment',
         'line_items': [line_item],
@@ -2684,16 +2896,9 @@ def billing_checkout():
         'customer_email': current_user.email,
         'customer_creation': 'always',
         'billing_address_collection': 'required',
-        'metadata': {
-            'user_id': str(current_user.id),
-            'minutes': str(CREDIT_PACK_MINUTES),
-            'pack': CREDIT_PACK_SKU,
-        },
+        'metadata': meta,
         'payment_intent_data': {
-            'metadata': {
-                'user_id': str(current_user.id),
-                'pack': CREDIT_PACK_SKU,
-            },
+            'metadata': pi_meta,
         },
     }
     if STRIPE_MANAGED_PAYMENTS:
@@ -2710,12 +2915,51 @@ def billing_checkout():
             params=params,
             options={'idempotency_key': f'checkout-{current_user.id}-{uuid.uuid4()}'},
         )
-    except Exception:  # noqa: BLE001 - never surface Stripe internals
+    except Exception as exc:  # noqa: BLE001 - never surface Stripe internals
         app.logger.exception('Stripe Checkout Session create failed')
+        _capture_purchase_failed(
+            'stripe_api_error',
+            stage='checkout_create',
+            user_id=current_user.id,
+            extra={'error_type': type(exc).__name__},
+        )
         flash('Could not start checkout. Please try again in a moment.', 'error')
         return redirect(url_for('settings') + '#credits')
 
+    cs_id = getattr(checkout_session, 'id', None) or (
+        checkout_session.get('id') if isinstance(checkout_session, dict) else None)
+    started_props = {
+        'location': source,
+        'source': source,
+        'checkout_session_id': cs_id,
+        'amount_cents': CREDIT_PACK_AMOUNT_CENTS,
+        'currency': CREDIT_PACK_CURRENCY,
+        'minutes': CREDIT_PACK_MINUTES,
+        'pack_sku': CREDIT_PACK_SKU,
+        'managed_payments': bool(STRIPE_MANAGED_PAYMENTS),
+        'trial_remaining_min': trial_remaining_min,
+        'paid_remaining_min': paid_remaining_min,
+    }
+    if ph_sid:
+        started_props['$session_id'] = ph_sid
+    product_analytics.capture(
+        'checkout_started',
+        current_user.id,
+        started_props,
+        uuid=_ph_uuid5(cs_id) if cs_id else None,
+    )
+
     return redirect(checkout_session.url, code=303)
+
+
+@app.route('/billing/cancel')
+@login_required
+def billing_cancel():
+    """Stripe cancel_url target: record checkout_returned then redirect."""
+    next_url = safe_next_url(
+        request.args.get('next'), url_for('settings') + '#credits')
+    _capture_checkout_returned('cancelled', user_id=current_user.id)
+    return redirect(next_url)
 
 
 @app.route('/billing/success')
@@ -2725,27 +2969,49 @@ def billing_success():
     session_id = (request.args.get('session_id') or '').strip()
     paid_ready = False
     pending = False
+    returned_status = 'error'
+    location = None
     if session_id.startswith('cs_') and stripe_checkout_enabled():
         try:
-            fulfill_checkout(session_id)
+            fulfill_checkout(session_id, fulfilled_via='success_page')
         except Exception:
             app.logger.exception(
                 'billing_success fulfill_checkout failed for %s', session_id)
+            returned_status = 'error'
         # Re-read from Stripe for the UI; never trust the query string alone.
         try:
             client = stripe_client()
             if client is not None:
                 s = client.v1.checkout.sessions.retrieve(session_id)
                 d = s.to_dict() if hasattr(s, 'to_dict') else dict(s)
+                meta = d.get('metadata') or {}
+                location = (meta.get('location') or meta.get('source') or None)
                 ref = str(d.get('client_reference_id') or '')
-                if ref == str(current_user.id):
-                    if d.get('payment_status') == 'paid':
-                        paid_ready = True
-                    else:
-                        pending = True
+                if ref != str(current_user.id):
+                    returned_status = 'not_owner'
+                elif d.get('payment_status') == 'paid':
+                    paid_ready = True
+                    returned_status = 'paid'
+                else:
+                    pending = True
+                    # unpaid vs pending (async): Stripe uses 'unpaid' until paid.
+                    ps = (d.get('payment_status') or 'unpaid').lower()
+                    returned_status = 'pending' if ps != 'unpaid' else 'unpaid'
+                    if ps in ('processing', 'pending'):
+                        returned_status = 'pending'
         except Exception:
             app.logger.exception(
                 'billing_success session retrieve failed for %s', session_id)
+            returned_status = 'error'
+        _capture_checkout_returned(
+            returned_status,
+            user_id=current_user.id,
+            session_id=session_id,
+            location=location,
+        )
+    elif session_id:
+        _capture_checkout_returned(
+            'error', user_id=current_user.id, session_id=session_id)
     return render_template(
         'billing_success.html',
         paid_ready=paid_ready,
@@ -2766,13 +3032,19 @@ def stripe_webhook():
         event = stripe.Webhook.construct_event(
             payload, sig_header, STRIPE_WEBHOOK_SECRET)
     except ValueError:
+        _capture_stripe_webhook_error('payload_invalid')
         return jsonify({'error': 'invalid payload'}), 400
     except Exception as exc:  # SignatureVerificationError and friends
         # stripe.SignatureVerificationError when the SDK is installed.
         name = type(exc).__name__
         if 'Signature' in name or 'signature' in str(exc).lower():
+            app.logger.warning(
+                'Stripe webhook bad signature (%s)', name)
+            _capture_stripe_webhook_error('signature_invalid')
             return jsonify({'error': 'invalid signature'}), 400
         app.logger.exception('Stripe webhook construct_event failed')
+        _capture_stripe_webhook_error(
+            'construct_failed', extra={'error_type': name})
         return jsonify({'error': 'webhook error'}), 400
 
     # stripe-python >= 15: Event is not a dict — use attribute access.
@@ -2786,7 +3058,12 @@ def stripe_webhook():
         ):
             fulfill_checkout(obj_id, event_id=event.id)
         elif etype == 'checkout.session.async_payment_failed':
-            app.logger.info('Async payment failed for %s', obj_id)
+            app.logger.warning('Async payment failed for %s', obj_id)
+            _capture_purchase_failed(
+                'async_payment_failed',
+                stage='async_payment',
+                session_id=obj_id,
+            )
         elif etype == 'charge.refunded':
             charge = obj.to_dict() if hasattr(obj, 'to_dict') else (
                 obj if isinstance(obj, dict) else dict(obj))
@@ -2795,9 +3072,14 @@ def stripe_webhook():
             dispute = obj.to_dict() if hasattr(obj, 'to_dict') else (
                 obj if isinstance(obj, dict) else dict(obj))
             handle_dispute(dispute, etype, event_id=event.id)
-    except Exception:
+    except Exception as exc:
         app.logger.exception(
             'Stripe webhook handling failed (%s %s)', etype, obj_id)
+        _capture_stripe_webhook_error(
+            'handler_exception',
+            event_type=etype,
+            extra={'error_type': type(exc).__name__},
+        )
         return jsonify({'error': 'handler failed'}), 500
     return jsonify({'received': True}), 200
 
@@ -3033,8 +3315,11 @@ def _show_openai_cost_estimates():
     )
 
 
-def _minutes_limit_actions(user_id, location='enqueue'):
-    """CTA payload for out-of-minutes messages: Buy (if configured) + add key."""
+def _minutes_limit_actions(user_id, location='enqueue', reason=None):
+    """CTA payload for out-of-minutes messages: Buy (if configured) + add key.
+
+    Analytics for paywall/offer are browser-side (paywall_shown / offer_shown).
+    """
     actions = []
     if stripe_checkout_enabled():
         actions.append({
@@ -3042,10 +3327,6 @@ def _minutes_limit_actions(user_id, location='enqueue'):
             'url': url_for('billing_checkout'),
             'method': 'POST',
         })
-        product_analytics.capture(
-            'offer_shown', user_id,
-            {'variant': 'buy_or_key', 'location': location},
-        )
     actions.append({
         'label': 'Add OpenAI key →',
         'url': settings_openai_url(),
@@ -3060,10 +3341,13 @@ def _minutes_limit_actions(user_id, location='enqueue'):
         'buy_available': stripe_checkout_enabled(),
         'buy_label': CREDIT_PACK_LABEL if stripe_checkout_enabled() else None,
         'buy_url': url_for('billing_checkout') if stripe_checkout_enabled() else None,
+        'paywall_reason': reason,
+        'paywall_location': location,
     }
 
 
 def _capture_paid_minutes_exhausted(user_id, source):
+    """Legacy alias — prefer _capture_minutes_exhausted_if_depleted after a charge."""
     product_analytics.capture(
         'paid_minutes_exhausted', user_id, {'source': source})
 
@@ -3213,6 +3497,7 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
             estimate_min = estimate // 60
             over_free_cap = bool(
                 TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS)
+            before_trial, before_paid = _platform_remaining_seconds(user_id)
             if over_free_cap:
                 # Free trial must not cover over-long episodes; paid credits can.
                 split = platform_reserve(user_id, estimate, paid_only=True)
@@ -3221,8 +3506,6 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                     _capture_trial_limit_hit(
                         user_id, 'episode_length', 'start', source,
                         estimate_min=estimate_min, remaining_min=remaining // 60)
-                    if paid_balance_seconds(user) <= 0:
-                        _capture_paid_minutes_exhausted(user_id, source)
                     cost = openai_whisper_cost_usd(estimate_min)
                     payload = {
                         'error': (
@@ -3233,9 +3516,12 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                             f'OpenAI\'s rate).'
                         ),
                     }
-                    payload.update(_minutes_limit_actions(user_id, 'enqueue_episode_length'))
+                    payload.update(_minutes_limit_actions(
+                        user_id, 'enqueue_episode_length', reason='episode_too_long'))
                     return payload, 402
                 trial_charge, paid_charge = split
+                _capture_minutes_exhausted_if_depleted(
+                    user_id, source, before_trial, before_paid)
             else:
                 split = platform_reserve(user_id, estimate)
                 if split is None:
@@ -3248,8 +3534,6 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                     _capture_trial_limit_hit(
                         user_id, scope, 'start', source,
                         estimate_min=estimate_min, remaining_min=remaining // 60)
-                    if paid_balance_seconds(user) <= 0 and remaining <= 0:
-                        _capture_paid_minutes_exhausted(user_id, source)
                     if scope == 'user':
                         cost = openai_whisper_cost_usd(estimate_min)
                         paid_left = paid_balance_seconds(user) // 60
@@ -3265,9 +3549,16 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                             f'add your own OpenAI API key '
                             f'(about ${cost} for this one, billed by OpenAI).'
                         )
+                        if remaining <= 0 and paid_left <= 0:
+                            paywall_reason = (
+                                'paid_exhausted' if before_paid > 0 and before_trial <= 0
+                                else 'trial_exhausted')
+                        else:
+                            paywall_reason = 'low_balance'
                     else:
                         # The user still has room; the service as a whole does not.
                         # Saying "you have 60 minutes left" here would contradict itself.
+                        paywall_reason = 'global_cap'
                         if stripe_checkout_enabled():
                             message = (
                                 'Podskrift has handed out all the free minutes it has '
@@ -3281,9 +3572,12 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                                 'keep transcribing.'
                             )
                     payload = {'error': message}
-                    payload.update(_minutes_limit_actions(user_id, 'enqueue'))
+                    payload.update(_minutes_limit_actions(
+                        user_id, 'enqueue', reason=paywall_reason))
                     return payload, 402
                 trial_charge, paid_charge = split
+                _capture_minutes_exhausted_if_depleted(
+                    user_id, source, before_trial, before_paid)
 
         task_id = str(uuid.uuid4())
         try:
@@ -3629,7 +3923,18 @@ def get_status(task_id):
         result['error'] = err
         if _is_minutes_limit_error(err):
             result['minutes_error'] = True
-            result.update(_minutes_limit_actions(task.user_id, 'reconcile_status'))
+            reason = 'trial_exhausted'
+            low = err.lower()
+            if 'too long for the free trial' in low:
+                reason = 'episode_too_long'
+            elif 'handed out all the free minutes' in low:
+                reason = 'global_cap'
+            elif 'paid minutes you have left' in low:
+                reason = 'paid_exhausted'
+            elif 'minutes you have left' in low:
+                reason = 'low_balance'
+            result.update(_minutes_limit_actions(
+                task.user_id, 'reconcile_status', reason=reason))
 
     # Partial text so the page fills in as chunks land, rather than staying empty
     if task.transcript_text and task.status != 'completed':

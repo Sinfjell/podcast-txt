@@ -117,6 +117,7 @@
 <form id="buyFormEpisodeSelection" method="POST" action="{{ url_for('billing_checkout') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="source" value="episode_selection">
+    <input type="hidden" name="ph_sid" value="">
 </form>
 {% endif %}
 
@@ -187,11 +188,14 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         hidden('csrf_token', CSRF_TOKEN);
         hidden('source', source || 'episode_selection');
+        var sid = '';
+        try { if (window.posthog) sid = posthog.get_session_id() || ''; } catch (e) { sid = ''; }
+        hidden('ph_sid', sid);
         document.body.appendChild(form);
         form.submit();
     }
 
-    function setStartError(text, buyAvailable) {
+    function setStartError(text, buyAvailable, paywallReason) {
         startError.classList.remove('hidden');
         startError.style.display = '';
         while (startError.firstChild) startError.removeChild(startError.firstChild);
@@ -215,6 +219,13 @@ document.addEventListener('DOMContentLoaded', function() {
             buyBtn.textContent = BUY_LABEL;
             buyBtn.addEventListener('click', function() { postBuyForm('episode_selection'); });
             actions.appendChild(buyBtn);
+            if (typeof window.podskriftPaywallShown === 'function') {
+                window.podskriftPaywallShown(
+                    'episode_selection_error',
+                    paywallReason || 'trial_exhausted',
+                    {trial_remaining_min: TRIAL_REMAINING_MIN, paid_remaining_min: PAID_REMAINING_MIN}
+                );
+            }
         }
         var keyLink = document.createElement('a');
         keyLink.href = SETTINGS_OPENAI;
@@ -373,7 +384,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 } else {
                     setStartError(
                         res.data.error || 'Could not start transcription.',
-                        !!res.data.buy_available
+                        !!res.data.buy_available,
+                        res.data.paywall_reason
                     );
                     transcribeBtn.disabled = false;
                     transcribeBtn.textContent = 'Start Transcription';
@@ -395,6 +407,15 @@ document.addEventListener('DOMContentLoaded', function() {
         document.getElementById('cancelSave').addEventListener('click', function() { dialog.style.display = 'none'; });
         dialog.addEventListener('click', function(e) { if (e.target === dialog) dialog.style.display = 'none'; });
     }
+
+    {% if needs_api_key and stripe_buy_enabled %}
+    if (typeof window.podskriftPaywallShown === 'function') {
+        window.podskriftPaywallShown('episode_selection', 'trial_exhausted', {
+            trial_remaining_min: TRIAL_REMAINING_MIN,
+            paid_remaining_min: PAID_REMAINING_MIN
+        });
+    }
+    {% endif %}
 });
 </script>
 {% endblock %}

@@ -59,9 +59,18 @@ PODSKRIFT_EVENTS = (
     'transcript_failed',
     'trial_limit_hit',
     'offer_shown',
+    'pricing_viewed',
+    'paywall_shown',
+    'buy_clicked',
     'checkout_started',
+    'checkout_returned',
     'purchase_completed',
+    'purchase_failed',
+    'purchase_refunded',
+    'refund_processed',
+    'stripe_webhook_error',
     'paid_minutes_exhausted',
+    'minutes_exhausted',
 )
 
 PT_HOSTS = ('productivitytech.io', 'www.productivitytech.io')
