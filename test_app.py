@@ -878,11 +878,12 @@ def _new_session():
 
 
 def _signup(client, email, password='abcdefgh1', confirm=None):
-    return client.post('/register', data={
+    data = {
         'email': email,
         'password': password,
-        'password2': confirm if confirm is not None else password,
-    }, follow_redirects=True)
+    }
+    # confirm kept for call-site compatibility; password confirmation was removed.
+    return client.post('/register', data=data, follow_redirects=True)
 
 
 def _purge(emails):
@@ -914,10 +915,10 @@ def test_register_route_releases_the_slot_on_validation_failure():
     _purge(emails)
     client = _fresh_client()
 
-    # Five mismatched-password attempts must cost nothing
+    # Five short-password attempts must cost nothing
     for _ in range(5):
-        body = _signup(client, 'rel0@example.com', confirm='WRONG').data.decode()
-        assert 'Passwords do not match' in body
+        body = _signup(client, 'rel0@example.com', password='short').data.decode()
+        assert 'at least 8 characters' in body
 
     created = 0
     for e in emails:
@@ -1062,8 +1063,7 @@ def test_releasing_a_pruned_token_does_not_steal_a_live_reservation():
 
 
 @pytest.mark.parametrize('override,expect', [
-    ({'password2': 'MISMATCH'}, 'Passwords do not match'),
-    ({'password': 'short1', 'password2': 'short1'}, 'at least 8 characters'),
+    ({'password': 'short1'}, 'at least 8 characters'),
     ({'email': 'not-an-email'}, 'valid email address'),
     ({'email': 'x@immenseignite.info'}, 'real email address'),
 ])
@@ -1072,8 +1072,7 @@ def test_every_validation_failure_gives_the_slot_back(override, expect):
     permanently burned a signup slot each."""
     A._register_attempts.clear()
     client = _fresh_client()
-    data = {'email': 'slot@example.com', 'password': 'abcdefgh1',
-            'password2': 'abcdefgh1'}
+    data = {'email': 'slot@example.com', 'password': 'abcdefgh1'}
     data.update(override)
 
     for _ in range(A.REGISTER_MAX_PER_IP + 2):
@@ -5687,7 +5686,50 @@ def test_homepage_copy_leads_with_spotify(trial_on):
 def test_register_helper_text_mentions_free_minutes(trial_on):
     body = A.app.test_client().get('/register').data.decode()
     assert f'{A.TRIAL_DEFAULT_SECONDS // 60} free minutes' in body
-    assert 'no OpenAI key needed' in body
+    assert 'No card, no OpenAI key' in body
+    assert 'password2' not in body
+    assert 'Confirm password' not in body
+    assert 'Create account' in body
+
+
+def test_register_with_pending_episode_shows_episode_card(monkeypatch, trial_on):
+    """Contextual signup: episode card + start-transcript CTA when stash is set."""
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    client = A.app.test_client()
+    client.post('/pending-transcription', data={
+        'audio_url': 'https://cdn.example.com/ep.mp3',
+        'episode_title': 'Hard Fork Special',
+        'podcast_name': 'Hard Fork',
+        'duration_min': '48',
+        'artwork': 'https://cdn.example.com/art.jpg',
+        'language': 'en',
+    }, follow_redirects=False)
+    body = client.get('/register').data.decode()
+    assert 'Create a free account to get this transcript' in body
+    assert 'Hard Fork Special' in body
+    assert 'Hard Fork' in body
+    assert '48 min' in body
+    assert f'of your {A.TRIAL_DEFAULT_SECONDS // 60} free' in body
+    assert 'Create account &amp; start transcript' in body or 'Create account & start transcript' in body
+    assert 'Confirm password' not in body
+
+
+def test_register_without_pending_is_generic(trial_on):
+    body = A.app.test_client().get('/register').data.decode()
+    assert 'Create a free account to get this transcript' not in body
+    assert 'Create your free account' in body
+    assert 'Create account &amp; start transcript' not in body
+    assert 'Create account & start transcript' not in body
+
+
+def test_signup_redirects_301_to_register(trial_on):
+    client = A.app.test_client()
+    resp = client.get('/signup?next=/resume-transcription', follow_redirects=False)
+    assert resp.status_code == 301
+    loc = resp.headers['Location']
+    assert '/register' in loc
+    assert 'next=' in loc
+    assert 'resume-transcription' in loc
 
 
 def test_settings_renames_developer_api_key_card(trial_on):
@@ -6883,7 +6925,11 @@ def test_nav_shows_minutes_pill_and_buy_when_stripe_on(stripe_on):
     assert '120 min left' in body  # 180 - 60
     assert 'class="nav-buy"' in body
     assert 'Buy minutes' in body
-    assert '/settings#credits' in body
+    assert 'data-open-buy-modal' in body
+    assert 'buy_modal_header' in body
+    assert 'id="navBuyPill"' in body
+    assert 'from=header_pill' in body
+    assert 'buyModalScrim' in body
 
 
 def test_nav_hides_buy_when_stripe_off(trial_on):
@@ -7102,10 +7148,16 @@ def test_episode_selection_buy_form_not_nested_in_episode_form(stripe_on):
     assert buy_form.find_parent('form') is None
     assert buy_form.get('action', '').endswith('/billing/checkout')
     assert buy_form.find('input', {'name': 'source', 'value': 'episode_selection'})
+    assert buy_form.find('input', {'name': 'ph_sid'}) is not None
+    assert buy_form.find('input', {'name': 'return_to'}) is not None
     # HTML5 form= associates the Buy button with buyForm without nesting.
     buy_btn = soup.find('button', attrs={'form': 'buyFormEpisodeSelection'})
     assert buy_btn is not None
     assert buy_btn.get('type') == 'submit'
+    # Sticky bar + meter hooks ship with the conversion top-3 work.
+    assert soup.find(id='epSticky') is not None
+    assert soup.find(id='stickyTranscribeBtn') is not None
+    assert 'This episode uses' in html or 'Transcribe free' in html
     # Start Transcription must remain a submit control of episodeForm.
     transcribe = soup.find(id='transcribeBtn')
     assert transcribe is not None
@@ -7197,3 +7249,200 @@ def test_episode_selection_own_key_shows_dollar_cost_not_paywall(
     assert 'Uses ~' not in meta
     assert '~$' in meta
     assert '30.0 min' in meta or '30 min' in meta
+
+# ---------------------------------------------------------------------------
+# Conversion top-3: signup episode card, usage meter, buy modal + return_to
+# ---------------------------------------------------------------------------
+
+def test_safe_return_to_rejects_absolute_and_external():
+    assert A.safe_return_to('/parse_rss') == '/parse_rss'
+    assert A.safe_return_to('/feeds/use/1?x=1') == '/feeds/use/1?x=1'
+    assert A.safe_return_to('/settings#credits') == '/settings#credits'
+    assert A.safe_return_to('/') == '/'
+    assert A.safe_return_to('https://evil.com') is None
+    assert A.safe_return_to('//evil.com') is None
+    assert A.safe_return_to('https://evil.example/phish') is None
+    assert A.safe_return_to('/\\evil.com') is None
+    assert A.safe_return_to('') is None
+    assert A.safe_return_to(None) is None
+    assert A.safe_return_to('  ') is None
+
+
+def test_billing_checkout_stores_safe_return_to(stripe_on):
+    uid = _make_user('returnto@test.com', limit=600, used=0)
+    client = _login(uid)
+    client.get('/settings')  # seed CSRF
+    with client.session_transaction() as sess:
+        tok = sess['_csrf_token']
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': tok,
+        'source': 'buy_modal_episode',
+        'return_to': '/parse_rss?feed=1',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    assert 'checkout.stripe.test' in resp.headers.get('Location', '')
+    with client.session_transaction() as sess:
+        assert sess.get(A.BILLING_RETURN_TO_KEY) == '/parse_rss?feed=1'
+    params = stripe_on['last_create_params']
+    assert params['metadata'].get('return_to') == '/parse_rss?feed=1'
+    # Cancel goes through /billing/cancel?next=<return_to>
+    assert 'billing/cancel' in params['cancel_url']
+    assert 'parse_rss' in params['cancel_url']
+    assert params['metadata'].get('location') == 'buy_modal_episode'
+    assert params['metadata'].get('source') == 'buy_modal_episode'
+
+
+def test_billing_checkout_rejects_external_return_to(stripe_on):
+    uid = _make_user('badrto@test.com', limit=600, used=0)
+    client = _login(uid)
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        tok = sess['_csrf_token']
+    client.post('/billing/checkout', data={
+        'csrf_token': tok,
+        'source': 'buy_modal_header',
+        'return_to': 'https://evil.example/steal',
+    }, follow_redirects=False)
+    with client.session_transaction() as sess:
+        assert sess.get(A.BILLING_RETURN_TO_KEY) is None
+    params = stripe_on['last_create_params']
+    assert 'return_to' not in (params.get('metadata') or {})
+    assert 'evil.example' not in (params.get('cancel_url') or '')
+
+
+def test_billing_success_shows_episode_start_button(stripe_on):
+    uid = _make_user('successcta@test.com', limit=600, used=0)
+    session = _pack_session(uid, 'cs_success_cta')
+    stripe_on['sessions'][session['id']] = session
+    client = _login(uid)
+    with client.session_transaction() as sess:
+        sess[A.PENDING_TRANSCRIPTION_KEY] = {
+            'title': 'Return To Task Ep',
+            'audio_url': 'https://cdn.example.com/r.mp3',
+            'duration_min': 40.0,
+            'podcast_name': 'Show',
+            'language': 'en',
+            'rss_url': None,
+            'episode_index': None,
+            'artwork': None,
+            'published': None,
+        }
+    resp = client.get(f'/billing/success?session_id={session["id"]}')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert f'+{A.CREDIT_PACK_MINUTES} minutes added' in body
+    assert 'Start transcript: Return To Task Ep' in body
+    assert 'resume-transcription' in body
+    assert 'Settings' in body
+    assert 'Back to Settings' not in body
+
+
+def test_billing_success_fallback_without_pending(stripe_on):
+    uid = _make_user('successfallback@test.com', limit=600, used=0)
+    session = _pack_session(uid, 'cs_success_fb')
+    stripe_on['sessions'][session['id']] = session
+    client = _login(uid)
+    resp = client.get(f'/billing/success?session_id={session["id"]}')
+    body = resp.data.decode()
+    assert f'+{A.CREDIT_PACK_MINUTES} minutes added' in body
+    assert 'Start a transcript' in body
+    assert 'Start transcript:' not in body
+
+
+def test_episode_picker_meter_text_for_trial_user(stripe_on):
+    from flask import render_template
+    uid = _make_user('metert@test.com', limit=180 * 60, used=30 * 60)
+    episodes = [{
+        'index': 0, 'title': 'Meter Ep', 'published': '2024-01-01',
+        'duration_min': 45, 'estimated_cost': 0.27, 'description': '',
+        'needs_own_key': False,
+    }]
+    client = _login(uid)
+    with client.session_transaction():
+        pass
+    with A.app.test_request_context('/'):
+        from flask_login import login_user
+        from models import User
+        user = A.db.session.get(User, uid)
+        login_user(user)
+        html = render_template(
+            'episode_selection.html',
+            episodes=episodes, all_episodes=episodes,
+            rss_url='https://example.com/feed.xml', feed_name='Show',
+            has_more=False, needs_api_key=False, podcast_name='Show',
+            artwork='https://cdn.example.com/a.jpg',
+            languages=[('en', 'English')],
+            show_openai_cost=False,
+        )
+    assert 'This episode uses' in html
+    assert 'you have' in html and 'left' in html
+    assert 'TRIAL_REMAINING_MIN' in html
+    assert 'epSticky' in html
+    assert 'Transcribe free' in html
+    # Trial users should not see OpenAI $ on cards — "Uses ~N min" instead
+    assert 'Uses ~45 min' in html
+    assert '~$0.270' not in html and '~$0.27' not in html
+
+
+def test_episode_picker_meter_for_paid_user(stripe_on):
+    from flask import render_template
+    from models import User
+    uid = _make_user('meterp@test.com', limit=180 * 60, used=180 * 60)
+    with A.app.app_context():
+        u = A.db.session.get(User, uid)
+        u.paid_seconds_balance = 120 * 60
+        A.db.session.commit()
+    episodes = [{
+        'index': 0, 'title': 'Paid Ep', 'published': '2024-01-01',
+        'duration_min': 30, 'estimated_cost': 0.18, 'description': '',
+        'needs_own_key': False,
+    }]
+    with A.app.test_request_context('/'):
+        from flask_login import login_user
+        login_user(A.db.session.get(User, uid))
+        html = render_template(
+            'episode_selection.html',
+            episodes=episodes, all_episodes=episodes,
+            rss_url='https://example.com/feed.xml', feed_name='Show',
+            has_more=False, needs_api_key=False, podcast_name='Show',
+            artwork='', languages=[('en', 'English')],
+            show_openai_cost=False,
+        )
+    assert 'Transcribe →' in html
+    assert 'This episode uses' in html
+    assert 'Uses ~30 min' in html
+
+
+def test_episode_picker_own_key_keeps_cost_no_meter(stripe_on):
+    from flask import render_template
+    from models import User
+    uid = _make_user('meterk@test.com', key='sk-' + 'm' * 40, limit=180 * 60, used=0)
+    episodes = [{
+        'index': 0, 'title': 'Key Ep', 'published': '2024-01-01',
+        'duration_min': 30, 'estimated_cost': 0.18, 'description': '',
+        'needs_own_key': False,
+    }]
+    with A.app.test_request_context('/'):
+        from flask_login import login_user
+        login_user(A.db.session.get(User, uid))
+        html = render_template(
+            'episode_selection.html',
+            episodes=episodes, all_episodes=episodes,
+            rss_url='https://example.com/feed.xml', feed_name='Show',
+            has_more=False, needs_api_key=False, podcast_name='Show',
+            artwork='', languages=[('en', 'English')],
+            show_openai_cost=True,
+        )
+    assert 'TRIAL_REMAINING_MIN = null' in html
+    assert '~$0.180' in html or '~$0.18' in html
+    assert 'Uses ~' not in html or 'SHOW_OPENAI_COST = true' in html
+
+
+def test_first_run_home_leads_with_start_not_buy(stripe_on):
+    uid = _make_user('firstrun@test.com', limit=180 * 60, used=0)
+    body = _login(uid).get('/').data.decode()
+    assert 'Start your first transcript' in body
+    assert 'autofocus' in body
+    # Banner Buy button must not lead for a brand-new account
+    assert 'source" value="home_banner"' not in body
+    assert 'name="source" value="home_banner"' not in body

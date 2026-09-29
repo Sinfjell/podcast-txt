@@ -181,6 +181,9 @@ def openai_whisper_cost_usd(minutes):
 #: Session key for an episode an anonymous visitor picked before signing up.
 #: Cleared after resume (success or failure) so a stale stash cannot fire later.
 PENDING_TRANSCRIPTION_KEY = 'pending_transcription'
+#: Relative path to return to after Stripe Checkout (cancel / success CTA).
+#: Validated with safe_return_to(); never trust a raw absolute URL here.
+BILLING_RETURN_TO_KEY = 'billing_return_to'
 
 
 def safe_next_url(candidate, default=None):
@@ -231,6 +234,22 @@ def safe_next_url(candidate, default=None):
         if urlparse(absolute).netloc.lower() != urlparse(request.host_url).netloc.lower():
             return fallback
     return safe
+
+
+def safe_return_to(candidate):
+    """Relative same-origin path for post-checkout return, or None if unsafe.
+
+    Rejects absolute URLs, protocol-relative hosts, and empty values. Used for
+    Stripe cancel_url / session return_to — never store an unvalidated string.
+    """
+    if not candidate or not isinstance(candidate, str) or not candidate.strip():
+        return None
+    # Sentinel default: safe_next_url returns it unchanged only on rejection.
+    rejected = '__unsafe_return_to__'
+    result = safe_next_url(candidate.strip(), default=rejected)
+    if result == rejected:
+        return None
+    return result
 
 
 def trial_estimate_seconds(duration_min):
@@ -1922,12 +1941,24 @@ def _redirect_after_auth():
 
 
 def _register_template(**extra):
+    pending = session.get(PENDING_TRANSCRIPTION_KEY)
     return render_template(
         'register.html',
         next=_auth_next_arg(),
         trial_minutes=(TRIAL_DEFAULT_SECONDS // 60 if trial_available() else None),
+        pending=pending,
         **extra,
     )
+
+
+@app.route('/signup')
+def signup_redirect():
+    """Common guess for /register — keep the query string (e.g. ?next=…)."""
+    target = url_for('register')
+    qs = request.query_string.decode('utf-8', errors='replace') if request.query_string else ''
+    if qs:
+        target = f'{target}?{qs}'
+    return redirect(target, code=301)
 
 
 @app.route('/register', methods=['GET', 'POST'])
@@ -1940,7 +1971,6 @@ def register():
 
     email = request.form.get('email', '').strip().lower()
     password = request.form.get('password', '')
-    password2 = request.form.get('password2', '')
 
     if not email or not password:
         flash('Email and password are required.', 'error')
@@ -1963,10 +1993,6 @@ def register():
 
         if '@' not in email or '.' not in email.rsplit('@', 1)[-1]:
             flash('Please enter a valid email address.', 'error')
-            return _register_template()
-
-        if password != password2:
-            flash('Passwords do not match.', 'error')
             return _register_template()
 
         if len(password) < 8:
@@ -2128,6 +2154,10 @@ def resume_transcription():
         # start would via flash, since this is a browser redirect not XHR.
         flash(payload.get('error') or 'Could not start transcription.', 'error')
         return redirect(url_for('index'))
+    flash(
+        "Your transcript has started. You can close this page; it'll be in History.",
+        'success',
+    )
     return redirect(url_for('transcription_page', task_id=payload['task_id']))
 
 
@@ -2837,7 +2867,20 @@ def billing_checkout():
     trial_remaining_min = trial_ctx.get('remaining_minutes')
     paid_remaining_min = trial_ctx.get('paid_minutes')
 
-    next_path = safe_next_url(
+# Optional stash so /billing/success can offer "Start transcript: …".
+    if (request.form.get('rss_url') or request.form.get('audio_url')):
+        _stash_pending_from_request()
+
+    # Prefer explicit return_to (buy modal / sticky bar); fall back to cancel_url.
+    return_to = safe_return_to(
+        request.form.get('return_to') or request.form.get('cancel_url') or '')
+    if return_to:
+        session[BILLING_RETURN_TO_KEY] = return_to
+        session.modified = True
+    else:
+        session.pop(BILLING_RETURN_TO_KEY, None)
+
+    next_path = return_to or safe_next_url(
         request.form.get('cancel_url') or (url_for('settings') + '#credits'),
         url_for('settings') + '#credits',
     )
@@ -2879,6 +2922,9 @@ def billing_checkout():
     }
     if ph_sid:
         meta['ph_sid'] = ph_sid
+    if return_to:
+        # Stripe metadata values are short strings; keep a relative path only.
+        meta['return_to'] = return_to[:500]
     pi_meta = {
         'user_id': str(current_user.id),
         'pack': CREDIT_PACK_SKU,
@@ -2896,7 +2942,7 @@ def billing_checkout():
         'customer_email': current_user.email,
         'customer_creation': 'always',
         'billing_address_collection': 'required',
-        'metadata': meta,
+'metadata': meta,
         'payment_intent_data': {
             'metadata': pi_meta,
         },
@@ -2999,6 +3045,11 @@ def billing_success():
                     returned_status = 'pending' if ps != 'unpaid' else 'unpaid'
                     if ps in ('processing', 'pending'):
                         returned_status = 'pending'
+                # Prefer Stripe metadata return_to if session key was lost.
+                meta_return = safe_return_to(meta.get('return_to') or '')
+                if meta_return and not session.get(BILLING_RETURN_TO_KEY):
+                    session[BILLING_RETURN_TO_KEY] = meta_return
+                    session.modified = True
         except Exception:
             app.logger.exception(
                 'billing_success session retrieve failed for %s', session_id)
@@ -3012,11 +3063,30 @@ def billing_success():
     elif session_id:
         _capture_checkout_returned(
             'error', user_id=current_user.id, session_id=session_id)
+
+    # Re-load balance after fulfill may have credited the account.
+    try:
+        db.session.expire(current_user)
+    except Exception:
+        pass
+    paid_minutes = paid_balance_seconds(current_user) // 60
+    trial_left = 0
+    if trial_available() and not getattr(current_user, 'openai_api_key', None):
+        trial_left = trial_status(current_user)[2] // 60
+    balance_minutes = paid_minutes + trial_left
+
+    pending_episode = session.get(PENDING_TRANSCRIPTION_KEY)
+    return_to = safe_return_to(session.get(BILLING_RETURN_TO_KEY) or '')
+
     return render_template(
         'billing_success.html',
         paid_ready=paid_ready,
         pending=pending,
-        paid_minutes=(current_user.paid_seconds_balance or 0) // 60,
+        paid_minutes=paid_minutes,
+        balance_minutes=balance_minutes,
+        credit_pack_minutes=CREDIT_PACK_MINUTES,
+        pending_episode=pending_episode,
+        return_to=return_to,
     )
 
 
@@ -3359,13 +3429,21 @@ def _capture_paid_minutes_exhausted(user_id, source):
 @app.route('/')
 def index():
     saved_feeds = []
+    first_run = False
     if current_user.is_authenticated:
         saved_feeds = SavedFeed.query.filter_by(
             user_id=current_user.id
         ).order_by(SavedFeed.created_at.desc()).limit(5).all()
+        # No transcription rows yet → lead with "start your first transcript"
+        # instead of a Buy banner (activation before purchase).
+        first_run = (
+            TranscriptionTask.query.filter_by(user_id=current_user.id)
+            .limit(1).first() is None
+        )
     return render_template('index.html', saved_feeds=saved_feeds,
                            languages=language_choices(),
                            trial=_trial_context(),
+                           first_run=first_run,
                            faq=faq_entries(),
                            trial_minutes=(TRIAL_DEFAULT_SECONDS // 60
                                           if trial_available() else None),

@@ -1,26 +1,58 @@
 {% extends "base.html" %}
-{% block title %}Payment received — Podskrift{% endblock %}
+{% block title %}{% if paid_ready %}+{{ credit_pack_minutes }} minutes{% else %}Payment{% endif %} — Podskrift{% endblock %}
 
 {% block content %}
-<div style="max-width: 500px; margin: 48px auto; text-align: center;">
-    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 12px;">
-        {% if paid_ready %}Payment received{% else %}Thanks — almost there{% endif %}
+<div style="max-width: 480px; margin: 56px auto; text-align: center;">
+    {% if paid_ready %}
+    <p style="display: inline-block; padding: 4px 12px; border-radius: 999px;
+              background: var(--accent-bg); border: 1px solid var(--accent-border);
+              color: var(--accent-bright); font-size: 12.5px; font-weight: 600;
+              margin-bottom: 16px;">Payment received</p>
+    <h1 style="font-size: 28px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 10px;">
+        +{{ credit_pack_minutes }} minutes added
     </h1>
-    <p style="color: var(--muted); font-size: 15px; line-height: 1.6; margin-bottom: 24px;">
-        {% if paid_ready %}
-        Your paid minutes are on your account
-        {% if paid_minutes %}({{ paid_minutes }} min available){% endif %}.
-        You can keep browsing — the balance also shows in Settings.
-        {% elif pending %}
-        Minutes are on the way. Some payment methods take a moment to clear;
-        we will add them when Stripe confirms payment.
-        {% else %}
-        Minutes are being added to your account. This usually takes a few seconds.
-        You can keep browsing — when the balance updates, it will show in Settings.
+    <p style="color: var(--muted); font-size: 15px; line-height: 1.6; margin-bottom: 28px;">
+        Balance: <strong style="color: var(--text);">{{ balance_minutes }} min</strong>
+        {% if paid_minutes is not none and paid_minutes != balance_minutes %}
+        <span style="opacity: 0.75;">({{ paid_minutes }} paid)</span>
         {% endif %}
     </p>
-    <a href="{{ url_for('settings') }}#credits" class="btn btn-primary">Back to Settings</a>
-    <a href="{{ url_for('index') }}" class="btn btn-ghost" style="margin-left: 8px;">Transcribe</a>
+    {% if pending_episode and pending_episode.title %}
+    <form method="POST" action="{{ url_for('resume_transcription') }}" style="margin-bottom: 12px;">
+        <button type="submit" class="btn btn-primary btn-lg" style="width: 100%; justify-content: center;">
+            Start transcript: {{ pending_episode.title[:80] }}{% if pending_episode.title|length > 80 %}…{% endif %}
+        </button>
+    </form>
+    {% else %}
+    <a href="{{ return_to or url_for('index') }}" class="btn btn-primary btn-lg"
+       style="width: 100%; justify-content: center; margin-bottom: 12px;">
+        Start a transcript
+    </a>
+    {% endif %}
+    <a href="{{ url_for('settings') }}#credits" class="btn btn-ghost" style="margin-top: 4px;">Settings</a>
+    {% elif pending %}
+    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 12px;">
+        Thanks — almost there
+    </h1>
+    <p style="color: var(--muted); font-size: 15px; line-height: 1.6; margin-bottom: 24px;">
+        Minutes are on the way. Some payment methods take a moment to clear;
+        we will add them when Stripe confirms payment.
+    </p>
+    <a href="{{ url_for('settings') }}#credits" class="btn btn-primary">View balance</a>
+    <a href="{{ return_to or url_for('index') }}" class="btn btn-ghost" style="margin-left: 8px;">Transcribe</a>
+    {% else %}
+    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 12px;">
+        Thanks — almost there
+    </h1>
+    <p style="color: var(--muted); font-size: 15px; line-height: 1.6; margin-bottom: 24px;">
+        Minutes are being added to your account. This usually takes a few seconds.
+        {% if balance_minutes is not none %}
+        Current balance: {{ balance_minutes }} min.
+        {% endif %}
+    </p>
+    <a href="{{ url_for('settings') }}#credits" class="btn btn-primary">View balance</a>
+    <a href="{{ return_to or url_for('index') }}" class="btn btn-ghost" style="margin-left: 8px;">Transcribe</a>
+    {% endif %}
 </div>
 {% endblock %}
 
