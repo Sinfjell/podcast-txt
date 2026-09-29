@@ -6544,6 +6544,11 @@ def test_ensure_credit_purchases_table_upgrades_legacy_table(trial_on):
             "amount_cents, currency, minutes) VALUES (1, 'cs_legacy', 500, 'usd', 300)"
         ))
         A.db.session.commit()
+        # Other pooled SQLite connections still cache the old (full) schema
+        # after the DROP/CREATE above and would report "duplicate column";
+        # a real boot starts with fresh connections, so start fresh here too.
+        A.db.session.remove()
+        A.db.engine.dispose()
         try:
             A.ensure_credit_purchases_table()
             A.ensure_credit_purchases_table()
@@ -6563,5 +6568,7 @@ def test_ensure_credit_purchases_table_upgrades_legacy_table(trial_on):
         finally:
             A.db.session.execute(A.text('DROP TABLE IF EXISTS credit_purchases'))
             A.db.session.commit()
+            A.db.session.remove()
+            A.db.engine.dispose()
             A.db.create_all()
             A.ensure_credit_purchases_table()
