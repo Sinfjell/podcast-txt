@@ -93,10 +93,31 @@ def capture(event, distinct_id, properties=None, uuid=None):
         logging.getLogger(__name__).exception('posthog capture failed for %s', event)
 
 
+def openai_error_code(exc):
+    """Best-effort OpenAI error `code` (e.g. insufficient_quota). Never the message."""
+    if exc is None:
+        return None
+    code = getattr(exc, 'code', None)
+    if isinstance(code, str) and code:
+        return code
+    body = getattr(exc, 'body', None)
+    if isinstance(body, dict):
+        nested = body.get('error')
+        if isinstance(nested, dict):
+            nested_code = nested.get('code')
+            if isinstance(nested_code, str) and nested_code:
+                return nested_code
+        top = body.get('code')
+        if isinstance(top, str) and top:
+            return top
+    return None
+
+
 def openai_fail_reason(exc=None, *, looks_like_key=True):
     """Coarse reason for openai_key_validation_failed / transcript_failed.
 
-    Values: invalid_key | no_billing | network | other. Never includes key material.
+    Values: invalid_key | no_billing | rate_limit | network | other.
+    Never includes key material.
     """
     if not looks_like_key:
         return 'invalid_key'
@@ -106,6 +127,11 @@ def openai_fail_reason(exc=None, *, looks_like_key=True):
     if status == 401 or status == 403:
         return 'invalid_key'
     if status == 429:
+        # models.list can 429 either way; Whisper usually sends a code.
+        code = openai_error_code(exc)
+        if code == 'rate_limit_exceeded':
+            return 'rate_limit'
+        # insufficient_quota, or a bare 429 with no code (common on empty billing).
         return 'no_billing'
     # Import locally so analytics stays importable without the OpenAI SDK.
     try:

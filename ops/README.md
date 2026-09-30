@@ -162,7 +162,7 @@ Named events:
 | `user_signed_up`, `settings_viewed` | server | — |
 | `openai_key_saved` / `openai_key_validation_failed` | server | `status` / `reason` |
 | `transcript_started` / `transcript_completed` | server | `key_source` (trial/user), `source` (web/api) |
-| `transcript_failed` | server | the above + `reason` (`invalid_key`, `no_billing`, `network`, `trial_exhausted`, `abandoned`, `other`) |
+| `transcript_failed` | server | the above + `reason` (`invalid_key`, `no_billing`, `rate_limit`, `network`, `trial_exhausted`, `abandoned`, `other`) |
 | `trial_limit_hit` | server | `scope` (`episode_length`, `user`, `global`), `stage` (`start`, `reconcile`), `source` |
 
 `trial_limit_hit` is the buying signal: a trial user wanted more than the free

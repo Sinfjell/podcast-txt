@@ -5331,13 +5331,26 @@ def test_openai_fail_reason_is_coarse():
         status_code = 401
     class E429(Exception):
         status_code = 429
+    class E429Quota(Exception):
+        status_code = 429
+        code = 'insufficient_quota'
+    class E429Rate(Exception):
+        status_code = 429
+        code = 'rate_limit_exceeded'
     class E503(Exception):
         status_code = 503
     assert analytics.openai_fail_reason(E401()) == 'invalid_key'
     assert analytics.openai_fail_reason(E429()) == 'no_billing'
+    assert analytics.openai_fail_reason(E429Quota()) == 'no_billing'
+    assert analytics.openai_fail_reason(E429Rate()) == 'rate_limit'
     assert analytics.openai_fail_reason(E503()) == 'network'
     assert analytics.openai_fail_reason(None, looks_like_key=False) == 'invalid_key'
     assert analytics.openai_fail_reason(RuntimeError('boom')) == 'other'
+    assert analytics.openai_error_code(E429Quota()) == 'insufficient_quota'
+    assert analytics.openai_error_code(E429Rate()) == 'rate_limit_exceeded'
+    nested = E429()
+    nested.body = {'error': {'code': 'insufficient_quota'}}
+    assert analytics.openai_error_code(nested) == 'insufficient_quota'
 
 
 def test_privacy_page_mentions_posthog():
@@ -5743,12 +5756,20 @@ def test_settings_renames_developer_api_key_card(trial_on):
 def test_verify_openai_key_copy(monkeypatch):
     ok, msg, status = A.verify_openai_key('psk_looks_like_ours_but_isnt')
     assert ok is False and status == 'invalid_key'
-    assert 'psk_' in msg
+    assert 'Podskrift developer key' in msg
     assert 'sk-' in msg
+
+    class Audio:
+        def __init__(self):
+            self.transcriptions = self
+
+        def create(self, **kw):
+            return type('T', (), {'text': ''})()
 
     class Client:
         def __init__(self, *a, **kw):
             self.models = self
+            self.audio = Audio()
 
         def list(self):
             return []
@@ -5756,8 +5777,273 @@ def test_verify_openai_key_copy(monkeypatch):
     monkeypatch.setattr(A, 'OpenAI', Client)
     ok, msg, status = A.verify_openai_key('sk-' + 'v' * 40)
     assert ok and status == 'verified'
-    assert 'Key saved and accepted by OpenAI' in msg
-    assert 'billing' in msg.lower()
+    assert 'Key saved and verified' in msg
+    assert 'Whisper' in msg
+
+
+def _fake_openai_client(*, list_exc=None, whisper_exc=None):
+    """OpenAI stand-in that can fail models.list and/or Whisper separately."""
+
+    class Audio:
+        def __init__(self):
+            self.transcriptions = self
+
+        def create(self, **kw):
+            if whisper_exc is not None:
+                raise whisper_exc
+            return type('T', (), {'text': ''})()
+
+    class Client:
+        def __init__(self, *a, **kw):
+            self.models = self
+            self.audio = Audio()
+
+        def list(self):
+            if list_exc is not None:
+                raise list_exc
+            return []
+
+    return Client
+
+
+def test_verify_probes_whisper_after_models_list(monkeypatch):
+    """Zero-credit accounts pass models.list; Whisper is what catches them."""
+    class NoCredit(Exception):
+        status_code = 429
+        code = 'insufficient_quota'
+
+    monkeypatch.setattr(A, 'OpenAI', _fake_openai_client(whisper_exc=NoCredit()))
+    ok, msg, status = A.verify_openai_key('sk-' + 'w' * 40)
+    assert ok is True
+    assert status == 'no_billing'
+    assert 'saved' in msg.lower()
+    assert 'credit' in msg.lower()
+
+
+def test_verify_whisper_network_error_still_saves(monkeypatch):
+    monkeypatch.setattr(
+        A, 'OpenAI',
+        _fake_openai_client(whisper_exc=A.APIConnectionError(request=None)))
+    ok, msg, status = A.verify_openai_key('sk-' + 'n' * 40)
+    assert ok is True
+    assert status == 'unverified_network'
+
+
+def test_silent_wav_probe_is_short_wav():
+    raw = A._silent_wav_bytes()
+    assert raw[:4] == b'RIFF'
+    assert b'WAVE' in raw[:16]
+    assert 1000 < len(raw) < 100_000
+
+
+def test_settings_openai_links_and_create_credit_hint(trial_on):
+    uid = _make_user('links@test.com')
+    body = _login(uid).get('/settings').data.decode()
+    assert 'href="https://platform.openai.com/api-keys"' in body
+    assert 'href="https://platform.openai.com/account/billing"' in body
+    assert 'rel="noopener"' in body
+    assert 'target="_blank"' in body
+    assert '1. Create key' in body
+    assert '2. Add credit' in body
+
+
+def test_settings_collapses_developer_api_key_without_one(trial_on):
+    uid = _make_user('collapse-api@test.com')
+    body = _login(uid).get('/settings').data.decode()
+    assert '<details' in body
+    assert 'Podskrift API key (developers only)' in body
+    # Create button is inside the collapsed details, not a top-level card header CTA.
+    assert body.index('<details') < body.index('>Create<')
+
+
+def test_settings_expands_developer_api_key_when_present(trial_on):
+    from models import db, User
+    uid = _make_user('expand-api@test.com')
+    with A.app.app_context():
+        u = db.session.get(User, uid)
+        u.api_key_hash = 'a' * 64
+        u.api_key_prefix = 'psk_abcd'
+        db.session.commit()
+    body = _login(uid).get('/settings').data.decode()
+    assert '<details' not in body or body.count('<details') == 0
+    assert 'psk_abcd' in body
+    assert 'Regenerate' in body
+
+
+def test_no_billing_save_offers_pack_when_stripe_on(ph_events, monkeypatch, stripe_on):
+    uid = _make_user('nobill-pack@test.com')
+
+    def soft_verify(key):
+        return True, A.OPENAI_NO_BILLING_SAVE_MSG, 'no_billing'
+    monkeypatch.setattr(A, 'verify_openai_key', soft_verify)
+
+    client = _login(uid)
+    body = client.post(
+        '/settings', data={'openai_api_key': 'sk-' + 'p' * 40},
+        follow_redirects=True,
+    ).data.decode()
+    assert 'openai-no-billing' in body or 'OpenAI account still needs credit' in body
+    assert 'openai_no_billing' in body
+    assert A.CREDIT_PACK_LABEL in body
+    saved = [e for e in ph_events.events if e['event'] == 'openai_key_saved']
+    assert saved and saved[0]['properties']['status'] == 'no_billing'
+
+
+def test_transcription_status_flags_no_billing_with_retry(stripe_on):
+    from models import db, TranscriptionTask
+    uid = _make_user('nobill-status@test.com', key='sk-' + 'q' * 40)
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='nobill-1', user_id=uid, episode_title='Hard Fork',
+            status='error', phase='error',
+            podcast_name='Hard Fork',
+            artwork_url='https://example.com/art.jpg',
+            episode_published='2024-01-01',
+            source_audio_url='https://example.com/ep.mp3',
+            audio_duration=48 * 60,
+            language='en',
+            error_message=A.describe_openai_error(
+                type('E', (Exception,), {'status_code': 429, 'code': 'insufficient_quota'})(),
+            ),
+        ))
+        db.session.commit()
+    data = _login(uid).get('/status/nobill-1').get_json()
+    assert data.get('no_billing') is True
+    assert data.get('minutes_error') is not True
+    assert 'insufficient_quota' not in (data.get('error') or '')
+    assert data['retry']['audio_url'] == 'https://example.com/ep.mp3'
+    assert data['retry']['episode_title'] == 'Hard Fork'
+    assert data['retry']['duration_min'] == '48'
+    assert data.get('buy_available') is True
+
+
+def test_transcription_page_has_no_billing_retry_ui(stripe_on):
+    src = open('templates/transcription.html').read()
+    assert 'no_billing' in src
+    assert 'Add credit at OpenAI' in src
+    assert 'Retry this episode' in src
+    assert 'retryEpisode' in src
+    assert 'transcription_no_billing' in src
+    assert 'Your OpenAI account has no credit' in src
+
+
+def test_enqueue_stores_source_audio_url_for_retry(monkeypatch, trial_on):
+    import types
+    uid = _make_user('retry-store@test.com', key='sk-' + 'r' * 40)
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: None))
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user,
+            {'title': 'Ep', 'audio_url': 'https://example.com/retry.mp3',
+             'duration_min': 12, 'podcast_name': 'Show'},
+        )
+        assert status == 200, payload
+        task = A.db.session.get(A.TranscriptionTask, payload['task_id'])
+        assert task.source_audio_url == 'https://example.com/retry.mp3'
+
+
+def test_byok_no_billing_checkout_clears_key(stripe_on):
+    key = 'sk-' + 'z' * 40
+    uid = _make_user('byok-clear@test.com', key=key)
+    client = _login(uid)
+    with client.session_transaction() as sess:
+        sess['_csrf_token'] = 'tok'
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': 'tok',
+        'source': 'openai_no_billing',
+        'ph_sid': '',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    with A.app.app_context():
+        assert A.db.session.get(A.User, uid).openai_api_key is None
+
+
+def test_saved_openai_key_never_leaks_into_html_or_analytics(ph_events, monkeypatch, stripe_on):
+    """Regression: a prior PR leaked keys into /pricing via a template expression."""
+    key = 'sk-leak-regression-key-never-render-' + ('x' * 24)
+    uid = _make_user('noleak@test.com', key=key)
+
+    def ok_verify(k):
+        return True, 'Key saved and verified for Whisper transcription.', 'verified'
+    monkeypatch.setattr(A, 'verify_openai_key', ok_verify)
+
+    client = _login(uid)
+    # Re-save so openai_key_saved fires with this key in scope.
+    client.post('/settings', data={'openai_api_key': key}, follow_redirects=True)
+
+    for path in ('/settings', '/pricing', '/'):
+        body = client.get(path).data.decode()
+        assert key not in body, f'{path} rendered the raw OpenAI key'
+
+    # Transcription page for a task owned by this user.
+    from models import db, TranscriptionTask
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='noleak-task', user_id=uid, episode_title='Ep',
+            status='error', phase='error',
+            source_audio_url='https://example.com/ep.mp3',
+            error_message='OpenAI refused the job: your OpenAI account has no credit left.',
+        ))
+        db.session.commit()
+    body = client.get('/transcription/noleak-task').data.decode()
+    assert key not in body
+    status = client.get('/status/noleak-task').get_json()
+    assert key not in str(status)
+
+    for event in ph_events.events:
+        blob = str(event)
+        assert key not in blob
+        props = event.get('properties') or {}
+        for v in props.values():
+            assert key not in str(v)
+
+    # Hint may show last 4 chars only — never the full key.
+    settings = client.get('/settings').data.decode()
+    assert f'••••{key[-4:]}' in settings
+    assert key not in settings
+
+
+def test_transcript_failed_distinguishes_rate_limit(ph_events, monkeypatch, trial_on):
+    import types
+    uid = _make_user('ratefail@test.com', key='sk-' + 't' * 40)
+
+    class RateLimited(Exception):
+        status_code = 429
+        code = 'rate_limit_exceeded'
+
+    RateLimited.__module__ = 'openai'
+
+    def boom(*a, **kw):
+        raise RateLimited('rate limited')
+
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: target and target()))
+    monkeypatch.setattr(A, 'download_audio', boom)
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+    monkeypatch.setattr(
+        A, '_is_openai_error',
+        lambda exc: type(exc).__module__.split('.')[0] == 'openai')
+
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user,
+            {'title': 'Ep', 'audio_url': 'https://example.com/ep.mp3',
+             'duration_min': 1},
+        )
+    assert status == 200, payload
+    failed = [e for e in ph_events.events
+              if e['event'] == 'transcript_failed' and e['distinct_id'] == str(uid)]
+    assert len(failed) == 1, [(e['event'], e.get('properties')) for e in ph_events.events]
+    assert failed[0]['properties']['reason'] == 'rate_limit'
+    assert 'sk-' not in str(failed[0])
 
 
 def test_own_key_user_gets_null_trial_badge(trial_on):

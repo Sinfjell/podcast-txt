@@ -87,6 +87,8 @@ class TranscriptionTask(db.Model):
     podcast_name = db.Column(db.String(512), nullable=True)
     artwork_url = db.Column(db.String(1024), nullable=True)
     episode_published = db.Column(db.String(128), nullable=True)
+    # Source audio URL so a failed job can be retried without re-searching.
+    source_audio_url = db.Column(db.String(1024), nullable=True)
 
     # Fine-grained progress state, read by /status to interpolate between checkpoints
     phase = db.Column(db.String(20), nullable=True)
@@ -155,6 +157,7 @@ TASK_COLUMN_MIGRATIONS = {
     'podcast_name': 'VARCHAR(512)',
     'artwork_url': 'VARCHAR(1024)',
     'episode_published': 'VARCHAR(128)',
+    'source_audio_url': 'VARCHAR(1024)',
     'phase': 'VARCHAR(20)',
     'phase_started_at': 'DATETIME',
     'chunk_index': 'INTEGER',
