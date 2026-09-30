@@ -11,6 +11,7 @@ import glob
 import hashlib
 import hmac
 import html as html_lib
+import io
 import json
 import math
 import os
@@ -23,6 +24,7 @@ import ssl
 import time
 import threading
 import unicodedata
+import wave
 from datetime import date, datetime, timezone
 from functools import wraps
 from zoneinfo import ZoneInfo
@@ -1094,16 +1096,23 @@ def describe_openai_error(exc, context='transcription'):
                 'incompletely. Create a new one at platform.openai.com/api-keys '
                 'and paste the whole thing.')
     if status == 429:
+        code = product_analytics.openai_error_code(exc)
+        if code == 'rate_limit_exceeded':
+            if context == 'verify':
+                return ('OpenAI rate-limited this check. Wait a moment and try '
+                        'saving the key again.')
+            return ('OpenAI rate-limited this request. Wait a minute, then use '
+                    'Retry this episode. Nothing was charged by Podskrift.')
         if context == 'verify':
             # verify_openai_key replaces this with a fuller "Key saved — but…"
             # message; kept here so any other verify caller still gets billing help.
             return ('Your OpenAI account has no credit yet, so transcription won\'t '
                     'work. Add a payment method or prepaid credit at '
                     'platform.openai.com/account/billing.')
-        return ('OpenAI refused the job: your OpenAI account has no credit left '
-                '(or hit a rate limit). Add credit at '
-                'platform.openai.com/account/billing — it can take a minute to '
-                'activate — then press Start over. Nothing was charged by Podskrift.')
+        return ('OpenAI refused the job: your OpenAI account has no credit left. '
+                'Add credit at platform.openai.com/account/billing — it can take a '
+                'minute to activate — then retry this episode. Nothing was charged '
+                'by Podskrift.')
     if status == 403:
         return ('Your OpenAI key is not allowed to use the Whisper API. Check its '
                 'permissions at platform.openai.com.')
@@ -1125,6 +1134,57 @@ def looks_like_openai_key(key):
     return bool(key) and key.startswith('sk-') and len(key) >= 20
 
 
+#: Friendly copy when verify finds a key that authenticates but cannot bill Whisper.
+OPENAI_NO_BILLING_SAVE_MSG = (
+    'Key saved — but your OpenAI account has no credit yet, so '
+    'transcription won\'t work. Add a payment method or prepaid credit '
+    'at platform.openai.com/account/billing, then start your transcript.'
+)
+
+#: Checkout sources that mean "switch from a broken BYOK key to the pack".
+BYOK_PACK_SOURCES = frozenset({'openai_no_billing', 'transcription_no_billing'})
+
+
+def _silent_wav_bytes(duration_sec=1.0, sample_rate=16000):
+    """~1s of mono PCM silence as WAV bytes (stdlib only; no ffmpeg)."""
+    nframes = max(1, int(duration_sec * sample_rate))
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(b'\x00\x00' * nframes)
+    return buf.getvalue()
+
+
+def _probe_whisper_billing(client):
+    """Minimal Whisper call — models.list() passes for zero-credit accounts."""
+    audio = io.BytesIO(_silent_wav_bytes())
+    # The SDK reads `.name` for the multipart filename / content type.
+    audio.name = 'silence.wav'
+    return client.audio.transcriptions.create(
+        model='whisper-1',
+        file=audio,
+    )
+
+
+def _openai_unreachable(exc):
+    status = getattr(exc, 'status_code', None)
+    return (status is not None and 500 <= status < 600) or isinstance(
+        exc, (APIConnectionError, APITimeoutError))
+
+
+def _is_no_billing_error(message):
+    """True when our own error copy means OpenAI billing/quota, not rate limit."""
+    if not message:
+        return False
+    msg = str(message).lower()
+    if 'rate-limited' in msg or 'rate limit' in msg:
+        return False
+    return 'openai account has no credit' in msg or (
+        'no credit' in msg and 'openai' in msg)
+
+
 def verify_openai_key(key):
     """Check a key against OpenAI. Returns (ok, message, status).
 
@@ -1135,39 +1195,51 @@ def verify_openai_key(key):
     Done at save time rather than at transcription time: previously the first
     signal that a key was wrong came minutes later, after picking an episode and
     waiting through a download. 15 of 16 production failures were this.
+
+    models.list() alone is not enough: zero-credit accounts still list models,
+    then fail the first Whisper job with 429/insufficient_quota. After list we
+    probe with a ~1s silent WAV on whisper-1 (same model as production).
     """
+    if key and str(key).startswith('psk_'):
+        return False, (
+            "That's a Podskrift developer key; paste your OpenAI key (starts with sk-)"
+        ), 'invalid_key'
     if not looks_like_openai_key(key):
         return False, ('That\'s not an OpenAI API key. OpenAI keys start with "sk-" '
                        'and are created at platform.openai.com/api-keys. (Not your '
                        'OpenAI password, and not the Podskrift "psk_" key below.)'), 'invalid_key'
     try:
-        OpenAI(api_key=key, timeout=15.0, max_retries=0).models.list()
+        client = OpenAI(api_key=key, timeout=15.0, max_retries=0)
+        client.models.list()
     except Exception as e:
-        status = getattr(e, 'status_code', None)
         # A 5xx or a connection failure means we could not CHECK the key, not
         # that OpenAI rejected it. Refusing the save there would make an OpenAI
         # outage look like the user's key is broken.
-        unreachable = (status is not None and 500 <= status < 600) or isinstance(
-            e, (APIConnectionError, APITimeoutError))
-        if unreachable:
+        if _openai_unreachable(e):
             return True, ('Key saved, but OpenAI could not be reached to verify it. '
                           'If transcription fails, re-check the key here.'), 'unverified_network'
-        if status == 429:
+        if getattr(e, 'status_code', None) == 429:
             # The key authenticated; the account is just out of credit or rate
             # limited. Refusing the save would leave them unable to store a
             # working key at all.
-            return True, (
-                'Key saved — but your OpenAI account has no credit yet, so '
-                'transcription won\'t work. Add a payment method or prepaid credit '
-                'at platform.openai.com/account/billing, then start your transcript.'
-            ), 'no_billing'
+            return True, OPENAI_NO_BILLING_SAVE_MSG, 'no_billing'
         return (False, describe_openai_error(e, context='verify'),
                 product_analytics.openai_fail_reason(e, looks_like_key=True))
-    return True, (
-        'Key saved and accepted by OpenAI. If this is a new OpenAI account, make '
-        'sure it has credit (platform.openai.com/account/billing) — otherwise the '
-        'first transcript will fail.'
-    ), 'verified'
+
+    try:
+        _probe_whisper_billing(client)
+    except Exception as e:
+        if _openai_unreachable(e):
+            return True, ('Key saved, but OpenAI could not be reached to verify it. '
+                          'If transcription fails, re-check the key here.'), 'unverified_network'
+        status = getattr(e, 'status_code', None)
+        code = product_analytics.openai_error_code(e)
+        if status == 429 or code == 'insufficient_quota':
+            return True, OPENAI_NO_BILLING_SAVE_MSG, 'no_billing'
+        return (False, describe_openai_error(e, context='verify'),
+                product_analytics.openai_fail_reason(e, looks_like_key=True))
+
+    return True, 'Key saved and verified for Whisper transcription.', 'verified'
 
 
 # ---------------------------------------------------------------------------
@@ -2825,11 +2897,16 @@ def settings():
             current_user.id,
             {'status': status or 'verified'},
         )
+        if status == 'no_billing':
+            session['openai_key_no_billing'] = True
+        else:
+            session.pop('openai_key_no_billing', None)
         flash(message, 'warning' if caveat else 'success')
         return redirect(url_for('settings'))
 
     # One-shot plaintext after generate (session, not DB).
     new_api_key = session.pop('new_api_key', None)
+    no_billing_warning = bool(session.pop('openai_key_no_billing', False))
     product_analytics.capture('settings_viewed', current_user.id)
     trial_ctx = _trial_context()
     buy_source = (
@@ -2840,6 +2917,7 @@ def settings():
         new_api_key=new_api_key,
         openai_key_hint=_openai_key_hint(current_user),
         buy_source=buy_source,
+        no_billing_warning=no_billing_warning,
     )
 
 
@@ -2856,10 +2934,18 @@ def billing_checkout():
         flash('That form expired. Please try again.', 'error')
         return redirect(url_for('settings') + '#credits')
     if current_user.openai_api_key:
-        _capture_purchase_failed(
-            'byok_user', stage='checkout_create', user_id=current_user.id)
-        flash('You are on your own OpenAI key — paid minutes are not needed.', 'info')
-        return redirect(url_for('settings'))
+        source_probe = (request.form.get('source') or '').strip()[:64]
+        if source_probe in BYOK_PACK_SOURCES:
+            # Broken / zero-credit BYOK key: pack minutes only apply on our key,
+            # so clear theirs when they explicitly choose the pack from the
+            # no_billing surfaces.
+            current_user.openai_api_key = None
+            db.session.commit()
+        else:
+            _capture_purchase_failed(
+                'byok_user', stage='checkout_create', user_id=current_user.id)
+            flash('You are on your own OpenAI key — paid minutes are not needed.', 'info')
+            return redirect(url_for('settings'))
 
     source = (request.form.get('source') or 'settings').strip()[:64]
     ph_sid = (request.form.get('ph_sid') or '').strip()[:128]
@@ -3670,6 +3756,7 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                 podcast_name=meta.get('podcast_name'),
                 artwork_url=meta.get('artwork'),
                 episode_published=meta.get('published'),
+                source_audio_url=audio_url,
                 # Feed duration is the best ETA source we have, and it is available
                 # before a single byte is downloaded.
                 audio_duration=(meta['duration_min'] * 60) if meta.get('duration_min') else None,
@@ -3999,7 +4086,27 @@ def get_status(task_id):
     elif task.status == 'error':
         err = task.error_message or 'Unknown error'
         result['error'] = err
-        if _is_minutes_limit_error(err):
+        if _is_no_billing_error(err):
+            # Boolean only — never echo provider text or key material.
+            result['no_billing'] = True
+            if task.source_audio_url:
+                duration_min = None
+                if task.audio_duration:
+                    duration_min = max(1, int(round(task.audio_duration / 60.0)))
+                result['retry'] = {
+                    'audio_url': task.source_audio_url,
+                    'episode_title': task.episode_title or 'Episode',
+                    'podcast_name': task.podcast_name or '',
+                    'artwork': task.artwork_url or '',
+                    'published': task.episode_published or '',
+                    'duration_min': (
+                        str(duration_min) if duration_min is not None else ''),
+                    'language': task.language or '',
+                }
+            if stripe_checkout_enabled():
+                result['buy_available'] = True
+                result['buy_label'] = CREDIT_PACK_LABEL
+        elif _is_minutes_limit_error(err):
             result['minutes_error'] = True
             reason = 'trial_exhausted'
             low = err.lower()

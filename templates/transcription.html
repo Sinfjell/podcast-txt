@@ -165,9 +165,38 @@
     function renderMinutesActions(d) {
         var actions = el('errorActions');
         while (actions.firstChild) actions.removeChild(actions.firstChild);
-        var showActions = !!(d.minutes_error || d.buy_available);
+        var showActions = !!(d.minutes_error || d.buy_available || d.no_billing);
         if (!showActions) {
             show(actions, false);
+            return;
+        }
+        if (d.no_billing) {
+            var billingLink = document.createElement('a');
+            billingLink.href = 'https://platform.openai.com/account/billing';
+            billingLink.target = '_blank';
+            billingLink.rel = 'noopener';
+            billingLink.className = 'btn btn-sm btn-primary';
+            billingLink.textContent = 'Add credit at OpenAI';
+            actions.appendChild(billingLink);
+
+            if (d.retry && d.retry.audio_url) {
+                var retryBtn = document.createElement('button');
+                retryBtn.type = 'button';
+                retryBtn.className = 'btn btn-sm btn-ghost';
+                retryBtn.textContent = 'Retry this episode';
+                retryBtn.addEventListener('click', function() { retryEpisode(d.retry); });
+                actions.appendChild(retryBtn);
+            }
+
+            if (d.buy_available && STRIPE_BUY) {
+                var buyBtn = document.createElement('button');
+                buyBtn.type = 'button';
+                buyBtn.className = 'btn btn-sm btn-ghost';
+                buyBtn.textContent = d.buy_label || BUY_LABEL;
+                buyBtn.addEventListener('click', function() { postBuyForm('transcription_no_billing'); });
+                actions.appendChild(buyBtn);
+            }
+            show(actions, true);
             return;
         }
         if (d.buy_available && STRIPE_BUY) {
@@ -194,6 +223,30 @@
         keyLink.className = 'btn btn-sm btn-ghost';
         actions.appendChild(keyLink);
         show(actions, true);
+    }
+
+    function retryEpisode(retry) {
+        if (!retry || !retry.audio_url) return;
+        var form = new FormData();
+        form.append('audio_url', retry.audio_url);
+        form.append('episode_title', retry.episode_title || 'Episode');
+        form.append('podcast_name', retry.podcast_name || '');
+        form.append('artwork', retry.artwork || '');
+        form.append('published', retry.published || '');
+        if (retry.duration_min) form.append('duration_min', retry.duration_min);
+        if (retry.language) form.append('language', retry.language);
+        fetch('{{ url_for("start_transcription") }}', { method: 'POST', body: form })
+            .then(function(r) { return r.json().then(function(data) { return { status: r.status, data: data }; }); })
+            .then(function(res) {
+                if (res.data && res.data.task_id) {
+                    window.location.href = '/transcription/' + res.data.task_id;
+                    return;
+                }
+                alert((res.data && res.data.error) || 'Could not restart this episode.');
+            })
+            .catch(function() {
+                alert('Could not restart this episode. Try again.');
+            });
     }
 
     function fmtDuration(secs) {
@@ -293,7 +346,13 @@
         if (d.status === 'error') {
             show(el('progressCard'), false);
             show(el('errorContainer'), true);
-            el('errorMessage').textContent = d.error || 'Unknown error';
+            if (d.no_billing) {
+                el('errorMessage').textContent =
+                    'Your OpenAI account has no credit, so transcription cannot start. '
+                    + 'Add credit at OpenAI, then retry this episode — no need to search again.';
+            } else {
+                el('errorMessage').textContent = d.error || 'Unknown error';
+            }
             renderMinutesActions(d);
             return;
         }

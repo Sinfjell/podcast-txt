@@ -107,28 +107,45 @@
                     <p class="form-hint">
                         With your own key, Podskrift stays free — OpenAI bills you for Whisper
                         (about ${{ openai_hourly_cost }} per hour of audio).
-                        <a href="https://platform.openai.com/api-keys" target="_blank">Get a key</a>.
+                        <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">Get a key</a>.
+                        <br><strong>1. Create key</strong> at
+                        <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com/api-keys</a>
+                        (starts with <code>sk-</code>).
+                        <strong>2. Add credit</strong> at
+                        <a href="https://platform.openai.com/account/billing" target="_blank" rel="noopener">platform.openai.com/account/billing</a>
+                        before your first transcript.
                         {% if current_user.openai_api_key %}
                         <br>Key saved{% if openai_key_hint %} (ends in {{ openai_key_hint }}){% endif %}.
                         Leave blank to keep it; paste a new key to replace it.
                         You're on your own key; nothing is metered against the trial.
                         {% else %}
                         <br><span style="color: var(--warning);">
-                            {% if trial %}Needed only after the free trial. Create a key at
-                            platform.openai.com/api-keys — it starts with "sk-". Your OpenAI
-                            account also needs credit: add a payment method or prepaid credit at
-                            platform.openai.com/account/billing first.
+                            {% if trial %}Needed only after the free trial.
                             {% else %}No key saved — add one to start transcribing.
-                            Create a key at platform.openai.com/api-keys — it starts with "sk-".
-                            Your OpenAI account also needs credit at
-                            platform.openai.com/account/billing.
-                            Podskrift doesn't charge; you pay OpenAI directly.{% endif %}
+                            {% endif %}
+                            Podskrift doesn't charge; you pay OpenAI directly.
                         </span>
                         {% endif %}
                     </p>
                 </div>
                 <button type="submit" class="btn btn-primary">Save</button>
             </form>
+            {% if no_billing_warning and stripe_buy_enabled %}
+            <div id="openai-no-billing" style="margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px;">
+                <p style="font-size: 14px; margin: 0 0 8px; line-height: 1.5;">
+                    Your OpenAI account still needs credit. Add it at
+                    <a href="https://platform.openai.com/account/billing" target="_blank" rel="noopener">OpenAI billing</a>,
+                    or switch to Podskrift minutes instead (removes this OpenAI key):
+                </p>
+                <form method="POST" action="{{ url_for('billing_checkout') }}" style="margin: 0;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="source" value="openai_no_billing">
+                    <input type="hidden" name="ph_sid" value="">
+                    <button type="submit" class="btn btn-primary">{{ credit_pack_label }}</button>
+                </form>
+                <p class="form-hint" style="margin-top: 8px;">{{ credit_pack_subline }}</p>
+            </div>
+            {% endif %}
             {% if current_user.openai_api_key %}
             <form method="POST" action="{{ url_for('settings_remove_openai_key') }}"
                   style="margin-top: 12px;"
@@ -139,6 +156,7 @@
         </div>
     </div>
 
+    {% if new_api_key or current_user.has_api_key %}
     <div class="card" style="margin-top: 16px;">
         <div class="card-header">
             <h5>Podskrift API key (developers only)</h5>
@@ -165,7 +183,7 @@
                     This is the only time the full key is shown.
                 </p>
             </div>
-            {% elif current_user.has_api_key %}
+            {% else %}
             <p style="font-size: 14px; margin-bottom: 12px;">
                 Active key:
                 <code style="font-size: 13px;">{{ current_user.api_key_prefix }}…</code>
@@ -185,13 +203,27 @@
                     <button type="submit" class="btn btn-ghost">Revoke</button>
                 </form>
             </div>
-            {% else %}
-            <form method="POST" action="{{ url_for('settings_generate_api_key') }}">
-                <button type="submit" class="btn btn-primary">Create</button>
-            </form>
             {% endif %}
         </div>
     </div>
+    {% else %}
+    <details class="card" style="margin-top: 16px; padding: 0;">
+        <summary class="card-header" style="cursor: pointer; list-style-position: inside;">
+            <h5 style="display: inline;">Podskrift API key (developers only)</h5>
+        </summary>
+        <div class="card-body">
+            <p style="color: var(--muted); font-size: 14px; line-height: 1.6; margin-bottom: 12px;">
+                For scripts and agents calling the Podskrift API. You don't need this to
+                transcribe on the website — for that, use the OpenAI API key above.
+                <a href="{{ url_for('api_docs') }}">How to use</a>
+                · <a href="{{ url_for('api_docs') }}">Docs</a>
+            </p>
+            <form method="POST" action="{{ url_for('settings_generate_api_key') }}">
+                <button type="submit" class="btn btn-primary">Create</button>
+            </form>
+        </div>
+    </details>
+    {% endif %}
 
     <div class="card" style="margin-top: 16px;">
         <div class="card-header">
