@@ -5703,6 +5703,10 @@ def test_register_helper_text_mentions_free_minutes(trial_on):
     assert 'password2' not in body
     assert 'Confirm password' not in body
     assert 'Create account' in body
+    assert 'At least 8 characters' in body
+    assert 'Creating account…' in body or 'Creating account' in body
+    assert 'novalidate' in body
+    assert 'id="registerSubmit"' in body
 
 
 def test_register_with_pending_episode_shows_episode_card(monkeypatch, trial_on):
@@ -7734,3 +7738,176 @@ def test_first_run_home_leads_with_start_not_buy(stripe_on):
     # Banner Buy button must not lead for a brand-new account
     assert 'source" value="home_banner"' not in body
     assert 'name="source" value="home_banner"' not in body
+
+
+# --------------------------------------------------------------------------
+# Result-page next steps, signup feedback, PostHog client events
+# --------------------------------------------------------------------------
+
+def _completed_task(uid, task_id, **kw):
+    from models import db, TranscriptionTask
+    defaults = dict(
+        id=task_id, user_id=uid, episode_title='Episode One',
+        status='completed', phase='completed', progress=100,
+        podcast_name='Hard Fork',
+        rss_url='https://feeds.example.com/hardfork.xml',
+        source_audio_url='https://cdn.example.com/ep1.mp3',
+        transcript_text='hello world',
+        language='en',
+    )
+    defaults.update(kw)
+    with A.app.app_context():
+        old = db.session.get(TranscriptionTask, task_id)
+        if old:
+            db.session.delete(old)
+            db.session.commit()
+        db.session.add(TranscriptionTask(**defaults))
+        db.session.commit()
+
+
+def test_related_episodes_lists_others_from_same_feed(monkeypatch, trial_on):
+    uid = _make_user('related@test.com')
+    _completed_task(uid, 'rel-1')
+    feed = [
+        {'index': 0, 'title': 'Episode Two', 'published': '2024-02-01',
+         'audio_url': 'https://cdn.example.com/ep2.mp3', 'duration_min': 40,
+         'artwork': '', 'podcast_name': 'Hard Fork', 'description': ''},
+        {'index': 1, 'title': 'Episode One', 'published': '2024-01-01',
+         'audio_url': 'https://cdn.example.com/ep1.mp3', 'duration_min': 48,
+         'artwork': '', 'podcast_name': 'Hard Fork', 'description': ''},
+        {'index': 2, 'title': 'Episode Zero', 'published': '2023-12-01',
+         'audio_url': 'https://cdn.example.com/ep0.mp3', 'duration_min': 30,
+         'artwork': '', 'podcast_name': 'Hard Fork', 'description': ''},
+    ]
+    monkeypatch.setattr(
+        A, 'get_episodes_from_rss',
+        lambda url, timeout=None: (feed, None))
+    data = _login(uid).get('/transcription/rel-1/related-episodes').get_json()
+    assert data['has_feed'] is True
+    assert data['following'] is False
+    assert data['podcast_name'] == 'Hard Fork'
+    titles = [e['title'] for e in data['episodes']]
+    assert 'Episode One' not in titles
+    assert titles == ['Episode Two', 'Episode Zero']
+    assert all('audio_url' in e for e in data['episodes'])
+
+
+def test_related_episodes_hidden_without_rss(trial_on):
+    uid = _make_user('norelated@test.com')
+    _completed_task(uid, 'rel-none', rss_url=None)
+    data = _login(uid).get('/transcription/rel-none/related-episodes').get_json()
+    assert data['has_feed'] is False
+    assert data['episodes'] == []
+    assert data['following'] is False
+
+
+def test_related_episodes_respects_timeout_kwarg(monkeypatch, trial_on):
+    """The result page must pass a timeout so a hung feed cannot stall it."""
+    uid = _make_user('reltimeout@test.com')
+    _completed_task(uid, 'rel-to')
+    seen = {}
+
+    def fake(url, timeout=None):
+        seen['timeout'] = timeout
+        return [], 'Error parsing RSS feed: timed out'
+
+    monkeypatch.setattr(A, 'get_episodes_from_rss', fake)
+    data = _login(uid).get('/transcription/rel-to/related-episodes').get_json()
+    assert seen['timeout'] == A.RELATED_EPISODES_TIMEOUT
+    assert data['has_feed'] is True
+    assert data['episodes'] == []
+
+
+def test_follow_task_podcast_saves_feed(monkeypatch, trial_on):
+    from models import SavedFeed
+    uid = _make_user('followme@test.com')
+    _completed_task(uid, 'follow-1', podcast_name='Hard Fork')
+    monkeypatch.setattr(
+        A, 'get_episodes_from_rss',
+        lambda url, timeout=None: ([], 'offline'))
+    client = _login(uid)
+    data = client.post('/transcription/follow-1/follow').get_json()
+    assert data['following'] is True
+    assert data['already'] is False
+    with A.app.app_context():
+        feeds = SavedFeed.query.filter_by(user_id=uid).all()
+        assert len(feeds) == 1
+        assert feeds[0].rss_url == 'https://feeds.example.com/hardfork.xml'
+        assert feeds[0].name == 'Hard Fork'
+    again = client.post('/transcription/follow-1/follow').get_json()
+    assert again['following'] is True
+    assert again['already'] is True
+    related = client.get('/transcription/follow-1/related-episodes').get_json()
+    assert related['following'] is True
+    assert related['has_feed'] is True
+
+
+def test_follow_task_podcast_without_rss_fails(trial_on):
+    uid = _make_user('nofollow@test.com')
+    _completed_task(uid, 'follow-none', rss_url=None)
+    resp = _login(uid).post('/transcription/follow-none/follow')
+    assert resp.status_code == 400
+    assert 'feed' in resp.get_json()['error'].lower()
+
+
+def test_status_reports_has_rss(trial_on):
+    uid = _make_user('hasrss@test.com')
+    _completed_task(uid, 'rss-yes')
+    data = _login(uid).get('/status/rss-yes').get_json()
+    assert data['has_rss'] is True
+    assert data['status'] == 'completed'
+    _completed_task(uid, 'rss-no', rss_url=None)
+    data2 = _login(uid).get('/status/rss-no').get_json()
+    assert data2['has_rss'] is False
+
+
+def test_transcription_page_has_next_steps_and_tracking():
+    src = open('templates/transcription.html').read()
+    assert 'id="nextSteps"' in src
+    assert 'Follow this podcast' in src
+    assert 'More episodes from' in src
+    assert 'related-episodes' in src or 'RELATED_URL' in src
+    assert "url_for('history')" in src
+    assert "transcript_copied" in src
+    assert "transcript_downloaded" in src
+    assert "result_viewed" in src
+    assert "next_episode_clicked" in src
+    assert "podcast_followed" in src
+    # Must not ship transcript text into analytics properties.
+    assert "phCapture('transcript_copied', { task_id: taskId })" in src
+    assert 'format: \'txt\'' in src or 'format: "txt"' in src
+
+
+def test_login_page_has_submit_feedback():
+    body = A.app.test_client().get('/login').data.decode()
+    assert 'id="loginSubmit"' in body
+    assert 'Logging in' in body
+    assert 'novalidate' in body
+
+
+def test_get_episodes_from_rss_timeout_uses_requests(monkeypatch):
+    """Timed path fetches via requests so a hung host cannot block forever."""
+    class FakeResp:
+        content = b"""<?xml version="1.0"?>
+        <rss><channel><title>Show</title>
+        <item><title>Ep</title>
+        <enclosure url="https://cdn.example.com/a.mp3" type="audio/mpeg"/>
+        </item></channel></rss>"""
+        def raise_for_status(self):
+            return None
+
+    called = {}
+
+    def fake_get(url, timeout=None, headers=None):
+        called['url'] = url
+        called['timeout'] = timeout
+        return FakeResp()
+
+    monkeypatch.setattr(A.requests, 'get', fake_get)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    episodes, err = A.get_episodes_from_rss(
+        'https://feeds.example.com/x.xml', timeout=8)
+    assert err is None
+    assert called['timeout'] == 8
+    assert len(episodes) == 1
+    assert episodes[0]['title'] == 'Ep'

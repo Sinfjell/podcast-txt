@@ -51,6 +51,19 @@
         padding: 6px; font-size: 12px; font-weight: 500;
     }
     .pw-toggle:hover { color: var(--text); }
+    .form-error {
+        font-size: 12.5px; color: var(--error); margin-top: 6px;
+        display: none;
+    }
+    .form-error.visible { display: block; }
+    .form-input.invalid { border-color: var(--error); }
+    .btn-spinner {
+        display: inline-block; width: 12px; height: 12px; margin-right: 8px;
+        border: 2px solid currentColor; border-right-color: transparent;
+        border-radius: 50%; vertical-align: -2px;
+        animation: regSpin 0.7s linear infinite;
+    }
+    @keyframes regSpin { to { transform: rotate(360deg); } }
 </style>
 <div class="register-wrap">
     <h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 8px; line-height: 1.25;">
@@ -106,12 +119,14 @@
 
     <div class="card">
         <div class="card-body">
-            <form method="POST" action="{{ url_for('register', next=next) if next else url_for('register') }}">
+            <form method="POST" action="{{ url_for('register', next=next) if next else url_for('register') }}"
+                  id="registerForm" novalidate>
                 {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
                 <div class="form-group">
                     <label class="form-label" for="email">Email</label>
                     <input type="email" class="form-input ph-no-capture" id="email" name="email"
                            required autofocus autocomplete="email">
+                    <p class="form-error" id="emailError" role="alert">Enter a valid email address</p>
                 </div>
                 <div class="form-group">
                     <label class="form-label" for="password">Password</label>
@@ -120,9 +135,12 @@
                                required minlength="8" autocomplete="new-password">
                         <button type="button" class="pw-toggle" id="pwToggle" aria-label="Show password">Show</button>
                     </div>
-                    <p class="form-hint">Minimum 8 characters</p>
+                    <p class="form-hint" id="passwordHint">At least 8 characters</p>
+                    <p class="form-error" id="passwordError" role="alert">At least 8 characters</p>
                 </div>
-                <button type="submit" class="btn btn-primary w-full" style="justify-content: center;">
+                <button type="submit" class="btn btn-primary w-full" id="registerSubmit"
+                        style="justify-content: center;"
+                        data-label="{% if pending %}Create account &amp; start transcript{% else %}Create account{% endif %}">
                     {% if pending %}Create account &amp; start transcript{% else %}Create account{% endif %}
                 </button>
             </form>
@@ -137,12 +155,58 @@
 
 {% block scripts %}
 <script>
-document.getElementById('pwToggle').addEventListener('click', function() {
-    var input = document.getElementById('password');
-    var show = input.type === 'password';
-    input.type = show ? 'text' : 'password';
-    this.textContent = show ? 'Hide' : 'Show';
-    this.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
-});
+(function() {
+    var form = document.getElementById('registerForm');
+    var email = document.getElementById('email');
+    var password = document.getElementById('password');
+    var emailError = document.getElementById('emailError');
+    var passwordError = document.getElementById('passwordError');
+    var passwordHint = document.getElementById('passwordHint');
+    var submitBtn = document.getElementById('registerSubmit');
+    var defaultLabel = submitBtn.getAttribute('data-label') || 'Create account';
+
+    document.getElementById('pwToggle').addEventListener('click', function() {
+        var show = password.type === 'password';
+        password.type = show ? 'text' : 'password';
+        this.textContent = show ? 'Hide' : 'Show';
+        this.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+    });
+
+    function setInvalid(input, errorEl, invalid) {
+        input.classList.toggle('invalid', invalid);
+        errorEl.classList.toggle('visible', invalid);
+    }
+
+    function validate() {
+        var emailOk = !!email.value && email.checkValidity();
+        var pwOk = (password.value || '').length >= 8;
+        setInvalid(email, emailError, !emailOk);
+        setInvalid(password, passwordError, !pwOk);
+        if (passwordHint) passwordHint.style.display = pwOk ? '' : 'none';
+        return emailOk && pwOk;
+    }
+
+    email.addEventListener('input', function() {
+        if (emailError.classList.contains('visible')) validate();
+    });
+    password.addEventListener('input', function() {
+        if (passwordError.classList.contains('visible') || passwordHint.style.display === 'none') {
+            validate();
+        }
+    });
+
+    form.addEventListener('submit', function(ev) {
+        if (!validate()) {
+            ev.preventDefault();
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = defaultLabel;
+            if ((password.value || '').length < 8) password.focus();
+            else email.focus();
+            return;
+        }
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span class="btn-spinner" aria-hidden="true"></span>Creating account…';
+    });
+})();
 </script>
 {% endblock %}

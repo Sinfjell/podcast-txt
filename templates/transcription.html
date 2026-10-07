@@ -94,6 +94,54 @@
     </div>
 </div>
 
+<!-- Next step after a completed transcript: more episodes, follow, history -->
+<div id="nextSteps" class="hidden card mb-2" style="margin-top: 16px;">
+    <div class="card-body">
+        <div class="flex-between" style="flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
+            <h5 style="margin: 0; font-size: 15px;">What’s next</h5>
+            <div class="flex-center" style="gap: 8px; flex-wrap: wrap;">
+                <button type="button" class="btn btn-sm btn-ghost hidden" id="followBtn"
+                        aria-live="polite">Follow this podcast</button>
+                <a href="{{ url_for('history') }}" class="btn btn-sm btn-ghost" id="historyLink">History</a>
+            </div>
+        </div>
+        <div id="moreEpisodesBlock" class="hidden">
+            <p class="section-label" id="moreEpisodesHeading" style="margin-bottom: 10px;"></p>
+            <div id="moreEpisodesList" class="next-ep-list"></div>
+            <p id="moreEpisodesEmpty" class="text-sm text-muted hidden" style="margin-top: 4px;">
+                No other recent episodes found in this feed.
+            </p>
+        </div>
+        <p id="moreEpisodesLoading" class="text-sm text-muted hidden">Loading more episodes…</p>
+    </div>
+</div>
+<style>
+    .next-ep-list { display: flex; flex-direction: column; gap: 8px; }
+    .next-ep {
+        display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+        padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+        background: var(--surface);
+    }
+    .next-ep-info { flex: 1 1 160px; min-width: 0; }
+    .next-ep-title {
+        font-weight: 600; font-size: 13.5px; line-height: 1.35;
+        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .next-ep-meta { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .next-ep .btn { flex-shrink: 0; }
+    .btn-spinner {
+        display: inline-block; width: 12px; height: 12px; margin-right: 6px;
+        border: 2px solid currentColor; border-right-color: transparent;
+        border-radius: 50%; vertical-align: -2px;
+        animation: nextSpin 0.7s linear infinite;
+    }
+    @keyframes nextSpin { to { transform: rotate(360deg); } }
+    @media (max-width: 560px) {
+        .next-ep { align-items: flex-start; }
+        .next-ep .btn { width: 100%; justify-content: center; }
+    }
+</style>
+
 <div id="errorContainer" class="hidden">
     <div class="alert alert-error" style="flex-direction: column; align-items: flex-start;">
         <strong>Error</strong>
@@ -134,8 +182,32 @@
     var BUY_URL = {{ url_for('billing_checkout')|tojson }};
     var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
     var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
+    var START_URL = {{ url_for('start_transcription')|tojson }};
+    var RELATED_URL = {{ url_for('related_episodes', task_id=task_id)|tojson }};
+    var FOLLOW_URL = {{ url_for('follow_task_podcast', task_id=task_id)|tojson }};
+    var resultViewed = false;
+    var nextStepsLoaded = false;
+    var taskHasRss = false;
+    var RELATED_CLIENT_TIMEOUT_MS = 10000;
 
     var el = function(id) { return document.getElementById(id); };
+
+    function phCapture(event, props) {
+        try {
+            if (!window.posthog || !event) return;
+            // Never pass keys or transcript text — only coarse metadata.
+            posthog.capture(event, props || {});
+        } catch (e) { /* ignore */ }
+    }
+
+    function fireResultViewed(completed) {
+        if (resultViewed) return;
+        resultViewed = true;
+        phCapture('result_viewed', {
+            task_id: taskId,
+            completed: !!completed
+        });
+    }
 
     function show(node, visible) {
         node.classList.toggle('hidden', !visible);
@@ -320,6 +392,7 @@
 
     function updateUI(d) {
         renderHeader(d);
+        if (d.has_rss != null) taskHasRss = !!d.has_rss;
         // Only offer Stop while there is something to stop.
         show(el('runningControls'), !isTerminal(d.status));
 
@@ -370,6 +443,7 @@
             if (d.download_txt) { el('downloadTxt').href = d.download_txt; show(el('downloadTxt'), true); }
             if (d.download_srt) { el('downloadSrt').href = d.download_srt; show(el('downloadSrt'), true); }
             show(el('copyBtn'), true);
+            loadNextSteps();
             return;
         }
 
@@ -442,8 +516,10 @@
                     show(el('progressCard'), false);
                     show(el('errorContainer'), true);
                     el('errorMessage').textContent = d.error;
+                    fireResultViewed(false);
                     return;
                 }
+                fireResultViewed(d.status === 'completed');
                 updateUI(d);
                 if (!isTerminal(d.status)) {
                     setTimeout(poll, 2000);
@@ -457,6 +533,7 @@
                     show(el('progressCard'), false);
                     show(el('errorContainer'), true);
                     el('errorMessage').textContent = 'Lost connection. Refresh to check status.';
+                    fireResultViewed(false);
                 }
             });
     }
@@ -466,11 +543,190 @@
         navigator.clipboard.writeText(transcriptText).then(function() {
             btn.textContent = 'Copied!';
             setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
+            phCapture('transcript_copied', { task_id: taskId });
         });
     };
 
+    function wireDownloadTracking() {
+        var txt = el('downloadTxt');
+        var srt = el('downloadSrt');
+        if (txt && !txt.dataset.phWired) {
+            txt.dataset.phWired = '1';
+            txt.addEventListener('click', function() {
+                phCapture('transcript_downloaded', { task_id: taskId, format: 'txt' });
+            });
+        }
+        if (srt && !srt.dataset.phWired) {
+            srt.dataset.phWired = '1';
+            srt.addEventListener('click', function() {
+                phCapture('transcript_downloaded', { task_id: taskId, format: 'srt' });
+            });
+        }
+    }
+
+    function setFollowButton(following) {
+        var btn = el('followBtn');
+        show(btn, true);
+        if (following) {
+            btn.disabled = true;
+            btn.textContent = 'Following';
+            btn.classList.remove('btn-primary');
+            btn.classList.add('btn-ghost');
+        } else {
+            btn.disabled = false;
+            btn.textContent = 'Follow this podcast';
+        }
+    }
+
+    function startRelatedEpisode(ep) {
+        if (!ep || !ep.audio_url) return;
+        phCapture('next_episode_clicked', {
+            task_id: taskId,
+            has_duration: ep.duration_min != null
+        });
+        var form = new FormData();
+        form.append('audio_url', ep.audio_url);
+        form.append('episode_title', ep.title || 'Episode');
+        form.append('podcast_name', ep.podcast_name || '');
+        form.append('artwork', ep.artwork || '');
+        form.append('published', ep.published || '');
+        if (ep.duration_min) form.append('duration_min', ep.duration_min);
+        fetch(START_URL, { method: 'POST', body: form })
+            .then(function(r) { return r.json().then(function(data) { return { status: r.status, data: data }; }); })
+            .then(function(res) {
+                if (res.data && res.data.task_id) {
+                    window.location.href = '/transcription/' + res.data.task_id;
+                    return;
+                }
+                alert((res.data && res.data.error) || 'Could not start this episode.');
+            })
+            .catch(function() {
+                alert('Could not start this episode. Try again.');
+            });
+    }
+
+    function renderMoreEpisodes(episodes, podcastName) {
+        var list = el('moreEpisodesList');
+        while (list.firstChild) list.removeChild(list.firstChild);
+        var heading = el('moreEpisodesHeading');
+        var name = podcastName || 'this podcast';
+        heading.textContent = 'More episodes from ' + name;
+        show(el('moreEpisodesBlock'), true);
+        if (!episodes || !episodes.length) {
+            show(el('moreEpisodesEmpty'), true);
+            return;
+        }
+        show(el('moreEpisodesEmpty'), false);
+        episodes.forEach(function(ep) {
+            var row = document.createElement('div');
+            row.className = 'next-ep';
+            var info = document.createElement('div');
+            info.className = 'next-ep-info';
+            var title = document.createElement('div');
+            title.className = 'next-ep-title';
+            title.textContent = ep.title || 'Episode';
+            var meta = document.createElement('div');
+            meta.className = 'next-ep-meta';
+            var metaBits = [];
+            if (ep.published) metaBits.push(ep.published);
+            if (ep.duration_min) metaBits.push(Math.round(ep.duration_min) + ' min');
+            meta.textContent = metaBits.join(' · ');
+            info.appendChild(title);
+            info.appendChild(meta);
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-sm btn-accent';
+            btn.textContent = 'Transcribe';
+            btn.addEventListener('click', function() { startRelatedEpisode(ep); });
+            row.appendChild(info);
+            row.appendChild(btn);
+            list.appendChild(row);
+        });
+    }
+
+    function followPodcast() {
+        var btn = el('followBtn');
+        if (!btn || btn.disabled) return;
+        btn.disabled = true;
+        var prev = btn.textContent;
+        btn.innerHTML = '<span class="btn-spinner" aria-hidden="true"></span>Saving…';
+        fetch(FOLLOW_URL, { method: 'POST' })
+            .then(function(r) { return r.json().then(function(data) { return { ok: r.ok, data: data }; }); })
+            .then(function(res) {
+                if (res.ok && res.data && res.data.following) {
+                    setFollowButton(true);
+                    phCapture('podcast_followed', {
+                        task_id: taskId,
+                        already: !!res.data.already
+                    });
+                    return;
+                }
+                btn.disabled = false;
+                btn.textContent = prev;
+                alert((res.data && res.data.error) || 'Could not follow this podcast.');
+            })
+            .catch(function() {
+                btn.disabled = false;
+                btn.textContent = prev;
+                alert('Could not follow this podcast. Try again.');
+            });
+    }
+
+    function loadNextSteps() {
+        if (nextStepsLoaded) return;
+        nextStepsLoaded = true;
+        show(el('nextSteps'), true);
+        show(el('moreEpisodesLoading'), true);
+        var followBtn = el('followBtn');
+        if (followBtn && !followBtn.dataset.wired) {
+            followBtn.dataset.wired = '1';
+            followBtn.addEventListener('click', followPodcast);
+        }
+
+        var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        var timer = null;
+        if (controller) {
+            timer = setTimeout(function() { try { controller.abort(); } catch (e) {} }, RELATED_CLIENT_TIMEOUT_MS);
+        }
+        var opts = controller ? { signal: controller.signal } : {};
+        fetch(RELATED_URL, opts)
+            .then(function(r) {
+                if (r.status === 401) {
+                    window.location.href = '/login?next=' + encodeURIComponent(window.location.pathname);
+                    return null;
+                }
+                return r.json();
+            })
+            .then(function(data) {
+                show(el('moreEpisodesLoading'), false);
+                if (!data) return;
+                if (!data.has_feed) {
+                    show(el('followBtn'), false);
+                    show(el('moreEpisodesBlock'), false);
+                    return;
+                }
+                setFollowButton(!!data.following);
+                renderMoreEpisodes(data.episodes || [], data.podcast_name || '');
+            })
+            .catch(function() {
+                show(el('moreEpisodesLoading'), false);
+                // Feed timed out — keep Follow when we know the task has a feed.
+                show(el('moreEpisodesBlock'), false);
+                if (taskHasRss) {
+                    setFollowButton(false);
+                } else {
+                    show(el('followBtn'), false);
+                }
+            })
+            .finally(function() {
+                if (timer) clearTimeout(timer);
+            });
+    }
+
+    wireDownloadTracking();
     show(el('resultBanner'), false);
     show(el('errorContainer'), false);
+    show(el('nextSteps'), false);
     poll();
 })();
 </script>

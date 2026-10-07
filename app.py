@@ -1943,10 +1943,37 @@ def _format_published(entry):
     return entry.get('published', 'Unknown date')
 
 
-def get_episodes_from_rss(rss_url):
-    """Parse RSS feed and return (episodes, error). Feed title lands on each episode."""
+# Cap for the result-page "more episodes" fetch so a slow feed cannot stall
+# the completed-transcript UI. The page loads this endpoint asynchronously.
+RELATED_EPISODES_TIMEOUT = 8
+RELATED_EPISODES_LIMIT = 5
+
+
+def get_episodes_from_rss(rss_url, *, timeout=None):
+    """Parse RSS feed and return (episodes, error). Feed title lands on each episode.
+
+    When ``timeout`` is set, the feed body is fetched with requests (SSRF-checked)
+    so a hung host cannot block the caller indefinitely. The default path keeps
+    feedparser's own fetch for existing callers.
+    """
     try:
-        feed = feedparser.parse(rss_url)
+        if timeout is not None:
+            if not _is_fetchable_url(rss_url):
+                return None, "That feed URL cannot be fetched."
+            resp = requests.get(
+                rss_url,
+                timeout=timeout,
+                headers={
+                    'User-Agent': (
+                        'Mozilla/5.0 (compatible; Podskrift/1.0; +https://podskrift.com)'
+                    ),
+                    'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+                },
+            )
+            resp.raise_for_status()
+            feed = feedparser.parse(resp.content)
+        else:
+            feed = feedparser.parse(rss_url)
         if not feed.entries:
             return None, "No episodes found in RSS feed"
 
@@ -4079,6 +4106,9 @@ def get_status(task_id):
             round((task.audio_duration / 60) * WHISPER_COST_PER_MINUTE, 3)
             if task.audio_duration else None
         ),
+        # Boolean only — the result page uses this to offer Follow when the
+        # async related-episodes fetch times out or fails.
+        'has_rss': bool((task.rss_url or '').strip()),
     }
 
     if task.status == 'cancelled':
@@ -4290,6 +4320,109 @@ def transcription_page(task_id):
     if not task or task.user_id != current_user.id:
         return "Task not found", 404
     return render_template('transcription.html', task_id=task_id)
+
+
+def _task_owned_or_404(task_id):
+    """Return the caller's TranscriptionTask, or a (json, status) error pair."""
+    task = db.session.get(TranscriptionTask, task_id)
+    if not task or task.user_id != current_user.id:
+        return None, (jsonify({'error': 'Task not found'}), 404)
+    return task, None
+
+
+def _feed_already_saved(user_id, rss_url):
+    if not rss_url:
+        return False
+    return SavedFeed.query.filter_by(user_id=user_id, rss_url=rss_url).first() is not None
+
+
+@app.route('/transcription/<task_id>/related-episodes')
+@login_required
+def related_episodes(task_id):
+    """JSON: other recent episodes from the task's RSS feed (async result-page UI).
+
+    Hidden gracefully when the task has no feed URL. Timed so a slow host cannot
+    stall the completed-transcript page.
+    """
+    task, err = _task_owned_or_404(task_id)
+    if err:
+        return err
+
+    rss_url = (task.rss_url or '').strip()
+    podcast_name = task.podcast_name or ''
+    if not rss_url:
+        return jsonify({
+            'has_feed': False,
+            'podcast_name': podcast_name,
+            'following': False,
+            'episodes': [],
+        })
+
+    following = _feed_already_saved(current_user.id, rss_url)
+    episodes, error = get_episodes_from_rss(
+        rss_url, timeout=RELATED_EPISODES_TIMEOUT)
+    if error or not episodes:
+        return jsonify({
+            'has_feed': True,
+            'podcast_name': podcast_name,
+            'following': following,
+            'episodes': [],
+            'error': error or 'No episodes found',
+        })
+
+    current_audio = (task.source_audio_url or '').strip()
+    current_title = (task.episode_title or '').strip()
+    others = []
+    for ep in episodes:
+        if current_audio and ep.get('audio_url') == current_audio:
+            continue
+        if not current_audio and current_title and ep.get('title') == current_title:
+            continue
+        others.append({
+            'title': ep.get('title') or 'Episode',
+            'published': ep.get('published') or '',
+            'audio_url': ep.get('audio_url'),
+            'duration_min': ep.get('duration_min'),
+            'artwork': ep.get('artwork') or '',
+            'podcast_name': ep.get('podcast_name') or podcast_name,
+            'index': ep.get('index'),
+        })
+        if len(others) >= RELATED_EPISODES_LIMIT:
+            break
+
+    if not podcast_name and episodes:
+        podcast_name = episodes[0].get('podcast_name') or ''
+
+    return jsonify({
+        'has_feed': True,
+        'podcast_name': podcast_name,
+        'following': following,
+        'episodes': others,
+    })
+
+
+@app.route('/transcription/<task_id>/follow', methods=['POST'])
+@login_required
+def follow_task_podcast(task_id):
+    """One-click save of the task's RSS feed into Saved Feeds (My Feeds)."""
+    task, err = _task_owned_or_404(task_id)
+    if err:
+        return err
+
+    rss_url = (task.rss_url or '').strip()
+    if not rss_url:
+        return jsonify({'error': 'No feed URL on this transcript'}), 400
+
+    name = (task.podcast_name or '').strip() or 'Podcast'
+    existing = SavedFeed.query.filter_by(
+        user_id=current_user.id, rss_url=rss_url).first()
+    if existing:
+        return jsonify({'following': True, 'already': True, 'feed_id': existing.id})
+
+    feed = SavedFeed(user_id=current_user.id, name=name, rss_url=rss_url)
+    db.session.add(feed)
+    db.session.commit()
+    return jsonify({'following': True, 'already': False, 'feed_id': feed.id})
 
 
 @app.route('/history')
