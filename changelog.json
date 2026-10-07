@@ -28,14 +28,14 @@
     {
       "id": "stripe-credit-pack",
       "date": "2026-09-29",
-      "title": "Buy 300 minutes for $5",
-      "summary": "When the free trial runs out, buy a one-time credit pack — no subscription. Minutes do not expire."
+      "title": "Buy five hours of audio for $5",
+      "summary": "When the free trial runs out, buy a one-time credit pack — no subscription. Credits do not expire."
     },
     {
       "id": "trial-180-minutes",
       "date": "2026-09-29",
-      "title": "180 free minutes to start",
-      "summary": "New accounts get three hours of audio on our OpenAI key — no card and no key of your own required to try Podskrift."
+      "title": "Three free hours to start",
+      "summary": "New accounts get a generous free trial on our OpenAI key — no card and no key of your own required to try Podskrift."
     },
     {
       "id": "customer-api",

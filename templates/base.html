@@ -493,14 +493,16 @@
                 width: auto;
             }
         }
-        @media (prefers-reduced-motion: no-preference) {
-            .whats-new-toast[data-open="1"] {
-                animation: whatsNewIn 0.22s ease-out;
-            }
-            @keyframes whatsNewIn {
-                from { opacity: 0; transform: translateY(8px); }
-                to { opacity: 1; transform: translateY(0); }
-            }
+        /* Animation uses the later prefers-reduced-motion: reduce block near
+           the nav rules — do not insert prefers-reduced-motion here; a suite
+           test slices from the first 640px query to the next reduced-motion
+           query to pin pointer-events on the closed mobile panel. */
+        .whats-new-toast[data-open="1"] {
+            animation: whatsNewIn 0.22s ease-out;
+        }
+        @keyframes whatsNewIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
         }
 
         /* Utility */
@@ -607,6 +609,7 @@
 
         @media (prefers-reduced-motion: reduce) {
             .nav-links, .nav-scrim, .nav-toggle span { transition: none; }
+            .whats-new-toast[data-open="1"] { animation: none; }
         }
 
         /* Live job bar.
