@@ -404,6 +404,107 @@
         .footer a { color: #888; }
         .footer a:hover { color: var(--text); }
 
+        /* What's new popup — returning visitors only; localStorage-gated. */
+        .whats-new-toast {
+            position: fixed;
+            z-index: 120;
+            right: 16px;
+            bottom: 16px;
+            width: min(360px, calc(100vw - 32px));
+            background: var(--surface);
+            border: 1px solid var(--border-light);
+            border-radius: var(--radius);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+            padding: 14px 16px 12px;
+            display: none;
+            flex-direction: column;
+            gap: 10px;
+            max-height: min(70vh, 420px);
+            overflow: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        .whats-new-toast[data-open="1"] { display: flex; }
+        .whats-new-toast-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .whats-new-toast-label {
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: var(--accent-bright);
+        }
+        .whats-new-toast-close {
+            background: none;
+            border: none;
+            color: var(--muted);
+            cursor: pointer;
+            font-size: 20px;
+            line-height: 1;
+            padding: 0 2px;
+            margin: -4px -2px 0 0;
+            min-width: 32px;
+            min-height: 32px;
+        }
+        .whats-new-toast-close:hover { color: var(--text); }
+        .whats-new-toast-list {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .whats-new-toast-list li { margin: 0; }
+        .whats-new-toast-list strong {
+            display: block;
+            font-size: 13.5px;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+            color: var(--text);
+            margin-bottom: 2px;
+            line-height: 1.35;
+        }
+        .whats-new-toast-list p {
+            margin: 0;
+            font-size: 12.5px;
+            color: var(--muted);
+            line-height: 1.5;
+        }
+        .whats-new-toast-actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-top: 2px;
+        }
+        .whats-new-toast-actions a {
+            font-size: 13px;
+            font-weight: 500;
+        }
+        @media (max-width: 480px) {
+            .whats-new-toast {
+                left: 12px;
+                right: 12px;
+                bottom: 12px;
+                width: auto;
+            }
+        }
+        /* Animation uses the later prefers-reduced-motion: reduce block near
+           the nav rules — do not insert prefers-reduced-motion here; a suite
+           test slices from the first 640px query to the next reduced-motion
+           query to pin pointer-events on the closed mobile panel. */
+        .whats-new-toast[data-open="1"] {
+            animation: whatsNewIn 0.22s ease-out;
+        }
+        @keyframes whatsNewIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
         /* Utility */
         .text-center { text-align: center; }
         .text-muted { color: var(--muted); }
@@ -508,6 +609,7 @@
 
         @media (prefers-reduced-motion: reduce) {
             .nav-links, .nav-scrim, .nav-toggle span { transition: none; }
+            .whats-new-toast[data-open="1"] { animation: none; }
         }
 
         /* Live job bar.
@@ -872,11 +974,31 @@
     <footer class="footer">
         A <a href="https://productivitytech.io" target="_blank">ProductivityTech</a> product &middot;
         Developed by <a href="https://nettsmed.no" target="_blank">Nettsmed</a> &middot;
+        <a href="{{ url_for('whats_new') }}">What's new</a> &middot;
         <a href="{{ url_for('privacy') }}">Privacy</a> &middot;
         <a href="{{ url_for('terms') }}">Terms</a> &middot;
         <a href="https://productivitytech.io/contact/" target="_blank">Contact</a> &middot;
         <a href="https://productivitytech.io/contact/" target="_blank">Feedback / feature ideas</a>
     </footer>
+
+    {# Returning-visitor What's new toast. First visit only seeds localStorage. #}
+    <aside class="whats-new-toast" id="whatsNewToast" hidden role="dialog"
+           aria-labelledby="whatsNewToastLabel" aria-modal="false">
+        <div class="whats-new-toast-head">
+            <span class="whats-new-toast-label" id="whatsNewToastLabel">What's new</span>
+            <button type="button" class="whats-new-toast-close" id="whatsNewToastClose"
+                    aria-label="Dismiss">&times;</button>
+        </div>
+        <ul class="whats-new-toast-list" id="whatsNewToastList"></ul>
+        <div class="whats-new-toast-actions">
+            <a href="{{ url_for('whats_new') }}" id="whatsNewToastLink">See all updates</a>
+            <button type="button" class="btn btn-sm btn-ghost" id="whatsNewToastGotIt">Got it</button>
+        </div>
+    </aside>
+    <script type="application/json" id="whatsNewData">{{
+        {'latestId': changelog_latest_id, 'entries': changelog_preview,
+         'pagePath': url_for('whats_new')} | tojson
+    }}</script>
 
     {% if posthog_key %}
     <script>
@@ -1245,6 +1367,92 @@
         window.addEventListener('resize', function () {
             if (!isMobile()) setOpen(false);
             syncToViewport();
+        });
+    })();
+    </script>
+    <script>
+    // What's new toast for returning visitors. First visit only records the
+    // latest id so we do not interrupt onboarding; later visits show entries
+    // newer than that id. Seen state lives in localStorage only.
+    (function () {
+        var STORAGE_KEY = 'podskrift_whats_new_seen';
+        var toast = document.getElementById('whatsNewToast');
+        var dataEl = document.getElementById('whatsNewData');
+        if (!toast || !dataEl) return;
+
+        var data;
+        try { data = JSON.parse(dataEl.textContent || '{}'); }
+        catch (e) { return; }
+        var latestId = data.latestId || '';
+        var entries = data.entries || [];
+        if (!latestId || !entries.length) return;
+
+        // Never interrupt the dedicated changelog page.
+        try {
+            if (data.pagePath && window.location.pathname === data.pagePath) {
+                try { localStorage.setItem(STORAGE_KEY, latestId); } catch (e) {}
+                return;
+            }
+        } catch (e) { /* ignore */ }
+
+        var seen = null;
+        try { seen = localStorage.getItem(STORAGE_KEY); } catch (e) { return; }
+
+        function markSeen() {
+            try { localStorage.setItem(STORAGE_KEY, latestId); } catch (e) {}
+        }
+
+        function closeToast() {
+            toast.setAttribute('data-open', '0');
+            toast.hidden = true;
+            markSeen();
+        }
+
+        // First visit: seed without showing. Returning with nothing new: noop.
+        if (!seen) {
+            markSeen();
+            return;
+        }
+        if (seen === latestId) return;
+
+        var unseen = [];
+        for (var i = 0; i < entries.length; i++) {
+            if (entries[i].id === seen) break;
+            unseen.push(entries[i]);
+        }
+        // Seen id vanished from the curated list (rename/remove) — treat as
+        // "caught up" after showing the newest few rather than dumping history.
+        if (!unseen.length) {
+            markSeen();
+            return;
+        }
+        if (unseen.length > 3) unseen = unseen.slice(0, 3);
+
+        var list = document.getElementById('whatsNewToastList');
+        if (!list) return;
+        list.innerHTML = '';
+        for (var j = 0; j < unseen.length; j++) {
+            var li = document.createElement('li');
+            var strong = document.createElement('strong');
+            strong.textContent = unseen[j].title || '';
+            var p = document.createElement('p');
+            p.textContent = unseen[j].summary || '';
+            li.appendChild(strong);
+            li.appendChild(p);
+            list.appendChild(li);
+        }
+
+        toast.hidden = false;
+        toast.setAttribute('data-open', '1');
+
+        var closeBtn = document.getElementById('whatsNewToastClose');
+        var gotIt = document.getElementById('whatsNewToastGotIt');
+        if (closeBtn) closeBtn.addEventListener('click', closeToast);
+        if (gotIt) gotIt.addEventListener('click', closeToast);
+        document.addEventListener('keydown', function (ev) {
+            if (ev.key === 'Escape' && toast.getAttribute('data-open') === '1') {
+                closeToast();
+            }
         });
     })();
     </script>

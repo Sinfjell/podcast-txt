@@ -8,6 +8,7 @@ Run: pytest test_app.py
 """
 
 import os
+import re
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -3332,6 +3333,7 @@ def test_the_sitemap_lists_the_public_pages(trial_on):
     assert any(u.endswith('/') for u in locs)
     assert any(u.endswith('/rss-help') for u in locs)
     assert any(u.endswith('/docs/api') for u in locs)
+    assert any(u.endswith('/whats-new') for u in locs)
     assert any(u.endswith('/register') for u in locs)
     assert not any('/settings' in u or '/history' in u for u in locs), (
         'a session-only page is in the sitemap'
@@ -5360,6 +5362,55 @@ def test_privacy_page_mentions_posthog():
     assert 'session replay' in body.lower()
 
 
+def test_whats_new_page_renders_changelog_entries(trial_on):
+    """Public /whats-new lists curated entries from changelog.json, newest first."""
+    import html as _html
+    entries = A.load_changelog_entries()
+    assert entries, 'changelog.json must have at least one curated entry'
+    assert entries[0]['id'] == 'whats-new-page'
+    resp = A.app.test_client().get('/whats-new')
+    assert resp.status_code == 200
+    body = _html.unescape(resp.data.decode())
+    assert 'id="whats-new-page"' in resp.data.decode()
+    assert entries[0]['title'] in body
+    assert entries[0]['summary'] in body
+    # Newest-first: the first entry's title appears before the last one's.
+    assert body.index(entries[0]['title']) < body.index(entries[-1]['title'])
+    # Footer link + toast markup on other public pages.
+    home = A.app.test_client().get('/').data.decode()
+    assert '/whats-new' in home
+    assert 'whatsNewToast' in home
+    assert 'podskrift_whats_new_seen' in home
+
+
+def test_changelog_json_is_well_formed():
+    """Keep the data file agent-friendly: unique ids, ISO dates, required fields."""
+    import json as _json
+    from pathlib import Path
+    path = Path(A.CHANGELOG_PATH)
+    data = _json.loads(path.read_text(encoding='utf-8'))
+    assert data.get('version') == 1
+    entries = data['entries']
+    assert isinstance(entries, list) and entries
+    ids = []
+    prev_date = None
+    for entry in entries:
+        assert entry['id'] and entry['title'] and entry['summary']
+        assert re.match(r'^\d{4}-\d{2}-\d{2}$', entry['date']), entry['date']
+        ids.append(entry['id'])
+        if prev_date is not None:
+            assert entry['date'] <= prev_date, (
+                'entries must be newest-first by date '
+                f'({prev_date} then {entry["date"]})'
+            )
+        prev_date = entry['date']
+    assert len(ids) == len(set(ids)), 'duplicate changelog ids'
+    # llms.txt surfaces the page for assistants.
+    llms = A.app.test_client().get('/llms.txt').data.decode()
+    assert 'whats-new' in llms
+    assert '/whats-new' in llms
+
+
 # --- trial_limit_hit: the buying signal ---------------------------------------
 
 def _limit_hits(ph_events):
@@ -7322,6 +7373,7 @@ def test_openai_key_never_rendered_into_analytics_pages(stripe_on, monkeypatch):
 def test_pricing_in_sitemap_and_llms(trial_on):
     sitemap = A.app.test_client().get('/sitemap.xml').data.decode()
     assert '/pricing' in sitemap
+    assert '/whats-new' in sitemap
     llms = A.app.test_client().get('/llms.txt').data.decode()
     assert 'Pricing' in llms
     assert '/pricing' in llms
