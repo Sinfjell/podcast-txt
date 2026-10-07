@@ -5492,6 +5492,22 @@ def inject_posthog():
     }
 
 
+@app.context_processor
+def inject_changelog_popup():
+    """Latest What's new ids for the dismissible returning-visitor popup."""
+    entries = load_changelog_entries()
+    # Cap the payload: the popup only shows a few newest items anyway.
+    preview = [
+        {'id': e['id'], 'date': e['date'], 'title': e['title'],
+         'summary': e['summary']}
+        for e in entries[:8]
+    ]
+    return {
+        'changelog_latest_id': entries[0]['id'] if entries else '',
+        'changelog_preview': preview,
+    }
+
+
 def _structured_data():
     """JSON-LD for the home page.
 
@@ -5668,6 +5684,7 @@ USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscripti
 ## Pages
 - [Home]({public_url('index')}): search, pick an episode, transcribe
 - [Pricing]({public_url('pricing')}): free trial, credit pack, or bring your own key
+- [What's new]({public_url('whats_new')}): dated feature list, newest first (build in public)
 - [API docs]({public_url('api_docs')}): customer HTTP API (resolve → transcribe → transcript)
 - [How to find an RSS feed]({public_url('rss_help')}): for podcasts outside the search index
 - [Sign up]({public_url('register')}): {signup_blurb}
@@ -5692,6 +5709,7 @@ def sitemap_xml():
     from xml.sax.saxutils import escape
     pages = [public_url('index'),
              public_url('pricing'),
+             public_url('whats_new'),
              public_url('api_docs'),
              public_url('rss_help'),
              public_url('register')]
@@ -5719,6 +5737,15 @@ def pricing():
     )
 
 
+@app.route('/whats-new')
+def whats_new():
+    """Public build-in-public changelog — curated entries from changelog.json."""
+    return render_template(
+        'whats_new.html',
+        entries=load_changelog_entries(),
+    )
+
+
 @app.route('/rss-help')
 def rss_help():
     return render_template('rss_help.html')
@@ -5738,6 +5765,49 @@ def terms():
 
 CUSTOMER_API_DOC_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'docs', 'customer-api.md')
+
+CHANGELOG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'changelog.json')
+
+
+def load_changelog_entries():
+    """User-facing What's new entries from changelog.json, newest first.
+
+    Returns a list of dicts with id, date (YYYY-MM-DD), date_display, title,
+    summary. Missing or invalid files yield an empty list so a deploy without
+    the data file still serves the rest of the site.
+    """
+    try:
+        with open(CHANGELOG_PATH, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        app.logger.warning('Could not load changelog.json: %s', exc)
+        return []
+    entries = data.get('entries') if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return []
+    out = []
+    for raw in entries:
+        if not isinstance(raw, dict):
+            continue
+        entry_id = (raw.get('id') or '').strip()
+        title = (raw.get('title') or '').strip()
+        summary = (raw.get('summary') or '').strip()
+        date_raw = (raw.get('date') or '').strip()
+        if not entry_id or not title or not summary or not date_raw:
+            continue
+        try:
+            date_display = datetime.strptime(date_raw, '%Y-%m-%d').strftime('%d %b %Y')
+        except ValueError:
+            date_display = date_raw
+        out.append({
+            'id': entry_id,
+            'date': date_raw,
+            'date_display': date_display,
+            'title': title,
+            'summary': summary,
+        })
+    return out
 
 
 def load_customer_api_markdown():

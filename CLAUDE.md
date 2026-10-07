@@ -67,6 +67,31 @@ before merging, regardless of how many files the diff has.
   to the user or the logs — `describe_openai_error()` exists for this. A user
   once pasted their password into the key field and it landed in the database.
 
+## Build in public
+
+Podskrift publishes a dated feature list at `/whats-new` from
+[`changelog.json`](changelog.json). Returning visitors also see a small
+dismissible popup (localStorage) for entries newer than their last visit.
+
+**Any PR that ships a user-facing feature must add a changelog entry** at the
+top of `entries` (newest first). Skip chores, refactors, dependency bumps, and
+ops/analytics-only changes.
+
+```json
+{
+  "id": "short-kebab-id",
+  "date": "YYYY-MM-DD",
+  "title": "Short user-facing title",
+  "summary": "One or two sentences in plain English."
+}
+```
+
+`id` is stable (popup seen-state keys off it). Optional local helper — not CI:
+
+```bash
+python3 ops/suggest-changelog.py
+```
+
 ## Testing
 
 ```bash

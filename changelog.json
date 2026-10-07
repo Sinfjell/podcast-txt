@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "whats-new-page",
+      "date": "2026-10-07",
+      "title": "What's new — we ship in public",
+      "summary": "This page lists every user-facing feature as it lands. Returning visitors also get a small popup with updates since their last visit."
+    },
+    {
+      "id": "related-episodes-follow",
+      "date": "2026-10-07",
+      "title": "More episodes from the same show",
+      "summary": "After a transcript finishes, pick another episode from that podcast in one click, or follow the show so it shows up in Feeds."
+    },
+    {
+      "id": "signup-episode-buy-modal",
+      "date": "2026-09-29",
+      "title": "Keep your episode through signup",
+      "summary": "Sign up with the episode you already chose, see how many free minutes you have left, and buy more without leaving the page."
+    },
+    {
+      "id": "pricing-nav-balance",
+      "date": "2026-09-29",
+      "title": "Pricing page and minutes in the nav",
+      "summary": "A clear Pricing page explains the free trial, credit pack, and bring-your-own-key options. Signed-in users see remaining minutes in the header."
+    },
+    {
+      "id": "stripe-credit-pack",
+      "date": "2026-09-29",
+      "title": "Buy 300 minutes for $5",
+      "summary": "When the free trial runs out, buy a one-time credit pack — no subscription. Minutes do not expire."
+    },
+    {
+      "id": "trial-180-minutes",
+      "date": "2026-09-29",
+      "title": "180 free minutes to start",
+      "summary": "New accounts get three hours of audio on our OpenAI key — no card and no key of your own required to try Podskrift."
+    },
+    {
+      "id": "customer-api",
+      "date": "2026-09-13",
+      "title": "HTTP API for scripts and agents",
+      "summary": "Create an API key in Settings and resolve, transcribe, and fetch transcripts over HTTP. Same free trial as the web app."
+    },
+    {
+      "id": "spotify-paste",
+      "date": "2026-09-11",
+      "title": "Paste a Spotify link",
+      "summary": "Drop an open.spotify.com episode or show link into search and go straight to transcription when the show has a public feed."
+    },
+    {
+      "id": "transcript-search",
+      "date": "2026-09-11",
+      "title": "Search inside your transcripts",
+      "summary": "On History, search the full text of your completed transcripts and jump to a highlighted snippet."
+    },
+    {
+      "id": "live-job-bar",
+      "date": "2026-09-09",
+      "title": "Live job bar on every page",
+      "summary": "A transcription keeps running when you navigate away. A small bar on every page shows progress so you can return to it."
+    },
+    {
+      "id": "stop-and-resume",
+      "date": "2026-09-09",
+      "title": "Stop a job, or pick it up later",
+      "summary": "Cancel a running transcription when you change your mind. Leave and come back — unfinished jobs are listed on the home page with live progress."
+    },
+    {
+      "id": "free-trial-key",
+      "date": "2026-09-09",
+      "title": "Free trial on our OpenAI key",
+      "summary": "Try Podskrift without pasting an API key. Usage is metered per account so the shared trial stays available for everyone."
+    },
+    {
+      "id": "episode-search-language-progress",
+      "date": "2026-09-09",
+      "title": "Episode search, language picker, live progress",
+      "summary": "Search individual episode titles, choose the spoken language (or auto-detect), and watch a smooth progress bar with ETA while Whisper works."
+    },
+    {
+      "id": "accounts-feeds-byok",
+      "date": "2026-04-09",
+      "title": "Accounts, saved feeds, and your own key",
+      "summary": "Create an account, save podcast feeds you use often, search the catalogue by show name, or bring your own OpenAI key and pay Whisper directly."
+    },
+    {
+      "id": "copy-and-costs",
+      "date": "2026-04-09",
+      "title": "Copy transcript and cost estimates",
+      "summary": "Copy a finished transcript in one click. History shows estimated Whisper cost per episode and a running total."
+    },
+    {
+      "id": "apple-podcasts-rss",
+      "date": "2025-09-27",
+      "title": "Apple Podcasts URL to RSS",
+      "summary": "Paste an Apple Podcasts show link and Podskrift finds the underlying RSS feed so you can pick an episode."
+    }
+  ]
+}
