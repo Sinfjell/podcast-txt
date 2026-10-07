@@ -155,18 +155,53 @@
 
 <!-- Transcript, filling in live -->
 <div class="card" id="transcriptCard">
-    <div class="card-header">
+    <div class="card-header" style="flex-wrap: wrap; gap: 10px;">
         <h5>Transcript</h5>
-        <div class="flex-center" style="gap: 8px;">
+        <div class="flex-center" style="gap: 8px; flex-wrap: wrap;" id="transcriptActions">
             <button type="button" class="btn btn-sm btn-primary hidden" id="copyBtn" onclick="copyTranscript()">Copy</button>
-            <a href="#" id="downloadTxt" class="btn btn-sm btn-ghost hidden">.txt</a>
-            <a href="#" id="downloadSrt" class="btn btn-sm btn-ghost hidden">.srt</a>
+            <span class="download-group hidden" id="downloadGroup" aria-label="Download">
+                <a href="#" id="downloadTxt" class="btn btn-sm btn-ghost hidden">Download .txt</a>
+                <a href="#" id="downloadSrt" class="btn btn-sm btn-ghost hidden">Download .srt</a>
+            </span>
         </div>
+    </div>
+    <!-- Shown right after Copy: next episodes + follow, while the lower What’s next stays too -->
+    <div id="copyNextSteps" class="hidden copy-next" role="status">
+        <div class="copy-next-head">
+            <strong id="copyNextTitle">Copied!</strong>
+            <button type="button" class="btn btn-sm btn-ghost hidden" id="copyFollowBtn"
+                    aria-live="polite">Follow this podcast</button>
+        </div>
+        <p class="text-sm text-muted" id="copyNextHint" style="margin: 6px 0 10px;"></p>
+        <div id="copyNextList" class="next-ep-list"></div>
+        <p id="copyNextEmpty" class="text-sm text-muted hidden" style="margin-top: 4px;">
+            No other recent episodes found in this feed.
+        </p>
+        <p id="copyNextLoading" class="text-sm text-muted hidden">Loading more episodes…</p>
     </div>
     <div class="card-body">
         <div class="transcript-pane ph-no-capture" id="transcriptPane"></div>
     </div>
 </div>
+<style>
+    .download-group {
+        display: inline-flex; gap: 6px; flex-wrap: wrap; align-items: center;
+        padding-left: 8px; border-left: 1px solid var(--border);
+    }
+    .copy-next {
+        margin: 0 16px 12px; padding: 12px 14px;
+        border: 1px solid var(--border); border-radius: var(--radius-sm);
+        background: var(--surface);
+    }
+    .copy-next-head {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; flex-wrap: wrap;
+    }
+    @media (max-width: 560px) {
+        .download-group { border-left: none; padding-left: 0; width: 100%; }
+        .download-group .btn { flex: 1 1 auto; justify-content: center; }
+    }
+</style>
 {% endblock %}
 
 {% block scripts %}
@@ -189,6 +224,8 @@
     var nextStepsLoaded = false;
     var taskHasRss = false;
     var RELATED_CLIENT_TIMEOUT_MS = 10000;
+    var relatedCache = null; // {has_feed, following, podcast_name, episodes, error?}
+    var copyNextShown = false;
 
     var el = function(id) { return document.getElementById(id); };
 
@@ -412,6 +449,7 @@
             if (partial && d.download_txt) {
                 el('downloadTxt').href = d.download_txt;
                 show(el('downloadTxt'), true);
+                show(el('downloadGroup'), true);
             }
             return;
         }
@@ -440,8 +478,15 @@
             if (d.language) bits.push('Language: ' + d.language);
             if (d.actual_transcription_time) bits.push('Took ' + d.actual_transcription_time);
             el('completionInfo').textContent = bits.join(' · ');
-            if (d.download_txt) { el('downloadTxt').href = d.download_txt; show(el('downloadTxt'), true); }
-            if (d.download_srt) { el('downloadSrt').href = d.download_srt; show(el('downloadSrt'), true); }
+            if (d.download_txt) {
+                el('downloadTxt').href = d.download_txt;
+                show(el('downloadTxt'), true);
+            }
+            if (d.download_srt) {
+                el('downloadSrt').href = d.download_srt;
+                show(el('downloadSrt'), true);
+            }
+            if (d.download_txt || d.download_srt) show(el('downloadGroup'), true);
             show(el('copyBtn'), true);
             loadNextSteps();
             return;
@@ -544,6 +589,7 @@
             btn.textContent = 'Copied!';
             setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
             phCapture('transcript_copied', { task_id: taskId });
+            showCopyNextSteps();
         });
     };
 
@@ -564,8 +610,8 @@
         }
     }
 
-    function setFollowButton(following) {
-        var btn = el('followBtn');
+    function setFollowButtonState(btn, following) {
+        if (!btn) return;
         show(btn, true);
         if (following) {
             btn.disabled = true;
@@ -578,11 +624,23 @@
         }
     }
 
-    function startRelatedEpisode(ep) {
+    function setFollowButton(following) {
+        setFollowButtonState(el('followBtn'), following);
+        setFollowButtonState(el('copyFollowBtn'), following);
+    }
+
+    function startRelatedEpisode(ep, source) {
         if (!ep || !ep.audio_url) return;
+        if (source === 'copy_panel') {
+            phCapture('copy_next_step_clicked', {
+                task_id: taskId,
+                item: 'transcribe_episode'
+            });
+        }
         phCapture('next_episode_clicked', {
             task_id: taskId,
-            has_duration: ep.duration_min != null
+            has_duration: ep.duration_min != null,
+            source: source || 'next_steps'
         });
         var form = new FormData();
         form.append('audio_url', ep.audio_url);
@@ -605,6 +663,32 @@
             });
     }
 
+    function appendEpisodeRow(list, ep, source) {
+        var row = document.createElement('div');
+        row.className = 'next-ep';
+        var info = document.createElement('div');
+        info.className = 'next-ep-info';
+        var title = document.createElement('div');
+        title.className = 'next-ep-title';
+        title.textContent = ep.title || 'Episode';
+        var meta = document.createElement('div');
+        meta.className = 'next-ep-meta';
+        var metaBits = [];
+        if (ep.published) metaBits.push(ep.published);
+        if (ep.duration_min) metaBits.push(Math.round(ep.duration_min) + ' min');
+        meta.textContent = metaBits.join(' · ');
+        info.appendChild(title);
+        info.appendChild(meta);
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-sm btn-accent';
+        btn.textContent = 'Transcribe';
+        btn.addEventListener('click', function() { startRelatedEpisode(ep, source); });
+        row.appendChild(info);
+        row.appendChild(btn);
+        list.appendChild(row);
+    }
+
     function renderMoreEpisodes(episodes, podcastName) {
         var list = el('moreEpisodesList');
         while (list.firstChild) list.removeChild(list.firstChild);
@@ -618,35 +702,77 @@
         }
         show(el('moreEpisodesEmpty'), false);
         episodes.forEach(function(ep) {
-            var row = document.createElement('div');
-            row.className = 'next-ep';
-            var info = document.createElement('div');
-            info.className = 'next-ep-info';
-            var title = document.createElement('div');
-            title.className = 'next-ep-title';
-            title.textContent = ep.title || 'Episode';
-            var meta = document.createElement('div');
-            meta.className = 'next-ep-meta';
-            var metaBits = [];
-            if (ep.published) metaBits.push(ep.published);
-            if (ep.duration_min) metaBits.push(Math.round(ep.duration_min) + ' min');
-            meta.textContent = metaBits.join(' · ');
-            info.appendChild(title);
-            info.appendChild(meta);
-            var btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'btn btn-sm btn-accent';
-            btn.textContent = 'Transcribe';
-            btn.addEventListener('click', function() { startRelatedEpisode(ep); });
-            row.appendChild(info);
-            row.appendChild(btn);
-            list.appendChild(row);
+            appendEpisodeRow(list, ep, 'next_steps');
         });
     }
 
-    function followPodcast() {
-        var btn = el('followBtn');
+    function renderCopyNextEpisodes(data) {
+        var list = el('copyNextList');
+        while (list.firstChild) list.removeChild(list.firstChild);
+        show(el('copyNextLoading'), false);
+        var name = (data && data.podcast_name) || 'this podcast';
+        el('copyNextHint').textContent =
+            'Transcribe another episode from ' + name;
+        var episodes = (data && data.episodes) || [];
+        var slice = episodes.slice(0, 3);
+        if (!data || !data.has_feed) {
+            show(el('copyFollowBtn'), false);
+            show(el('copyNextEmpty'), false);
+            el('copyNextHint').textContent =
+                'Copied! Search for another episode when you are ready.';
+            return;
+        }
+        setFollowButtonState(el('copyFollowBtn'), !!(data && data.following));
+        if (!slice.length) {
+            show(el('copyNextEmpty'), true);
+            return;
+        }
+        show(el('copyNextEmpty'), false);
+        slice.forEach(function(ep) {
+            appendEpisodeRow(list, ep, 'copy_panel');
+        });
+    }
+
+    function showCopyNextSteps() {
+        var panel = el('copyNextSteps');
+        if (!panel) return;
+        show(panel, true);
+        el('copyNextTitle').textContent = 'Copied!';
+        if (!copyNextShown) {
+            copyNextShown = true;
+            phCapture('copy_next_step_shown', {
+                task_id: taskId,
+                has_feed: !!(relatedCache && relatedCache.has_feed),
+                episode_count: relatedCache && relatedCache.episodes
+                    ? Math.min(3, relatedCache.episodes.length) : 0
+            });
+        }
+        var copyFollow = el('copyFollowBtn');
+        if (copyFollow && !copyFollow.dataset.wired) {
+            copyFollow.dataset.wired = '1';
+            copyFollow.addEventListener('click', function() {
+                followPodcast('copy_panel');
+            });
+        }
+        if (relatedCache) {
+            renderCopyNextEpisodes(relatedCache);
+            return;
+        }
+        show(el('copyNextLoading'), true);
+        el('copyNextHint').textContent = 'Loading more episodes…';
+        // loadNextSteps will fill relatedCache and refresh this panel.
+        loadNextSteps();
+    }
+
+    function followPodcast(source) {
+        var btn = source === 'copy_panel' ? el('copyFollowBtn') : el('followBtn');
         if (!btn || btn.disabled) return;
+        if (source === 'copy_panel') {
+            phCapture('copy_next_step_clicked', {
+                task_id: taskId,
+                item: 'follow'
+            });
+        }
         btn.disabled = true;
         var prev = btn.textContent;
         btn.innerHTML = '<span class="btn-spinner" aria-hidden="true"></span>Saving…';
@@ -655,9 +781,11 @@
             .then(function(res) {
                 if (res.ok && res.data && res.data.following) {
                     setFollowButton(true);
+                    if (relatedCache) relatedCache.following = true;
                     phCapture('podcast_followed', {
                         task_id: taskId,
-                        already: !!res.data.already
+                        already: !!res.data.already,
+                        source: source || 'next_steps'
                     });
                     return;
                 }
@@ -672,15 +800,32 @@
             });
     }
 
+    function applyRelatedData(data) {
+        relatedCache = data || {
+            has_feed: false, following: false, podcast_name: '', episodes: []
+        };
+        if (!data || !data.has_feed) {
+            show(el('followBtn'), false);
+            show(el('moreEpisodesBlock'), false);
+        } else {
+            setFollowButton(!!data.following);
+            renderMoreEpisodes(data.episodes || [], data.podcast_name || '');
+        }
+        if (copyNextShown) renderCopyNextEpisodes(relatedCache);
+    }
+
     function loadNextSteps() {
-        if (nextStepsLoaded) return;
+        if (nextStepsLoaded) {
+            if (copyNextShown && relatedCache) renderCopyNextEpisodes(relatedCache);
+            return;
+        }
         nextStepsLoaded = true;
         show(el('nextSteps'), true);
         show(el('moreEpisodesLoading'), true);
         var followBtn = el('followBtn');
         if (followBtn && !followBtn.dataset.wired) {
             followBtn.dataset.wired = '1';
-            followBtn.addEventListener('click', followPodcast);
+            followBtn.addEventListener('click', function() { followPodcast('next_steps'); });
         }
 
         var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
@@ -700,23 +845,24 @@
             .then(function(data) {
                 show(el('moreEpisodesLoading'), false);
                 if (!data) return;
-                if (!data.has_feed) {
-                    show(el('followBtn'), false);
-                    show(el('moreEpisodesBlock'), false);
-                    return;
-                }
-                setFollowButton(!!data.following);
-                renderMoreEpisodes(data.episodes || [], data.podcast_name || '');
+                applyRelatedData(data);
             })
             .catch(function() {
                 show(el('moreEpisodesLoading'), false);
                 // Feed timed out — keep Follow when we know the task has a feed.
                 show(el('moreEpisodesBlock'), false);
+                relatedCache = {
+                    has_feed: !!taskHasRss,
+                    following: false,
+                    podcast_name: (el('podcastName') && el('podcastName').textContent) || '',
+                    episodes: []
+                };
                 if (taskHasRss) {
                     setFollowButton(false);
                 } else {
                     show(el('followBtn'), false);
                 }
+                if (copyNextShown) renderCopyNextEpisodes(relatedCache);
             })
             .finally(function() {
                 if (timer) clearTimeout(timer);
@@ -727,6 +873,7 @@
     show(el('resultBanner'), false);
     show(el('errorContainer'), false);
     show(el('nextSteps'), false);
+    show(el('copyNextSteps'), false);
     poll();
 })();
 </script>

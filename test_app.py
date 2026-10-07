@@ -5497,17 +5497,25 @@ def test_api_transcriptions_are_labelled_api(ph_events, agent_write):
         {'key_source': 'trial', 'source': 'api', 'app': 'podskrift'}]
 
 
-def test_search_emits_podcast_searched_without_the_query(monkeypatch):
+def test_search_emits_podcast_searched_with_query_and_input_type(monkeypatch):
     monkeypatch.setenv('POSTHOG_KEY', 'phc_test_not_real')
     body = A.app.test_client().get('/').data.decode()
     assert "capture('podcast_searched'" in body
-    start = body.index("capture('podcast_searched'")
-    snippet = body[start:start + 200]
-    assert 'result_count' in snippet
-    assert 'query' not in snippet
-    # Both ways into the funnel: typed search and a pasted Spotify link.
-    assert 'trackSearch(searchType,' in body
-    assert "trackSearch('spotify_link'," in body
+    assert "capture('podcast_search_no_results'" in body
+    assert 'input_type' in body
+    assert 'detectInputType' in body
+    assert "slice(0, 200)" in body
+    assert 'errored' in body
+    # Empty-state copy + RSS help when nothing matches.
+    assert "No results? Paste the podcast's RSS feed" in body
+    assert '/rss-help' in body or "url_for('rss_help')" in body
+    assert 'showSearchEmptyState' in body
+    # Typed search and Spotify resolve both go through trackSearch(query, …).
+    assert 'trackSearch(query,' in body or 'trackSearch(url,' in body
+    assert 'detectInputType' in body
+    for kind in ('name', 'rss_feed', 'spotify_link', 'apple_link',
+                 'youtube_link', 'audio_url', 'other'):
+        assert f"'{kind}'" in body
 
 
 def test_reconcile_names_the_global_cap(trial_on, monkeypatch):
@@ -7876,6 +7884,25 @@ def test_transcription_page_has_next_steps_and_tracking():
     # Must not ship transcript text into analytics properties.
     assert "phCapture('transcript_copied', { task_id: taskId })" in src
     assert 'format: \'txt\'' in src or 'format: "txt"' in src
+    # Copy-adjacent next steps + visible downloads.
+    assert 'id="copyNextSteps"' in src
+    assert 'copy_next_step_shown' in src
+    assert 'copy_next_step_clicked' in src
+    assert 'Download .txt' in src
+    assert 'Download .srt' in src
+    assert 'showCopyNextSteps' in src
+    assert 'Transcribe another episode from' in src
+
+
+def test_search_input_type_patterns_in_homepage():
+    """Client-side classifier covers the documented input_type enum."""
+    src = open('templates/index.html').read()
+    assert 'podcasts' in src and 'apple' in src
+    assert 'APPLE_RE' in src
+    assert 'YOUTUBE_RE' in src
+    assert 'AUDIO_EXT_RE' in src
+    assert 'RSS_HINT_RE' in src
+    assert "return 'name'" in src
 
 
 def test_login_page_has_submit_feedback():
