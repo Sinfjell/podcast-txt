@@ -2,23 +2,42 @@
 {% block title %}Log In — Podskrift{% endblock %}
 
 {% block content %}
+<style>
+    .form-error {
+        font-size: 12.5px; color: var(--error); margin-top: 6px;
+        display: none;
+    }
+    .form-error.visible { display: block; }
+    .form-input.invalid { border-color: var(--error); }
+    .btn-spinner {
+        display: inline-block; width: 12px; height: 12px; margin-right: 8px;
+        border: 2px solid currentColor; border-right-color: transparent;
+        border-radius: 50%; vertical-align: -2px;
+        animation: loginSpin 0.7s linear infinite;
+    }
+    @keyframes loginSpin { to { transform: rotate(360deg); } }
+</style>
 <div style="max-width: 400px; margin: 40px auto;">
     <h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">Log in</h2>
     <div class="card">
         <div class="card-body">
-            <form method="POST" action="{{ url_for('login', next=next) if next else url_for('login') }}">
+            <form method="POST" action="{{ url_for('login', next=next) if next else url_for('login') }}"
+                  id="loginForm" novalidate>
                 {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
                 <div class="form-group">
                     <label class="form-label" for="email">Email</label>
                     <input type="email" class="form-input ph-no-capture" id="email" name="email"
                            required autofocus autocomplete="email">
+                    <p class="form-error" id="emailError" role="alert">Enter a valid email address</p>
                 </div>
                 <div class="form-group">
                     <label class="form-label" for="password">Password</label>
                     <input type="password" class="form-input ph-no-capture" id="password" name="password"
                            required autocomplete="current-password">
+                    <p class="form-error" id="passwordError" role="alert">Enter your password</p>
                 </div>
-                <button type="submit" class="btn btn-primary w-full" style="justify-content: center;">Log in</button>
+                <button type="submit" class="btn btn-primary w-full" id="loginSubmit"
+                        style="justify-content: center;" data-label="Log in">Log in</button>
             </form>
         </div>
     </div>
@@ -27,4 +46,49 @@
         <a href="{{ url_for('register', next=next) if next else url_for('register') }}">Sign up</a>
     </p>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    var form = document.getElementById('loginForm');
+    var email = document.getElementById('email');
+    var password = document.getElementById('password');
+    var emailError = document.getElementById('emailError');
+    var passwordError = document.getElementById('passwordError');
+    var submitBtn = document.getElementById('loginSubmit');
+    var defaultLabel = submitBtn.getAttribute('data-label') || 'Log in';
+
+    function setInvalid(input, errorEl, invalid) {
+        input.classList.toggle('invalid', invalid);
+        errorEl.classList.toggle('visible', invalid);
+    }
+
+    function validate() {
+        var emailOk = !!email.value && email.checkValidity();
+        var pwOk = !!(password.value || '').length;
+        setInvalid(email, emailError, !emailOk);
+        setInvalid(password, passwordError, !pwOk);
+        return emailOk && pwOk;
+    }
+
+    email.addEventListener('input', function() {
+        if (emailError.classList.contains('visible')) validate();
+    });
+    password.addEventListener('input', function() {
+        if (passwordError.classList.contains('visible')) validate();
+    });
+
+    form.addEventListener('submit', function(ev) {
+        if (!validate()) {
+            ev.preventDefault();
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = defaultLabel;
+            return;
+        }
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span class="btn-spinner" aria-hidden="true"></span>Logging in…';
+    });
+})();
+</script>
 {% endblock %}
