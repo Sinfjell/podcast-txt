@@ -45,6 +45,7 @@ from urllib.parse import urljoin, urlparse, unquote
 import uuid
 from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError, APITimeoutError
+import httpx
 
 from sqlalchemy import (event as sa_event, func as sa_func, inspect as sa_inspect, text,
                         update as sa_update, or_ as sa_or_)
@@ -326,14 +327,23 @@ def settings_credits_url():
     return url_for('settings') + '#credits'
 
 # Keep a hanging Whisper call inside the stale-task window, so the client gives
-# up before _fail_if_stale() presumes the task dead. Sized against the 900s floor
-# rather than the (larger) per-task window, so it holds for every task: 420 x 2
-# attempts = 840s. Note httpx reads a bare float as a per-operation timeout, not
-# a wall-clock total, so this is a close approximation and not a hard ceiling --
-# retry backoff eats a few seconds of the margin. A steadily-progressing upload
-# never trips it: 24 MB (the chunk cap) over 420s is only 57 KB/s.
+# up before _fail_if_stale() presumses the task dead. Sized against the 900s floor:
+# 420s read/write × WHISPER_CHUNK_ATTEMPTS (=2) = 840s, plus a small backoff
+# margin. Client-level SDK retries are off (WHISPER_CLIENT_MAX_RETRIES=0); we
+# own the retry loop per chunk so a timeout cannot stretch past this budget via
+# opaque SDK retries, and so we can heartbeat between attempts.
+# A steadily-progressing upload never trips the write timeout: 24 MB (the chunk
+# cap) over 420s is only 57 KB/s.
 WHISPER_TIMEOUT_SECONDS = 420.0
-WHISPER_MAX_RETRIES = 1
+WHISPER_CHUNK_ATTEMPTS = 2
+WHISPER_CLIENT_MAX_RETRIES = 0
+# Back-compat alias used by older tests / docs; same meaning as "SDK retries".
+WHISPER_MAX_RETRIES = WHISPER_CLIENT_MAX_RETRIES
+
+# Connect + per-read idle timeout for enclosure downloads. stream=True applies
+# the read timeout between iter_content chunks, so a stalled CDN cannot hang
+# the worker indefinitely after the first byte.
+DOWNLOAD_TIMEOUT_SECONDS = 30
 
 # Caps on the audio we will pull down from a client-supplied URL.
 #
@@ -453,10 +463,18 @@ def build_openai_client(key):
     """Wrap a raw key in a configured OpenAI client, or None if there is no key."""
     if not key:
         return None
+    # Explicit connect/read/write/pool timeouts: a bare float is also accepted
+    # by httpx, but naming the four makes the hang budget obvious and keeps a
+    # slow connect from borrowing the whole Whisper window.
     return OpenAI(
         api_key=key,
-        timeout=WHISPER_TIMEOUT_SECONDS,
-        max_retries=WHISPER_MAX_RETRIES,
+        timeout=httpx.Timeout(
+            connect=30.0,
+            read=WHISPER_TIMEOUT_SECONDS,
+            write=WHISPER_TIMEOUT_SECONDS,
+            pool=30.0,
+        ),
+        max_retries=WHISPER_CLIENT_MAX_RETRIES,
     )
 
 
@@ -1254,8 +1272,15 @@ TERMINAL_STATUSES = frozenset({'error', 'cancelled'})
 
 #: Floor for how long a task may go without a progress write before it counts
 #: as abandoned. The real window scales with the work in flight -- see
-#: _stale_after_seconds().
+#: _stale_after_seconds() -- but is capped by the Whisper hang budget so a
+#: mid-chunk hang cannot sit for tens of minutes before anything notices.
 STALE_TASK_SECONDS = 15 * 60
+
+#: How often the background watchdog scans for quiet tasks. Polling /status
+#: and /active-jobs also sweep; this is the backstop when nobody is looking
+#: (closed tab, API-only client, worker death after a deploy).
+STALE_WATCHDOG_INTERVAL_SECONDS = int(os.getenv('STALE_WATCHDOG_INTERVAL_SECONDS', '60'))
+_stale_watchdog_started = False
 
 
 def _update_task(task_id, **kwargs):
@@ -1321,7 +1346,7 @@ def download_audio(url, filename, task_id):
 
             resp = session.get(
                 current, stream=True, headers=hop_headers,
-                timeout=30, allow_redirects=False,
+                timeout=DOWNLOAD_TIMEOUT_SECONDS, allow_redirects=False,
             )
             if resp.is_redirect or resp.is_permanent_redirect:
                 location = resp.headers.get('location')
@@ -1465,8 +1490,8 @@ SEGMENT_SECONDS = 900
 #: Hard check on what we actually produced. Belt to SEGMENT_SECONDS' braces.
 WHISPER_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 #: Re-encoding writes no heartbeat, so it has to finish inside the stale-task
-#: floor or a live job gets swept and the user is told the server restarted.
-#: ffmpeg runs at roughly 100x realtime here, so this is generous.
+#: floor or a live job gets swept as stuck. ffmpeg runs at roughly 100x
+#: realtime here, so this is generous.
 FFMPEG_TIMEOUT_SECONDS = 600
 #: A part must fit the upload limit by construction, not by luck. Raising the
 #: bitrate or the segment length without checking this would fail every episode
@@ -1721,15 +1746,68 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
         os.remove(audio_file)
 
 
+def _whisper_transcribe_chunk(openai_client, chunk_file, language, *,
+                              task_id=None, chunk_label=None,
+                              attempts=None):
+    """Call Whisper on one chunk with a bounded retry budget.
+
+    SDK max_retries is 0; this loop is the only retry path, so a hung request
+    cannot stretch past WHISPER_TIMEOUT_SECONDS × attempts via opaque retries.
+    Heartbeats between attempts keep the stale sweeper from killing a job that
+    is still retrying. Non-transient errors (auth, billing, 4xx) are not retried.
+    """
+    attempts = WHISPER_CHUNK_ATTEMPTS if attempts is None else max(1, int(attempts))
+    last_exc = None
+    label = chunk_label or os.path.basename(chunk_file)
+
+    for attempt in range(1, attempts + 1):
+        try:
+            with open(chunk_file, 'rb') as f:
+                create_kwargs = {
+                    'model': 'whisper-1',
+                    'file': f,
+                    'response_format': 'verbose_json',
+                    'timestamp_granularities': ['segment'],
+                }
+                # Omitting `language` entirely is what makes Whisper auto-detect;
+                # passing None or '' is rejected by the API.
+                if language:
+                    create_kwargs['language'] = language
+                return openai_client.audio.transcriptions.create(**create_kwargs)
+        except (APITimeoutError, APIConnectionError) as exc:
+            last_exc = exc
+            app.logger.warning(
+                'Whisper %s attempt %s/%s failed (%s)',
+                label, attempt, attempts, type(exc).__name__,
+            )
+            if attempt >= attempts:
+                break
+            # Prove we are still alive so a long retry budget cannot look like
+            # a dead worker to the stale sweeper.
+            if task_id:
+                _update_task(task_id)
+            time.sleep(min(2 ** (attempt - 1), 8))
+
+    # Surface a clear, actionable message. describe_openai_error() still wins
+    # for the raw SDK types in the worker except path; this wraps the final
+    # raise so callers that stringify get the chunk context too.
+    raise last_exc
+
+
 def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language,
                        audio_duration):
     """Send each chunk to Whisper, publishing partial text as it goes.
 
     Returns (full_text, segments). `remaining` is mutated as chunks are consumed
     so the caller can clean up whatever is left if this raises.
+
+    Resume after a worker death is not attempted: chunk files live only for the
+    life of the thread (cleaned in `finally`), so the only safe recovery is to
+    fail the task, refund unspent trial minutes, and let the user retry.
     """
     all_segments = []
     full_text = ""
+    total = len(audio_chunks)
 
     for i, chunk_file in enumerate(audio_chunks):
         # The stale sweeper may have given up on this task and refunded the
@@ -1750,33 +1828,29 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
         # check-to-upload window almost entirely, for free.
         if not _update_task(
             task_id,
-            status=f'transcribing chunk {i + 1}/{len(audio_chunks)}',
+            status=f'transcribing chunk {i + 1}/{total}',
             chunk_index=i,
             phase_started_at=datetime.now(timezone.utc),
-            progress=_transcribe_checkpoint(i, len(audio_chunks)),
+            progress=_transcribe_checkpoint(i, total),
         ):
             raise TaskAbandoned(
                 'Task was marked failed between chunks; stopping so it cannot '
                 'keep billing against an allowance already refunded.'
             )
 
-        with open(chunk_file, 'rb') as f:
-            create_kwargs = {
-                'model': "whisper-1",
-                'file': f,
-                'response_format': "verbose_json",
-                'timestamp_granularities': ["segment"],
-            }
-            # Omitting `language` entirely is what makes Whisper auto-detect;
-            # passing None or '' is rejected by the API.
-            if language:
-                create_kwargs['language'] = language
-            chunk_transcript = openai_client.audio.transcriptions.create(**create_kwargs)
+        # Exhausted retries raise APITimeoutError / APIConnectionError; the
+        # worker marks the task failed, fires transcript_failed (reason=network),
+        # and refunds unspent trial minutes.
+        chunk_transcript = _whisper_transcribe_chunk(
+            openai_client, chunk_file, language,
+            task_id=task_id,
+            chunk_label=f'chunk {i + 1}/{total}',
+        )
 
         full_text += chunk_transcript.text + " "
 
         if hasattr(chunk_transcript, 'segments') and chunk_transcript.segments:
-            chunk_dur = audio_duration / len(audio_chunks)
+            chunk_dur = audio_duration / total
             offset = i * chunk_dur
             for seg in chunk_transcript.segments:
                 all_segments.append({
@@ -1792,7 +1866,7 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
         _update_task(
             task_id,
             transcript_text=full_text.strip(),
-            progress=_transcribe_checkpoint(i + 1, len(audio_chunks)),
+            progress=_transcribe_checkpoint(i + 1, total),
             language=language or detected or None,
         )
 
@@ -4014,17 +4088,33 @@ def _positive_float_or_none(raw):
     return value if value > 0 else None
 
 
+def _whisper_hang_budget_seconds():
+    """Wall-clock seconds a single chunk may stay quiet while still being alive.
+
+    Matches the hard timeout × retry budget in `_whisper_transcribe_chunk`, plus
+    a small margin for backoff and scheduling. Anything quieter than this with
+    chunks in flight is a dead worker, not a slow API.
+    """
+    return WHISPER_TIMEOUT_SECONDS * WHISPER_CHUNK_ATTEMPTS + 120
+
+
 def _stale_after_seconds(task):
     """How long this particular task may stay quiet before it is presumed dead.
 
-    The heartbeat is written per chunk, so the window has to clear the slowest
-    plausible single chunk. A 24 MB chunk of 64 kbps audio is ~50 minutes long,
-    and if Whisper degrades to ~1.5x realtime that one chunk runs for over half
-    an hour -- a flat 15-minute window would kill a job that is very much alive.
+    The heartbeat is written per chunk (and between Whisper retries), so the
+    window has to clear one in-flight attempt. It used to scale with
+    `per_chunk * 8` unbounded, which let a hung mid-chunk job sit far longer
+    than the Whisper timeout before /active-jobs noticed. Cap the transcribing
+    window at the hard hang budget; keep the longer scaled windows for
+    splitting/download where ffmpeg or a large pull is still silent work.
     """
+    hang_budget = _whisper_hang_budget_seconds()
     if task.chunk_total and task.audio_duration:
         per_chunk = task.audio_duration / task.chunk_total / WHISPER_REALTIME_FACTOR
-        return max(STALE_TASK_SECONDS, per_chunk * 8)
+        return max(STALE_TASK_SECONDS, min(per_chunk * 8, hang_budget))
+    if task.chunk_total:
+        # Transcribing but duration unknown -- still bound by the Whisper budget.
+        return max(STALE_TASK_SECONDS, hang_budget)
     if task.audio_duration:
         # Splitting sets no chunk_total yet, and cutting a large episode is
         # silent work -- scale off the episode length instead.
@@ -4038,13 +4128,21 @@ def _stale_after_seconds(task):
     return STALE_TASK_SECONDS
 
 
-def _fail_if_stale(task):
+def _task_key_source_for_analytics(task):
+    """Best-effort key_source for a task row (stale sweep has no enqueue context)."""
+    if task.trial_seconds_charged is not None or (task.paid_seconds_charged or 0) > 0:
+        return 'trial'
+    return 'user'
+
+
+def _fail_if_stale(task, source='poll'):
     """Fail a task whose worker has stopped writing progress.
 
-    The boot sweep alone is not enough: a task orphaned by a restart has a
-    heartbeat only seconds old, so the sweep on that same boot skips it and
-    nothing runs again afterwards. Checking here means the page polling the
-    task is what notices, which is exactly where the user is waiting.
+    Called from /status, /active-jobs, boot recovery, and the background
+    watchdog. A task orphaned by a restart has a heartbeat only seconds old, so
+    the boot sweep on that same boot skips it; the watchdog (and any later
+    poll) is what notices. Resume is not attempted: chunk files are gone with
+    the dead thread.
     """
     if task.status == 'completed' or task.status in TERMINAL_STATUSES:
         return False
@@ -4055,24 +4153,85 @@ def _fail_if_stale(task):
     # One conditional UPDATE, like every other status write here. This used to
     # be a read-check-write on a session-cached row, and it is the one path that
     # can clobber a task that finished inside the window -- turning a completed
-    # transcript into "the server restarted, please try again" while keeping the
-    # full charge, which invites a paid re-run. The live job bar polls this from
-    # every open tab, so it fires roughly 15x more often than it used to.
+    # transcript into an error while keeping the full charge, which invites a
+    # paid re-run. The live job bar polls this from every open tab, so it fires
+    # roughly 15x more often than it used to.
     claimed = db.session.execute(text("""
         UPDATE transcription_tasks
            SET status = 'error', phase = 'error', error_message = :message
          WHERE id = :tid AND status NOT IN ('completed', 'error', 'cancelled')
     """), {
         'tid': task.id,
-        'message': ('Transcription stopped making progress, most likely because '
-                    'the server restarted. Please try again.'),
+        'message': ('Transcription stopped making progress and was stopped. '
+                    'Please try again.'),
     }).rowcount == 1
     db.session.commit()
     db.session.expire(task)
     if not claimed:
         return False
     trial_refund_task(task)
-    report_stale_task(task.id, last_status, quiet, source='poll')
+    report_stale_task(task.id, last_status, quiet, source=source)
+    # Poll/watchdog/boot paths used to skip analytics, so a hung job that never
+    # raised in the worker was invisible to the transcript_failed funnel.
+    try:
+        product_analytics.capture(
+            'transcript_failed',
+            task.user_id,
+            {
+                'reason': 'stale',
+                'key_source': _task_key_source_for_analytics(task),
+            },
+        )
+    except Exception:  # noqa: BLE001 - analytics must never undo the refund
+        app.logger.exception(
+            'transcript_failed analytics failed for stale task %s', task.id)
+    return True
+
+
+def _sweep_stale_tasks(source='watchdog'):
+    """Fail every running task that has gone quiet past its stale window.
+
+    Safe for concurrent callers (two gunicorn workers, watchdog + poll): each
+    claim is one conditional UPDATE inside `_fail_if_stale`.
+    """
+    running = TranscriptionTask.query.filter(
+        ~TranscriptionTask.status.in_(['completed', *TERMINAL_STATUSES]),
+    ).all()
+    failed = 0
+    for task in running:
+        if _fail_if_stale(task, source=source):
+            failed += 1
+    return failed
+
+
+def _stale_watchdog_loop():
+    """Background backstop when no client is polling /status or /active-jobs."""
+    while True:
+        time.sleep(STALE_WATCHDOG_INTERVAL_SECONDS)
+        try:
+            with app.app_context():
+                _sweep_stale_tasks(source='watchdog')
+        except Exception:  # noqa: BLE001 - never let the watchdog thread die quietly
+            app.logger.exception('stale-task watchdog sweep failed')
+
+
+def start_stale_watchdog():
+    """Start the daemon watchdog once per process. No-op when disabled.
+
+    The test suite sets PODSKRIFT_DISABLE_WATCHDOG=1 before importing this
+    module so a sleeping thread cannot race the throwaway DB.
+    """
+    global _stale_watchdog_started
+    if _stale_watchdog_started:
+        return False
+    if os.getenv('PODSKRIFT_DISABLE_WATCHDOG', '').strip().lower() in (
+            '1', 'true', 'yes'):
+        return False
+    thread = threading.Thread(
+        target=_stale_watchdog_loop, name='stale-task-watchdog', daemon=True,
+    )
+    thread.start()
+    _stale_watchdog_started = True
     return True
 
 
@@ -6431,28 +6590,16 @@ with app.app_context():
     # stuck in a running state forever. Fail those at boot -- but only ones that
     # have gone quiet: this module is imported by every gunicorn worker, and a
     # worker respawning mid-life must not kill jobs another worker is running.
-    orphaned = [
-        t for t in TranscriptionTask.query.filter(
-            ~TranscriptionTask.status.in_(['completed', *TERMINAL_STATUSES])
-        ).all()
-        if _seconds_since(t.heartbeat_at or t.started_at) > _stale_after_seconds(t)
-    ]
-    for task in orphaned:
-        # Both gunicorn workers run this sweep, so a stuck task can be reported
-        # twice. The shared fingerprint keeps that to one issue.
-        report_stale_task(task.id, task.status,
-                          _seconds_since(task.heartbeat_at or task.started_at), source='boot')
-        task.status = 'error'
-        task.phase = 'error'
-        task.error_message = (
-            'Transcription was interrupted and stopped making progress. Please try again.'
-        )
-    if orphaned:
-        db.session.commit()
-        for task in orphaned:
-            trial_refund_task(task)
+    # Shared with the watchdog / poll paths so refunds and transcript_failed
+    # fire the same way regardless of who notices.
+    _sweep_stale_tasks(source='boot')
 
     settle_stranded_charges()
+
+    # Backstop when nobody is polling: a hung mid-chunk job with a closed tab
+    # used to sit until the next deploy. Interval is coarse; the hang budget
+    # on Whisper is what bounds how long a live call may stay quiet.
+    start_stale_watchdog()
 
     # One-time migration: move old transcriptions table to transcription_tasks
     if 'transcriptions' in inspector.get_table_names():

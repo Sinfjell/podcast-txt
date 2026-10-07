@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "stuck-transcript-recovery",
+      "date": "2026-10-07",
+      "title": "Stuck transcripts fail cleanly",
+      "summary": "If a long episode stops progressing mid-way, Podskrift now times out the hung step, marks the job failed with a clear message, and refunds unused free minutes instead of spinning forever."
+    },
+    {
       "id": "whats-new-page",
       "date": "2026-10-07",
       "title": "What's new — we ship in public",

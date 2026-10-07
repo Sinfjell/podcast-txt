@@ -25,6 +25,10 @@ os.environ['DATABASE_URL'] = f'sqlite:///{_TEST_DB}'
 os.environ['SENTRY_DSN'] = ''
 os.environ['POSTHOG_KEY'] = ''
 os.environ['POSTHOG_HOST'] = ''
+# The stale-task watchdog is a daemon thread; keep it off in the suite so it
+# cannot race tests against the throwaway DB. Tests call _sweep_stale_tasks /
+# _fail_if_stale directly.
+os.environ['PODSKRIFT_DISABLE_WATCHDOG'] = '1'
 
 import app as A  # noqa: E402 - must follow the DATABASE_URL assignment
 
@@ -133,12 +137,12 @@ def test_stale_task_is_failed_when_its_status_is_polled():
         task = db.session.get(TranscriptionTask, stale_id)
         assert A._fail_if_stale(task) is True
         assert task.status == 'error'
-        assert 'restarted' in task.error_message
+        assert 'stopped making progress' in task.error_message
 
 
 def test_stale_window_scales_with_chunk_length():
-    """A 24 MB chunk of low-bitrate audio can legitimately run past 15 minutes;
-    a flat window would kill a job that is still working."""
+    """Transcribing windows clear a slow chunk but stay under the Whisper hang
+    budget -- unbounded per_chunk*8 is what left a hung job quiet for ~90 min."""
     class T:
         chunk_total = 1
         audio_duration = 50 * 60      # one ~50-minute chunk (24 MB @ 64 kbps)
@@ -149,9 +153,9 @@ def test_stale_window_scales_with_chunk_length():
         audio_duration = None
         bytes_downloaded = None
 
-    slow_chunk_runtime = (50 * 60) / A.WHISPER_REALTIME_FACTOR
-    assert A._stale_after_seconds(T()) > slow_chunk_runtime * 4
-    assert A._stale_after_seconds(T()) > A.STALE_TASK_SECONDS
+    window = A._stale_after_seconds(T())
+    assert window >= A.STALE_TASK_SECONDS
+    assert window <= A._whisper_hang_budget_seconds()
     # With nothing to go on, fall back to the flat floor
     assert A._stale_after_seconds(NoInfo()) == A.STALE_TASK_SECONDS
 
@@ -172,18 +176,24 @@ def test_whisper_client_gives_up_before_the_task_is_presumed_dead(monkeypatch):
 
     Asserts the values on the constructed client, not just the constants -- an
     earlier version of this test passed even with the timeout removed entirely.
+    SDK retries are off; per-chunk attempts are ours, and their product must
+    stay inside the stale floor.
     """
+    import httpx
+
     monkeypatch.setattr(A, 'GLOBAL_OPENAI_KEY', 'sk-test-not-a-real-key')
     monkeypatch.setattr(A, 'TRIAL_ENABLED', True)
     client = A.build_openai_client(A.resolve_openai_key(None)[0])
 
     assert client is not None
-    assert client.timeout == A.WHISPER_TIMEOUT_SECONDS
-    assert client.max_retries == A.WHISPER_MAX_RETRIES
+    assert isinstance(client.timeout, httpx.Timeout)
+    assert client.timeout.read == A.WHISPER_TIMEOUT_SECONDS
+    assert client.timeout.write == A.WHISPER_TIMEOUT_SECONDS
+    assert client.max_retries == A.WHISPER_CLIENT_MAX_RETRIES == 0
 
-    # max_retries=N means N+1 total attempts
-    worst_case = client.timeout * (client.max_retries + 1)
+    worst_case = A.WHISPER_TIMEOUT_SECONDS * A.WHISPER_CHUNK_ATTEMPTS
     assert worst_case < A.STALE_TASK_SECONDS
+    assert A._whisper_hang_budget_seconds() >= worst_case
 
 
 def test_stale_window_falls_back_to_downloaded_size_without_a_feed_duration():
@@ -222,6 +232,159 @@ def test_live_task_is_not_failed():
         task = db.session.get(TranscriptionTask, live_id)
         assert A._fail_if_stale(task) is False
         assert task.status == 'transcribing'
+
+
+def test_hung_whisper_chunk_retries_then_raises(tmp_path, monkeypatch):
+    """A Whisper call that times out every attempt must not hang the job forever.
+
+    Bounded retries are the whole point of owning the loop instead of the SDK's
+    opaque max_retries: after WHISPER_CHUNK_ATTEMPTS the error surfaces so the
+    worker can mark the task failed.
+    """
+    attempts = {'n': 0}
+
+    class FakeClient:
+        class audio:
+            class transcriptions:
+                @staticmethod
+                def create(**kw):
+                    attempts['n'] += 1
+                    raise A.APITimeoutError(request=None)
+
+    chunk = tmp_path / 'c0.mp3'
+    chunk.write_bytes(b'\0' * 16)
+    monkeypatch.setattr(A.time, 'sleep', lambda *_: None)
+
+    with pytest.raises(A.APITimeoutError):
+        A._whisper_transcribe_chunk(
+            FakeClient(), str(chunk), 'no', chunk_label='chunk 1/9')
+    assert attempts['n'] == A.WHISPER_CHUNK_ATTEMPTS
+
+
+def test_hung_chunk_fails_task_refunds_and_emits_transcript_failed(
+        trial_on, monkeypatch, ph_events):
+    """End-to-end through the worker: a Whisper timeout fails the job, refunds
+    unsent minutes, and fires transcript_failed with reason=network — the path
+    that was missing when a hang never raised."""
+    import types
+    from models import db, TranscriptionTask
+
+    uid = _make_user('hungchunk@test.com', limit=3600)
+    monkeypatch.setattr(A.time, 'sleep', lambda *_: None)
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: target and target()))
+    monkeypatch.setattr(A, 'download_audio', lambda *a, **kw: None)
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+
+    def hang(*a, **kw):
+        raise A.APITimeoutError(request=None)
+
+    monkeypatch.setattr(A, 'transcribe_audio', hang)
+
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user, {'title': 'Ep', 'audio_url': 'https://example.com/ep.mp3',
+                   'duration_min': 15})
+        assert status == 200, payload
+        task = db.session.get(TranscriptionTask, payload['task_id'])
+        assert task.status == 'error'
+        assert 'did not respond in time' in (task.error_message or '').lower()
+        # Nothing reached Whisper (failure before/at transcribe_audio entry),
+        # so the whole reservation is refunded.
+        assert task.trial_settled is True
+    assert _used(uid) == 0
+
+    failed_events = [e for e in ph_events.events if e['event'] == 'transcript_failed']
+    assert failed_events
+    assert failed_events[-1]['properties']['reason'] == 'network'
+
+
+def test_hung_chunk_in_loop_refunds_only_unsent_remainder(
+        trial_on, monkeypatch, tmp_path):
+    """Timeout after chunk_index is written still charges for that in-flight
+    chunk (it may have reached Whisper) and refunds the rest."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('hungmid@test.com', limit=3600)
+    monkeypatch.setattr(A.time, 'sleep', lambda *_: None)
+
+    class FakeClient:
+        class audio:
+            class transcriptions:
+                @staticmethod
+                def create(**kw):
+                    raise A.APITimeoutError(request=None)
+
+    chunks = []
+    for i in range(3):
+        f = tmp_path / f'c{i}.mp3'
+        f.write_bytes(b'\0' * 16)
+        chunks.append(str(f))
+
+    with A.app.app_context():
+        A.trial_reserve(uid, 900)
+        db.session.add(TranscriptionTask(
+            id='hung-mid', user_id=uid, episode_title='x',
+            status='transcribing', chunk_total=3, chunk_index=None,
+            trial_seconds_charged=900))
+        db.session.commit()
+        with pytest.raises(A.APITimeoutError):
+            A._transcribe_chunks(
+                chunks, set(chunks), 'hung-mid', FakeClient(), 'no', 900.0)
+        task = db.session.get(TranscriptionTask, 'hung-mid')
+        assert task.chunk_index == 0
+        A._update_task('hung-mid', status='error', phase='error',
+                       error_message='timed out')
+        assert A.trial_refund_task(task) == 600
+    assert _used(uid) == 300
+
+
+def test_worker_death_sweep_fails_refunds_and_emits_stale(
+        trial_on, ph_events, sentry_events):
+    """A daemon thread killed mid-chunk never runs its except handler. The
+    stale sweep (watchdog / boot / active-jobs) must still fail the row,
+    refund unspent minutes, report to Sentry, and fire transcript_failed.
+    """
+    from models import db, TranscriptionTask
+
+    uid = _make_user('workerdeath@test.com', limit=3600)
+    now = datetime.now(timezone.utc)
+    with A.app.app_context():
+        A.trial_reserve(uid, 900)
+        db.session.add(TranscriptionTask(
+            id='worker-death', user_id=uid, episode_title='Ep',
+            status='transcribing chunk 7/9', phase='transcribing',
+            progress=70, chunk_total=9, chunk_index=6,
+            audio_duration=5400.0, trial_seconds_charged=900,
+            started_at=now - timedelta(hours=2),
+            heartbeat_at=now - timedelta(hours=2),
+        ))
+        db.session.commit()
+
+        assert A._sweep_stale_tasks(source='watchdog') == 1
+        task = db.session.get(TranscriptionTask, 'worker-death')
+        assert task.status == 'error'
+        assert 'stopped making progress' in task.error_message
+        # index 6 of 9 => 7 chunks billed; refund 2/9 of 900 = 200
+        assert task.trial_settled is True
+    assert _used(uid) == 700
+
+    stale_events = [
+        e for e in ph_events.events
+        if e['event'] == 'transcript_failed' and e['properties'].get('reason') == 'stale'
+    ]
+    assert stale_events
+    assert stale_events[-1]['distinct_id'] == str(uid)
+    assert any(e.get('fingerprint') == ['stale-task'] for e in sentry_events)
+
+
+def test_watchdog_is_disabled_in_the_test_suite():
+    """Guard the env opt-out: a live watchdog racing the suite is a flake factory."""
+    assert os.environ.get('PODSKRIFT_DISABLE_WATCHDOG') == '1'
+    assert A._stale_watchdog_started is False
 
 
 # --------------------------------------------------------------------------
@@ -3204,9 +3367,9 @@ def test_active_jobs_refunds_a_dead_task_it_sweeps(trial_on):
 def test_sweeping_a_stale_task_cannot_clobber_one_that_just_finished(trial_on):
     """_fail_if_stale was a read-check-write on a session-cached row -- the one
     status write in the file that was not a conditional UPDATE. A task that
-    completed inside the window became "the server restarted, please try again"
-    while keeping the full charge, inviting a paid re-run. The job bar polls
-    this from every open tab, so it fires far more often than it used to.
+    completed inside the window became "stopped making progress" while keeping
+    the full charge, inviting a paid re-run. The job bar polls this from every
+    open tab, so it fires far more often than it used to.
     """
     from models import db, TranscriptionTask
 
@@ -5367,11 +5530,11 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'whats-new-page'
+    assert entries[0]['id'] == 'stuck-transcript-recovery'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
-    assert 'id="whats-new-page"' in resp.data.decode()
+    assert f'id="{entries[0]["id"]}"' in resp.data.decode()
     assert entries[0]['title'] in body
     assert entries[0]['summary'] in body
     # Newest-first: the first entry's title appears before the last one's.
