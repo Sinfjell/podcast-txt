@@ -5694,8 +5694,9 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'stay-logged-in'
-    assert entries[1]['id'] == 'spotify-resolve-clarity'
+    assert entries[0]['id'] == 'related-episodes-feed-fix'
+    assert entries[1]['id'] == 'stay-logged-in'
+    assert entries[2]['id'] == 'spotify-resolve-clarity'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -6296,6 +6297,7 @@ def test_transcription_status_flags_no_billing_with_retry(stripe_on):
             artwork_url='https://example.com/art.jpg',
             episode_published='2024-01-01',
             source_audio_url='https://example.com/ep.mp3',
+            rss_url='https://feeds.example.com/hardfork.xml',
             audio_duration=48 * 60,
             language='en',
             error_message=A.describe_openai_error(
@@ -6310,6 +6312,7 @@ def test_transcription_status_flags_no_billing_with_retry(stripe_on):
     assert data['retry']['audio_url'] == 'https://example.com/ep.mp3'
     assert data['retry']['episode_title'] == 'Hard Fork'
     assert data['retry']['duration_min'] == '48'
+    assert data['retry']['rss_url'] == 'https://feeds.example.com/hardfork.xml'
     assert data.get('buy_available') is True
 
 
@@ -8202,11 +8205,124 @@ def test_related_episodes_lists_others_from_same_feed(monkeypatch, trial_on):
 
 def test_related_episodes_hidden_without_rss(trial_on):
     uid = _make_user('norelated@test.com')
-    _completed_task(uid, 'rel-none', rss_url=None)
+    # No feed and no show name → nothing to look up.
+    _completed_task(uid, 'rel-none', rss_url=None, podcast_name=None)
     data = _login(uid).get('/transcription/rel-none/related-episodes').get_json()
     assert data['has_feed'] is False
     assert data['episodes'] == []
     assert data['following'] is False
+
+
+def test_start_transcription_stores_rss_url_with_audio(monkeypatch, trial_on):
+    """Episode search / Spotify starts must persist the show feed for Follow."""
+    from models import db, TranscriptionTask
+    uid = _make_user('startrss@test.com', limit=36000)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    feed = 'https://feeds.example.com/hardfork.xml'
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://cdn.example.com/ep.mp3',
+        'episode_title': 'Episode One',
+        'podcast_name': 'Hard Fork',
+        'rss_url': feed,
+        'duration_min': '5',
+    })
+    assert resp.status_code == 200
+    task_id = resp.get_json()['task_id']
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        assert task is not None
+        assert task.rss_url == feed
+    # Mark completed so related-episodes is the post-transcript path users hit.
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        task.status = 'completed'
+        task.phase = 'completed'
+        task.progress = 100
+        task.transcript_text = 'hello'
+        db.session.commit()
+    monkeypatch.setattr(
+        A, 'get_episodes_from_rss',
+        lambda url, timeout=None: ([], 'offline'))
+    data = _login(uid).get(f'/transcription/{task_id}/related-episodes').get_json()
+    assert data['has_feed'] is True
+
+
+def test_start_transcription_drops_private_rss_url(monkeypatch, trial_on):
+    from models import db, TranscriptionTask
+    uid = _make_user('droprss@test.com', limit=36000)
+
+    def fetchable(url):
+        return '127.0.0.1' not in url and '169.254' not in url
+
+    monkeypatch.setattr(A, '_is_fetchable_url', fetchable)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://cdn.example.com/ep.mp3',
+        'episode_title': 'Episode One',
+        'podcast_name': 'Hard Fork',
+        'rss_url': 'http://127.0.0.1/feed.xml',
+        'duration_min': '5',
+    })
+    assert resp.status_code == 200
+    task_id = resp.get_json()['task_id']
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        assert task.rss_url is None
+
+
+def test_pending_transcription_keeps_fetchable_rss(monkeypatch, trial_on):
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: '127.0.0.1' not in url)
+    client = A.app.test_client()
+    resp = client.post('/pending-transcription', data={
+        'audio_url': 'https://cdn.example.com/ep.mp3',
+        'episode_title': 'ChatGPT Ep',
+        'podcast_name': 'Show',
+        'rss_url': 'https://feeds.example.com/show.xml',
+        'duration_min': '42',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    with client.session_transaction() as sess:
+        pending = sess.get(A.PENDING_TRANSCRIPTION_KEY)
+        assert pending['rss_url'] == 'https://feeds.example.com/show.xml'
+
+    client2 = A.app.test_client()
+    resp2 = client2.post('/pending-transcription', data={
+        'audio_url': 'https://cdn.example.com/ep.mp3',
+        'episode_title': 'ChatGPT Ep',
+        'rss_url': 'http://127.0.0.1/feed.xml',
+    }, follow_redirects=False)
+    assert resp2.status_code in (302, 303)
+    with client2.session_transaction() as sess:
+        pending = sess.get(A.PENDING_TRANSCRIPTION_KEY)
+        assert pending['rss_url'] is None
+
+
+def test_related_episodes_looks_up_feed_by_podcast_name(monkeypatch, trial_on):
+    """Tasks that never stored rss_url still get related episodes via iTunes."""
+    from models import db, TranscriptionTask
+    uid = _make_user('rellookup@test.com')
+    _completed_task(uid, 'rel-lookup', rss_url=None, podcast_name='Hard Fork')
+    feed_url = 'https://feeds.example.com/hardfork.xml'
+    monkeypatch.setattr(
+        A, '_public_shows_named',
+        lambda name: [{'collectionName': 'Hard Fork', 'feedUrl': feed_url}])
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    feed = [
+        {'index': 0, 'title': 'Episode Two', 'published': '2024-02-01',
+         'audio_url': 'https://cdn.example.com/ep2.mp3', 'duration_min': 40,
+         'artwork': '', 'podcast_name': 'Hard Fork', 'description': ''},
+        {'index': 1, 'title': 'Episode One', 'published': '2024-01-01',
+         'audio_url': 'https://cdn.example.com/ep1.mp3', 'duration_min': 48,
+         'artwork': '', 'podcast_name': 'Hard Fork', 'description': ''},
+    ]
+    monkeypatch.setattr(
+        A, 'get_episodes_from_rss',
+        lambda url, timeout=None: (feed, None))
+    data = _login(uid).get('/transcription/rel-lookup/related-episodes').get_json()
+    assert data['has_feed'] is True
+    assert data['episodes'][0]['title'] == 'Episode Two'
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'rel-lookup')
+        assert task.rss_url == feed_url
 
 
 def test_related_episodes_respects_timeout_kwarg(monkeypatch, trial_on):
@@ -8292,6 +8408,12 @@ def test_transcription_page_has_next_steps_and_tracking():
     assert 'Download .srt' in src
     assert 'showCopyNextSteps' in src
     assert 'Transcribe another episode from' in src
+
+
+def test_homepage_episode_click_sends_rss_url():
+    """Search / Spotify episode rows must post feed_url as rss_url."""
+    src = open('templates/index.html').read()
+    assert 'fields.rss_url = item.feed_url' in src or 'rss_url: item.feed_url' in src
 
 
 def test_search_input_type_patterns_in_homepage():
