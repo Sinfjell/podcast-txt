@@ -42,7 +42,7 @@ if not os.path.exists(certifi.where()):
 from flask import (Flask, render_template, request, jsonify, send_file, flash,
                    redirect, url_for, Response, g, session, has_request_context)
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from urllib.parse import urljoin, urlparse, unquote
+from urllib.parse import parse_qs, urljoin, urlparse, unquote
 import uuid
 from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError, APITimeoutError
@@ -6744,6 +6744,192 @@ def resolve_spotify():
         'error': outcome['error'],
         'error_kind': outcome['error_kind'],
         'show_name': outcome.get('show_name') or '',
+    })
+
+
+# ---------------------------------------------------------------------------
+# Apple Podcasts links
+# ---------------------------------------------------------------------------
+
+#: Any country store: /us/podcast/…/id123, /cn/podcast/…/id123?i=456, …
+APPLE_SHOW_ID_RE = re.compile(r'/id(\d+)', re.I)
+
+
+def parse_apple_podcasts_url(raw):
+    """Return (show_id, episode_id) from a podcasts.apple.com URL.
+
+    ``episode_id`` is None for show-only links. Both are digit strings when
+    present. Returns (None, None) when the URL is not an Apple Podcasts link
+    with a show id.
+    """
+    text = (raw or '').strip()
+    if not text or 'podcasts.apple.com' not in text.lower():
+        return None, None
+    show_match = APPLE_SHOW_ID_RE.search(text)
+    if not show_match:
+        return None, None
+    show_id = show_match.group(1)
+    episode_id = None
+    try:
+        parsed = urlparse(text if '://' in text else 'https://' + text)
+        values = parse_qs(parsed.query).get('i') or []
+        if values and re.fullmatch(r'\d+', values[0] or ''):
+            episode_id = values[0]
+    except ValueError:
+        pass
+    return show_id, episode_id
+
+
+def _itunes_lookup(itunes_id, *, entity=None, limit=None):
+    """Raw iTunes lookup results. Raises requests.RequestException."""
+    params = {'id': itunes_id}
+    if entity:
+        params['entity'] = entity
+    if limit is not None:
+        params['limit'] = limit
+    resp = requests.get('https://itunes.apple.com/lookup', timeout=10, params=params)
+    resp.raise_for_status()
+    return resp.json().get('results', [])
+
+
+def _apple_resolve_outcome(results, error=None, error_kind=None):
+    return {
+        'results': results,
+        'error': error,
+        'error_kind': error_kind,
+    }
+
+
+def _apple_show_from_lookup(items):
+    """The podcast/show row from an iTunes lookup payload, or None."""
+    for item in items:
+        if item.get('kind') == 'podcast' and item.get('feedUrl'):
+            return item
+        # Some payloads omit kind and only set wrapperType=track + feedUrl.
+        if item.get('feedUrl') and item.get('wrapperType') == 'track' and (
+                item.get('kind') in (None, 'podcast')):
+            return item
+    for item in items:
+        if item.get('feedUrl') and not item.get('episodeUrl'):
+            return item
+    return None
+
+
+def _apple_episode_from_lookup(items, episode_id):
+    """Match trackId to the pasted ``i=`` value among podcastEpisode rows."""
+    want = str(episode_id)
+    for item in items:
+        if str(item.get('trackId') or '') != want:
+            continue
+        if item.get('wrapperType') == 'podcastEpisode' or item.get('kind') == 'podcast-episode':
+            return item
+        # Defensive: episode rows always carry episodeUrl; the show row does not.
+        if item.get('episodeUrl'):
+            return item
+    return None
+
+
+def _apple_episode_result(item, show_item=None):
+    """Episode search-box row; copy feedUrl from the show when the episode omits it."""
+    if not item.get('feedUrl') and show_item and show_item.get('feedUrl'):
+        item = dict(item, feedUrl=show_item['feedUrl'])
+    return _itunes_episode_result(item)
+
+
+def resolve_apple_url(raw):
+    """Map a podcasts.apple.com show/episode link to a search-box result.
+
+    Returns a dict: results, error, error_kind. Raises
+    requests.RequestException when the iTunes lookup itself fails.
+    """
+    show_id, episode_id = parse_apple_podcasts_url(raw)
+    if not show_id:
+        return _apple_resolve_outcome(
+            [], "That doesn't look like an Apple Podcasts link.",
+            'unreadable_link')
+
+    if episode_id:
+        items = _itunes_lookup(show_id, entity='podcastEpisode', limit=200)
+        show_item = _apple_show_from_lookup(items)
+        episode_item = _apple_episode_from_lookup(items, episode_id)
+        if episode_item and episode_item.get('episodeUrl'):
+            ep = _apple_episode_result(episode_item, show_item)
+            audio = ep.get('audio_url') or ''
+            if audio and not _is_fetchable_url(audio):
+                # Keep the show when audio is on a private host; never fetch it.
+                if show_item and show_item.get('feedUrl') and _is_fetchable_url(
+                        show_item['feedUrl']):
+                    return _apple_resolve_outcome(
+                        [_itunes_show_result(show_item)],
+                        "That episode's audio can't be fetched. "
+                        'The show is below — open it to pick another episode.',
+                        'episode_not_fetchable')
+                return _apple_resolve_outcome(
+                    [], "That episode's audio can't be fetched.",
+                    'episode_not_fetchable')
+            feed = ep.get('feed_url') or ''
+            if feed and not _is_fetchable_url(feed):
+                ep['feed_url'] = ''
+            return _apple_resolve_outcome([ep])
+
+        if show_item and show_item.get('feedUrl') and _is_fetchable_url(
+                show_item['feedUrl']):
+            return _apple_resolve_outcome(
+                [_itunes_show_result(show_item)],
+                "Couldn't find that episode in Apple's directory. "
+                'The show is below — open it to pick an episode.',
+                'episode_not_found')
+        if show_item:
+            return _apple_resolve_outcome(
+                [], 'We couldn\'t find a public RSS feed for that show.',
+                'no_feed')
+        return _apple_resolve_outcome(
+            [], "Couldn't find that Apple Podcasts show.",
+            'not_found')
+
+    items = _itunes_lookup(show_id)
+    show_item = _apple_show_from_lookup(items)
+    if show_item and show_item.get('feedUrl') and _is_fetchable_url(
+            show_item['feedUrl']):
+        return _apple_resolve_outcome([_itunes_show_result(show_item)])
+    if show_item:
+        return _apple_resolve_outcome(
+            [], 'We couldn\'t find a public RSS feed for that show.',
+            'no_feed')
+    return _apple_resolve_outcome(
+        [], "Couldn't find that Apple Podcasts show.",
+        'not_found')
+
+
+def _log_apple_resolve_failure(show_id, episode_id, error_kind):
+    if not error_kind:
+        return
+    app.logger.info(
+        'apple resolve failed show_id=%s episode_id=%s error_kind=%s',
+        show_id or '-', episode_id or '-', error_kind)
+
+
+@app.route('/resolve-apple', methods=['GET'])
+def resolve_apple():
+    """Turn a pasted Apple Podcasts show/episode link into a search-box result."""
+    raw = request.args.get('url', '').strip()
+    show_id, episode_id = parse_apple_podcasts_url(raw)
+    outcome = None
+    try:
+        outcome = resolve_apple_url(raw)
+    except requests.RequestException:
+        try:
+            time.sleep(SPOTIFY_DIRECTORY_RETRY_PAUSE_SEC)
+            outcome = resolve_apple_url(raw)
+        except requests.RequestException:
+            outcome = _apple_resolve_outcome(
+                [], "Couldn't reach the podcast directory. Try again in a moment.",
+                'directory_unreachable')
+    _log_apple_resolve_failure(show_id, episode_id, outcome.get('error_kind'))
+    return jsonify({
+        'results': outcome['results'],
+        'error': outcome['error'],
+        'error_kind': outcome['error_kind'],
     })
 
 

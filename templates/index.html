@@ -621,6 +621,25 @@
         resultsDiv.appendChild(tip);
     }
 
+    // Empty-state tip: suggest alternatives, but never the input type that just failed.
+    function emptyStateTipText(inputType) {
+        var parts = [];
+        if (inputType !== 'rss_feed') parts.push("the podcast's RSS feed");
+        if (inputType !== 'apple_link') parts.push('an Apple Podcasts link');
+        if (inputType !== 'audio_url') parts.push('a direct audio URL');
+        if (!parts.length) {
+            return 'No results? Try searching by podcast name. ';
+        }
+        if (parts.length === 1) {
+            return 'No results? Paste ' + parts[0] + '. ';
+        }
+        if (parts.length === 2) {
+            return 'No results? Paste ' + parts[0] + ' or ' + parts[1] + '. ';
+        }
+        return ('No results? Paste ' + parts.slice(0, -1).join(', ')
+            + ', or ' + parts[parts.length - 1] + '. ');
+    }
+
     function showSearchEmptyState(opts) {
         // opts: { query, errored, errorText, resultCount, errorKind, showName }
         clearResults();
@@ -641,8 +660,8 @@
         tip.style.color = 'var(--muted)';
         tip.style.fontSize = '13.5px';
         tip.style.lineHeight = '1.55';
-        tip.appendChild(document.createTextNode(
-            "No results? Paste the podcast's RSS feed, an Apple Podcasts link, or a direct audio URL. "));
+        var inputType = opts.inputType || detectInputType(opts.query);
+        tip.appendChild(document.createTextNode(emptyStateTipText(inputType)));
         var link = document.createElement('a');
         link.href = RSS_HELP_URL;
         link.textContent = 'How to find an RSS feed';
@@ -655,39 +674,41 @@
         trackSearch(opts.query, opts.resultCount || 0, !!opts.errored, opts.errorKind);
     }
 
+    function applyResolveResults(url, data, seq) {
+        if (seq !== searchSeq) return;
+        clearResults();
+        resultsDiv.style.padding = '0';
+        resultsDiv.style.color = '';
+        var results = data.results || [];
+        var errorKind = data.error_kind || '';
+        // Empty results → empty state. Results + error → notice above cards.
+        if (!results.length) {
+            showSearchEmptyState({
+                query: url,
+                errored: !!data.error,
+                errorText: data.error || '',
+                resultCount: 0,
+                errorKind: errorKind,
+                showName: data.show_name || ''
+            });
+            return;
+        }
+        resultsDiv.style.padding = data.error ? '12px 0 0' : '0';
+        if (data.error) {
+            showSearchNotice(data.error);
+        }
+        trackSearch(url, results.length, !!data.error, errorKind);
+        renderList(results);
+        // An episode hit transcribes directly, so the language must be pickable
+        langRow.classList.toggle('hidden',
+            !(results.length && results[0].type === 'episode') && searchType !== 'episode');
+    }
+
     function resolveSpotify(url, seq) {
         setMessage('Looking up the Spotify link…');
         fetch('/resolve-spotify?url=' + encodeURIComponent(url))
             .then(function(r) { return r.json(); })
-            .then(function(data) {
-                if (seq !== searchSeq) return;
-                clearResults();
-                resultsDiv.style.padding = '0';
-                resultsDiv.style.color = '';
-                var results = data.results || [];
-                var errorKind = data.error_kind || '';
-                // Empty results → empty state. Results + error → notice above cards.
-                if (!results.length) {
-                    showSearchEmptyState({
-                        query: url,
-                        errored: !!data.error,
-                        errorText: data.error || '',
-                        resultCount: 0,
-                        errorKind: errorKind,
-                        showName: data.show_name || ''
-                    });
-                    return;
-                }
-                resultsDiv.style.padding = data.error ? '12px 0 0' : '0';
-                if (data.error) {
-                    showSearchNotice(data.error);
-                }
-                trackSearch(url, results.length, !!data.error, errorKind);
-                renderList(results);
-                // An episode hit transcribes directly, so the language must be pickable
-                langRow.classList.toggle('hidden',
-                    !(results.length && results[0].type === 'episode') && searchType !== 'episode');
-            })
+            .then(function(data) { applyResolveResults(url, data, seq); })
             .catch(function() {
                 if (seq !== searchSeq) return;
                 showSearchEmptyState({
@@ -700,11 +721,70 @@
             });
     }
 
+    function resolveApple(url, seq) {
+        setMessage('Looking up the Apple Podcasts link…');
+        fetch('/resolve-apple?url=' + encodeURIComponent(url))
+            .then(function(r) { return r.json(); })
+            .then(function(data) { applyResolveResults(url, data, seq); })
+            .catch(function() {
+                if (seq !== searchSeq) return;
+                showSearchEmptyState({
+                    query: url,
+                    errored: true,
+                    errorText: 'Could not look up that Apple Podcasts link.',
+                    resultCount: 0,
+                    errorKind: 'unreadable_link'
+                });
+            });
+    }
+
+    function showDirectAudioRow(url) {
+        clearResults();
+        resultsDiv.style.padding = '0';
+        resultsDiv.style.color = '';
+        trackSearch(url, 1, false);
+        renderList([{
+            type: 'episode',
+            name: 'Transcribe this audio file',
+            artist: '',
+            artwork: '',
+            audio_url: url,
+            feed_url: '',
+            released: '',
+            duration_min: null,
+            estimated_cost: null
+        }]);
+        langRow.classList.remove('hidden');
+    }
+
     function doSearch() {
         var query = searchInput.value.trim();
         var seq = ++searchSeq;
         if (query.length < 2) { clearResults(); return; }
-        if (SPOTIFY_RE.test(query)) { resolveSpotify(query, seq); return; }
+
+        var inputType = detectInputType(query);
+        if (inputType === 'spotify_link') { resolveSpotify(query, seq); return; }
+        if (inputType === 'apple_link') { resolveApple(query, seq); return; }
+        if (inputType === 'youtube_link') {
+            showSearchEmptyState({
+                query: query,
+                errored: true,
+                errorText: "YouTube isn't supported yet. Paste a podcast link (Apple, Spotify or RSS).",
+                resultCount: 0,
+                errorKind: 'unsupported',
+                inputType: inputType
+            });
+            return;
+        }
+        if (inputType === 'audio_url') {
+            showDirectAudioRow(query);
+            return;
+        }
+        if (inputType === 'rss_feed') {
+            trackSearch(query, 1, false);
+            postForm(PARSE_RSS_URL, { rss_url: query });
+            return;
+        }
 
         setMessage('Searching…');
 

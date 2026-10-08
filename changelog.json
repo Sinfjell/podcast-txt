@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "apple-rss-link-resolve",
+      "date": "2026-10-08",
+      "title": "Paste Apple Podcasts, RSS, or audio links in Search",
+      "summary": "Apple Podcasts links (any country store) and RSS feeds open the right show or episode instead of a name search. Direct audio URLs get a one-click Transcribe row; YouTube links explain they aren't supported yet."
+    },
+    {
       "id": "related-episodes-feed-fix",
       "date": "2026-10-08",
       "title": "More episodes and Follow work after search",
