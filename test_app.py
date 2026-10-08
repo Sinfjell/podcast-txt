@@ -3579,19 +3579,21 @@ def test_public_urls_use_the_configured_origin(trial_on, monkeypatch):
     the JSON-LD @id all pointed at URLs that 301 away."""
     monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
     client = A.app.test_client()
+    # Match the canonical Host so before_request does not 301 away from localhost.
+    host = {'Host': 'podskrift.com'}
 
-    sitemap = client.get('/sitemap.xml').data.decode()
+    sitemap = client.get('/sitemap.xml', headers=host).data.decode()
     assert 'https://podskrift.com/' in sitemap
     assert 'http://localhost' not in sitemap and 'http://podskrift' not in sitemap
 
-    llms = client.get('/llms.txt').data.decode()
+    llms = client.get('/llms.txt', headers=host).data.decode()
     assert 'http://localhost' not in llms
 
-    robots = client.get('/robots.txt').data.decode()
+    robots = client.get('/robots.txt', headers=host).data.decode()
     assert 'Sitemap: https://podskrift.com/sitemap.xml' in robots
 
     import json as _json, re as _re
-    body = client.get('/').data.decode()
+    body = client.get('/', headers=host).data.decode()
     raw = _re.search(r'<script type="application/ld\+json">(.*?)</script>', body, _re.S).group(1)
     data = _json.loads(raw.replace('\\u003c', '<').replace('\\u003e', '>'))
     for node in data['@graph']:
@@ -5937,13 +5939,20 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
     assert entries[0]['id'] == 'apple-rss-link-resolve'
+    assert entries[1]['id'] == 'related-episodes-feed-fix'
+    assert entries[2]['id'] == 'stay-logged-in'
+    assert entries[3]['id'] == 'spotify-resolve-clarity'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
     assert f'id="{entries[0]["id"]}"' in resp.data.decode()
     assert entries[0]['title'] in body
     assert entries[0]['summary'] in body
+    assert f'id="{entries[1]["id"]}"' in resp.data.decode()
+    assert entries[1]['title'] in body
+    assert entries[1]['summary'] in body
     # Newest-first: the first entry's title appears before the last one's.
+    assert body.index(entries[0]['title']) < body.index(entries[1]['title'])
     assert body.index(entries[0]['title']) < body.index(entries[-1]['title'])
     # Footer link + toast markup on other public pages.
     home = A.app.test_client().get('/').data.decode()
@@ -6535,6 +6544,7 @@ def test_transcription_status_flags_no_billing_with_retry(stripe_on):
             artwork_url='https://example.com/art.jpg',
             episode_published='2024-01-01',
             source_audio_url='https://example.com/ep.mp3',
+            rss_url='https://feeds.example.com/hardfork.xml',
             audio_duration=48 * 60,
             language='en',
             error_message=A.describe_openai_error(
@@ -6549,6 +6559,7 @@ def test_transcription_status_flags_no_billing_with_retry(stripe_on):
     assert data['retry']['audio_url'] == 'https://example.com/ep.mp3'
     assert data['retry']['episode_title'] == 'Hard Fork'
     assert data['retry']['duration_min'] == '48'
+    assert data['retry']['rss_url'] == 'https://feeds.example.com/hardfork.xml'
     assert data.get('buy_available') is True
 
 
@@ -8441,11 +8452,124 @@ def test_related_episodes_lists_others_from_same_feed(monkeypatch, trial_on):
 
 def test_related_episodes_hidden_without_rss(trial_on):
     uid = _make_user('norelated@test.com')
-    _completed_task(uid, 'rel-none', rss_url=None)
+    # No feed and no show name → nothing to look up.
+    _completed_task(uid, 'rel-none', rss_url=None, podcast_name=None)
     data = _login(uid).get('/transcription/rel-none/related-episodes').get_json()
     assert data['has_feed'] is False
     assert data['episodes'] == []
     assert data['following'] is False
+
+
+def test_start_transcription_stores_rss_url_with_audio(monkeypatch, trial_on):
+    """Episode search / Spotify starts must persist the show feed for Follow."""
+    from models import db, TranscriptionTask
+    uid = _make_user('startrss@test.com', limit=36000)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    feed = 'https://feeds.example.com/hardfork.xml'
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://cdn.example.com/ep.mp3',
+        'episode_title': 'Episode One',
+        'podcast_name': 'Hard Fork',
+        'rss_url': feed,
+        'duration_min': '5',
+    })
+    assert resp.status_code == 200
+    task_id = resp.get_json()['task_id']
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        assert task is not None
+        assert task.rss_url == feed
+    # Mark completed so related-episodes is the post-transcript path users hit.
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        task.status = 'completed'
+        task.phase = 'completed'
+        task.progress = 100
+        task.transcript_text = 'hello'
+        db.session.commit()
+    monkeypatch.setattr(
+        A, 'get_episodes_from_rss',
+        lambda url, timeout=None: ([], 'offline'))
+    data = _login(uid).get(f'/transcription/{task_id}/related-episodes').get_json()
+    assert data['has_feed'] is True
+
+
+def test_start_transcription_drops_private_rss_url(monkeypatch, trial_on):
+    from models import db, TranscriptionTask
+    uid = _make_user('droprss@test.com', limit=36000)
+
+    def fetchable(url):
+        return '127.0.0.1' not in url and '169.254' not in url
+
+    monkeypatch.setattr(A, '_is_fetchable_url', fetchable)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://cdn.example.com/ep.mp3',
+        'episode_title': 'Episode One',
+        'podcast_name': 'Hard Fork',
+        'rss_url': 'http://127.0.0.1/feed.xml',
+        'duration_min': '5',
+    })
+    assert resp.status_code == 200
+    task_id = resp.get_json()['task_id']
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        assert task.rss_url is None
+
+
+def test_pending_transcription_keeps_fetchable_rss(monkeypatch, trial_on):
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: '127.0.0.1' not in url)
+    client = A.app.test_client()
+    resp = client.post('/pending-transcription', data={
+        'audio_url': 'https://cdn.example.com/ep.mp3',
+        'episode_title': 'ChatGPT Ep',
+        'podcast_name': 'Show',
+        'rss_url': 'https://feeds.example.com/show.xml',
+        'duration_min': '42',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    with client.session_transaction() as sess:
+        pending = sess.get(A.PENDING_TRANSCRIPTION_KEY)
+        assert pending['rss_url'] == 'https://feeds.example.com/show.xml'
+
+    client2 = A.app.test_client()
+    resp2 = client2.post('/pending-transcription', data={
+        'audio_url': 'https://cdn.example.com/ep.mp3',
+        'episode_title': 'ChatGPT Ep',
+        'rss_url': 'http://127.0.0.1/feed.xml',
+    }, follow_redirects=False)
+    assert resp2.status_code in (302, 303)
+    with client2.session_transaction() as sess:
+        pending = sess.get(A.PENDING_TRANSCRIPTION_KEY)
+        assert pending['rss_url'] is None
+
+
+def test_related_episodes_looks_up_feed_by_podcast_name(monkeypatch, trial_on):
+    """Tasks that never stored rss_url still get related episodes via iTunes."""
+    from models import db, TranscriptionTask
+    uid = _make_user('rellookup@test.com')
+    _completed_task(uid, 'rel-lookup', rss_url=None, podcast_name='Hard Fork')
+    feed_url = 'https://feeds.example.com/hardfork.xml'
+    monkeypatch.setattr(
+        A, '_public_shows_named',
+        lambda name: [{'collectionName': 'Hard Fork', 'feedUrl': feed_url}])
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    feed = [
+        {'index': 0, 'title': 'Episode Two', 'published': '2024-02-01',
+         'audio_url': 'https://cdn.example.com/ep2.mp3', 'duration_min': 40,
+         'artwork': '', 'podcast_name': 'Hard Fork', 'description': ''},
+        {'index': 1, 'title': 'Episode One', 'published': '2024-01-01',
+         'audio_url': 'https://cdn.example.com/ep1.mp3', 'duration_min': 48,
+         'artwork': '', 'podcast_name': 'Hard Fork', 'description': ''},
+    ]
+    monkeypatch.setattr(
+        A, 'get_episodes_from_rss',
+        lambda url, timeout=None: (feed, None))
+    data = _login(uid).get('/transcription/rel-lookup/related-episodes').get_json()
+    assert data['has_feed'] is True
+    assert data['episodes'][0]['title'] == 'Episode Two'
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'rel-lookup')
+        assert task.rss_url == feed_url
 
 
 def test_related_episodes_respects_timeout_kwarg(monkeypatch, trial_on):
@@ -8533,6 +8657,12 @@ def test_transcription_page_has_next_steps_and_tracking():
     assert 'Transcribe another episode from' in src
 
 
+def test_homepage_episode_click_sends_rss_url():
+    """Search / Spotify episode rows must post feed_url as rss_url."""
+    src = open('templates/index.html').read()
+    assert 'fields.rss_url = item.feed_url' in src or 'rss_url: item.feed_url' in src
+
+
 def test_search_input_type_patterns_in_homepage():
     """Client-side classifier covers the documented input_type enum."""
     src = open('templates/index.html').read()
@@ -8549,6 +8679,183 @@ def test_login_page_has_submit_feedback():
     assert 'id="loginSubmit"' in body
     assert 'Logging in' in body
     assert 'novalidate' in body
+
+
+def test_register_sets_remember_cookie_and_permanent_session(trial_on):
+    """Closing Safari must not dump a new signup onto /login."""
+    A._register_attempts.clear()
+    email = 'remember-me@example.com'
+    _purge([email])
+    client = _fresh_client()
+    resp = client.post(
+        '/register',
+        data={'email': email, 'password': 'abcdefgh1'},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (302, 303)
+    set_cookies = resp.headers.getlist('Set-Cookie')
+    remember = [c for c in set_cookies if c.lower().startswith('remember_token=')]
+    assert remember, set_cookies
+    assert 'Expires=' in remember[0] or 'Max-Age=' in remember[0]
+    with client.session_transaction() as sess:
+        assert sess.permanent is True
+    _purge([email])
+
+
+def test_login_sets_remember_cookie_and_permanent_session():
+    uid = _make_user('login-remember@test.com')
+    from models import User
+    with A.app.app_context():
+        email = A.db.session.get(User, uid).email
+    client = A.app.test_client()
+    resp = client.post(
+        '/login',
+        data={'email': email, 'password': 'password123'},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (302, 303)
+    set_cookies = resp.headers.getlist('Set-Cookie')
+    remember = [c for c in set_cookies if c.lower().startswith('remember_token=')]
+    assert remember, set_cookies
+    assert 'Expires=' in remember[0] or 'Max-Age=' in remember[0]
+    with client.session_transaction() as sess:
+        assert sess.permanent is True
+
+
+def test_session_cookie_config_matches_public_origin(monkeypatch):
+    assert A.app.config['PERMANENT_SESSION_LIFETIME'].days == 90
+    assert A.app.config['REMEMBER_COOKIE_DURATION'].days == 365
+    assert A.app.config['SESSION_COOKIE_SAMESITE'] == 'Lax'
+    assert A.app.config['REMEMBER_COOKIE_SAMESITE'] == 'Lax'
+    # Suite leaves PUBLIC_BASE_URL unset / http — Secure must stay off so
+    # test_client cookies work. Production sets https://podskrift.com.
+    if not (A.PUBLIC_BASE_URL or '').startswith('https://'):
+        assert A.app.config['SESSION_COOKIE_SECURE'] is False
+        assert A.app.config['REMEMBER_COOKIE_SECURE'] is False
+
+
+def test_www_host_redirects_301_to_public_base(monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    client = A.app.test_client()
+    resp = client.get(
+        '/pricing?x=1',
+        headers={'Host': 'www.podskrift.com'},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 301
+    assert resp.headers['Location'] == 'https://podskrift.com/pricing?x=1'
+
+
+def test_staging_host_post_redirects_308(monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    client = A.app.test_client()
+    resp = client.post(
+        '/login',
+        headers={'Host': 'podskrift.nettsmed.dev'},
+        data={'email': 'a@b.com', 'password': 'x'},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 308
+    assert resp.headers['Location'] == 'https://podskrift.com/login'
+
+
+def test_stripe_webhook_not_redirected_off_canonical_host(monkeypatch):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    client = A.app.test_client()
+    resp = client.post(
+        '/stripe/webhook',
+        headers={'Host': 'www.podskrift.com'},
+        data=b'{}',
+        content_type='application/json',
+        follow_redirects=False,
+    )
+    assert resp.status_code != 301
+    assert resp.status_code != 308
+    assert 'Location' not in resp.headers or 'podskrift.com/stripe' not in (
+        resp.headers.get('Location') or '')
+
+
+def test_api_path_not_redirected_off_canonical_host(monkeypatch):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    client = A.app.test_client()
+    resp = client.get(
+        '/api/v1/episodes',
+        headers={'Host': 'www.podskrift.com'},
+        follow_redirects=False,
+    )
+    assert resp.status_code != 301
+    assert resp.status_code != 308
+
+
+def test_canonical_link_uses_public_base_url(monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    body = A.app.test_client().get(
+        '/pricing', headers={'Host': 'podskrift.com'}).data.decode()
+    assert 'rel="canonical" href="https://podskrift.com/pricing"' in body
+    assert 'property="og:url" content="https://podskrift.com/pricing"' in body
+
+
+def test_register_existing_account_offers_login_with_next(trial_on):
+    A._register_attempts.clear()
+    email = 'exists-link@example.com'
+    _purge([email])
+    client = _fresh_client()
+    assert 'Account created' in _signup(client, email).data.decode()
+    client = _new_session()
+    resp = client.post(
+        '/register?next=/transcription/abc123',
+        data={'email': email, 'password': 'abcdefgh1'},
+        follow_redirects=True,
+    )
+    body = resp.data.decode()
+    assert 'already exists' in body
+    assert 'Log in instead' in body
+    assert 'next=/transcription/abc123' in body or 'next=%2Ftranscription%2Fabc123' in body
+    _purge([email])
+
+
+def test_login_heading_for_saved_transcript():
+    body = A.app.test_client().get(
+        '/login?next=/transcription/task-xyz').data.decode()
+    assert 'Log in to open your saved transcript' in body
+    assert 'Forgot password?' in body
+    assert 'hello@podskrift.com' in body
+
+
+def test_login_default_heading_without_transcript_next():
+    body = A.app.test_client().get('/login').data.decode()
+    assert 'Log in to open your saved transcript' not in body
+    assert '>Log in<' in body or 'Log in</h2>' in body
+    assert 'Forgot password?' in body
+
+
+def test_register_page_shows_password_rule_upfront(trial_on):
+    body = A.app.test_client().get('/register').data.decode()
+    assert 'minlength="8"' in body
+    assert 'At least 8 characters' in body
+    assert 'id="passwordHint"' in body
+
+
+def test_register_failed_emits_posthog_reason(ph_events, trial_on):
+    A._register_attempts.clear()
+    client = _fresh_client()
+    client.post('/register', data={
+        'email': 'shortpw@example.com',
+        'password': 'short',
+    })
+    fails = [e for e in ph_events.events if e['event'] == 'register_failed']
+    assert fails
+    assert fails[-1]['properties']['reason'] == 'password_too_short'
+    assert 'email' not in fails[-1]['properties']
+
+
+def test_login_wall_shown_emits_next_type(ph_events):
+    client = A.app.test_client()
+    client.get('/login?next=/transcription/abc')
+    walls = [e for e in ph_events.events if e['event'] == 'login_wall_shown']
+    assert len(walls) == 1
+    assert walls[0]['properties']['next_type'] == 'transcription'
+    assert 'email' not in walls[0]['properties']
 
 
 def test_get_episodes_from_rss_timeout_uses_requests(monkeypatch):
