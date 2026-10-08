@@ -6196,8 +6196,7 @@ SPOTIFY_LOOSE_ID_RE = re.compile(
 )
 
 SPOTIFY_NO_FEED_HINT = (
-    "If the show has one, paste the feed URL (see How to find an RSS feed), "
-    "or try searching for the show by name."
+    "If the show has one, paste the feed URL, or try searching for the show by name."
 )
 
 #: One short pause before retrying a transient directory failure.
