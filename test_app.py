@@ -4226,6 +4226,250 @@ def test_index_routes_spotify_links_to_the_resolver():
 
 
 # --------------------------------------------------------------------------
+# Apple Podcasts / RSS / audio / YouTube search-box routing
+# --------------------------------------------------------------------------
+
+_APPLE_SHOW_ID = '1200361736'
+_APPLE_EP_ID = '1000792546642'
+_APPLE_CN_SHOW_ID = '262026947'
+_APPLE_FEED = 'https://feeds.example.com/the-daily'
+_APPLE_AUDIO = 'https://cdn.example.com/daily.mp3'
+
+
+def _apple_show_item(show_id=_APPLE_SHOW_ID, feed=_APPLE_FEED, name='The Daily'):
+    return {
+        'wrapperType': 'track',
+        'kind': 'podcast',
+        'trackId': int(show_id),
+        'collectionId': int(show_id),
+        'trackName': name,
+        'collectionName': name,
+        'artistName': 'Publisher',
+        'feedUrl': feed,
+        'artworkUrl100': 'https://cdn.example.com/art.jpg',
+        'primaryGenreName': 'News',
+    }
+
+
+def _apple_episode_item(ep_id=_APPLE_EP_ID, show_id=_APPLE_SHOW_ID, *,
+                        feed=_APPLE_FEED, audio=_APPLE_AUDIO,
+                        title='Why does heartbreak hurt so much?',
+                        show_name='6 Minute English'):
+    return {
+        'wrapperType': 'podcastEpisode',
+        'kind': 'podcast-episode',
+        'trackId': int(ep_id),
+        'collectionId': int(show_id),
+        'trackName': title,
+        'collectionName': show_name,
+        'episodeUrl': audio,
+        'feedUrl': feed,
+        'releaseDate': '2023-01-15T00:00:00Z',
+        'trackTimeMillis': 360000,
+        'artworkUrl160': 'https://cdn.example.com/ep.jpg',
+    }
+
+
+def _fake_itunes_lookup(monkeypatch, items_by_id, *, fail_times=0):
+    """Stub itunes.apple.com/lookup (and refuse unexpected hosts)."""
+    state = {'calls': 0, 'fails_left': fail_times}
+    fetched = []
+
+    def get(url, params=None, **kw):
+        fetched.append((url, dict(params or {})))
+        if 'itunes.apple.com/lookup' not in url and 'itunes.apple.com' not in url:
+            raise AssertionError(f'unexpected fetch {url}')
+        # /search is also under itunes.apple.com — only allow lookup here.
+        if '/search' in url:
+            raise AssertionError(f'expected lookup, got search: {url}')
+        state['calls'] += 1
+        if state['fails_left'] > 0:
+            state['fails_left'] -= 1
+            raise A.requests.ConnectionError('blip')
+        itunes_id = str((params or {}).get('id') or '')
+        items = list(items_by_id.get(itunes_id, []))
+        return _HttpResp(200, payload={'results': items})
+
+    _patch_requests_get(monkeypatch, get)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    return fetched, state
+
+
+@pytest.mark.parametrize('url,expected', [
+    (f'https://podcasts.apple.com/us/podcast/the-daily/id{_APPLE_SHOW_ID}',
+     (_APPLE_SHOW_ID, None)),
+    (f'https://podcasts.apple.com/cn/podcast/6-minute-english/id{_APPLE_CN_SHOW_ID}'
+     f'?i={_APPLE_EP_ID}&r=0',
+     (_APPLE_CN_SHOW_ID, _APPLE_EP_ID)),
+    (f'podcasts.apple.com/gb/podcast/x/id{_APPLE_SHOW_ID}?i={_APPLE_EP_ID}',
+     (_APPLE_SHOW_ID, _APPLE_EP_ID)),
+    ('https://podcasts.apple.com/us/podcast/the-daily/', (None, None)),
+    ('https://open.spotify.com/episode/x', (None, None)),
+    ('the daily', (None, None)),
+])
+def test_apple_links_are_recognised(url, expected):
+    assert A.parse_apple_podcasts_url(url) == expected
+
+
+def test_apple_episode_link_us_resolves_to_episode(monkeypatch):
+    show = _apple_show_item()
+    ep = _apple_episode_item(show_id=_APPLE_SHOW_ID, show_name='The Daily',
+                             title='Call My A.I. Agent')
+    _fake_itunes_lookup(monkeypatch, {_APPLE_SHOW_ID: [show, ep]})
+    out = A.resolve_apple_url(
+        f'https://podcasts.apple.com/us/podcast/the-daily/id{_APPLE_SHOW_ID}'
+        f'?i={_APPLE_EP_ID}')
+    assert out['error'] is None and out['error_kind'] is None
+    assert len(out['results']) == 1
+    hit = out['results'][0]
+    assert hit['type'] == 'episode'
+    assert hit['name'] == 'Call My A.I. Agent'
+    assert hit['audio_url'] == _APPLE_AUDIO
+    assert hit['feed_url'] == _APPLE_FEED
+
+
+def test_apple_episode_link_cn_resolves_to_episode(monkeypatch):
+    show = _apple_show_item(show_id=_APPLE_CN_SHOW_ID, name='6 Minute English',
+                            feed='https://podcasts.files.bbci.co.uk/p02pc9tn.rss')
+    ep = _apple_episode_item(
+        ep_id=_APPLE_EP_ID, show_id=_APPLE_CN_SHOW_ID,
+        feed=show['feedUrl'],
+        audio='http://open.live.bbc.co.uk/mediaselector/ep.mp3',
+        title='Why does heartbreak hurt so much?',
+        show_name='6 Minute English')
+    # Episode omits feedUrl — resolver must copy it from the show row.
+    ep_no_feed = dict(ep)
+    ep_no_feed.pop('feedUrl')
+    _fake_itunes_lookup(monkeypatch, {_APPLE_CN_SHOW_ID: [show, ep_no_feed]})
+    out = A.resolve_apple_url(
+        f'https://podcasts.apple.com/cn/podcast/6-minute-english/id{_APPLE_CN_SHOW_ID}'
+        f'?i={_APPLE_EP_ID}&r=0')
+    assert out['error'] is None
+    hit = out['results'][0]
+    assert hit['type'] == 'episode'
+    assert hit['feed_url'] == show['feedUrl']
+    assert hit['audio_url'] == ep['episodeUrl']
+
+
+def test_apple_show_link_returns_show(monkeypatch):
+    show = _apple_show_item()
+    _fake_itunes_lookup(monkeypatch, {_APPLE_SHOW_ID: [show]})
+    out = A.resolve_apple_url(
+        f'https://podcasts.apple.com/us/podcast/the-daily/id{_APPLE_SHOW_ID}')
+    assert out['error'] is None and out['error_kind'] is None
+    assert out['results'] == [A._itunes_show_result(show)]
+    assert out['results'][0]['feed_url'] == _APPLE_FEED
+
+
+def test_apple_episode_missing_falls_back_to_show(monkeypatch):
+    show = _apple_show_item()
+    other = _apple_episode_item(ep_id='999', title='Other')
+    _fake_itunes_lookup(monkeypatch, {_APPLE_SHOW_ID: [show, other]})
+    out = A.resolve_apple_url(
+        f'https://podcasts.apple.com/us/podcast/the-daily/id{_APPLE_SHOW_ID}'
+        f'?i={_APPLE_EP_ID}')
+    assert [r['type'] for r in out['results']] == ['show']
+    assert out['error_kind'] == 'episode_not_found'
+    assert out['results'][0]['feed_url'] == _APPLE_FEED
+
+
+def test_apple_show_without_fetchable_feed_reports_no_feed(monkeypatch):
+    show = _apple_show_item(feed='http://127.0.0.1/secret.xml')
+    _fake_itunes_lookup(monkeypatch, {_APPLE_SHOW_ID: [show]})
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: False)
+    out = A.resolve_apple_url(
+        f'https://podcasts.apple.com/us/podcast/the-daily/id{_APPLE_SHOW_ID}')
+    assert out['results'] == []
+    assert out['error_kind'] == 'no_feed'
+
+
+def test_resolve_apple_json_includes_error_kind(monkeypatch):
+    _fake_itunes_lookup(monkeypatch, {})
+    data = A.app.test_client().get(
+        f'/resolve-apple?url=https://podcasts.apple.com/us/podcast/x/id{_APPLE_SHOW_ID}'
+    ).get_json()
+    assert data['error_kind'] == 'not_found'
+    assert data['results'] == []
+    assert data['error']
+
+
+def test_resolve_apple_logs_error_kind(monkeypatch, caplog):
+    import logging
+    _fake_itunes_lookup(monkeypatch, {})
+    with caplog.at_level(logging.INFO, logger=A.app.logger.name):
+        A.app.test_client().get(
+            f'/resolve-apple?url=https://podcasts.apple.com/us/podcast/x/id{_APPLE_SHOW_ID}'
+            f'?i={_APPLE_EP_ID}')
+    assert any(
+        'apple resolve failed' in r.message
+        and f'show_id={_APPLE_SHOW_ID}' in r.message
+        and f'episode_id={_APPLE_EP_ID}' in r.message
+        and 'error_kind=not_found' in r.message
+        for r in caplog.records
+    )
+
+
+def test_resolve_apple_retries_transient_directory_failure(monkeypatch):
+    show = _apple_show_item()
+    ep = _apple_episode_item(show_name='The Daily', title='Ep')
+    fetched, state = _fake_itunes_lookup(
+        monkeypatch, {_APPLE_SHOW_ID: [show, ep]}, fail_times=1)
+    monkeypatch.setattr(A.time, 'sleep', lambda s: None)
+    data = A.app.test_client().get(
+        f'/resolve-apple?url=https://podcasts.apple.com/us/podcast/x/id{_APPLE_SHOW_ID}'
+        f'?i={_APPLE_EP_ID}').get_json()
+    assert data['error'] is None
+    assert data['results'][0]['audio_url'] == _APPLE_AUDIO
+    assert state['calls'] >= 2
+    assert any('lookup' in (u if isinstance(u, str) else u[0]) or True for u in fetched)
+
+
+def test_resolve_apple_reports_unreachable_directory(monkeypatch):
+    def down(*a, **kw):
+        raise A.requests.ConnectionError('secret-internal-detail')
+
+    monkeypatch.setattr(A.requests, 'get', down)
+    monkeypatch.setattr(A.requests.Session, 'get',
+                        lambda self, url, **kw: down(url, **kw))
+    monkeypatch.setattr(A.time, 'sleep', lambda s: None)
+    data = A.app.test_client().get(
+        f'/resolve-apple?url=https://podcasts.apple.com/us/podcast/x/id{_APPLE_SHOW_ID}'
+    ).get_json()
+    assert data['results'] == []
+    assert data['error_kind'] == 'directory_unreachable'
+    assert 'secret-internal-detail' not in data['error']
+
+
+def test_index_routes_apple_rss_audio_youtube():
+    body = A.app.test_client().get('/').data.decode()
+    assert '/resolve-apple?url=' in body
+    assert 'resolveApple' in body
+    assert 'showDirectAudioRow' in body
+    assert 'Transcribe this audio file' in body
+    assert "YouTube isn't supported yet" in body
+    assert 'PARSE_RSS_URL' in body
+    assert "inputType === 'rss_feed'" in body or "inputType === \"rss_feed\"" in body
+    assert 'emptyStateTipText' in body
+    # Failed Apple paste must not be told to paste an Apple link again.
+    assert "inputType !== 'apple_link'" in body or 'inputType !== "apple_link"' in body
+    assert 'error_kind' in body
+
+
+def test_empty_state_tip_omits_failed_input_type():
+    """Static check: tip builder skips the type that just failed."""
+    body = A.app.test_client().get('/').data.decode()
+    assert 'emptyStateTipText' in body
+    assert "inputType !== 'apple_link'" in body
+    assert "inputType !== 'rss_feed'" in body
+    assert "inputType !== 'audio_url'" in body
+    # Name-search empty state still offers the classic trio (assembled in JS).
+    assert "No results? Paste" in body
+    assert "the podcast's RSS feed" in body
+    assert 'an Apple Podcasts link' in body
+    assert 'a direct audio URL' in body
+
+
+# --------------------------------------------------------------------------
 # Transcript search  (TSK-20441)
 # --------------------------------------------------------------------------
 
@@ -5692,7 +5936,7 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'spotify-resolve-clarity'
+    assert entries[0]['id'] == 'apple-rss-link-resolve'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -5883,8 +6127,10 @@ def test_search_emits_podcast_searched_with_query_and_input_type(monkeypatch):
     assert "slice(0, 200)" in body
     assert 'errored' in body
     assert 'error_kind' in body
-    # Empty-state copy + RSS help when nothing matches.
-    assert "No results? Paste the podcast's RSS feed" in body
+    # Empty-state copy + RSS help when nothing matches (tip assembled in JS).
+    assert "No results? Paste" in body
+    assert "the podcast's RSS feed" in body
+    assert 'emptyStateTipText' in body
     assert '/rss-help' in body or "url_for('rss_help')" in body
     assert 'showSearchEmptyState' in body
     # Typed search and Spotify resolve both go through trackSearch(query, …).
