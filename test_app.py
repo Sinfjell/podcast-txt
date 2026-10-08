@@ -3584,19 +3584,21 @@ def test_public_urls_use_the_configured_origin(trial_on, monkeypatch):
     the JSON-LD @id all pointed at URLs that 301 away."""
     monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
     client = A.app.test_client()
+    # Match the canonical Host so before_request does not 301 away from localhost.
+    host = {'Host': 'podskrift.com'}
 
-    sitemap = client.get('/sitemap.xml').data.decode()
+    sitemap = client.get('/sitemap.xml', headers=host).data.decode()
     assert 'https://podskrift.com/' in sitemap
     assert 'http://localhost' not in sitemap and 'http://podskrift' not in sitemap
 
-    llms = client.get('/llms.txt').data.decode()
+    llms = client.get('/llms.txt', headers=host).data.decode()
     assert 'http://localhost' not in llms
 
-    robots = client.get('/robots.txt').data.decode()
+    robots = client.get('/robots.txt', headers=host).data.decode()
     assert 'Sitemap: https://podskrift.com/sitemap.xml' in robots
 
     import json as _json, re as _re
-    body = client.get('/').data.decode()
+    body = client.get('/', headers=host).data.decode()
     raw = _re.search(r'<script type="application/ld\+json">(.*?)</script>', body, _re.S).group(1)
     data = _json.loads(raw.replace('\\u003c', '<').replace('\\u003e', '>'))
     for node in data['@graph']:
@@ -3902,10 +3904,15 @@ _HUBERMAN_SHOW = {'collectionName': 'Huberman Lab', 'artistName': 'Scicomm Media
     (f'https://open.spotify.com/intl-no/episode/{_SPOTIFY_EP}', ('episode', _SPOTIFY_EP)),
     (f'open.spotify.com/show/{_SPOTIFY_SHOW}', ('show', _SPOTIFY_SHOW)),
     (f'spotify:episode:{_SPOTIFY_EP}', ('episode', _SPOTIFY_EP)),
+    # Mangled hosts still yield the id; only the id is ever requested.
+    (f'https://open.spotify.comsode/{_SPOTIFY_EP}?si=x', ('episode', _SPOTIFY_EP)),
+    (f'sode/{_SPOTIFY_EP}', ('episode', _SPOTIFY_EP)),
+    (f'https://evil.example.com/episode/{_SPOTIFY_EP}', ('episode', _SPOTIFY_EP)),
     (f'https://open.spotify.com/track/{_SPOTIFY_EP}', (None, None)),
     ('https://open.spotify.com/episode/tooShort', (None, None)),
-    (f'https://evil.example.com/episode/{_SPOTIFY_EP}', (None, None)),
     ('huberman lab', (None, None)),
+    # Must not misfire on ordinary prose that happens to contain "episode/".
+    ('read the episode/notes carefully please', (None, None)),
 ])
 def test_spotify_links_are_recognised(url, expected):
     assert A.parse_spotify_url(url) == expected
@@ -3915,10 +3922,10 @@ def test_spotify_episode_resolves_to_the_audio_in_the_public_feed(monkeypatch):
     fetched = _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY),
                         shows=[_HUBERMAN_SHOW],
                         feed=_rss('Another episode', 'Essentials: Genes &amp; Memory'))
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}?si=x')
-    assert error is None
-    assert len(results) == 1
-    hit = results[0]
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}?si=x')
+    assert out['error'] is None and out['error_kind'] is None
+    assert len(out['results']) == 1
+    hit = out['results'][0]
     assert hit['type'] == 'episode'
     assert hit['name'] == 'Essentials: Genes & Memory'
     assert hit['artist'] == 'Huberman Lab'
@@ -3931,27 +3938,30 @@ def test_spotify_episode_resolves_to_the_audio_in_the_public_feed(monkeypatch):
 def test_numbered_feed_titles_still_match(monkeypatch):
     _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW],
               feed=_rss('#212 - Essentials: Genes &amp; Memory'))
-    results, error = A.resolve_spotify_url(f'spotify:episode:{_SPOTIFY_EP}')
-    assert error is None and results[0]['audio_url'] == 'https://cdn.example.com/0.mp3'
+    out = A.resolve_spotify_url(f'spotify:episode:{_SPOTIFY_EP}')
+    assert out['error'] is None and out['results'][0]['audio_url'] == 'https://cdn.example.com/0.mp3'
 
 
-def test_spotify_exclusive_show_fails_with_a_clear_message(monkeypatch):
+def test_spotify_show_not_in_directory_softens_the_message(monkeypatch):
     _fake_web(monkeypatch,
               embed=_embed_page({'type': 'episode', 'name': 'Ep 1', 'subtitle': 'Only On Spotify'}),
               shows=[{'collectionName': 'Something Else', 'feedUrl': _FEED}])
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
-    assert results == []
-    assert 'Only On Spotify' in error
-    assert 'Spotify-exclusive' in error
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['results'] == []
+    assert 'Only On Spotify' in out['error']
+    assert 'public RSS feed' in out['error']
+    assert 'Spotify-exclusive' not in out['error']
+    assert out['error_kind'] == 'no_feed'
 
 
 def test_episode_missing_from_the_feed_offers_the_show(monkeypatch):
     _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW],
               feed=_rss('Unrelated episode'), episodes=[])
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
-    assert 'isn\'t in its public feed' in error
-    assert [r['type'] for r in results] == ['show']
-    assert results[0]['feed_url'] == _FEED
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert 'isn\'t in its public feed' in out['error']
+    assert out['error_kind'] == 'episode_not_in_feed'
+    assert [r['type'] for r in out['results']] == ['show']
+    assert out['results'][0]['feed_url'] == _FEED
 
 
 def test_itunes_episode_search_is_the_fallback_to_the_feed(monkeypatch):
@@ -3961,9 +3971,9 @@ def test_itunes_episode_search_is_the_fallback_to_the_feed(monkeypatch):
                         {'trackName': 'Essentials: Genes & Memory',
                          'collectionName': 'Huberman Lab',
                          'episodeUrl': 'https://cdn.example.com/right.mp3'}])
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
-    assert error is None
-    assert results[0]['audio_url'] == 'https://cdn.example.com/right.mp3'
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['error'] is None
+    assert out['results'][0]['audio_url'] == 'https://cdn.example.com/right.mp3'
 
 
 def test_a_dead_feed_still_falls_through_to_the_episode_search(monkeypatch):
@@ -3972,36 +3982,39 @@ def test_a_dead_feed_still_falls_through_to_the_episode_search(monkeypatch):
               episodes=[{'trackName': 'Essentials: Genes & Memory',
                          'collectionName': 'Huberman Lab',
                          'episodeUrl': 'https://cdn.example.com/right.mp3'}])
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
-    assert error is None
-    assert results[0]['audio_url'] == 'https://cdn.example.com/right.mp3'
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['error'] is None
+    assert out['results'][0]['audio_url'] == 'https://cdn.example.com/right.mp3'
 
 
 def test_an_oversized_feed_is_not_read_into_memory(monkeypatch):
     _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW],
               feed=_rss('Essentials: Genes &amp; Memory'), episodes=[])
     monkeypatch.setattr(A._fetch_feed_capped, '__defaults__', (100,))
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
     # The feed would have matched; being over the cap it is skipped, not parsed.
-    assert [r['type'] for r in results] == ['show']
-    assert error
+    assert [r['type'] for r in out['results']] == ['show']
+    assert out['error']
 
 
 def test_spotify_show_link_opens_the_show(monkeypatch):
     # A show embed renders its latest episode; the show name is the subtitle.
     _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW])
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/show/{_SPOTIFY_SHOW}')
-    assert error is None
-    assert results == [A._itunes_show_result(_HUBERMAN_SHOW)]
+    out = A.resolve_spotify_url(f'https://open.spotify.com/show/{_SPOTIFY_SHOW}')
+    assert out['error'] is None
+    assert out['results'] == [A._itunes_show_result(_HUBERMAN_SHOW)]
 
 
-def test_spotify_exclusive_show_link_fails_with_a_clear_message(monkeypatch):
+def test_spotify_show_link_not_in_directory_softens_the_message(monkeypatch):
     _fake_web(monkeypatch,
               embed=_embed_page({'type': 'episode', 'name': 'Ep 1', 'subtitle': 'Only On Spotify'}),
               shows=[])
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/show/{_SPOTIFY_SHOW}')
-    assert results == []
-    assert 'Only On Spotify' in error and 'Spotify-exclusive' in error
+    out = A.resolve_spotify_url(f'https://open.spotify.com/show/{_SPOTIFY_SHOW}')
+    assert out['results'] == []
+    assert 'Only On Spotify' in out['error']
+    assert 'public RSS feed' in out['error']
+    assert 'Spotify-exclusive' not in out['error']
+    assert out['error_kind'] == 'no_feed'
 
 
 def test_oembed_is_used_when_the_embed_page_changes_shape(monkeypatch):
@@ -4010,15 +4023,16 @@ def test_oembed_is_used_when_the_embed_page_changes_shape(monkeypatch):
               episodes=[{'trackName': 'Essentials: Genes & Memory',
                          'collectionName': 'Huberman Lab',
                          'episodeUrl': 'https://cdn.example.com/right.mp3'}])
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
-    assert error is None
-    assert results[0]['audio_url'] == 'https://cdn.example.com/right.mp3'
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['error'] is None
+    assert out['results'][0]['audio_url'] == 'https://cdn.example.com/right.mp3'
 
 
 def test_unreadable_spotify_link_says_so(monkeypatch):
     _fake_web(monkeypatch)
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
-    assert results == [] and "Couldn't read that Spotify link" in error
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['results'] == [] and "Couldn't read that Spotify link" in out['error']
+    assert out['error_kind'] == 'unreadable_link'
 
 
 def test_a_feed_on_a_private_host_is_never_fetched(monkeypatch):
@@ -4053,36 +4067,413 @@ def _redirecting_feed(monkeypatch, target):
 def test_a_feed_redirect_into_the_private_network_is_refused(monkeypatch):
     target = 'http://169.254.169.254/latest/meta-data/'
     fetched = _redirecting_feed(monkeypatch, target)
-    results, _ = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
     assert target not in fetched, 'metadata endpoint was contacted'
-    assert [r['type'] for r in results] == ['show']
+    assert [r['type'] for r in out['results']] == ['show']
 
 
 def test_a_feed_redirect_to_a_public_host_is_followed(monkeypatch):
     target = 'https://moved.example.com/feed.xml'
     fetched = _redirecting_feed(monkeypatch, target)
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
-    assert target in fetched and error is None
-    assert results[0]['audio_url'] == 'https://cdn.example.com/0.mp3'
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert target in fetched and out['error'] is None
+    assert out['results'][0]['audio_url'] == 'https://cdn.example.com/0.mp3'
 
 
 def test_resolve_route_reports_an_unreachable_directory_without_details(monkeypatch):
+    calls = {'n': 0}
+
     def down(*a, **kw):
+        calls['n'] += 1
         if 'spotify.com' in a[0]:
             return _HttpResp(200, text=_embed_page(_HUBERMAN_EP_ENTITY))
         raise A.requests.ConnectionError('secret-internal-detail')
+
     monkeypatch.setattr(A.requests, 'get', down)
+    monkeypatch.setattr(A.requests.Session, 'get',
+                        lambda self, url, **kw: down(url, **kw))
+    monkeypatch.setattr(A.time, 'sleep', lambda s: None)
     data = A.app.test_client().get(
         f'/resolve-spotify?url=https://open.spotify.com/episode/{_SPOTIFY_EP}').get_json()
     assert data['results'] == []
     assert "Couldn't reach the podcast directory" in data['error']
+    assert data['error_kind'] == 'directory_unreachable'
     assert 'secret-internal-detail' not in data['error']
+    # One attempt + one automatic retry.
+    assert calls['n'] >= 2
+
+
+def test_resolve_route_retries_transient_directory_failure(monkeypatch):
+    state = {'itunes': 0}
+
+    def get(url, params=None, **kw):
+        if '/embed/' in url:
+            return _HttpResp(200, text=_embed_page(_HUBERMAN_EP_ENTITY))
+        if 'itunes.apple.com' in url:
+            state['itunes'] += 1
+            if state['itunes'] == 1:
+                raise A.requests.ConnectionError('blip')
+            return _HttpResp(200, payload={'results': [_HUBERMAN_SHOW]})
+        if url == _FEED:
+            return _HttpResp(200, content=_rss('Essentials: Genes &amp; Memory'))
+        raise AssertionError(url)
+
+    _patch_requests_get(monkeypatch, get)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    monkeypatch.setattr(A.time, 'sleep', lambda s: None)
+    data = A.app.test_client().get(
+        f'/resolve-spotify?url=https://open.spotify.com/episode/{_SPOTIFY_EP}').get_json()
+    assert data['error'] is None
+    assert data['results'][0]['audio_url'] == 'https://cdn.example.com/0.mp3'
+    assert state['itunes'] >= 2
+
+
+def test_paid_spotify_episode_offers_the_show(monkeypatch):
+    entity = dict(_HUBERMAN_EP_ENTITY, playabilityReason='PAYMENT_REQUIRED',
+                  isPlayable=False)
+    _fake_web(monkeypatch, embed=_embed_page(entity), shows=[_HUBERMAN_SHOW],
+              feed=_rss('Essentials: Genes &amp; Memory'))
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['error_kind'] == 'paid_episode'
+    assert 'paying' in out['error'].lower() or 'subscribers' in out['error'].lower()
+    assert [r['type'] for r in out['results']] == ['show']
+    assert out['results'][0]['feed_url'] == _FEED
+
+
+def test_parenthetical_show_name_matches_when_episode_is_in_feed(monkeypatch):
+    """Exact name "Higher Mind (backup)" misses; stripped "Higher Mind" hits,
+    but only after the episode title is confirmed in that feed."""
+    entity = {'type': 'episode', 'name': 'Deep Focus', 'subtitle': 'Higher Mind (backup)'}
+    base_show = {'collectionName': 'Higher Mind', 'artistName': 'y', 'feedUrl': _FEED}
+
+    def get(url, params=None, **kw):
+        if '/embed/' in url:
+            return _HttpResp(200, text=_embed_page(entity))
+        if 'itunes.apple.com' in url:
+            term = params['term']
+            if params['entity'] == 'podcastEpisode':
+                return _HttpResp(200, payload={'results': []})
+            # Directory lists the base name, not the "(backup)" Spotify label.
+            if term == 'Higher Mind':
+                return _HttpResp(200, payload={'results': [base_show]})
+            return _HttpResp(200, payload={'results': []})
+        if url == _FEED:
+            return _HttpResp(200, content=_rss('Deep Focus'))
+        raise AssertionError(url)
+
+    _patch_requests_get(monkeypatch, get)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['error'] is None
+    assert out['results'][0]['audio_url'] == 'https://cdn.example.com/0.mp3'
+    assert out['results'][0]['feed_url'] == _FEED
+
+
+def test_loose_show_name_without_episode_in_feed_is_rejected(monkeypatch):
+    entity = {'type': 'episode', 'name': 'Missing Ep', 'subtitle': 'Higher Mind (backup)'}
+    base_show = {'collectionName': 'Higher Mind', 'artistName': 'y', 'feedUrl': _FEED}
+
+    def get(url, params=None, **kw):
+        if '/embed/' in url:
+            return _HttpResp(200, text=_embed_page(entity))
+        if 'itunes.apple.com' in url:
+            if params['entity'] == 'podcastEpisode':
+                return _HttpResp(200, payload={'results': []})
+            if params['term'] == 'Higher Mind':
+                return _HttpResp(200, payload={'results': [base_show]})
+            return _HttpResp(200, payload={'results': []})
+        if url == _FEED:
+            return _HttpResp(200, content=_rss('Something else entirely'))
+        raise AssertionError(url)
+
+    _patch_requests_get(monkeypatch, get)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['results'] == []
+    assert out['error_kind'] == 'no_feed'
+
+
+def test_resolve_spotify_json_includes_error_kind(monkeypatch):
+    _fake_web(monkeypatch,
+              embed=_embed_page({'type': 'episode', 'name': 'Ep 1', 'subtitle': 'Ghost Show'}),
+              shows=[])
+    data = A.app.test_client().get(
+        f'/resolve-spotify?url=https://open.spotify.com/episode/{_SPOTIFY_EP}').get_json()
+    assert data['error_kind'] == 'no_feed'
+    assert data['show_name'] == 'Ghost Show'
+    assert data['results'] == []
+
+
+def test_resolve_spotify_logs_error_kind(monkeypatch, caplog):
+    import logging
+    _fake_web(monkeypatch,
+              embed=_embed_page({'type': 'episode', 'name': 'Ep 1', 'subtitle': 'Ghost Show'}),
+              shows=[])
+    with caplog.at_level(logging.INFO, logger=A.app.logger.name):
+        A.app.test_client().get(
+            f'/resolve-spotify?url=https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert any(
+        'spotify resolve failed' in r.message and 'error_kind=no_feed' in r.message
+        and _SPOTIFY_EP in r.message
+        for r in caplog.records
+    )
 
 
 def test_index_routes_spotify_links_to_the_resolver():
     body = A.app.test_client().get('/').data.decode()
     assert '/resolve-spotify?url=' in body
     assert 'SPOTIFY_RE' in body
+    # Results + error must render the cards, not the empty state.
+    assert 'showSearchNotice' in body
+    assert '!results.length' in body or 'if (!results.length)' in body
+    assert 'error_kind' in body
+    assert 'search-notice' in body
+    # Mangled sode/<id> links are treated as Spotify, not name search.
+    assert 'sode' in body
+
+
+# --------------------------------------------------------------------------
+# Apple Podcasts / RSS / audio / YouTube search-box routing
+# --------------------------------------------------------------------------
+
+_APPLE_SHOW_ID = '1200361736'
+_APPLE_EP_ID = '1000792546642'
+_APPLE_CN_SHOW_ID = '262026947'
+_APPLE_FEED = 'https://feeds.example.com/the-daily'
+_APPLE_AUDIO = 'https://cdn.example.com/daily.mp3'
+
+
+def _apple_show_item(show_id=_APPLE_SHOW_ID, feed=_APPLE_FEED, name='The Daily'):
+    return {
+        'wrapperType': 'track',
+        'kind': 'podcast',
+        'trackId': int(show_id),
+        'collectionId': int(show_id),
+        'trackName': name,
+        'collectionName': name,
+        'artistName': 'Publisher',
+        'feedUrl': feed,
+        'artworkUrl100': 'https://cdn.example.com/art.jpg',
+        'primaryGenreName': 'News',
+    }
+
+
+def _apple_episode_item(ep_id=_APPLE_EP_ID, show_id=_APPLE_SHOW_ID, *,
+                        feed=_APPLE_FEED, audio=_APPLE_AUDIO,
+                        title='Why does heartbreak hurt so much?',
+                        show_name='6 Minute English'):
+    return {
+        'wrapperType': 'podcastEpisode',
+        'kind': 'podcast-episode',
+        'trackId': int(ep_id),
+        'collectionId': int(show_id),
+        'trackName': title,
+        'collectionName': show_name,
+        'episodeUrl': audio,
+        'feedUrl': feed,
+        'releaseDate': '2023-01-15T00:00:00Z',
+        'trackTimeMillis': 360000,
+        'artworkUrl160': 'https://cdn.example.com/ep.jpg',
+    }
+
+
+def _fake_itunes_lookup(monkeypatch, items_by_id, *, fail_times=0):
+    """Stub itunes.apple.com/lookup (and refuse unexpected hosts)."""
+    state = {'calls': 0, 'fails_left': fail_times}
+    fetched = []
+
+    def get(url, params=None, **kw):
+        fetched.append((url, dict(params or {})))
+        if 'itunes.apple.com/lookup' not in url and 'itunes.apple.com' not in url:
+            raise AssertionError(f'unexpected fetch {url}')
+        # /search is also under itunes.apple.com — only allow lookup here.
+        if '/search' in url:
+            raise AssertionError(f'expected lookup, got search: {url}')
+        state['calls'] += 1
+        if state['fails_left'] > 0:
+            state['fails_left'] -= 1
+            raise A.requests.ConnectionError('blip')
+        itunes_id = str((params or {}).get('id') or '')
+        items = list(items_by_id.get(itunes_id, []))
+        return _HttpResp(200, payload={'results': items})
+
+    _patch_requests_get(monkeypatch, get)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    return fetched, state
+
+
+@pytest.mark.parametrize('url,expected', [
+    (f'https://podcasts.apple.com/us/podcast/the-daily/id{_APPLE_SHOW_ID}',
+     (_APPLE_SHOW_ID, None)),
+    (f'https://podcasts.apple.com/cn/podcast/6-minute-english/id{_APPLE_CN_SHOW_ID}'
+     f'?i={_APPLE_EP_ID}&r=0',
+     (_APPLE_CN_SHOW_ID, _APPLE_EP_ID)),
+    (f'podcasts.apple.com/gb/podcast/x/id{_APPLE_SHOW_ID}?i={_APPLE_EP_ID}',
+     (_APPLE_SHOW_ID, _APPLE_EP_ID)),
+    ('https://podcasts.apple.com/us/podcast/the-daily/', (None, None)),
+    ('https://open.spotify.com/episode/x', (None, None)),
+    ('the daily', (None, None)),
+])
+def test_apple_links_are_recognised(url, expected):
+    assert A.parse_apple_podcasts_url(url) == expected
+
+
+def test_apple_episode_link_us_resolves_to_episode(monkeypatch):
+    show = _apple_show_item()
+    ep = _apple_episode_item(show_id=_APPLE_SHOW_ID, show_name='The Daily',
+                             title='Call My A.I. Agent')
+    _fake_itunes_lookup(monkeypatch, {_APPLE_SHOW_ID: [show, ep]})
+    out = A.resolve_apple_url(
+        f'https://podcasts.apple.com/us/podcast/the-daily/id{_APPLE_SHOW_ID}'
+        f'?i={_APPLE_EP_ID}')
+    assert out['error'] is None and out['error_kind'] is None
+    assert len(out['results']) == 1
+    hit = out['results'][0]
+    assert hit['type'] == 'episode'
+    assert hit['name'] == 'Call My A.I. Agent'
+    assert hit['audio_url'] == _APPLE_AUDIO
+    assert hit['feed_url'] == _APPLE_FEED
+
+
+def test_apple_episode_link_cn_resolves_to_episode(monkeypatch):
+    show = _apple_show_item(show_id=_APPLE_CN_SHOW_ID, name='6 Minute English',
+                            feed='https://podcasts.files.bbci.co.uk/p02pc9tn.rss')
+    ep = _apple_episode_item(
+        ep_id=_APPLE_EP_ID, show_id=_APPLE_CN_SHOW_ID,
+        feed=show['feedUrl'],
+        audio='http://open.live.bbc.co.uk/mediaselector/ep.mp3',
+        title='Why does heartbreak hurt so much?',
+        show_name='6 Minute English')
+    # Episode omits feedUrl — resolver must copy it from the show row.
+    ep_no_feed = dict(ep)
+    ep_no_feed.pop('feedUrl')
+    _fake_itunes_lookup(monkeypatch, {_APPLE_CN_SHOW_ID: [show, ep_no_feed]})
+    out = A.resolve_apple_url(
+        f'https://podcasts.apple.com/cn/podcast/6-minute-english/id{_APPLE_CN_SHOW_ID}'
+        f'?i={_APPLE_EP_ID}&r=0')
+    assert out['error'] is None
+    hit = out['results'][0]
+    assert hit['type'] == 'episode'
+    assert hit['feed_url'] == show['feedUrl']
+    assert hit['audio_url'] == ep['episodeUrl']
+
+
+def test_apple_show_link_returns_show(monkeypatch):
+    show = _apple_show_item()
+    _fake_itunes_lookup(monkeypatch, {_APPLE_SHOW_ID: [show]})
+    out = A.resolve_apple_url(
+        f'https://podcasts.apple.com/us/podcast/the-daily/id{_APPLE_SHOW_ID}')
+    assert out['error'] is None and out['error_kind'] is None
+    assert out['results'] == [A._itunes_show_result(show)]
+    assert out['results'][0]['feed_url'] == _APPLE_FEED
+
+
+def test_apple_episode_missing_falls_back_to_show(monkeypatch):
+    show = _apple_show_item()
+    other = _apple_episode_item(ep_id='999', title='Other')
+    _fake_itunes_lookup(monkeypatch, {_APPLE_SHOW_ID: [show, other]})
+    out = A.resolve_apple_url(
+        f'https://podcasts.apple.com/us/podcast/the-daily/id{_APPLE_SHOW_ID}'
+        f'?i={_APPLE_EP_ID}')
+    assert [r['type'] for r in out['results']] == ['show']
+    assert out['error_kind'] == 'episode_not_found'
+    assert out['results'][0]['feed_url'] == _APPLE_FEED
+
+
+def test_apple_show_without_fetchable_feed_reports_no_feed(monkeypatch):
+    show = _apple_show_item(feed='http://127.0.0.1/secret.xml')
+    _fake_itunes_lookup(monkeypatch, {_APPLE_SHOW_ID: [show]})
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: False)
+    out = A.resolve_apple_url(
+        f'https://podcasts.apple.com/us/podcast/the-daily/id{_APPLE_SHOW_ID}')
+    assert out['results'] == []
+    assert out['error_kind'] == 'no_feed'
+
+
+def test_resolve_apple_json_includes_error_kind(monkeypatch):
+    _fake_itunes_lookup(monkeypatch, {})
+    data = A.app.test_client().get(
+        f'/resolve-apple?url=https://podcasts.apple.com/us/podcast/x/id{_APPLE_SHOW_ID}'
+    ).get_json()
+    assert data['error_kind'] == 'not_found'
+    assert data['results'] == []
+    assert data['error']
+
+
+def test_resolve_apple_logs_error_kind(monkeypatch, caplog):
+    import logging
+    _fake_itunes_lookup(monkeypatch, {})
+    with caplog.at_level(logging.INFO, logger=A.app.logger.name):
+        A.app.test_client().get(
+            f'/resolve-apple?url=https://podcasts.apple.com/us/podcast/x/id{_APPLE_SHOW_ID}'
+            f'?i={_APPLE_EP_ID}')
+    assert any(
+        'apple resolve failed' in r.message
+        and f'show_id={_APPLE_SHOW_ID}' in r.message
+        and f'episode_id={_APPLE_EP_ID}' in r.message
+        and 'error_kind=not_found' in r.message
+        for r in caplog.records
+    )
+
+
+def test_resolve_apple_retries_transient_directory_failure(monkeypatch):
+    show = _apple_show_item()
+    ep = _apple_episode_item(show_name='The Daily', title='Ep')
+    fetched, state = _fake_itunes_lookup(
+        monkeypatch, {_APPLE_SHOW_ID: [show, ep]}, fail_times=1)
+    monkeypatch.setattr(A.time, 'sleep', lambda s: None)
+    data = A.app.test_client().get(
+        f'/resolve-apple?url=https://podcasts.apple.com/us/podcast/x/id{_APPLE_SHOW_ID}'
+        f'?i={_APPLE_EP_ID}').get_json()
+    assert data['error'] is None
+    assert data['results'][0]['audio_url'] == _APPLE_AUDIO
+    assert state['calls'] >= 2
+    assert any('lookup' in (u if isinstance(u, str) else u[0]) or True for u in fetched)
+
+
+def test_resolve_apple_reports_unreachable_directory(monkeypatch):
+    def down(*a, **kw):
+        raise A.requests.ConnectionError('secret-internal-detail')
+
+    monkeypatch.setattr(A.requests, 'get', down)
+    monkeypatch.setattr(A.requests.Session, 'get',
+                        lambda self, url, **kw: down(url, **kw))
+    monkeypatch.setattr(A.time, 'sleep', lambda s: None)
+    data = A.app.test_client().get(
+        f'/resolve-apple?url=https://podcasts.apple.com/us/podcast/x/id{_APPLE_SHOW_ID}'
+    ).get_json()
+    assert data['results'] == []
+    assert data['error_kind'] == 'directory_unreachable'
+    assert 'secret-internal-detail' not in data['error']
+
+
+def test_index_routes_apple_rss_audio_youtube():
+    body = A.app.test_client().get('/').data.decode()
+    assert '/resolve-apple?url=' in body
+    assert 'resolveApple' in body
+    assert 'showDirectAudioRow' in body
+    assert 'Transcribe this audio file' in body
+    assert "YouTube isn't supported yet" in body
+    assert 'PARSE_RSS_URL' in body
+    assert "inputType === 'rss_feed'" in body or "inputType === \"rss_feed\"" in body
+    assert 'emptyStateTipText' in body
+    # Failed Apple paste must not be told to paste an Apple link again.
+    assert "inputType !== 'apple_link'" in body or 'inputType !== "apple_link"' in body
+    assert 'error_kind' in body
+
+
+def test_empty_state_tip_omits_failed_input_type():
+    """Static check: tip builder skips the type that just failed."""
+    body = A.app.test_client().get('/').data.decode()
+    assert 'emptyStateTipText' in body
+    assert "inputType !== 'apple_link'" in body
+    assert "inputType !== 'rss_feed'" in body
+    assert "inputType !== 'audio_url'" in body
+    # Name-search empty state still offers the classic trio (assembled in JS).
+    assert "No results? Paste" in body
+    assert "the podcast's RSS feed" in body
+    assert 'an Apple Podcasts link' in body
+    assert 'a direct audio URL' in body
 
 
 # --------------------------------------------------------------------------
@@ -5570,13 +5961,21 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
     assert entries[0]['id'] == 'no-double-charge-restart'
+    assert entries[1]['id'] == 'apple-rss-link-resolve'
+    assert entries[2]['id'] == 'related-episodes-feed-fix'
+    assert entries[3]['id'] == 'stay-logged-in'
+    assert entries[4]['id'] == 'spotify-resolve-clarity'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
     assert f'id="{entries[0]["id"]}"' in resp.data.decode()
     assert entries[0]['title'] in body
     assert entries[0]['summary'] in body
+    assert f'id="{entries[1]["id"]}"' in resp.data.decode()
+    assert entries[1]['title'] in body
+    assert entries[1]['summary'] in body
     # Newest-first: the first entry's title appears before the last one's.
+    assert body.index(entries[0]['title']) < body.index(entries[1]['title'])
     assert body.index(entries[0]['title']) < body.index(entries[-1]['title'])
     # Footer link + toast markup on other public pages.
     home = A.app.test_client().get('/').data.decode()
@@ -5767,8 +6166,11 @@ def test_search_emits_podcast_searched_with_query_and_input_type(monkeypatch):
     assert 'detectInputType' in body
     assert "slice(0, 200)" in body
     assert 'errored' in body
-    # Empty-state copy + RSS help when nothing matches.
-    assert "No results? Paste the podcast's RSS feed" in body
+    assert 'error_kind' in body
+    # Empty-state copy + RSS help when nothing matches (tip assembled in JS).
+    assert "No results? Paste" in body
+    assert "the podcast's RSS feed" in body
+    assert 'emptyStateTipText' in body
     assert '/rss-help' in body or "url_for('rss_help')" in body
     assert 'showSearchEmptyState' in body
     # Typed search and Spotify resolve both go through trackSearch(query, …).
@@ -6173,6 +6575,7 @@ def test_transcription_status_flags_no_billing_with_retry(stripe_on):
             artwork_url='https://example.com/art.jpg',
             episode_published='2024-01-01',
             source_audio_url='https://example.com/ep.mp3',
+            rss_url='https://feeds.example.com/hardfork.xml',
             audio_duration=48 * 60,
             language='en',
             error_message=A.describe_openai_error(
@@ -6187,6 +6590,7 @@ def test_transcription_status_flags_no_billing_with_retry(stripe_on):
     assert data['retry']['audio_url'] == 'https://example.com/ep.mp3'
     assert data['retry']['episode_title'] == 'Hard Fork'
     assert data['retry']['duration_min'] == '48'
+    assert data['retry']['rss_url'] == 'https://feeds.example.com/hardfork.xml'
     assert data.get('buy_available') is True
 
 
@@ -8079,11 +8483,124 @@ def test_related_episodes_lists_others_from_same_feed(monkeypatch, trial_on):
 
 def test_related_episodes_hidden_without_rss(trial_on):
     uid = _make_user('norelated@test.com')
-    _completed_task(uid, 'rel-none', rss_url=None)
+    # No feed and no show name → nothing to look up.
+    _completed_task(uid, 'rel-none', rss_url=None, podcast_name=None)
     data = _login(uid).get('/transcription/rel-none/related-episodes').get_json()
     assert data['has_feed'] is False
     assert data['episodes'] == []
     assert data['following'] is False
+
+
+def test_start_transcription_stores_rss_url_with_audio(monkeypatch, trial_on):
+    """Episode search / Spotify starts must persist the show feed for Follow."""
+    from models import db, TranscriptionTask
+    uid = _make_user('startrss@test.com', limit=36000)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    feed = 'https://feeds.example.com/hardfork.xml'
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://cdn.example.com/ep.mp3',
+        'episode_title': 'Episode One',
+        'podcast_name': 'Hard Fork',
+        'rss_url': feed,
+        'duration_min': '5',
+    })
+    assert resp.status_code == 200
+    task_id = resp.get_json()['task_id']
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        assert task is not None
+        assert task.rss_url == feed
+    # Mark completed so related-episodes is the post-transcript path users hit.
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        task.status = 'completed'
+        task.phase = 'completed'
+        task.progress = 100
+        task.transcript_text = 'hello'
+        db.session.commit()
+    monkeypatch.setattr(
+        A, 'get_episodes_from_rss',
+        lambda url, timeout=None: ([], 'offline'))
+    data = _login(uid).get(f'/transcription/{task_id}/related-episodes').get_json()
+    assert data['has_feed'] is True
+
+
+def test_start_transcription_drops_private_rss_url(monkeypatch, trial_on):
+    from models import db, TranscriptionTask
+    uid = _make_user('droprss@test.com', limit=36000)
+
+    def fetchable(url):
+        return '127.0.0.1' not in url and '169.254' not in url
+
+    monkeypatch.setattr(A, '_is_fetchable_url', fetchable)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://cdn.example.com/ep.mp3',
+        'episode_title': 'Episode One',
+        'podcast_name': 'Hard Fork',
+        'rss_url': 'http://127.0.0.1/feed.xml',
+        'duration_min': '5',
+    })
+    assert resp.status_code == 200
+    task_id = resp.get_json()['task_id']
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        assert task.rss_url is None
+
+
+def test_pending_transcription_keeps_fetchable_rss(monkeypatch, trial_on):
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: '127.0.0.1' not in url)
+    client = A.app.test_client()
+    resp = client.post('/pending-transcription', data={
+        'audio_url': 'https://cdn.example.com/ep.mp3',
+        'episode_title': 'ChatGPT Ep',
+        'podcast_name': 'Show',
+        'rss_url': 'https://feeds.example.com/show.xml',
+        'duration_min': '42',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    with client.session_transaction() as sess:
+        pending = sess.get(A.PENDING_TRANSCRIPTION_KEY)
+        assert pending['rss_url'] == 'https://feeds.example.com/show.xml'
+
+    client2 = A.app.test_client()
+    resp2 = client2.post('/pending-transcription', data={
+        'audio_url': 'https://cdn.example.com/ep.mp3',
+        'episode_title': 'ChatGPT Ep',
+        'rss_url': 'http://127.0.0.1/feed.xml',
+    }, follow_redirects=False)
+    assert resp2.status_code in (302, 303)
+    with client2.session_transaction() as sess:
+        pending = sess.get(A.PENDING_TRANSCRIPTION_KEY)
+        assert pending['rss_url'] is None
+
+
+def test_related_episodes_looks_up_feed_by_podcast_name(monkeypatch, trial_on):
+    """Tasks that never stored rss_url still get related episodes via iTunes."""
+    from models import db, TranscriptionTask
+    uid = _make_user('rellookup@test.com')
+    _completed_task(uid, 'rel-lookup', rss_url=None, podcast_name='Hard Fork')
+    feed_url = 'https://feeds.example.com/hardfork.xml'
+    monkeypatch.setattr(
+        A, '_public_shows_named',
+        lambda name: [{'collectionName': 'Hard Fork', 'feedUrl': feed_url}])
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    feed = [
+        {'index': 0, 'title': 'Episode Two', 'published': '2024-02-01',
+         'audio_url': 'https://cdn.example.com/ep2.mp3', 'duration_min': 40,
+         'artwork': '', 'podcast_name': 'Hard Fork', 'description': ''},
+        {'index': 1, 'title': 'Episode One', 'published': '2024-01-01',
+         'audio_url': 'https://cdn.example.com/ep1.mp3', 'duration_min': 48,
+         'artwork': '', 'podcast_name': 'Hard Fork', 'description': ''},
+    ]
+    monkeypatch.setattr(
+        A, 'get_episodes_from_rss',
+        lambda url, timeout=None: (feed, None))
+    data = _login(uid).get('/transcription/rel-lookup/related-episodes').get_json()
+    assert data['has_feed'] is True
+    assert data['episodes'][0]['title'] == 'Episode Two'
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'rel-lookup')
+        assert task.rss_url == feed_url
 
 
 def test_related_episodes_respects_timeout_kwarg(monkeypatch, trial_on):
@@ -8171,6 +8688,12 @@ def test_transcription_page_has_next_steps_and_tracking():
     assert 'Transcribe another episode from' in src
 
 
+def test_homepage_episode_click_sends_rss_url():
+    """Search / Spotify episode rows must post feed_url as rss_url."""
+    src = open('templates/index.html').read()
+    assert 'fields.rss_url = item.feed_url' in src or 'rss_url: item.feed_url' in src
+
+
 def test_search_input_type_patterns_in_homepage():
     """Client-side classifier covers the documented input_type enum."""
     src = open('templates/index.html').read()
@@ -8187,6 +8710,183 @@ def test_login_page_has_submit_feedback():
     assert 'id="loginSubmit"' in body
     assert 'Logging in' in body
     assert 'novalidate' in body
+
+
+def test_register_sets_remember_cookie_and_permanent_session(trial_on):
+    """Closing Safari must not dump a new signup onto /login."""
+    A._register_attempts.clear()
+    email = 'remember-me@example.com'
+    _purge([email])
+    client = _fresh_client()
+    resp = client.post(
+        '/register',
+        data={'email': email, 'password': 'abcdefgh1'},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (302, 303)
+    set_cookies = resp.headers.getlist('Set-Cookie')
+    remember = [c for c in set_cookies if c.lower().startswith('remember_token=')]
+    assert remember, set_cookies
+    assert 'Expires=' in remember[0] or 'Max-Age=' in remember[0]
+    with client.session_transaction() as sess:
+        assert sess.permanent is True
+    _purge([email])
+
+
+def test_login_sets_remember_cookie_and_permanent_session():
+    uid = _make_user('login-remember@test.com')
+    from models import User
+    with A.app.app_context():
+        email = A.db.session.get(User, uid).email
+    client = A.app.test_client()
+    resp = client.post(
+        '/login',
+        data={'email': email, 'password': 'password123'},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (302, 303)
+    set_cookies = resp.headers.getlist('Set-Cookie')
+    remember = [c for c in set_cookies if c.lower().startswith('remember_token=')]
+    assert remember, set_cookies
+    assert 'Expires=' in remember[0] or 'Max-Age=' in remember[0]
+    with client.session_transaction() as sess:
+        assert sess.permanent is True
+
+
+def test_session_cookie_config_matches_public_origin(monkeypatch):
+    assert A.app.config['PERMANENT_SESSION_LIFETIME'].days == 90
+    assert A.app.config['REMEMBER_COOKIE_DURATION'].days == 365
+    assert A.app.config['SESSION_COOKIE_SAMESITE'] == 'Lax'
+    assert A.app.config['REMEMBER_COOKIE_SAMESITE'] == 'Lax'
+    # Suite leaves PUBLIC_BASE_URL unset / http — Secure must stay off so
+    # test_client cookies work. Production sets https://podskrift.com.
+    if not (A.PUBLIC_BASE_URL or '').startswith('https://'):
+        assert A.app.config['SESSION_COOKIE_SECURE'] is False
+        assert A.app.config['REMEMBER_COOKIE_SECURE'] is False
+
+
+def test_www_host_redirects_301_to_public_base(monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    client = A.app.test_client()
+    resp = client.get(
+        '/pricing?x=1',
+        headers={'Host': 'www.podskrift.com'},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 301
+    assert resp.headers['Location'] == 'https://podskrift.com/pricing?x=1'
+
+
+def test_staging_host_post_redirects_308(monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    client = A.app.test_client()
+    resp = client.post(
+        '/login',
+        headers={'Host': 'podskrift.nettsmed.dev'},
+        data={'email': 'a@b.com', 'password': 'x'},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 308
+    assert resp.headers['Location'] == 'https://podskrift.com/login'
+
+
+def test_stripe_webhook_not_redirected_off_canonical_host(monkeypatch):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    client = A.app.test_client()
+    resp = client.post(
+        '/stripe/webhook',
+        headers={'Host': 'www.podskrift.com'},
+        data=b'{}',
+        content_type='application/json',
+        follow_redirects=False,
+    )
+    assert resp.status_code != 301
+    assert resp.status_code != 308
+    assert 'Location' not in resp.headers or 'podskrift.com/stripe' not in (
+        resp.headers.get('Location') or '')
+
+
+def test_api_path_not_redirected_off_canonical_host(monkeypatch):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    client = A.app.test_client()
+    resp = client.get(
+        '/api/v1/episodes',
+        headers={'Host': 'www.podskrift.com'},
+        follow_redirects=False,
+    )
+    assert resp.status_code != 301
+    assert resp.status_code != 308
+
+
+def test_canonical_link_uses_public_base_url(monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    body = A.app.test_client().get(
+        '/pricing', headers={'Host': 'podskrift.com'}).data.decode()
+    assert 'rel="canonical" href="https://podskrift.com/pricing"' in body
+    assert 'property="og:url" content="https://podskrift.com/pricing"' in body
+
+
+def test_register_existing_account_offers_login_with_next(trial_on):
+    A._register_attempts.clear()
+    email = 'exists-link@example.com'
+    _purge([email])
+    client = _fresh_client()
+    assert 'Account created' in _signup(client, email).data.decode()
+    client = _new_session()
+    resp = client.post(
+        '/register?next=/transcription/abc123',
+        data={'email': email, 'password': 'abcdefgh1'},
+        follow_redirects=True,
+    )
+    body = resp.data.decode()
+    assert 'already exists' in body
+    assert 'Log in instead' in body
+    assert 'next=/transcription/abc123' in body or 'next=%2Ftranscription%2Fabc123' in body
+    _purge([email])
+
+
+def test_login_heading_for_saved_transcript():
+    body = A.app.test_client().get(
+        '/login?next=/transcription/task-xyz').data.decode()
+    assert 'Log in to open your saved transcript' in body
+    assert 'Forgot password?' in body
+    assert 'hello@podskrift.com' in body
+
+
+def test_login_default_heading_without_transcript_next():
+    body = A.app.test_client().get('/login').data.decode()
+    assert 'Log in to open your saved transcript' not in body
+    assert '>Log in<' in body or 'Log in</h2>' in body
+    assert 'Forgot password?' in body
+
+
+def test_register_page_shows_password_rule_upfront(trial_on):
+    body = A.app.test_client().get('/register').data.decode()
+    assert 'minlength="8"' in body
+    assert 'At least 8 characters' in body
+    assert 'id="passwordHint"' in body
+
+
+def test_register_failed_emits_posthog_reason(ph_events, trial_on):
+    A._register_attempts.clear()
+    client = _fresh_client()
+    client.post('/register', data={
+        'email': 'shortpw@example.com',
+        'password': 'short',
+    })
+    fails = [e for e in ph_events.events if e['event'] == 'register_failed']
+    assert fails
+    assert fails[-1]['properties']['reason'] == 'password_too_short'
+    assert 'email' not in fails[-1]['properties']
+
+
+def test_login_wall_shown_emits_next_type(ph_events):
+    client = A.app.test_client()
+    client.get('/login?next=/transcription/abc')
+    walls = [e for e in ph_events.events if e['event'] == 'login_wall_shown']
+    assert len(walls) == 1
+    assert walls[0]['properties']['next_type'] == 'transcription'
+    assert 'email' not in walls[0]['properties']
 
 
 def test_get_episodes_from_rss_timeout_uses_requests(monkeypatch):

@@ -25,12 +25,13 @@ import time
 import threading
 import unicodedata
 import wave
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from zoneinfo import ZoneInfo
 import certifi
 import requests
 import feedparser
+from markupsafe import Markup
 
 # Fix CA bundle path for Python 3.14+ where certifi may ship without the PEM
 if not os.path.exists(certifi.where()):
@@ -41,7 +42,7 @@ if not os.path.exists(certifi.where()):
 from flask import (Flask, render_template, request, jsonify, send_file, flash,
                    redirect, url_for, Response, g, session, has_request_context)
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from urllib.parse import urljoin, urlparse, unquote
+from urllib.parse import parse_qs, urljoin, urlparse, unquote
 import uuid
 from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError, APITimeoutError
@@ -132,6 +133,16 @@ def load_user(user_id):
 #: trustworthy as the proxy stripping them, and this needs no such assumption.
 PUBLIC_BASE_URL = (os.getenv('PUBLIC_BASE_URL') or '').rstrip('/')
 
+# Persistent login: session cookie lasts 90 days; Flask-Login remember cookie
+# lasts a year. Secure flags follow the public origin so http:// test clients
+# still receive cookies (production PUBLIC_BASE_URL is https://…).
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=90)
+app.config['REMEMBER_COOKIE_DURATION'] = timedelta(days=365)
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['REMEMBER_COOKIE_SAMESITE'] = 'Lax'
+_cookie_secure = PUBLIC_BASE_URL.startswith('https://')
+app.config['SESSION_COOKIE_SECURE'] = _cookie_secure
+app.config['REMEMBER_COOKIE_SECURE'] = _cookie_secure
 
 def public_url(endpoint, **values):
     """Absolute URL for `endpoint`, on the configured public origin."""
@@ -139,6 +150,41 @@ def public_url(endpoint, **values):
     if PUBLIC_BASE_URL:
         return PUBLIC_BASE_URL + path
     return url_for(endpoint, _external=True, **values)
+
+
+def _canonical_host_exempt(path):
+    """True for Stripe webhooks, /api/*, and common health probes."""
+    if path.startswith('/stripe/webhook') or path.startswith('/api/'):
+        return True
+    if path in ('/health', '/healthz', '/ready', '/ping') or path.startswith('/health'):
+        return True
+    return False
+
+
+def _canonical_redirect_target():
+    """PUBLIC_BASE_URL + path + query (no trailing bare ?)."""
+    path = request.path or '/'
+    qs = request.query_string.decode('utf-8', errors='replace') if request.query_string else ''
+    return PUBLIC_BASE_URL + path + (('?' + qs) if qs else '')
+
+
+@app.before_request
+def canonical_host_redirect():
+    """Send www / staging hosts to PUBLIC_BASE_URL so cookies stay on one origin.
+
+    GET/HEAD → 301; other methods → 308 (preserve method/body). Stripe webhooks,
+    /api/*, and common health probes are left alone so probes and signed
+    callbacks are not bounced.
+    """
+    if not PUBLIC_BASE_URL:
+        return None
+    canonical_host = (urlparse(PUBLIC_BASE_URL).netloc or '').lower()
+    if not canonical_host or request.host.lower() == canonical_host:
+        return None
+    if _canonical_host_exempt(request.path or '/'):
+        return None
+    code = 301 if request.method in ('GET', 'HEAD') else 308
+    return redirect(_canonical_redirect_target(), code=code)
 
 
 # Global fallback OpenAI key
@@ -2171,6 +2217,66 @@ def _auth_next_arg():
     return request.values.get('next') or ''
 
 
+def _login_url_preserving_next():
+    """/login, keeping a safe next= so returning users land on the transcript."""
+    nxt = _auth_next_arg()
+    if nxt:
+        return url_for('login', next=nxt)
+    return url_for('login')
+
+
+def _auth_next_type(candidate=None):
+    """Coarse next= bucket for analytics — never the raw path (may be a task id)."""
+    raw = candidate if candidate is not None else _auth_next_arg()
+    if not raw:
+        return 'none'
+    path = safe_next_url(raw, default='')
+    if not path:
+        return 'other'
+    if path.startswith('/transcription/'):
+        return 'transcription'
+    if path.startswith('/resume-transcription'):
+        return 'resume'
+    if path.startswith('/settings'):
+        return 'settings'
+    if path.startswith('/history'):
+        return 'history'
+    return 'other'
+
+
+def _analytics_anon_id():
+    """Stable anonymous distinct_id for pre-auth events (no email/IP)."""
+    aid = session.get('_ph_anon')
+    if not aid:
+        aid = secrets.token_hex(16)
+        session['_ph_anon'] = aid
+    return f'anon:{aid}'
+
+
+def _capture_register_failed(reason):
+    """register_failed — coarse reason only; never email/password."""
+    product_analytics.capture(
+        'register_failed',
+        _analytics_anon_id(),
+        {
+            'reason': reason,
+            '$process_person_profile': False,
+        },
+    )
+
+
+def _capture_login_wall_shown(next_type):
+    """login_wall_shown when /login is rendered for an anonymous visitor."""
+    product_analytics.capture(
+        'login_wall_shown',
+        _analytics_anon_id(),
+        {
+            'next_type': next_type,
+            '$process_person_profile': False,
+        },
+    )
+
+
 def _redirect_after_auth():
     """Send a newly authenticated user to a safe next URL, or resume a stash."""
     if session.get(PENDING_TRANSCRIPTION_KEY):
@@ -2187,6 +2293,12 @@ def _register_template(**extra):
         pending=pending,
         **extra,
     )
+
+
+def _persist_login(user):
+    """Mark the session permanent and set the Flask-Login remember cookie."""
+    session.permanent = True
+    login_user(user, remember=True)
 
 
 @app.route('/signup')
@@ -2211,12 +2323,14 @@ def register():
     password = request.form.get('password', '')
 
     if not email or not password:
+        _capture_register_failed('missing_fields')
         flash('Email and password are required.', 'error')
         return _register_template()
 
     ip = _client_ip()
     slot = register_reserve_slot(ip)
     if slot is None:
+        _capture_register_failed('rate_limited')
         flash('Too many accounts created from this address. Try again later.', 'error')
         return _register_template()
 
@@ -2226,19 +2340,27 @@ def register():
     created = False
     try:
         if is_disposable_email(email):
+            _capture_register_failed('disposable_email')
             flash('Please register with a real email address.', 'error')
             return _register_template()
 
         if '@' not in email or '.' not in email.rsplit('@', 1)[-1]:
+            _capture_register_failed('invalid_email')
             flash('Please enter a valid email address.', 'error')
             return _register_template()
 
         if len(password) < 8:
+            _capture_register_failed('password_too_short')
             flash('Password must be at least 8 characters.', 'error')
             return _register_template()
 
         if User.query.filter_by(email=email).first():
-            flash('An account with this email already exists.', 'error')
+            _capture_register_failed('already_exists')
+            login_href = html_lib.escape(_login_url_preserving_next(), quote=True)
+            flash(Markup(
+                'An account with this email already exists. '
+                f'<a href="{login_href}">Log in instead</a>.'
+            ), 'error')
             return _register_template()
 
         user = User(email=email)
@@ -2247,7 +2369,7 @@ def register():
         db.session.commit()
         created = True
 
-        login_user(user)
+        _persist_login(user)
         product_analytics.capture('user_signed_up', user.id)
         if session.get(PENDING_TRANSCRIPTION_KEY):
             flash('Account created — starting your transcript.', 'success')
@@ -2269,18 +2391,27 @@ def login():
     if current_user.is_authenticated:
         return _redirect_after_auth()
 
+    next_arg = _auth_next_arg()
+    next_type = _auth_next_type(next_arg)
+
     if request.method == 'POST':
         email = request.form.get('email', '').strip().lower()
         password = request.form.get('password', '')
 
         user = User.query.filter_by(email=email).first()
         if user and user.check_password(password):
-            login_user(user, remember=True)
+            _persist_login(user)
             return _redirect_after_auth()
 
         flash('Invalid email or password.', 'error')
+    else:
+        _capture_login_wall_shown(next_type)
 
-    return render_template('login.html', next=_auth_next_arg())
+    return render_template(
+        'login.html',
+        next=next_arg,
+        login_for_transcript=(next_type == 'transcription'),
+    )
 
 
 def _stash_pending_from_request():
@@ -2289,6 +2420,9 @@ def _stash_pending_from_request():
 
     audio_url = (request.form.get('audio_url') or '').strip()
     rss_url = (request.form.get('rss_url') or '').strip() or None
+    # Optional on the direct-audio path; never stash a private/unfetchable feed.
+    if rss_url and not _is_fetchable_url(rss_url):
+        rss_url = None
     episode_index_raw = request.form.get('episode_index')
 
     pending = {
@@ -4136,7 +4270,11 @@ def start_transcription():
     language = normalize_language_code(request.form.get('language', ''))
 
     audio_url = request.form.get('audio_url')
-    rss_url = request.form.get('rss_url')
+    rss_url = (request.form.get('rss_url') or '').strip() or None
+    # Direct-audio starts may also carry the show feed (search / Spotify). Drop
+    # anything we would refuse to fetch — never persist a private URL.
+    if rss_url and not _is_fetchable_url(rss_url):
+        rss_url = None
 
     if audio_url:
         if not _is_fetchable_url(audio_url):
@@ -4427,6 +4565,7 @@ def get_status(task_id):
                     'podcast_name': task.podcast_name or '',
                     'artwork': task.artwork_url or '',
                     'published': task.episode_published or '',
+                    'rss_url': task.rss_url or '',
                     'duration_min': (
                         str(duration_min) if duration_min is not None else ''),
                     # Always an ISO code (or '') so start_transcription accepts it.
@@ -4650,6 +4789,21 @@ def related_episodes(task_id):
 
     rss_url = (task.rss_url or '').strip()
     podcast_name = task.podcast_name or ''
+    # Older search/Spotify starts never stored the feed. Recover it from the
+    # public directory by exact show name so related episodes / Follow work.
+    if not rss_url and podcast_name.strip():
+        try:
+            shows = _public_shows_named(podcast_name.strip())
+        except requests.RequestException:
+            shows = []
+        for show in shows:
+            feed = (show.get('feedUrl') or '').strip()
+            if feed and _is_fetchable_url(feed):
+                task.rss_url = feed
+                db.session.commit()
+                rss_url = feed
+                break
+
     if not rss_url:
         return jsonify({
             'has_feed': False,
@@ -5792,6 +5946,7 @@ def inject_posthog():
             if getattr(current_user, 'is_authenticated', False)
             else ''
         ),
+        'public_base_url': PUBLIC_BASE_URL,
     }
 
 
@@ -6330,27 +6485,76 @@ SPOTIFY_URL_RE = re.compile(
     r'(?:open\.spotify\.com/(?:intl-[a-z]{2}(?:-[a-z]{2})?/)?(?:embed/)?|spotify:)'
     r'(episode|show)[/:]([A-Za-z0-9]{22})(?![A-Za-z0-9])'
 )
+#: Pasted links sometimes lose a slash or letters ("open.spotify.comsode/<id>",
+#: "sode/<id>"). Still route a bare episode|show/<22-char-id> — and the common
+#: mangled "sode/<id>" form of episode — to the resolver, never as name search.
+#: group1=episode|show (needs a non-alnum boundary so "myepisode/…" is ignored),
+#: group2=sode (may sit inside a mangled host like "comsode"), group3=id.
+SPOTIFY_LOOSE_ID_RE = re.compile(
+    r'(?:(?:^|[^A-Za-z0-9])(episode|show)|(sode))/([A-Za-z0-9]{22})(?![A-Za-z0-9])',
+    re.I,
+)
 
 SPOTIFY_NO_FEED_HINT = (
-    "Podskrift can only transcribe podcasts that publish a public RSS feed. "
-    "Spotify-exclusive shows don't, so their audio can't be fetched."
+    "If the show has one, paste the feed URL, or try searching for the show by name."
 )
+
+#: One short pause before retrying a transient directory failure.
+SPOTIFY_DIRECTORY_RETRY_PAUSE_SEC = 0.4
 
 _SPOTIFY_HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; Podskrift/1.0)'}
 _NEXT_DATA_RE = re.compile(
     r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.S)
+_SHOW_SUFFIX_RE = re.compile(r'\s*[\(\[\{][^\)\]\}]*[\)\]\}]\s*$')
 
 
 def parse_spotify_url(raw):
     """Return (kind, id) for a Spotify episode/show link, or (None, None)."""
-    match = SPOTIFY_URL_RE.search(raw or '')
-    return (match.group(1), match.group(2)) if match else (None, None)
+    text = raw or ''
+    match = SPOTIFY_URL_RE.search(text)
+    if match:
+        return match.group(1), match.group(2)
+    loose = SPOTIFY_LOOSE_ID_RE.search(text)
+    if not loose:
+        return None, None
+    kind = (loose.group(1) or 'episode').lower()
+    return kind, loose.group(3)
 
 
 def _normalize_title(text):
     """Case-, width- and punctuation-insensitive form for matching titles."""
     text = unicodedata.normalize('NFKC', text or '').casefold()
     return re.sub(r'[\W_]+', ' ', text).strip()
+
+
+def _show_name_variants(show_name):
+    """Exact name first, then without trailing parenthetical/bracketed suffixes."""
+    variants, seen = [], set()
+
+    def add(name):
+        name = (name or '').strip()
+        key = _normalize_title(name)
+        if not name or not key or key in seen:
+            return
+        seen.add(key)
+        variants.append(name)
+
+    add(show_name)
+    stripped = (show_name or '').strip()
+    while True:
+        nxt = _SHOW_SUFFIX_RE.sub('', stripped).strip()
+        if nxt == stripped:
+            break
+        stripped = nxt
+        add(stripped)
+    return variants
+
+
+def _empty_spotify_meta():
+    return {
+        'title': '', 'show': '',
+        'playability_reason': None, 'is_playable': None, 'has_video': None,
+    }
 
 
 def _spotify_embed_metadata(kind, spotify_id):
@@ -6369,11 +6573,17 @@ def _spotify_embed_metadata(kind, spotify_id):
     except (requests.RequestException, AttributeError, KeyError, TypeError, ValueError):
         return None
     name = entity.get('name') or entity.get('title') or ''
+    meta = _empty_spotify_meta()
+    meta['playability_reason'] = entity.get('playabilityReason')
+    meta['is_playable'] = entity.get('isPlayable')
+    meta['has_video'] = entity.get('hasVideo')
     if entity.get('type') == 'episode':
         # A show embed renders its latest episode: the show is the subtitle.
-        show = entity.get('subtitle') or ''
-        return {'title': name if kind == 'episode' else '', 'show': show}
-    return {'title': '', 'show': name}
+        meta['title'] = name if kind == 'episode' else ''
+        meta['show'] = entity.get('subtitle') or ''
+        return meta
+    meta['show'] = name
+    return meta
 
 
 def _spotify_oembed_metadata(kind, spotify_id):
@@ -6388,11 +6598,16 @@ def _spotify_oembed_metadata(kind, spotify_id):
         return None
     if not title:
         return None
-    return {'title': title, 'show': ''} if kind == 'episode' else {'title': '', 'show': title}
+    meta = _empty_spotify_meta()
+    if kind == 'episode':
+        meta['title'] = title
+    else:
+        meta['show'] = title
+    return meta
 
 
 def fetch_spotify_metadata(kind, spotify_id):
-    """{'title', 'show'} for a Spotify link, or None when Spotify tells us nothing."""
+    """{'title', 'show', playability…} for a Spotify link, or None when empty."""
     meta = _spotify_embed_metadata(kind, spotify_id)
     if meta and (meta['show'] or meta['title']):
         return meta
@@ -6411,8 +6626,34 @@ def _itunes_search(term, entity):
 def _public_shows_named(show_name):
     """iTunes shows with a feed whose name matches the Spotify show exactly."""
     want = _normalize_title(show_name)
+    if not want:
+        return []
     return [item for item in _itunes_search(show_name, 'podcast')
             if item.get('feedUrl') and _normalize_title(item.get('collectionName')) == want]
+
+
+def _public_shows_named_loose(show_name):
+    """Shows matching a stripped variant of the name (parens/brackets removed).
+
+    Only used when exact match finds nothing; callers must confirm the episode
+    is in the candidate's feed before accepting the show (false positives are
+    otherwise easy — e.g. two shows that share a short base name).
+    """
+    variants = _show_name_variants(show_name)
+    if len(variants) <= 1:
+        return []
+    found, seen_feeds = [], set()
+    for variant in variants[1:]:
+        want = _normalize_title(variant)
+        for item in _itunes_search(variant, 'podcast'):
+            feed = item.get('feedUrl')
+            if not feed or feed in seen_feeds:
+                continue
+            if _normalize_title(item.get('collectionName')) != want:
+                continue
+            seen_feeds.add(feed)
+            found.append(item)
+    return found
 
 
 def _match_episode(episodes, title):
@@ -6523,50 +6764,323 @@ def _episode_from_itunes(title, show_name):
     return None
 
 
+def _no_feed_message(name):
+    label = name or 'this show'
+    return (
+        f'We couldn\'t find a public RSS feed for "{label}". '
+        f'{SPOTIFY_NO_FEED_HINT}'
+    )
+
+
+def _paid_episode_message(show_name):
+    base = (
+        'This episode is for paying Spotify subscribers only, so Podskrift '
+        "can't fetch its audio to transcribe."
+    )
+    if show_name:
+        return (
+            f'{base} The show "{show_name}" is below — open it to pick a '
+            'public episode if the feed has any.'
+        )
+    return base
+
+
+def _spotify_resolve_outcome(results, error=None, error_kind=None, show_name=None):
+    return {
+        'results': results,
+        'error': error,
+        'error_kind': error_kind,
+        'show_name': show_name or '',
+    }
+
+
 def resolve_spotify_url(raw):
     """Map a Spotify link onto the public feed Podskrift can fetch.
 
-    Returns (results, error) in /search-podcasts' result shape. Raises
+    Returns a dict: results, error, error_kind, show_name. Raises
     requests.RequestException when a directory lookup itself fails.
     """
     kind, spotify_id = parse_spotify_url(raw)
     if not kind:
-        return [], "That doesn't look like a Spotify episode or show link."
+        return _spotify_resolve_outcome(
+            [], "That doesn't look like a Spotify episode or show link.",
+            'unreadable_link')
     meta = fetch_spotify_metadata(kind, spotify_id)
     if not meta:
-        return [], "Couldn't read that Spotify link. Check that it's a public episode or show."
-    shows = _public_shows_named(meta['show']) if meta['show'] else []
+        return _spotify_resolve_outcome(
+            [], "Couldn't read that Spotify link. Check that it's a public episode or show.",
+            'unreadable_link')
+
+    show_name = meta.get('show') or ''
+    title = meta.get('title') or ''
+    paid = (meta.get('playability_reason') or '').upper() == 'PAYMENT_REQUIRED'
+
+    shows = _public_shows_named(show_name) if show_name else []
     if kind == 'show':
         if shows:
-            return [_itunes_show_result(shows[0])], None
-        return [], f'"{meta["show"]}" has no public podcast feed. {SPOTIFY_NO_FEED_HINT}'
+            return _spotify_resolve_outcome([_itunes_show_result(shows[0])],
+                                            show_name=show_name)
+        return _spotify_resolve_outcome(
+            [], _no_feed_message(show_name), 'no_feed', show_name)
+
+    if paid:
+        # Still surface the show when we can find its public feed.
+        if shows:
+            return _spotify_resolve_outcome(
+                [_itunes_show_result(shows[0])],
+                _paid_episode_message(show_name), 'paid_episode', show_name)
+        return _spotify_resolve_outcome(
+            [], _paid_episode_message(show_name), 'paid_episode', show_name)
 
     for show in shows[:2]:
-        hit = _episode_from_feed(show['feedUrl'], meta['title'])
+        hit = _episode_from_feed(show['feedUrl'], title)
         if hit:
             hit = dict(hit, origin='spotify')
-            return [hit], None
-    hit = _episode_from_itunes(meta['title'], meta['show'])
+            return _spotify_resolve_outcome([hit], show_name=show_name)
+
+    # Exact name missed: try stripped variants, but only accept a candidate
+    # when the episode title is actually in that show's feed.
+    if show_name and title and not shows:
+        for show in _public_shows_named_loose(show_name)[:3]:
+            hit = _episode_from_feed(show['feedUrl'], title)
+            if hit:
+                hit = dict(hit, origin='spotify')
+                return _spotify_resolve_outcome([hit], show_name=show_name)
+
+    hit = _episode_from_itunes(title, show_name)
     if hit:
         # Prefer spotify even when the match came via iTunes as a lookup aid.
         hit = dict(hit, origin='spotify')
-        return [hit], None
+        return _spotify_resolve_outcome([hit], show_name=show_name)
     if shows:
-        return [_itunes_show_result(shows[0])], (
-            f'Found "{meta["show"]}", but this episode isn\'t in its public feed -- it may be '
-            'Spotify-exclusive. Open the show below to pick from the episodes that are.')
-    name = meta['show'] or meta['title']
-    return [], f'"{name}" has no public podcast feed. {SPOTIFY_NO_FEED_HINT}'
+        return _spotify_resolve_outcome(
+            [_itunes_show_result(shows[0])],
+            (f'Found "{show_name}", but this episode isn\'t in its public feed. '
+             'Open the show below to pick from the episodes that are.'),
+            'episode_not_in_feed', show_name)
+    name = show_name or title
+    return _spotify_resolve_outcome(
+        [], _no_feed_message(name), 'no_feed', show_name or name)
+
+
+def _log_spotify_resolve_failure(spotify_id, kind, error_kind):
+    if not error_kind:
+        return
+    app.logger.info(
+        'spotify resolve failed id=%s type=%s error_kind=%s',
+        spotify_id or '-', kind or '-', error_kind)
 
 
 @app.route('/resolve-spotify', methods=['GET'])
 def resolve_spotify():
     """Turn a pasted Spotify episode/show link into a search-box result."""
+    raw = request.args.get('url', '').strip()
+    kind, spotify_id = parse_spotify_url(raw)
+    outcome = None
     try:
-        results, error = resolve_spotify_url(request.args.get('url', '').strip())
+        outcome = resolve_spotify_url(raw)
     except requests.RequestException:
-        results, error = [], "Couldn't reach the podcast directory. Try again in a moment."
-    return jsonify({'results': results, 'error': error})
+        try:
+            time.sleep(SPOTIFY_DIRECTORY_RETRY_PAUSE_SEC)
+            outcome = resolve_spotify_url(raw)
+        except requests.RequestException:
+            outcome = _spotify_resolve_outcome(
+                [], "Couldn't reach the podcast directory. Try again in a moment.",
+                'directory_unreachable')
+    _log_spotify_resolve_failure(spotify_id, kind, outcome.get('error_kind'))
+    return jsonify({
+        'results': outcome['results'],
+        'error': outcome['error'],
+        'error_kind': outcome['error_kind'],
+        'show_name': outcome.get('show_name') or '',
+    })
+
+
+# ---------------------------------------------------------------------------
+# Apple Podcasts links
+# ---------------------------------------------------------------------------
+
+#: Any country store: /us/podcast/…/id123, /cn/podcast/…/id123?i=456, …
+APPLE_SHOW_ID_RE = re.compile(r'/id(\d+)', re.I)
+
+
+def parse_apple_podcasts_url(raw):
+    """Return (show_id, episode_id) from a podcasts.apple.com URL.
+
+    ``episode_id`` is None for show-only links. Both are digit strings when
+    present. Returns (None, None) when the URL is not an Apple Podcasts link
+    with a show id.
+    """
+    text = (raw or '').strip()
+    if not text or 'podcasts.apple.com' not in text.lower():
+        return None, None
+    show_match = APPLE_SHOW_ID_RE.search(text)
+    if not show_match:
+        return None, None
+    show_id = show_match.group(1)
+    episode_id = None
+    try:
+        parsed = urlparse(text if '://' in text else 'https://' + text)
+        values = parse_qs(parsed.query).get('i') or []
+        if values and re.fullmatch(r'\d+', values[0] or ''):
+            episode_id = values[0]
+    except ValueError:
+        pass
+    return show_id, episode_id
+
+
+def _itunes_lookup(itunes_id, *, entity=None, limit=None):
+    """Raw iTunes lookup results. Raises requests.RequestException."""
+    params = {'id': itunes_id}
+    if entity:
+        params['entity'] = entity
+    if limit is not None:
+        params['limit'] = limit
+    resp = requests.get('https://itunes.apple.com/lookup', timeout=10, params=params)
+    resp.raise_for_status()
+    return resp.json().get('results', [])
+
+
+def _apple_resolve_outcome(results, error=None, error_kind=None):
+    return {
+        'results': results,
+        'error': error,
+        'error_kind': error_kind,
+    }
+
+
+def _apple_show_from_lookup(items):
+    """The podcast/show row from an iTunes lookup payload, or None."""
+    for item in items:
+        if item.get('kind') == 'podcast' and item.get('feedUrl'):
+            return item
+        # Some payloads omit kind and only set wrapperType=track + feedUrl.
+        if item.get('feedUrl') and item.get('wrapperType') == 'track' and (
+                item.get('kind') in (None, 'podcast')):
+            return item
+    for item in items:
+        if item.get('feedUrl') and not item.get('episodeUrl'):
+            return item
+    return None
+
+
+def _apple_episode_from_lookup(items, episode_id):
+    """Match trackId to the pasted ``i=`` value among podcastEpisode rows."""
+    want = str(episode_id)
+    for item in items:
+        if str(item.get('trackId') or '') != want:
+            continue
+        if item.get('wrapperType') == 'podcastEpisode' or item.get('kind') == 'podcast-episode':
+            return item
+        # Defensive: episode rows always carry episodeUrl; the show row does not.
+        if item.get('episodeUrl'):
+            return item
+    return None
+
+
+def _apple_episode_result(item, show_item=None):
+    """Episode search-box row; copy feedUrl from the show when the episode omits it."""
+    if not item.get('feedUrl') and show_item and show_item.get('feedUrl'):
+        item = dict(item, feedUrl=show_item['feedUrl'])
+    # Pasted Apple Podcasts links are a distinct origin from iTunes name search.
+    return dict(_itunes_episode_result(item), origin='apple')
+
+
+def resolve_apple_url(raw):
+    """Map a podcasts.apple.com show/episode link to a search-box result.
+
+    Returns a dict: results, error, error_kind. Raises
+    requests.RequestException when the iTunes lookup itself fails.
+    """
+    show_id, episode_id = parse_apple_podcasts_url(raw)
+    if not show_id:
+        return _apple_resolve_outcome(
+            [], "That doesn't look like an Apple Podcasts link.",
+            'unreadable_link')
+
+    if episode_id:
+        items = _itunes_lookup(show_id, entity='podcastEpisode', limit=200)
+        show_item = _apple_show_from_lookup(items)
+        episode_item = _apple_episode_from_lookup(items, episode_id)
+        if episode_item and episode_item.get('episodeUrl'):
+            ep = _apple_episode_result(episode_item, show_item)
+            audio = ep.get('audio_url') or ''
+            if audio and not _is_fetchable_url(audio):
+                # Keep the show when audio is on a private host; never fetch it.
+                if show_item and show_item.get('feedUrl') and _is_fetchable_url(
+                        show_item['feedUrl']):
+                    return _apple_resolve_outcome(
+                        [_itunes_show_result(show_item)],
+                        "That episode's audio can't be fetched. "
+                        'The show is below — open it to pick another episode.',
+                        'episode_not_fetchable')
+                return _apple_resolve_outcome(
+                    [], "That episode's audio can't be fetched.",
+                    'episode_not_fetchable')
+            feed = ep.get('feed_url') or ''
+            if feed and not _is_fetchable_url(feed):
+                ep['feed_url'] = ''
+            return _apple_resolve_outcome([ep])
+
+        if show_item and show_item.get('feedUrl') and _is_fetchable_url(
+                show_item['feedUrl']):
+            return _apple_resolve_outcome(
+                [_itunes_show_result(show_item)],
+                "Couldn't find that episode in Apple's directory. "
+                'The show is below — open it to pick an episode.',
+                'episode_not_found')
+        if show_item:
+            return _apple_resolve_outcome(
+                [], 'We couldn\'t find a public RSS feed for that show.',
+                'no_feed')
+        return _apple_resolve_outcome(
+            [], "Couldn't find that Apple Podcasts show.",
+            'not_found')
+
+    items = _itunes_lookup(show_id)
+    show_item = _apple_show_from_lookup(items)
+    if show_item and show_item.get('feedUrl') and _is_fetchable_url(
+            show_item['feedUrl']):
+        return _apple_resolve_outcome([_itunes_show_result(show_item)])
+    if show_item:
+        return _apple_resolve_outcome(
+            [], 'We couldn\'t find a public RSS feed for that show.',
+            'no_feed')
+    return _apple_resolve_outcome(
+        [], "Couldn't find that Apple Podcasts show.",
+        'not_found')
+
+
+def _log_apple_resolve_failure(show_id, episode_id, error_kind):
+    if not error_kind:
+        return
+    app.logger.info(
+        'apple resolve failed show_id=%s episode_id=%s error_kind=%s',
+        show_id or '-', episode_id or '-', error_kind)
+
+
+@app.route('/resolve-apple', methods=['GET'])
+def resolve_apple():
+    """Turn a pasted Apple Podcasts show/episode link into a search-box result."""
+    raw = request.args.get('url', '').strip()
+    show_id, episode_id = parse_apple_podcasts_url(raw)
+    outcome = None
+    try:
+        outcome = resolve_apple_url(raw)
+    except requests.RequestException:
+        try:
+            time.sleep(SPOTIFY_DIRECTORY_RETRY_PAUSE_SEC)
+            outcome = resolve_apple_url(raw)
+        except requests.RequestException:
+            outcome = _apple_resolve_outcome(
+                [], "Couldn't reach the podcast directory. Try again in a moment.",
+                'directory_unreachable')
+    _log_apple_resolve_failure(show_id, episode_id, outcome.get('error_kind'))
+    return jsonify({
+        'results': outcome['results'],
+        'error': outcome['error'],
+        'error_kind': outcome['error_kind'],
+    })
 
 
 # ---------------------------------------------------------------------------

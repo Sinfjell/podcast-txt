@@ -342,6 +342,7 @@
         form.append('podcast_name', retry.podcast_name || '');
         form.append('artwork', retry.artwork || '');
         form.append('published', retry.published || '');
+        if (retry.rss_url) form.append('rss_url', retry.rss_url);
         if (retry.duration_min) form.append('duration_min', retry.duration_min);
         if (retry.language) form.append('language', retry.language);
         fetch('{{ url_for("start_transcription") }}', { method: 'POST', body: form })
