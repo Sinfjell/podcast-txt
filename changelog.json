@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "spotify-resolve-clarity",
+      "date": "2026-10-08",
+      "title": "Clearer help when a Spotify link can't be transcribed",
+      "summary": "Paid Spotify episodes say so plainly and still offer the show when we find it. Shows without a public feed get a softer message and a path to paste the RSS URL. Mangled Spotify links are recognised too."
+    },
+    {
       "id": "history-title-links",
       "date": "2026-10-08",
       "title": "Tap a History title to open it",
