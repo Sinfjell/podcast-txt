@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "stay-logged-in",
+      "date": "2026-10-08",
+      "title": "Stay logged in on your phone",
+      "summary": "Signing up or logging in now keeps you signed in after you close the browser, so returning to a saved transcript no longer sends you to the login wall. Forgot your password? Email hello@podskrift.com until self-serve reset lands."
+    },
+    {
       "id": "history-title-links",
       "date": "2026-10-08",
       "title": "Tap a History title to open it",

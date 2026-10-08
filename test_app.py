@@ -3579,19 +3579,21 @@ def test_public_urls_use_the_configured_origin(trial_on, monkeypatch):
     the JSON-LD @id all pointed at URLs that 301 away."""
     monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
     client = A.app.test_client()
+    # Match the canonical Host so before_request does not 301 away from localhost.
+    host = {'Host': 'podskrift.com'}
 
-    sitemap = client.get('/sitemap.xml').data.decode()
+    sitemap = client.get('/sitemap.xml', headers=host).data.decode()
     assert 'https://podskrift.com/' in sitemap
     assert 'http://localhost' not in sitemap and 'http://podskrift' not in sitemap
 
-    llms = client.get('/llms.txt').data.decode()
+    llms = client.get('/llms.txt', headers=host).data.decode()
     assert 'http://localhost' not in llms
 
-    robots = client.get('/robots.txt').data.decode()
+    robots = client.get('/robots.txt', headers=host).data.decode()
     assert 'Sitemap: https://podskrift.com/sitemap.xml' in robots
 
     import json as _json, re as _re
-    body = client.get('/').data.decode()
+    body = client.get('/', headers=host).data.decode()
     raw = _re.search(r'<script type="application/ld\+json">(.*?)</script>', body, _re.S).group(1)
     data = _json.loads(raw.replace('\\u003c', '<').replace('\\u003e', '>'))
     for node in data['@graph']:
@@ -8157,6 +8159,183 @@ def test_login_page_has_submit_feedback():
     assert 'id="loginSubmit"' in body
     assert 'Logging in' in body
     assert 'novalidate' in body
+
+
+def test_register_sets_remember_cookie_and_permanent_session(trial_on):
+    """Closing Safari must not dump a new signup onto /login."""
+    A._register_attempts.clear()
+    email = 'remember-me@example.com'
+    _purge([email])
+    client = _fresh_client()
+    resp = client.post(
+        '/register',
+        data={'email': email, 'password': 'abcdefgh1'},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (302, 303)
+    set_cookies = resp.headers.getlist('Set-Cookie')
+    remember = [c for c in set_cookies if c.lower().startswith('remember_token=')]
+    assert remember, set_cookies
+    assert 'Expires=' in remember[0] or 'Max-Age=' in remember[0]
+    with client.session_transaction() as sess:
+        assert sess.permanent is True
+    _purge([email])
+
+
+def test_login_sets_remember_cookie_and_permanent_session():
+    uid = _make_user('login-remember@test.com')
+    from models import User
+    with A.app.app_context():
+        email = A.db.session.get(User, uid).email
+    client = A.app.test_client()
+    resp = client.post(
+        '/login',
+        data={'email': email, 'password': 'password123'},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (302, 303)
+    set_cookies = resp.headers.getlist('Set-Cookie')
+    remember = [c for c in set_cookies if c.lower().startswith('remember_token=')]
+    assert remember, set_cookies
+    assert 'Expires=' in remember[0] or 'Max-Age=' in remember[0]
+    with client.session_transaction() as sess:
+        assert sess.permanent is True
+
+
+def test_session_cookie_config_matches_public_origin(monkeypatch):
+    assert A.app.config['PERMANENT_SESSION_LIFETIME'].days == 90
+    assert A.app.config['REMEMBER_COOKIE_DURATION'].days == 365
+    assert A.app.config['SESSION_COOKIE_SAMESITE'] == 'Lax'
+    assert A.app.config['REMEMBER_COOKIE_SAMESITE'] == 'Lax'
+    # Suite leaves PUBLIC_BASE_URL unset / http — Secure must stay off so
+    # test_client cookies work. Production sets https://podskrift.com.
+    if not (A.PUBLIC_BASE_URL or '').startswith('https://'):
+        assert A.app.config['SESSION_COOKIE_SECURE'] is False
+        assert A.app.config['REMEMBER_COOKIE_SECURE'] is False
+
+
+def test_www_host_redirects_301_to_public_base(monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    client = A.app.test_client()
+    resp = client.get(
+        '/pricing?x=1',
+        headers={'Host': 'www.podskrift.com'},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 301
+    assert resp.headers['Location'] == 'https://podskrift.com/pricing?x=1'
+
+
+def test_staging_host_post_redirects_308(monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    client = A.app.test_client()
+    resp = client.post(
+        '/login',
+        headers={'Host': 'podskrift.nettsmed.dev'},
+        data={'email': 'a@b.com', 'password': 'x'},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 308
+    assert resp.headers['Location'] == 'https://podskrift.com/login'
+
+
+def test_stripe_webhook_not_redirected_off_canonical_host(monkeypatch):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    client = A.app.test_client()
+    resp = client.post(
+        '/stripe/webhook',
+        headers={'Host': 'www.podskrift.com'},
+        data=b'{}',
+        content_type='application/json',
+        follow_redirects=False,
+    )
+    assert resp.status_code != 301
+    assert resp.status_code != 308
+    assert 'Location' not in resp.headers or 'podskrift.com/stripe' not in (
+        resp.headers.get('Location') or '')
+
+
+def test_api_path_not_redirected_off_canonical_host(monkeypatch):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    client = A.app.test_client()
+    resp = client.get(
+        '/api/v1/episodes',
+        headers={'Host': 'www.podskrift.com'},
+        follow_redirects=False,
+    )
+    assert resp.status_code != 301
+    assert resp.status_code != 308
+
+
+def test_canonical_link_uses_public_base_url(monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    body = A.app.test_client().get(
+        '/pricing', headers={'Host': 'podskrift.com'}).data.decode()
+    assert 'rel="canonical" href="https://podskrift.com/pricing"' in body
+    assert 'property="og:url" content="https://podskrift.com/pricing"' in body
+
+
+def test_register_existing_account_offers_login_with_next(trial_on):
+    A._register_attempts.clear()
+    email = 'exists-link@example.com'
+    _purge([email])
+    client = _fresh_client()
+    assert 'Account created' in _signup(client, email).data.decode()
+    client = _new_session()
+    resp = client.post(
+        '/register?next=/transcription/abc123',
+        data={'email': email, 'password': 'abcdefgh1'},
+        follow_redirects=True,
+    )
+    body = resp.data.decode()
+    assert 'already exists' in body
+    assert 'Log in instead' in body
+    assert 'next=/transcription/abc123' in body or 'next=%2Ftranscription%2Fabc123' in body
+    _purge([email])
+
+
+def test_login_heading_for_saved_transcript():
+    body = A.app.test_client().get(
+        '/login?next=/transcription/task-xyz').data.decode()
+    assert 'Log in to open your saved transcript' in body
+    assert 'Forgot password?' in body
+    assert 'hello@podskrift.com' in body
+
+
+def test_login_default_heading_without_transcript_next():
+    body = A.app.test_client().get('/login').data.decode()
+    assert 'Log in to open your saved transcript' not in body
+    assert '>Log in<' in body or 'Log in</h2>' in body
+    assert 'Forgot password?' in body
+
+
+def test_register_page_shows_password_rule_upfront(trial_on):
+    body = A.app.test_client().get('/register').data.decode()
+    assert 'minlength="8"' in body
+    assert 'At least 8 characters' in body
+    assert 'id="passwordHint"' in body
+
+
+def test_register_failed_emits_posthog_reason(ph_events, trial_on):
+    A._register_attempts.clear()
+    client = _fresh_client()
+    client.post('/register', data={
+        'email': 'shortpw@example.com',
+        'password': 'short',
+    })
+    fails = [e for e in ph_events.events if e['event'] == 'register_failed']
+    assert fails
+    assert fails[-1]['properties']['reason'] == 'password_too_short'
+    assert 'email' not in fails[-1]['properties']
+
+
+def test_login_wall_shown_emits_next_type(ph_events):
+    client = A.app.test_client()
+    client.get('/login?next=/transcription/abc')
+    walls = [e for e in ph_events.events if e['event'] == 'login_wall_shown']
+    assert len(walls) == 1
+    assert walls[0]['properties']['next_type'] == 'transcription'
+    assert 'email' not in walls[0]['properties']
 
 
 def test_get_episodes_from_rss_timeout_uses_requests(monkeypatch):
