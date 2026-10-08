@@ -4190,6 +4190,23 @@ def test_history_search_page_renders_and_escapes(library):
     assert 'Weather report' not in body
 
 
+def test_history_list_titles_link_to_transcription_page(library):
+    """Default History rows match search: title is a link to the transcript."""
+    owner, _ = library
+    body = _login(owner).get('/history').data.decode().replace("'", '"')
+    assert 'Weather report' in body
+    assert 'Cooking hour' in body
+    # Title itself is the link text (same pattern as search results).
+    assert 'class="list-item-title"' in body
+    assert 'href="/transcription/lib-1"' in body
+    assert '>Weather report</a>' in body
+    assert 'href="/transcription/lib-2"' in body
+    assert '>Cooking hour</a>' in body
+    # Default list is completed-only; in-progress must not appear.
+    assert 'Still running' not in body
+    assert 'href="/transcription/lib-3"' not in body
+
+
 def test_history_search_with_no_hits_says_so(library):
     owner, _ = library
     body = _login(owner).get('/history?q=zeppelin').data.decode()
@@ -5530,7 +5547,7 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'stuck-transcript-recovery'
+    assert entries[0]['id'] == 'history-title-links'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -7442,6 +7459,21 @@ def test_nav_shows_minutes_pill_and_buy_when_stripe_on(stripe_on):
     assert 'id="navBuyPill"' in body
     assert 'from=header_pill' in body
     assert 'buyModalScrim' in body
+
+
+def test_buy_modal_tracks_open_and_close_not_header_pill_click(stripe_on, monkeypatch):
+    """Opening the modal is buy_modal_opened; buy_clicked is form-submit only."""
+    monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
+    uid = _make_user('buymodaltrack@test.com', limit=180 * 60, used=60 * 60)
+    body = _login(uid).get('/').data.decode()
+    assert "posthog.capture('buy_modal_opened'" in body
+    assert "posthog.capture('buy_modal_closed'" in body
+    assert "open_ms" in body
+    assert "podskriftPaywallShown('buy_modal_' + source, 'manual')" in body
+    assert 'closeMobileNav' in body
+    # Header pill must not fire buy_clicked on click — that event means checkout submit.
+    assert "location: 'header_pill'" not in body
+    assert "posthog.capture('buy_clicked', {location: loc" in body
 
 
 def test_nav_hides_buy_when_stripe_off(trial_on):

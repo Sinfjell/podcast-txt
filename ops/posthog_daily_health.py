@@ -61,6 +61,8 @@ PODSKRIFT_EVENTS = (
     'offer_shown',
     'pricing_viewed',
     'paywall_shown',
+    'buy_modal_opened',
+    'buy_modal_closed',
     'buy_clicked',
     'checkout_started',
     'checkout_returned',

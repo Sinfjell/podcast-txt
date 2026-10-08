@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "history-title-links",
+      "date": "2026-10-08",
+      "title": "Tap a History title to open it",
+      "summary": "In your transcription History, the episode title is now a link to the transcript — same as when you search."
+    },
+    {
       "id": "stuck-transcript-recovery",
       "date": "2026-10-07",
       "title": "Stuck transcripts fail cleanly",
