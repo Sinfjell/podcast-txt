@@ -8,6 +8,18 @@
       "summary": "After you finish a transcript from search or a Spotify link, you can again pick another episode from that show or follow it — the feed URL is saved with the job."
     },
     {
+      "id": "stay-logged-in",
+      "date": "2026-10-08",
+      "title": "Stay logged in on your phone",
+      "summary": "Signing up or logging in now keeps you signed in after you close the browser, so returning to a saved transcript no longer sends you to the login wall. Forgot your password? Email hello@podskrift.com until self-serve reset lands."
+    },
+    {
+      "id": "spotify-resolve-clarity",
+      "date": "2026-10-08",
+      "title": "Clearer help when a Spotify link can't be transcribed",
+      "summary": "Paid Spotify episodes say so plainly and still offer the show when we find it. Shows without a public feed get a softer message and a path to paste the RSS URL. Mangled Spotify links are recognised too."
+    },
+    {
       "id": "history-title-links",
       "date": "2026-10-08",
       "title": "Tap a History title to open it",

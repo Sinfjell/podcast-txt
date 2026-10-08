@@ -525,8 +525,9 @@
     }
 
     // A pasted Spotify link is resolved to the show's public feed server-side
-    // instead of being searched for as text.
-    var SPOTIFY_RE = /(open\.spotify\.com\/.*(episode|show)\/[A-Za-z0-9]{22}|spotify:(episode|show):[A-Za-z0-9]{22})/i;
+    // instead of being searched for as text. Also catches mangled hosts that
+    // still end in episode|show|sode/<22-char-id>.
+    var SPOTIFY_RE = /(open\.spotify\.com\/.*(episode|show)\/[A-Za-z0-9]{22}|spotify:(episode|show):[A-Za-z0-9]{22}|(?:^|[^A-Za-z0-9])(?:episode|show|sode)\/[A-Za-z0-9]{22}(?![A-Za-z0-9]))/i;
     var APPLE_RE = /podcasts\.apple\.com/i;
     var YOUTUBE_RE = /(youtube\.com|youtu\.be)\//i;
     var AUDIO_EXT_RE = /\.(mp3|m4a|wav|aac|ogg|mp4|mpeg)(\?|#|$)/i;
@@ -551,29 +552,77 @@
         return 'name';
     }
 
-    function searchProps(query, resultCount, errored) {
-        return {
+    function searchProps(query, resultCount, errored, errorKind) {
+        var props = {
             query: (query || '').trim().slice(0, 200),
             result_count: resultCount,
             input_type: detectInputType(query),
             errored: !!errored,
             search_type: searchType
         };
+        if (errorKind) props.error_kind = errorKind;
+        return props;
     }
 
     // Top of the funnel. Query is fine to send (not a secret); transcript text
     // stays out of analytics elsewhere.
-    function trackSearch(query, resultCount, errored) {
+    function trackSearch(query, resultCount, errored, errorKind) {
         if (!(window.posthog && window.posthog.capture)) return;
-        var props = searchProps(query, resultCount, errored);
+        var props = searchProps(query, resultCount, errored, errorKind);
         window.posthog.capture('podcast_searched', props);
         if (errored || !resultCount) {
             window.posthog.capture('podcast_search_no_results', props);
         }
     }
 
+    function showSearchNotice(text) {
+        var notice = document.createElement('p');
+        notice.className = 'search-notice';
+        notice.setAttribute('role', 'status');
+        notice.textContent = text;
+        notice.style.color = 'var(--error)';
+        notice.style.margin = '0 0 10px';
+        notice.style.fontSize = '13.5px';
+        notice.style.lineHeight = '1.55';
+        resultsDiv.appendChild(notice);
+    }
+
+    function offerShowNameSearch(showName) {
+        if (!showName) return;
+        var tip = document.createElement('p');
+        tip.className = 'search-show-hint';
+        tip.style.margin = '0 0 10px';
+        tip.style.color = 'var(--muted)';
+        tip.style.fontSize = '13.5px';
+        tip.style.lineHeight = '1.55';
+        tip.appendChild(document.createTextNode('Or '));
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'search for “' + showName + '”';
+        btn.style.background = 'none';
+        btn.style.border = 'none';
+        btn.style.padding = '0';
+        btn.style.color = 'var(--accent, var(--link, #0b57d0))';
+        btn.style.cursor = 'pointer';
+        btn.style.font = 'inherit';
+        btn.style.textDecoration = 'underline';
+        btn.addEventListener('click', function() {
+            searchInput.value = showName;
+            // Force a name search even if the box still looks like a Spotify URL.
+            searchType = 'show';
+            tabs.querySelectorAll('.tab').forEach(function(t) {
+                t.classList.toggle('active', t.dataset.type === 'show');
+            });
+            langRow.classList.add('hidden');
+            doSearch();
+        });
+        tip.appendChild(btn);
+        tip.appendChild(document.createTextNode(' by name.'));
+        resultsDiv.appendChild(tip);
+    }
+
     function showSearchEmptyState(opts) {
-        // opts: { query, errored, errorText, resultCount }
+        // opts: { query, errored, errorText, resultCount, errorKind, showName }
         clearResults();
         resultsDiv.style.padding = '12px 0';
         resultsDiv.style.color = '';
@@ -600,7 +649,10 @@
         tip.appendChild(link);
         wrap.appendChild(tip);
         resultsDiv.appendChild(wrap);
-        trackSearch(opts.query, opts.resultCount || 0, !!opts.errored);
+        if (opts.showName && opts.errorKind === 'no_feed') {
+            offerShowNameSearch(opts.showName);
+        }
+        trackSearch(opts.query, opts.resultCount || 0, !!opts.errored, opts.errorKind);
     }
 
     function resolveSpotify(url, seq) {
@@ -613,16 +665,24 @@
                 resultsDiv.style.padding = '0';
                 resultsDiv.style.color = '';
                 var results = data.results || [];
-                if (data.error || !results.length) {
+                var errorKind = data.error_kind || '';
+                // Empty results → empty state. Results + error → notice above cards.
+                if (!results.length) {
                     showSearchEmptyState({
                         query: url,
                         errored: !!data.error,
                         errorText: data.error || '',
-                        resultCount: results.length
+                        resultCount: 0,
+                        errorKind: errorKind,
+                        showName: data.show_name || ''
                     });
                     return;
                 }
-                trackSearch(url, results.length, false);
+                resultsDiv.style.padding = data.error ? '12px 0 0' : '0';
+                if (data.error) {
+                    showSearchNotice(data.error);
+                }
+                trackSearch(url, results.length, !!data.error, errorKind);
                 renderList(results);
                 // An episode hit transcribes directly, so the language must be pickable
                 langRow.classList.toggle('hidden',
@@ -634,7 +694,8 @@
                     query: url,
                     errored: true,
                     errorText: 'Could not look up that Spotify link.',
-                    resultCount: 0
+                    resultCount: 0,
+                    errorKind: 'unreadable_link'
                 });
             });
     }
