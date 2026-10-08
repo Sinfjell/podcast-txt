@@ -2307,12 +2307,17 @@ def test_concurrent_transcriptions_are_capped(trial_on, monkeypatch):
     monkeypatch.setattr(A, '_transcription_slots', _t.BoundedSemaphore(2))
 
     uid = _make_user('cap@test.com', limit=36000)
-    data = {'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
-            'duration_min': '5', 'language': 'no'}
+    # Distinct audio URLs: the web duplicate guard would otherwise reuse the
+    # first task and never ask for a third capacity slot.
+    def _start(n):
+        return _post_start(monkeypatch, uid, {
+            'audio_url': f'https://example.com/cap-{n}.mp3',
+            'episode_title': 'Ep', 'duration_min': '5', 'language': 'no',
+        })
 
-    assert _post_start(monkeypatch, uid, data).status_code == 200
-    assert _post_start(monkeypatch, uid, data).status_code == 200
-    third = _post_start(monkeypatch, uid, data)
+    assert _start(1).status_code == 200
+    assert _start(2).status_code == 200
+    third = _start(3)
     assert third.status_code == 503
     assert 'try again' in third.get_json()['error'].lower()
 
@@ -5564,7 +5569,7 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'history-title-links'
+    assert entries[0]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -5726,9 +5731,11 @@ def test_worker_reports_trial_exhausted_at_reconcile(ph_events, monkeypatch, tri
                    'duration_min': 1})
     assert status == 200, payload
     failed = [e for e in ph_events.events if e['event'] == 'transcript_failed']
-    assert [f['properties'] for f in failed] == [
-        {'key_source': 'trial', 'source': 'web', 'reason': 'trial_exhausted',
-         'app': 'podskrift'}]
+    assert len(failed) == 1
+    assert failed[0]['properties']['key_source'] == 'trial'
+    assert failed[0]['properties']['source'] == 'web'
+    assert failed[0]['properties']['reason'] == 'trial_exhausted'
+    assert failed[0]['properties']['app'] == 'podskrift'
     assert [h['properties'] for h in _limit_hits(ph_events)] == [
         {'scope': 'user', 'stage': 'reconcile', 'source': 'web',
          'estimate_min': 1, 'remaining_min': 60, 'app': 'podskrift'}]
@@ -5741,8 +5748,14 @@ def test_api_transcriptions_are_labelled_api(ph_events, agent_write):
         json_body={'publisher': 'Spårtsklubben', 'date': '2026-09-10'})
     assert r.status_code == 201, r.get_json()
     started = [e for e in ph_events.events if e['event'] == 'transcript_started']
-    assert [e['properties'] for e in started] == [
-        {'key_source': 'trial', 'source': 'api', 'app': 'podskrift'}]
+    assert len(started) == 1
+    props = started[0]['properties']
+    assert props['key_source'] == 'trial'
+    assert props['source'] == 'api'
+    assert props['app'] == 'podskrift'
+    assert props['input_origin'] == 'rss'
+    assert props['has_feed'] is True
+    assert props['podcast_name'] == 'Spårtsklubben'
 
 
 def test_search_emits_podcast_searched_with_query_and_input_type(monkeypatch):
@@ -8212,17 +8225,17 @@ def test_web_enqueue_reuses_running_task_without_double_charge(monkeypatch, tria
     """Restarting the same audio URL while it is live must not reserve again."""
     uid = _make_user('dup-run@test.com', limit=3600)
     first = _post_start(monkeypatch, uid, {
-        'audio_url': 'https://cdn.example.com/same-ep.mp3',
+        'audio_url': 'https://example.com/same-ep.mp3',
         'episode_title': 'Same Ep',
         'duration_min': '5',
     })
-    assert first.status_code == 200
+    assert first.status_code == 200, first.get_json()
     first_id = first.get_json()['task_id']
     used_after_first = _used(uid)
     assert used_after_first == 300  # 5 min reserved
 
     second = _post_start(monkeypatch, uid, {
-        'audio_url': 'https://cdn.example.com/same-ep.mp3',
+        'audio_url': 'https://example.com/same-ep.mp3',
         'episode_title': 'Same Ep again',
         'duration_min': '5',
     })
@@ -8238,13 +8251,13 @@ def test_web_enqueue_reuses_completed_task_without_double_charge(monkeypatch, tr
     from models import db, TranscriptionTask
 
     uid = _make_user('dup-done@test.com', limit=3600)
-    audio = 'https://cdn.example.com/finished-ep.mp3'
+    audio = 'https://example.com/finished-ep.mp3'
     first = _post_start(monkeypatch, uid, {
         'audio_url': audio,
         'episode_title': 'Done Ep',
         'duration_min': '4',
     })
-    assert first.status_code == 200
+    assert first.status_code == 200, first.get_json()
     task_id = first.get_json()['task_id']
     used_after = _used(uid)
 
@@ -8268,15 +8281,21 @@ def test_web_enqueue_reuses_completed_task_without_double_charge(monkeypatch, tr
 
 def test_web_enqueue_allows_rerun_after_error(monkeypatch, trial_on):
     """Error/cancelled tasks may be started again (and reserve again)."""
+    import threading as _t
     from models import db, TranscriptionTask
 
+    # Default concurrency is 1; the stubbed worker never releases its slot.
+    monkeypatch.setattr(A, 'MAX_CONCURRENT_TRANSCRIPTIONS', 2)
+    monkeypatch.setattr(A, '_transcription_slots', _t.BoundedSemaphore(2))
+
     uid = _make_user('dup-err@test.com', limit=3600)
-    audio = 'https://cdn.example.com/failed-ep.mp3'
+    audio = 'https://example.com/failed-ep.mp3'
     first = _post_start(monkeypatch, uid, {
         'audio_url': audio,
         'episode_title': 'Fail Ep',
         'duration_min': '3',
     })
+    assert first.status_code == 200, first.get_json()
     task_id = first.get_json()['task_id']
     with A.app.app_context():
         task = db.session.get(TranscriptionTask, task_id)
@@ -8292,7 +8311,7 @@ def test_web_enqueue_allows_rerun_after_error(monkeypatch, trial_on):
         'episode_title': 'Fail Ep',
         'duration_min': '3',
     })
-    assert second.status_code == 200
+    assert second.status_code == 200, second.get_json()
     body = second.get_json()
     assert body.get('existing') is not True
     assert body['task_id'] != task_id
@@ -8301,11 +8320,14 @@ def test_web_enqueue_allows_rerun_after_error(monkeypatch, trial_on):
 
 def test_api_enqueue_is_not_blocked_by_web_duplicate_guard(monkeypatch, trial_on):
     """Duplicate guard is web-only; agent/api keeps its own reuse logic."""
+    import threading as _t
     import types
     from models import db, User
 
+    monkeypatch.setattr(A, 'MAX_CONCURRENT_TRANSCRIPTIONS', 2)
+    monkeypatch.setattr(A, '_transcription_slots', _t.BoundedSemaphore(2))
     uid = _make_user('dup-api@test.com', key='sk-' + 'a' * 40)
-    audio = 'https://cdn.example.com/api-ep.mp3'
+    audio = 'https://example.com/api-ep.mp3'
     monkeypatch.setattr(
         A.threading, 'Thread',
         lambda *a, **kw: types.SimpleNamespace(daemon=True, start=lambda: None))
