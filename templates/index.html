@@ -471,6 +471,7 @@
                 language: langSelect.value
             };
             if (item.duration_min) fields.duration_min = item.duration_min;
+            if (item.origin) fields.input_origin = item.origin;
 
             if (!IS_AUTHENTICATED) {
                 // Stash the episode, then /register?next=/resume-transcription.

@@ -46,6 +46,15 @@ DEFAULT_DATABASE_ID = '0d846d9fc2a4441ba5d542eb4e7609da'
 NOTION_VERSION = '2022-06-28'
 # Matches app.py TRIAL_MINUTES default when users.trial_seconds_limit is NULL.
 DEFAULT_TRIAL_MINUTES = 180
+# Matches app.py TRIAL_GLOBAL_MINUTES — lifetime ceiling across all accounts.
+DEFAULT_TRIAL_GLOBAL_MINUTES = 1800
+# Warn (Notes + Sentry) when lifetime global trial usage crosses these ratios.
+TRIAL_GLOBAL_WARN_THRESHOLDS = (0.70, 0.90)
+
+try:
+    import sentry_sdk
+except ImportError:  # pragma: no cover - metrics host may omit the SDK
+    sentry_sdk = None
 
 
 def _script_dir() -> Path:
@@ -107,8 +116,96 @@ def _scalar(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> int | flo
     return 0 if value is None else value
 
 
+def trial_global_usage_ratio(used_seconds: int | float, cap_seconds: int | float) -> float | None:
+    """used/cap, or None when the cap is disabled (0)."""
+    cap = int(cap_seconds or 0)
+    if cap <= 0:
+        return None
+    return max(0.0, float(used_seconds or 0) / cap)
+
+
+def trial_global_cap_warning_lines(
+    used_seconds: int | float,
+    cap_seconds: int | float,
+) -> list[str]:
+    """Norwegian Notes lines when usage crosses 70% / 90% of the lifetime cap."""
+    ratio = trial_global_usage_ratio(used_seconds, cap_seconds)
+    if ratio is None:
+        return []
+    used_min = float(used_seconds or 0) / 60.0
+    cap_min = float(cap_seconds) / 60.0
+    lines: list[str] = []
+    for threshold in TRIAL_GLOBAL_WARN_THRESHOLDS:
+        if ratio >= threshold:
+            lines.append(
+                f'Global trial-tak: {used_min:.0f}/{cap_min:.0f} min brukt '
+                f'({ratio:.0%} av TRIAL_GLOBAL_MINUTES-taket, varsel ved '
+                f'{int(threshold * 100)}%+). Gratis-minutter kan snart stoppe '
+                f'for alle kontoer.'
+            )
+    return lines
+
+
+def emit_trial_global_sentry_warnings(
+    used_seconds: int | float,
+    cap_seconds: int | float,
+    *,
+    metric_day: date,
+) -> list[float]:
+    """Fire one Sentry warning per crossed threshold (fingerprint = day+pct).
+
+    Returns the thresholds that fired. Never raises. No-op without SENTRY_DSN.
+    """
+    ratio = trial_global_usage_ratio(used_seconds, cap_seconds)
+    if ratio is None or sentry_sdk is None:
+        return []
+    dsn = os.environ.get('SENTRY_DSN', '').strip()
+    if not dsn:
+        return []
+    try:
+        # Soft init so a bare cron host with only the DSN set still reports.
+        # Tests may have already initialised a capturing transport.
+        client = None
+        try:
+            client = sentry_sdk.get_client()
+        except Exception:  # noqa: BLE001
+            client = None
+        if client is None or not getattr(client, 'dsn', None):
+            sentry_sdk.init(
+                dsn=dsn,
+                environment=os.environ.get('SENTRY_ENVIRONMENT', 'production'),
+                traces_sample_rate=0.0,
+                send_default_pii=False,
+            )
+    except Exception:  # noqa: BLE001
+        return []
+    used_min = float(used_seconds or 0) / 60.0
+    cap_min = float(cap_seconds) / 60.0
+    fired: list[float] = []
+    for threshold in TRIAL_GLOBAL_WARN_THRESHOLDS:
+        if ratio < threshold:
+            continue
+        pct = int(threshold * 100)
+        try:
+            sentry_sdk.capture_message(
+                f'Global trial allowance at {ratio:.0%} of cap '
+                f'({used_min:.0f}/{cap_min:.0f} min)',
+                level='warning',
+                fingerprint=[
+                    'trial-global-cap',
+                    str(pct),
+                    metric_day.isoformat(),
+                ],
+            )
+            fired.append(threshold)
+        except Exception:  # noqa: BLE001 — metrics must never die on Sentry
+            pass
+    return fired
+
+
 def collect_metrics(conn: sqlite3.Connection, day: date,
-                    trial_default_seconds: int) -> dict:
+                    trial_default_seconds: int,
+                    trial_global_seconds: int | None = None) -> dict:
     start, end = day_bounds_utc(day)
 
     users_total = _scalar(
@@ -204,12 +301,15 @@ def collect_metrics(conn: sqlite3.Connection, day: date,
         days_by_user.setdefault(int(row['user_id']), set()).add(oslo_day)
     returned_2plus = sum(1 for days in days_by_user.values() if len(days) >= 2)
 
-    trial_minutes_used = float(_scalar(
+    trial_seconds_used_total = int(_scalar(
         conn,
-        'SELECT COALESCE(SUM(trial_seconds_used), 0) / 60.0 FROM users',
+        'SELECT COALESCE(SUM(trial_seconds_used), 0) FROM users',
     ))
-    # Round to one decimal for a stable Notion number.
-    trial_minutes_used = round(trial_minutes_used, 1)
+    trial_minutes_used = round(trial_seconds_used_total / 60.0, 1)
+    if trial_global_seconds is None:
+        trial_global_seconds = DEFAULT_TRIAL_GLOBAL_MINUTES * 60
+    trial_global_cap_minutes = round(int(trial_global_seconds) / 60.0, 1)
+    trial_global_used_minutes = trial_minutes_used
 
     trial_exhausted = _scalar(
         conn,
@@ -237,8 +337,15 @@ def collect_metrics(conn: sqlite3.Connection, day: date,
         'Ever completed': int(ever_completed),
         'Returned 2+ days': int(returned_2plus),
         'Trial minutes used': trial_minutes_used,
+        # Lifetime global ceiling (same SUM as Trial minutes used vs TRIAL_GLOBAL).
+        # Printed in the cron JSON; not synced as Notion columns (no schema change).
+        'Trial global used minutes': trial_global_used_minutes,
+        'Trial global cap minutes': trial_global_cap_minutes,
         'Trial exhausted': int(trial_exhausted),
         'Saved feeds': int(saved_feeds),
+        # Internal seconds for threshold checks (not Notion-bound).
+        '_trial_global_used_seconds': trial_seconds_used_total,
+        '_trial_global_cap_seconds': int(trial_global_seconds),
     }
 
 
@@ -458,14 +565,28 @@ def main(argv: list[str] | None = None) -> int:
     trial_minutes = int(os.environ.get('TRIAL_MINUTES', DEFAULT_TRIAL_MINUTES))
     trial_default_seconds = trial_minutes * 60
 
+    trial_global_minutes = int(
+        os.environ.get('TRIAL_GLOBAL_MINUTES', DEFAULT_TRIAL_GLOBAL_MINUTES)
+    )
+    trial_global_seconds = max(0, trial_global_minutes) * 60
+
     day = parse_day(args.day)
     with open_db(db_path) as conn:
-        metrics = collect_metrics(conn, day, trial_default_seconds)
+        metrics = collect_metrics(
+            conn, day, trial_default_seconds,
+            trial_global_seconds=trial_global_seconds,
+        )
 
     # Health check after metrics collect; failures become a single Notes line.
     health_lines = run_health_check(day)
+    # Lifetime global trial ceiling — silent stop risk for every free-trial user.
+    used_s = metrics.pop('_trial_global_used_seconds', 0)
+    cap_s = metrics.pop('_trial_global_cap_seconds', trial_global_seconds)
+    health_lines.extend(trial_global_cap_warning_lines(used_s, cap_s))
+    emit_trial_global_sentry_warnings(used_s, cap_s, metric_day=day)
     notes_content = phh.format_notes_content(health_lines)
 
+    # Public metrics JSON (no internal underscore keys).
     print(json.dumps(metrics, indent=2, sort_keys=True))
     if notes_content:
         print(notes_content)

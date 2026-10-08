@@ -457,6 +457,68 @@ SUPPORTED_LANGUAGES = [(code, native) for code, native, _ in SUPPORTED_LANGUAGES
 #: cannot drift: an earlier version kept a second hand-written list.
 LANGUAGE_ENGLISH_NAMES = {code: english for code, _, english in SUPPORTED_LANGUAGES_FULL if code}
 VALID_LANGUAGE_CODES = {code for code, _ in SUPPORTED_LANGUAGES}
+#: Whisper returns English language *names* ('english'); the picker stores ISO
+#: codes ('en'). Map both directions so storage and retries stay consistent.
+LANGUAGE_NAME_TO_CODE = {
+    english.casefold(): code for code, english in LANGUAGE_ENGLISH_NAMES.items()
+}
+
+
+def normalize_language_code(value):
+    """Return an ISO language code, or '' (auto-detect) when unknown.
+
+    Accepts picker codes (`en`) and Whisper/legacy names (`english`). Unknown
+    values become auto rather than being stored or sent to Whisper as junk.
+    """
+    if not value:
+        return ''
+    raw = str(value).strip()
+    if not raw:
+        return ''
+    lowered = raw.casefold()
+    if lowered in VALID_LANGUAGE_CODES:
+        return lowered
+    return LANGUAGE_NAME_TO_CODE.get(lowered, '')
+
+
+def display_language(value):
+    """Human label for a stored language: codes → English name; names stay as-is."""
+    if not value:
+        return ''
+    code = normalize_language_code(value)
+    if code and code in LANGUAGE_ENGLISH_NAMES:
+        return LANGUAGE_ENGLISH_NAMES[code]
+    # Legacy row that held a name we do not map, or free text — show as stored.
+    return str(value).strip()
+
+
+#: Origins we record on transcript_* analytics. Explicit meta wins; otherwise
+#: derived from rss_url / audio-only path.
+VALID_INPUT_ORIGINS = frozenset({
+    'spotify', 'itunes_episode', 'rss', 'apple', 'audio',
+})
+
+
+def derive_input_origin(meta, rss_url=None):
+    """Classify how the episode was chosen for analytics."""
+    explicit = (meta.get('input_origin') or '').strip().lower()
+    if explicit in VALID_INPUT_ORIGINS:
+        return explicit
+    feed = (rss_url or meta.get('rss_url') or '').strip()
+    if feed:
+        if 'podcasts.apple.com' in feed.lower():
+            return 'apple'
+        return 'rss'
+    return 'audio'
+
+
+def safe_download_basename(title):
+    """Filename stem safe for Content-Disposition: no path seps or control chars."""
+    base = (title or 'transcript').replace(' ', '_')
+    # Strip separators and Windows-forbidden characters; keep letters/digits/_-.
+    base = re.sub(r'[/\\:*?"<>|\x00-\x1f]+', '_', base)
+    base = re.sub(r'_+', '_', base).strip('._')
+    return base or 'transcript'
 
 
 def build_openai_client(key):
@@ -1860,6 +1922,9 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
                 })
 
         detected = getattr(chunk_transcript, 'language', None)
+        # Store ISO codes only. Whisper returns names like 'english'; the
+        # picker sends 'en'. normalize_language_code maps both; unknown → auto.
+        stored_lang = normalize_language_code(language or detected) or None
         # Publish the text we have so far so the page can show it streaming in
         # instead of an empty box. History only lists completed tasks, so a
         # partial write here is never user-visible as a finished transcript.
@@ -1867,7 +1932,7 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
             task_id,
             transcript_text=full_text.strip(),
             progress=_transcribe_checkpoint(i + 1, total),
-            language=language or detected or None,
+            language=stored_lang,
         )
 
         os.remove(chunk_file)
@@ -2220,9 +2285,7 @@ def login():
 
 def _stash_pending_from_request():
     """Pull episode fields off the request into the session. Returns an error or None."""
-    language = request.form.get('language', '')
-    if language not in VALID_LANGUAGE_CODES:
-        language = ''
+    language = normalize_language_code(request.form.get('language', ''))
 
     audio_url = (request.form.get('audio_url') or '').strip()
     rss_url = (request.form.get('rss_url') or '').strip() or None
@@ -2238,6 +2301,7 @@ def _stash_pending_from_request():
         'artwork': (request.form.get('artwork') or '').strip() or None,
         'published': (request.form.get('published') or '').strip() or None,
         'duration_min': _positive_float_or_none(request.form.get('duration_min')),
+        'input_origin': (request.form.get('input_origin') or '').strip() or None,
     }
 
     if audio_url:
@@ -2288,9 +2352,10 @@ def resume_transcription():
         flash('Nothing to resume — search for an episode to transcribe.', 'info')
         return redirect(url_for('index'))
 
-    language = pending.get('language') or ''
+    language = normalize_language_code(pending.get('language') or '')
     rss_url = pending.get('rss_url')
     episode_index = pending.get('episode_index')
+    pending_origin = pending.get('input_origin') or ''
 
     if rss_url is not None and episode_index is not None:
         episodes, error = get_episodes_from_rss(rss_url)
@@ -2305,6 +2370,7 @@ def resume_transcription():
             'artwork': episode.get('artwork') or pending.get('artwork'),
             'published': episode.get('published'),
             'duration_min': _positive_float_or_none(episode.get('duration_min')),
+            'input_origin': pending_origin or 'rss',
         }
     else:
         audio_url = (pending.get('audio_url') or '').strip()
@@ -2318,6 +2384,7 @@ def resume_transcription():
             'artwork': pending.get('artwork'),
             'published': pending.get('published'),
             'duration_min': _positive_float_or_none(pending.get('duration_min')),
+            'input_origin': pending_origin,
         }
 
     payload, status = enqueue_transcription(
@@ -3691,6 +3758,35 @@ def _capture_trial_limit_hit(user_id, scope, stage, source,
     product_analytics.capture('trial_limit_hit', user_id, props)
 
 
+def _find_existing_web_task(user_id, source_audio_url):
+    """Return a same-user task for this audio that is still live or finished.
+
+    Error/cancelled tasks are intentionally omitted so the user can re-run.
+    Used only on the web path to avoid double-reserving trial minutes when
+    someone restarts an episode that is already queued, running, or done.
+    """
+    if not source_audio_url:
+        return None
+    return (
+        TranscriptionTask.query
+        .filter(
+            TranscriptionTask.user_id == user_id,
+            TranscriptionTask.source_audio_url == source_audio_url,
+            ~TranscriptionTask.status.in_(TERMINAL_STATUSES),
+        )
+        .order_by(TranscriptionTask.started_at.desc())
+        .first()
+    )
+
+
+def _completed_transcript_count(user_id):
+    return (
+        TranscriptionTask.query
+        .filter_by(user_id=user_id, status='completed')
+        .count()
+    )
+
+
 def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
     """Start Whisper for one episode on behalf of `user`.
 
@@ -3702,8 +3798,7 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
     `meta` keys: title, audio_url, podcast_name, artwork, published, duration_min.
     `source` is 'web' or 'api'; it only labels the analytics events.
     """
-    if language not in VALID_LANGUAGE_CODES:
-        language = ''
+    language = normalize_language_code(language)
 
     audio_url = (meta.get('audio_url') or '').strip()
     if not audio_url or not _is_fetchable_url(audio_url):
@@ -3714,14 +3809,42 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
     # Evaluating .id inside the thread is what turned completed jobs into
     # status=error with "'NoneType' object has no attribute 'id'".
     user_id = user.id
+
+    # Web only: restarting a live or finished episode must not reserve again.
+    # Checked before admission/reserve so a redirect costs nothing.
+    if source == 'web':
+        existing = _find_existing_web_task(user_id, audio_url)
+        if existing is not None:
+            return {'task_id': existing.id, 'existing': True}, 200
+
     api_key, key_source = resolve_openai_key(user)
     if not api_key:
         return {
             'error': 'No OpenAI API key configured. Add your key in Settings.'
         }, 400
     openai_client = build_openai_client(api_key)
-    # Every analytics event for this job carries the same two labels.
-    ph_props = {'key_source': key_source, 'source': source}
+
+    duration_min = meta.get('duration_min')
+    try:
+        duration_min = float(duration_min) if duration_min is not None else None
+    except (TypeError, ValueError):
+        duration_min = None
+    input_origin = derive_input_origin(meta, rss_url=rss_url)
+    podcast_name = meta.get('podcast_name') or None
+    has_feed = bool((rss_url or '').strip())
+    # Anticipated rank: completed so far + this new job.
+    nth_transcript = _completed_transcript_count(user_id) + 1
+    # Every analytics event for this job carries the same labels.
+    ph_props = {
+        'key_source': key_source,
+        'source': source,
+        'duration_min': duration_min,
+        'language': language or None,
+        'input_origin': input_origin,
+        'has_feed': has_feed,
+        'podcast_name': podcast_name,
+        'nth_transcript': nth_transcript,
+    }
 
     # Admission control, before anything is reserved or written, so a refusal
     # has nothing to unwind. This box is shared with 50+ other services, so
@@ -3940,8 +4063,22 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                         # capture() also swallows, but keep a local guard so a
                         # broken monkeypatch / SDK cannot fail the job either.
                         try:
+                            done_props = dict(ph_props)
+                            finished = db.session.get(TranscriptionTask, task_id)
+                            if finished is not None:
+                                if finished.audio_duration:
+                                    done_props['duration_min'] = round(
+                                        finished.audio_duration / 60.0, 2)
+                                if finished.language:
+                                    done_props['language'] = normalize_language_code(
+                                        finished.language) or None
+                                if finished.podcast_name:
+                                    done_props['podcast_name'] = finished.podcast_name
+                                # Incl. this completion (status is already completed).
+                                done_props['nth_transcript'] = (
+                                    _completed_transcript_count(user_id))
                             product_analytics.capture(
-                                'transcript_completed', user_id, ph_props)
+                                'transcript_completed', user_id, done_props)
                         except Exception:  # noqa: BLE001
                             app.logger.exception(
                                 'transcript_completed analytics failed for %s',
@@ -3995,9 +4132,8 @@ def start_transcription():
     # obeys as a hard constraint, so the result is phonetic nonsense that we
     # still paid for. The same reasoning makes it the right fallback for an
     # unrecognised value: guessing beats asserting something we cannot know.
-    language = request.form.get('language', '')
-    if language not in VALID_LANGUAGE_CODES:
-        language = ''
+    # Also maps Whisper/legacy names ('english') so a retry of an old task works.
+    language = normalize_language_code(request.form.get('language', ''))
 
     audio_url = request.form.get('audio_url')
     rss_url = request.form.get('rss_url')
@@ -4012,6 +4148,7 @@ def start_transcription():
             'artwork': request.form.get('artwork'),
             'published': request.form.get('published'),
             'duration_min': _positive_float_or_none(request.form.get('duration_min')),
+            'input_origin': request.form.get('input_origin') or '',
         }
     else:
         if not rss_url or request.form.get('episode_index') in (None, ''):
@@ -4033,6 +4170,8 @@ def start_transcription():
             'artwork': episode.get('artwork') or request.form.get('artwork'),
             'published': episode.get('published'),
             'duration_min': _positive_float_or_none(episode.get('duration_min')),
+            # RSS picker path (incl. Apple→RSS): prefer an explicit form value.
+            'input_origin': request.form.get('input_origin') or 'rss',
         }
 
     payload, status = enqueue_transcription(
@@ -4290,7 +4429,8 @@ def get_status(task_id):
                     'published': task.episode_published or '',
                     'duration_min': (
                         str(duration_min) if duration_min is not None else ''),
-                    'language': task.language or '',
+                    # Always an ISO code (or '') so start_transcription accepts it.
+                    'language': normalize_language_code(task.language) or '',
                 }
             if stripe_checkout_enabled():
                 result['buy_available'] = True
@@ -4325,7 +4465,8 @@ def get_status(task_id):
         if task.transcription_time:
             result['actual_transcription_time'] = f"{task.transcription_time:.1f} seconds"
         if task.language:
-            result['language'] = task.language
+            # Display name for UI; old rows with names still look fine.
+            result['language'] = display_language(task.language)
 
     return jsonify(result)
 
@@ -4440,7 +4581,7 @@ def download_file(task_id, file_type):
     elif task.status != 'completed':
         return "File not found", 404
 
-    safe_title = task.episode_title.replace(' ', '_')
+    safe_title = safe_download_basename(task.episode_title)
 
     if file_type == 'txt':
         content = (task.transcript_text or '').encode('utf-8')
@@ -5609,7 +5750,10 @@ def inject_language_count():
     """One number for every surface that quotes it. It was hardcoded in three
     meta tags beside a comment claiming the derived form existed so they could
     not drift."""
-    return {'language_count': len(LANGUAGE_ENGLISH_NAMES)}
+    return {
+        'language_count': len(LANGUAGE_ENGLISH_NAMES),
+        'display_language': display_language,
+    }
 
 
 @app.context_processor
@@ -6159,6 +6303,7 @@ def _itunes_episode_result(item):
         'estimated_cost': (
             round(duration_min * WHISPER_COST_PER_MINUTE, 3) if duration_min else None
         ),
+        'origin': 'itunes_episode',
     }
 
 
@@ -6399,9 +6544,12 @@ def resolve_spotify_url(raw):
     for show in shows[:2]:
         hit = _episode_from_feed(show['feedUrl'], meta['title'])
         if hit:
+            hit = dict(hit, origin='spotify')
             return [hit], None
     hit = _episode_from_itunes(meta['title'], meta['show'])
     if hit:
+        # Prefer spotify even when the match came via iTunes as a lookup aid.
+        hit = dict(hit, origin='spotify')
         return [hit], None
     if shows:
         return [_itunes_show_result(shows[0])], (
