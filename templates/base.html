@@ -1092,19 +1092,8 @@
                 posthog.capture('buy_clicked', {location: loc, transport: 'sendBeacon'}, opts);
             } catch (e) { /* ignore */ }
         }, true);
-
-        var navBuy = document.getElementById('navBuyPill');
-        if (navBuy) {
-            navBuy.addEventListener('click', function () {
-                try {
-                    var opts = {};
-                    if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
-                        opts.transport = 'sendBeacon';
-                    }
-                    posthog.capture('buy_clicked', {location: 'header_pill', transport: 'sendBeacon'}, opts);
-                } catch (e) { /* ignore */ }
-            });
-        }
+        // buy_clicked fires only on checkout form submit — opening the Buy
+        // minutes modal is buy_modal_opened (see _buy_modal.html).
     })();
     </script>
     {% endif %}
@@ -1368,6 +1357,9 @@
             if (!isMobile()) setOpen(false);
             syncToViewport();
         });
+        // Buy modal (and anything else that locks body scroll) closes the menu
+        // first so overflow is not left stuck after the overlay dismisses.
+        window.closeMobileNav = function () { setOpen(false); };
     })();
     </script>
     <script>

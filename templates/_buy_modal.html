@@ -94,9 +94,24 @@
     var subEl = document.getElementById('buyModalSub');
     var sourceEl = document.getElementById('buyModalSource');
     var returnEl = document.getElementById('buyModalReturnTo');
+    var openAtMs = 0;
+    var openSource = '';
     if (!scrim) return;
 
     function closeBuyModal() {
+        if (scrim.classList.contains('is-open')) {
+            try {
+                if (window.posthog) {
+                    var openMs = openAtMs ? Math.max(0, Date.now() - openAtMs) : 0;
+                    posthog.capture('buy_modal_closed', {
+                        source: openSource || (sourceEl && sourceEl.value) || '',
+                        open_ms: openMs
+                    });
+                }
+            } catch (e) { /* ignore */ }
+        }
+        openAtMs = 0;
+        openSource = '';
         scrim.classList.remove('is-open');
         scrim.hidden = true;
         document.body.style.overflow = '';
@@ -104,6 +119,11 @@
 
     function openBuyModal(opts) {
         opts = opts || {};
+        // Mobile menu also locks body scroll; close it first so modal close
+        // restores overflow correctly instead of fighting the nav lock.
+        try {
+            if (typeof window.closeMobileNav === 'function') window.closeMobileNav();
+        } catch (e) { /* ignore */ }
         var needed = opts.needed != null ? Math.max(0, Math.round(Number(opts.needed))) : null;
         var left = opts.left != null ? Math.max(0, Math.round(Number(opts.left))) : null;
         var epTitle = opts.title || '';
@@ -148,6 +168,20 @@
         scrim.hidden = false;
         scrim.classList.add('is-open');
         document.body.style.overflow = 'hidden';
+        openAtMs = Date.now();
+        openSource = source;
+        try {
+            if (window.posthog) {
+                posthog.capture('buy_modal_opened', {
+                    source: source,
+                    needed: needed,
+                    left: left
+                });
+            }
+            if (typeof window.podskriftPaywallShown === 'function') {
+                window.podskriftPaywallShown('buy_modal_' + source, 'manual');
+            }
+        } catch (e) { /* ignore */ }
     }
 
     document.getElementById('buyModalClose').addEventListener('click', closeBuyModal);
