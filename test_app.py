@@ -5547,7 +5547,7 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'history-title-links'
+    assert entries[0]['id'] == 'related-episodes-feed-fix'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
