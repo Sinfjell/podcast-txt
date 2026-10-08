@@ -3897,10 +3897,15 @@ _HUBERMAN_SHOW = {'collectionName': 'Huberman Lab', 'artistName': 'Scicomm Media
     (f'https://open.spotify.com/intl-no/episode/{_SPOTIFY_EP}', ('episode', _SPOTIFY_EP)),
     (f'open.spotify.com/show/{_SPOTIFY_SHOW}', ('show', _SPOTIFY_SHOW)),
     (f'spotify:episode:{_SPOTIFY_EP}', ('episode', _SPOTIFY_EP)),
+    # Mangled hosts still yield the id; only the id is ever requested.
+    (f'https://open.spotify.comsode/{_SPOTIFY_EP}?si=x', ('episode', _SPOTIFY_EP)),
+    (f'sode/{_SPOTIFY_EP}', ('episode', _SPOTIFY_EP)),
+    (f'https://evil.example.com/episode/{_SPOTIFY_EP}', ('episode', _SPOTIFY_EP)),
     (f'https://open.spotify.com/track/{_SPOTIFY_EP}', (None, None)),
     ('https://open.spotify.com/episode/tooShort', (None, None)),
-    (f'https://evil.example.com/episode/{_SPOTIFY_EP}', (None, None)),
     ('huberman lab', (None, None)),
+    # Must not misfire on ordinary prose that happens to contain "episode/".
+    ('read the episode/notes carefully please', (None, None)),
 ])
 def test_spotify_links_are_recognised(url, expected):
     assert A.parse_spotify_url(url) == expected
@@ -3910,10 +3915,10 @@ def test_spotify_episode_resolves_to_the_audio_in_the_public_feed(monkeypatch):
     fetched = _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY),
                         shows=[_HUBERMAN_SHOW],
                         feed=_rss('Another episode', 'Essentials: Genes &amp; Memory'))
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}?si=x')
-    assert error is None
-    assert len(results) == 1
-    hit = results[0]
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}?si=x')
+    assert out['error'] is None and out['error_kind'] is None
+    assert len(out['results']) == 1
+    hit = out['results'][0]
     assert hit['type'] == 'episode'
     assert hit['name'] == 'Essentials: Genes & Memory'
     assert hit['artist'] == 'Huberman Lab'
@@ -3926,27 +3931,30 @@ def test_spotify_episode_resolves_to_the_audio_in_the_public_feed(monkeypatch):
 def test_numbered_feed_titles_still_match(monkeypatch):
     _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW],
               feed=_rss('#212 - Essentials: Genes &amp; Memory'))
-    results, error = A.resolve_spotify_url(f'spotify:episode:{_SPOTIFY_EP}')
-    assert error is None and results[0]['audio_url'] == 'https://cdn.example.com/0.mp3'
+    out = A.resolve_spotify_url(f'spotify:episode:{_SPOTIFY_EP}')
+    assert out['error'] is None and out['results'][0]['audio_url'] == 'https://cdn.example.com/0.mp3'
 
 
-def test_spotify_exclusive_show_fails_with_a_clear_message(monkeypatch):
+def test_spotify_show_not_in_directory_softens_the_message(monkeypatch):
     _fake_web(monkeypatch,
               embed=_embed_page({'type': 'episode', 'name': 'Ep 1', 'subtitle': 'Only On Spotify'}),
               shows=[{'collectionName': 'Something Else', 'feedUrl': _FEED}])
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
-    assert results == []
-    assert 'Only On Spotify' in error
-    assert 'Spotify-exclusive' in error
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['results'] == []
+    assert 'Only On Spotify' in out['error']
+    assert 'public RSS feed' in out['error']
+    assert 'Spotify-exclusive' not in out['error']
+    assert out['error_kind'] == 'no_feed'
 
 
 def test_episode_missing_from_the_feed_offers_the_show(monkeypatch):
     _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW],
               feed=_rss('Unrelated episode'), episodes=[])
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
-    assert 'isn\'t in its public feed' in error
-    assert [r['type'] for r in results] == ['show']
-    assert results[0]['feed_url'] == _FEED
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert 'isn\'t in its public feed' in out['error']
+    assert out['error_kind'] == 'episode_not_in_feed'
+    assert [r['type'] for r in out['results']] == ['show']
+    assert out['results'][0]['feed_url'] == _FEED
 
 
 def test_itunes_episode_search_is_the_fallback_to_the_feed(monkeypatch):
@@ -3956,9 +3964,9 @@ def test_itunes_episode_search_is_the_fallback_to_the_feed(monkeypatch):
                         {'trackName': 'Essentials: Genes & Memory',
                          'collectionName': 'Huberman Lab',
                          'episodeUrl': 'https://cdn.example.com/right.mp3'}])
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
-    assert error is None
-    assert results[0]['audio_url'] == 'https://cdn.example.com/right.mp3'
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['error'] is None
+    assert out['results'][0]['audio_url'] == 'https://cdn.example.com/right.mp3'
 
 
 def test_a_dead_feed_still_falls_through_to_the_episode_search(monkeypatch):
@@ -3967,36 +3975,39 @@ def test_a_dead_feed_still_falls_through_to_the_episode_search(monkeypatch):
               episodes=[{'trackName': 'Essentials: Genes & Memory',
                          'collectionName': 'Huberman Lab',
                          'episodeUrl': 'https://cdn.example.com/right.mp3'}])
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
-    assert error is None
-    assert results[0]['audio_url'] == 'https://cdn.example.com/right.mp3'
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['error'] is None
+    assert out['results'][0]['audio_url'] == 'https://cdn.example.com/right.mp3'
 
 
 def test_an_oversized_feed_is_not_read_into_memory(monkeypatch):
     _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW],
               feed=_rss('Essentials: Genes &amp; Memory'), episodes=[])
     monkeypatch.setattr(A._fetch_feed_capped, '__defaults__', (100,))
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
     # The feed would have matched; being over the cap it is skipped, not parsed.
-    assert [r['type'] for r in results] == ['show']
-    assert error
+    assert [r['type'] for r in out['results']] == ['show']
+    assert out['error']
 
 
 def test_spotify_show_link_opens_the_show(monkeypatch):
     # A show embed renders its latest episode; the show name is the subtitle.
     _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW])
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/show/{_SPOTIFY_SHOW}')
-    assert error is None
-    assert results == [A._itunes_show_result(_HUBERMAN_SHOW)]
+    out = A.resolve_spotify_url(f'https://open.spotify.com/show/{_SPOTIFY_SHOW}')
+    assert out['error'] is None
+    assert out['results'] == [A._itunes_show_result(_HUBERMAN_SHOW)]
 
 
-def test_spotify_exclusive_show_link_fails_with_a_clear_message(monkeypatch):
+def test_spotify_show_link_not_in_directory_softens_the_message(monkeypatch):
     _fake_web(monkeypatch,
               embed=_embed_page({'type': 'episode', 'name': 'Ep 1', 'subtitle': 'Only On Spotify'}),
               shows=[])
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/show/{_SPOTIFY_SHOW}')
-    assert results == []
-    assert 'Only On Spotify' in error and 'Spotify-exclusive' in error
+    out = A.resolve_spotify_url(f'https://open.spotify.com/show/{_SPOTIFY_SHOW}')
+    assert out['results'] == []
+    assert 'Only On Spotify' in out['error']
+    assert 'public RSS feed' in out['error']
+    assert 'Spotify-exclusive' not in out['error']
+    assert out['error_kind'] == 'no_feed'
 
 
 def test_oembed_is_used_when_the_embed_page_changes_shape(monkeypatch):
@@ -4005,15 +4016,16 @@ def test_oembed_is_used_when_the_embed_page_changes_shape(monkeypatch):
               episodes=[{'trackName': 'Essentials: Genes & Memory',
                          'collectionName': 'Huberman Lab',
                          'episodeUrl': 'https://cdn.example.com/right.mp3'}])
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
-    assert error is None
-    assert results[0]['audio_url'] == 'https://cdn.example.com/right.mp3'
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['error'] is None
+    assert out['results'][0]['audio_url'] == 'https://cdn.example.com/right.mp3'
 
 
 def test_unreadable_spotify_link_says_so(monkeypatch):
     _fake_web(monkeypatch)
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
-    assert results == [] and "Couldn't read that Spotify link" in error
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['results'] == [] and "Couldn't read that Spotify link" in out['error']
+    assert out['error_kind'] == 'unreadable_link'
 
 
 def test_a_feed_on_a_private_host_is_never_fetched(monkeypatch):
@@ -4048,36 +4060,169 @@ def _redirecting_feed(monkeypatch, target):
 def test_a_feed_redirect_into_the_private_network_is_refused(monkeypatch):
     target = 'http://169.254.169.254/latest/meta-data/'
     fetched = _redirecting_feed(monkeypatch, target)
-    results, _ = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
     assert target not in fetched, 'metadata endpoint was contacted'
-    assert [r['type'] for r in results] == ['show']
+    assert [r['type'] for r in out['results']] == ['show']
 
 
 def test_a_feed_redirect_to_a_public_host_is_followed(monkeypatch):
     target = 'https://moved.example.com/feed.xml'
     fetched = _redirecting_feed(monkeypatch, target)
-    results, error = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
-    assert target in fetched and error is None
-    assert results[0]['audio_url'] == 'https://cdn.example.com/0.mp3'
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert target in fetched and out['error'] is None
+    assert out['results'][0]['audio_url'] == 'https://cdn.example.com/0.mp3'
 
 
 def test_resolve_route_reports_an_unreachable_directory_without_details(monkeypatch):
+    calls = {'n': 0}
+
     def down(*a, **kw):
+        calls['n'] += 1
         if 'spotify.com' in a[0]:
             return _HttpResp(200, text=_embed_page(_HUBERMAN_EP_ENTITY))
         raise A.requests.ConnectionError('secret-internal-detail')
+
     monkeypatch.setattr(A.requests, 'get', down)
+    monkeypatch.setattr(A.requests.Session, 'get',
+                        lambda self, url, **kw: down(url, **kw))
+    monkeypatch.setattr(A.time, 'sleep', lambda s: None)
     data = A.app.test_client().get(
         f'/resolve-spotify?url=https://open.spotify.com/episode/{_SPOTIFY_EP}').get_json()
     assert data['results'] == []
     assert "Couldn't reach the podcast directory" in data['error']
+    assert data['error_kind'] == 'directory_unreachable'
     assert 'secret-internal-detail' not in data['error']
+    # One attempt + one automatic retry.
+    assert calls['n'] >= 2
+
+
+def test_resolve_route_retries_transient_directory_failure(monkeypatch):
+    state = {'itunes': 0}
+
+    def get(url, params=None, **kw):
+        if '/embed/' in url:
+            return _HttpResp(200, text=_embed_page(_HUBERMAN_EP_ENTITY))
+        if 'itunes.apple.com' in url:
+            state['itunes'] += 1
+            if state['itunes'] == 1:
+                raise A.requests.ConnectionError('blip')
+            return _HttpResp(200, payload={'results': [_HUBERMAN_SHOW]})
+        if url == _FEED:
+            return _HttpResp(200, content=_rss('Essentials: Genes &amp; Memory'))
+        raise AssertionError(url)
+
+    _patch_requests_get(monkeypatch, get)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    monkeypatch.setattr(A.time, 'sleep', lambda s: None)
+    data = A.app.test_client().get(
+        f'/resolve-spotify?url=https://open.spotify.com/episode/{_SPOTIFY_EP}').get_json()
+    assert data['error'] is None
+    assert data['results'][0]['audio_url'] == 'https://cdn.example.com/0.mp3'
+    assert state['itunes'] >= 2
+
+
+def test_paid_spotify_episode_offers_the_show(monkeypatch):
+    entity = dict(_HUBERMAN_EP_ENTITY, playabilityReason='PAYMENT_REQUIRED',
+                  isPlayable=False)
+    _fake_web(monkeypatch, embed=_embed_page(entity), shows=[_HUBERMAN_SHOW],
+              feed=_rss('Essentials: Genes &amp; Memory'))
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['error_kind'] == 'paid_episode'
+    assert 'paying' in out['error'].lower() or 'subscribers' in out['error'].lower()
+    assert [r['type'] for r in out['results']] == ['show']
+    assert out['results'][0]['feed_url'] == _FEED
+
+
+def test_parenthetical_show_name_matches_when_episode_is_in_feed(monkeypatch):
+    """Exact name "Higher Mind (backup)" misses; stripped "Higher Mind" hits,
+    but only after the episode title is confirmed in that feed."""
+    entity = {'type': 'episode', 'name': 'Deep Focus', 'subtitle': 'Higher Mind (backup)'}
+    base_show = {'collectionName': 'Higher Mind', 'artistName': 'y', 'feedUrl': _FEED}
+
+    def get(url, params=None, **kw):
+        if '/embed/' in url:
+            return _HttpResp(200, text=_embed_page(entity))
+        if 'itunes.apple.com' in url:
+            term = params['term']
+            if params['entity'] == 'podcastEpisode':
+                return _HttpResp(200, payload={'results': []})
+            # Directory lists the base name, not the "(backup)" Spotify label.
+            if term == 'Higher Mind':
+                return _HttpResp(200, payload={'results': [base_show]})
+            return _HttpResp(200, payload={'results': []})
+        if url == _FEED:
+            return _HttpResp(200, content=_rss('Deep Focus'))
+        raise AssertionError(url)
+
+    _patch_requests_get(monkeypatch, get)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['error'] is None
+    assert out['results'][0]['audio_url'] == 'https://cdn.example.com/0.mp3'
+    assert out['results'][0]['feed_url'] == _FEED
+
+
+def test_loose_show_name_without_episode_in_feed_is_rejected(monkeypatch):
+    entity = {'type': 'episode', 'name': 'Missing Ep', 'subtitle': 'Higher Mind (backup)'}
+    base_show = {'collectionName': 'Higher Mind', 'artistName': 'y', 'feedUrl': _FEED}
+
+    def get(url, params=None, **kw):
+        if '/embed/' in url:
+            return _HttpResp(200, text=_embed_page(entity))
+        if 'itunes.apple.com' in url:
+            if params['entity'] == 'podcastEpisode':
+                return _HttpResp(200, payload={'results': []})
+            if params['term'] == 'Higher Mind':
+                return _HttpResp(200, payload={'results': [base_show]})
+            return _HttpResp(200, payload={'results': []})
+        if url == _FEED:
+            return _HttpResp(200, content=_rss('Something else entirely'))
+        raise AssertionError(url)
+
+    _patch_requests_get(monkeypatch, get)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['results'] == []
+    assert out['error_kind'] == 'no_feed'
+
+
+def test_resolve_spotify_json_includes_error_kind(monkeypatch):
+    _fake_web(monkeypatch,
+              embed=_embed_page({'type': 'episode', 'name': 'Ep 1', 'subtitle': 'Ghost Show'}),
+              shows=[])
+    data = A.app.test_client().get(
+        f'/resolve-spotify?url=https://open.spotify.com/episode/{_SPOTIFY_EP}').get_json()
+    assert data['error_kind'] == 'no_feed'
+    assert data['show_name'] == 'Ghost Show'
+    assert data['results'] == []
+
+
+def test_resolve_spotify_logs_error_kind(monkeypatch, caplog):
+    import logging
+    _fake_web(monkeypatch,
+              embed=_embed_page({'type': 'episode', 'name': 'Ep 1', 'subtitle': 'Ghost Show'}),
+              shows=[])
+    with caplog.at_level(logging.INFO, logger=A.app.logger.name):
+        A.app.test_client().get(
+            f'/resolve-spotify?url=https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert any(
+        'spotify resolve failed' in r.message and 'error_kind=no_feed' in r.message
+        and _SPOTIFY_EP in r.message
+        for r in caplog.records
+    )
 
 
 def test_index_routes_spotify_links_to_the_resolver():
     body = A.app.test_client().get('/').data.decode()
     assert '/resolve-spotify?url=' in body
     assert 'SPOTIFY_RE' in body
+    # Results + error must render the cards, not the empty state.
+    assert 'showSearchNotice' in body
+    assert '!results.length' in body or 'if (!results.length)' in body
+    assert 'error_kind' in body
+    assert 'search-notice' in body
+    # Mangled sode/<id> links are treated as Spotify, not name search.
+    assert 'sode' in body
 
 
 # --------------------------------------------------------------------------
@@ -5737,6 +5882,7 @@ def test_search_emits_podcast_searched_with_query_and_input_type(monkeypatch):
     assert 'detectInputType' in body
     assert "slice(0, 200)" in body
     assert 'errored' in body
+    assert 'error_kind' in body
     # Empty-state copy + RSS help when nothing matches.
     assert "No results? Paste the podcast's RSS feed" in body
     assert '/rss-help' in body or "url_for('rss_help')" in body

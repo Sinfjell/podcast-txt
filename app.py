@@ -6185,27 +6185,77 @@ SPOTIFY_URL_RE = re.compile(
     r'(?:open\.spotify\.com/(?:intl-[a-z]{2}(?:-[a-z]{2})?/)?(?:embed/)?|spotify:)'
     r'(episode|show)[/:]([A-Za-z0-9]{22})(?![A-Za-z0-9])'
 )
+#: Pasted links sometimes lose a slash or letters ("open.spotify.comsode/<id>",
+#: "sode/<id>"). Still route a bare episode|show/<22-char-id> — and the common
+#: mangled "sode/<id>" form of episode — to the resolver, never as name search.
+#: group1=episode|show (needs a non-alnum boundary so "myepisode/…" is ignored),
+#: group2=sode (may sit inside a mangled host like "comsode"), group3=id.
+SPOTIFY_LOOSE_ID_RE = re.compile(
+    r'(?:(?:^|[^A-Za-z0-9])(episode|show)|(sode))/([A-Za-z0-9]{22})(?![A-Za-z0-9])',
+    re.I,
+)
 
 SPOTIFY_NO_FEED_HINT = (
-    "Podskrift can only transcribe podcasts that publish a public RSS feed. "
-    "Spotify-exclusive shows don't, so their audio can't be fetched."
+    "If the show has one, paste the feed URL (see How to find an RSS feed), "
+    "or try searching for the show by name."
 )
+
+#: One short pause before retrying a transient directory failure.
+SPOTIFY_DIRECTORY_RETRY_PAUSE_SEC = 0.4
 
 _SPOTIFY_HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; Podskrift/1.0)'}
 _NEXT_DATA_RE = re.compile(
     r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.S)
+_SHOW_SUFFIX_RE = re.compile(r'\s*[\(\[\{][^\)\]\}]*[\)\]\}]\s*$')
 
 
 def parse_spotify_url(raw):
     """Return (kind, id) for a Spotify episode/show link, or (None, None)."""
-    match = SPOTIFY_URL_RE.search(raw or '')
-    return (match.group(1), match.group(2)) if match else (None, None)
+    text = raw or ''
+    match = SPOTIFY_URL_RE.search(text)
+    if match:
+        return match.group(1), match.group(2)
+    loose = SPOTIFY_LOOSE_ID_RE.search(text)
+    if not loose:
+        return None, None
+    kind = (loose.group(1) or 'episode').lower()
+    return kind, loose.group(3)
 
 
 def _normalize_title(text):
     """Case-, width- and punctuation-insensitive form for matching titles."""
     text = unicodedata.normalize('NFKC', text or '').casefold()
     return re.sub(r'[\W_]+', ' ', text).strip()
+
+
+def _show_name_variants(show_name):
+    """Exact name first, then without trailing parenthetical/bracketed suffixes."""
+    variants, seen = [], set()
+
+    def add(name):
+        name = (name or '').strip()
+        key = _normalize_title(name)
+        if not name or not key or key in seen:
+            return
+        seen.add(key)
+        variants.append(name)
+
+    add(show_name)
+    stripped = (show_name or '').strip()
+    while True:
+        nxt = _SHOW_SUFFIX_RE.sub('', stripped).strip()
+        if nxt == stripped:
+            break
+        stripped = nxt
+        add(stripped)
+    return variants
+
+
+def _empty_spotify_meta():
+    return {
+        'title': '', 'show': '',
+        'playability_reason': None, 'is_playable': None, 'has_video': None,
+    }
 
 
 def _spotify_embed_metadata(kind, spotify_id):
@@ -6224,11 +6274,17 @@ def _spotify_embed_metadata(kind, spotify_id):
     except (requests.RequestException, AttributeError, KeyError, TypeError, ValueError):
         return None
     name = entity.get('name') or entity.get('title') or ''
+    meta = _empty_spotify_meta()
+    meta['playability_reason'] = entity.get('playabilityReason')
+    meta['is_playable'] = entity.get('isPlayable')
+    meta['has_video'] = entity.get('hasVideo')
     if entity.get('type') == 'episode':
         # A show embed renders its latest episode: the show is the subtitle.
-        show = entity.get('subtitle') or ''
-        return {'title': name if kind == 'episode' else '', 'show': show}
-    return {'title': '', 'show': name}
+        meta['title'] = name if kind == 'episode' else ''
+        meta['show'] = entity.get('subtitle') or ''
+        return meta
+    meta['show'] = name
+    return meta
 
 
 def _spotify_oembed_metadata(kind, spotify_id):
@@ -6243,11 +6299,16 @@ def _spotify_oembed_metadata(kind, spotify_id):
         return None
     if not title:
         return None
-    return {'title': title, 'show': ''} if kind == 'episode' else {'title': '', 'show': title}
+    meta = _empty_spotify_meta()
+    if kind == 'episode':
+        meta['title'] = title
+    else:
+        meta['show'] = title
+    return meta
 
 
 def fetch_spotify_metadata(kind, spotify_id):
-    """{'title', 'show'} for a Spotify link, or None when Spotify tells us nothing."""
+    """{'title', 'show', playability…} for a Spotify link, or None when empty."""
     meta = _spotify_embed_metadata(kind, spotify_id)
     if meta and (meta['show'] or meta['title']):
         return meta
@@ -6266,8 +6327,34 @@ def _itunes_search(term, entity):
 def _public_shows_named(show_name):
     """iTunes shows with a feed whose name matches the Spotify show exactly."""
     want = _normalize_title(show_name)
+    if not want:
+        return []
     return [item for item in _itunes_search(show_name, 'podcast')
             if item.get('feedUrl') and _normalize_title(item.get('collectionName')) == want]
+
+
+def _public_shows_named_loose(show_name):
+    """Shows matching a stripped variant of the name (parens/brackets removed).
+
+    Only used when exact match finds nothing; callers must confirm the episode
+    is in the candidate's feed before accepting the show (false positives are
+    otherwise easy — e.g. two shows that share a short base name).
+    """
+    variants = _show_name_variants(show_name)
+    if len(variants) <= 1:
+        return []
+    found, seen_feeds = [], set()
+    for variant in variants[1:]:
+        want = _normalize_title(variant)
+        for item in _itunes_search(variant, 'podcast'):
+            feed = item.get('feedUrl')
+            if not feed or feed in seen_feeds:
+                continue
+            if _normalize_title(item.get('collectionName')) != want:
+                continue
+            seen_feeds.add(feed)
+            found.append(item)
+    return found
 
 
 def _match_episode(episodes, title):
@@ -6378,47 +6465,132 @@ def _episode_from_itunes(title, show_name):
     return None
 
 
+def _no_feed_message(name):
+    label = name or 'this show'
+    return (
+        f'We couldn\'t find a public RSS feed for "{label}". '
+        f'{SPOTIFY_NO_FEED_HINT}'
+    )
+
+
+def _paid_episode_message(show_name):
+    base = (
+        'This episode is for paying Spotify subscribers only, so Podskrift '
+        "can't fetch its audio to transcribe."
+    )
+    if show_name:
+        return (
+            f'{base} The show "{show_name}" is below — open it to pick a '
+            'public episode if the feed has any.'
+        )
+    return base
+
+
+def _spotify_resolve_outcome(results, error=None, error_kind=None, show_name=None):
+    return {
+        'results': results,
+        'error': error,
+        'error_kind': error_kind,
+        'show_name': show_name or '',
+    }
+
+
 def resolve_spotify_url(raw):
     """Map a Spotify link onto the public feed Podskrift can fetch.
 
-    Returns (results, error) in /search-podcasts' result shape. Raises
+    Returns a dict: results, error, error_kind, show_name. Raises
     requests.RequestException when a directory lookup itself fails.
     """
     kind, spotify_id = parse_spotify_url(raw)
     if not kind:
-        return [], "That doesn't look like a Spotify episode or show link."
+        return _spotify_resolve_outcome(
+            [], "That doesn't look like a Spotify episode or show link.",
+            'unreadable_link')
     meta = fetch_spotify_metadata(kind, spotify_id)
     if not meta:
-        return [], "Couldn't read that Spotify link. Check that it's a public episode or show."
-    shows = _public_shows_named(meta['show']) if meta['show'] else []
+        return _spotify_resolve_outcome(
+            [], "Couldn't read that Spotify link. Check that it's a public episode or show.",
+            'unreadable_link')
+
+    show_name = meta.get('show') or ''
+    title = meta.get('title') or ''
+    paid = (meta.get('playability_reason') or '').upper() == 'PAYMENT_REQUIRED'
+
+    shows = _public_shows_named(show_name) if show_name else []
     if kind == 'show':
         if shows:
-            return [_itunes_show_result(shows[0])], None
-        return [], f'"{meta["show"]}" has no public podcast feed. {SPOTIFY_NO_FEED_HINT}'
+            return _spotify_resolve_outcome([_itunes_show_result(shows[0])],
+                                            show_name=show_name)
+        return _spotify_resolve_outcome(
+            [], _no_feed_message(show_name), 'no_feed', show_name)
+
+    if paid:
+        # Still surface the show when we can find its public feed.
+        if shows:
+            return _spotify_resolve_outcome(
+                [_itunes_show_result(shows[0])],
+                _paid_episode_message(show_name), 'paid_episode', show_name)
+        return _spotify_resolve_outcome(
+            [], _paid_episode_message(show_name), 'paid_episode', show_name)
 
     for show in shows[:2]:
-        hit = _episode_from_feed(show['feedUrl'], meta['title'])
+        hit = _episode_from_feed(show['feedUrl'], title)
         if hit:
-            return [hit], None
-    hit = _episode_from_itunes(meta['title'], meta['show'])
+            return _spotify_resolve_outcome([hit], show_name=show_name)
+
+    # Exact name missed: try stripped variants, but only accept a candidate
+    # when the episode title is actually in that show's feed.
+    if show_name and title and not shows:
+        for show in _public_shows_named_loose(show_name)[:3]:
+            hit = _episode_from_feed(show['feedUrl'], title)
+            if hit:
+                return _spotify_resolve_outcome([hit], show_name=show_name)
+
+    hit = _episode_from_itunes(title, show_name)
     if hit:
-        return [hit], None
+        return _spotify_resolve_outcome([hit], show_name=show_name)
     if shows:
-        return [_itunes_show_result(shows[0])], (
-            f'Found "{meta["show"]}", but this episode isn\'t in its public feed -- it may be '
-            'Spotify-exclusive. Open the show below to pick from the episodes that are.')
-    name = meta['show'] or meta['title']
-    return [], f'"{name}" has no public podcast feed. {SPOTIFY_NO_FEED_HINT}'
+        return _spotify_resolve_outcome(
+            [_itunes_show_result(shows[0])],
+            (f'Found "{show_name}", but this episode isn\'t in its public feed. '
+             'Open the show below to pick from the episodes that are.'),
+            'episode_not_in_feed', show_name)
+    name = show_name or title
+    return _spotify_resolve_outcome(
+        [], _no_feed_message(name), 'no_feed', show_name or name)
+
+
+def _log_spotify_resolve_failure(spotify_id, kind, error_kind):
+    if not error_kind:
+        return
+    app.logger.info(
+        'spotify resolve failed id=%s type=%s error_kind=%s',
+        spotify_id or '-', kind or '-', error_kind)
 
 
 @app.route('/resolve-spotify', methods=['GET'])
 def resolve_spotify():
     """Turn a pasted Spotify episode/show link into a search-box result."""
+    raw = request.args.get('url', '').strip()
+    kind, spotify_id = parse_spotify_url(raw)
+    outcome = None
     try:
-        results, error = resolve_spotify_url(request.args.get('url', '').strip())
+        outcome = resolve_spotify_url(raw)
     except requests.RequestException:
-        results, error = [], "Couldn't reach the podcast directory. Try again in a moment."
-    return jsonify({'results': results, 'error': error})
+        try:
+            time.sleep(SPOTIFY_DIRECTORY_RETRY_PAUSE_SEC)
+            outcome = resolve_spotify_url(raw)
+        except requests.RequestException:
+            outcome = _spotify_resolve_outcome(
+                [], "Couldn't reach the podcast directory. Try again in a moment.",
+                'directory_unreachable')
+    _log_spotify_resolve_failure(spotify_id, kind, outcome.get('error_kind'))
+    return jsonify({
+        'results': outcome['results'],
+        'error': outcome['error'],
+        'error_kind': outcome['error_kind'],
+        'show_name': outcome.get('show_name') or '',
+    })
 
 
 # ---------------------------------------------------------------------------
