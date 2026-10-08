@@ -2226,6 +2226,9 @@ def _stash_pending_from_request():
 
     audio_url = (request.form.get('audio_url') or '').strip()
     rss_url = (request.form.get('rss_url') or '').strip() or None
+    # Optional on the direct-audio path; never stash a private/unfetchable feed.
+    if rss_url and not _is_fetchable_url(rss_url):
+        rss_url = None
     episode_index_raw = request.form.get('episode_index')
 
     pending = {
@@ -4000,7 +4003,11 @@ def start_transcription():
         language = ''
 
     audio_url = request.form.get('audio_url')
-    rss_url = request.form.get('rss_url')
+    rss_url = (request.form.get('rss_url') or '').strip() or None
+    # Direct-audio starts may also carry the show feed (search / Spotify). Drop
+    # anything we would refuse to fetch — never persist a private URL.
+    if rss_url and not _is_fetchable_url(rss_url):
+        rss_url = None
 
     if audio_url:
         if not _is_fetchable_url(audio_url):
@@ -4288,6 +4295,7 @@ def get_status(task_id):
                     'podcast_name': task.podcast_name or '',
                     'artwork': task.artwork_url or '',
                     'published': task.episode_published or '',
+                    'rss_url': task.rss_url or '',
                     'duration_min': (
                         str(duration_min) if duration_min is not None else ''),
                     'language': task.language or '',
@@ -4509,6 +4517,21 @@ def related_episodes(task_id):
 
     rss_url = (task.rss_url or '').strip()
     podcast_name = task.podcast_name or ''
+    # Older search/Spotify starts never stored the feed. Recover it from the
+    # public directory by exact show name so related episodes / Follow work.
+    if not rss_url and podcast_name.strip():
+        try:
+            shows = _public_shows_named(podcast_name.strip())
+        except requests.RequestException:
+            shows = []
+        for show in shows:
+            feed = (show.get('feedUrl') or '').strip()
+            if feed and _is_fetchable_url(feed):
+                task.rss_url = feed
+                db.session.commit()
+                rss_url = feed
+                break
+
     if not rss_url:
         return jsonify({
             'has_feed': False,

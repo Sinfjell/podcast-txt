@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "related-episodes-feed-fix",
+      "date": "2026-10-08",
+      "title": "More episodes and Follow work after search",
+      "summary": "After you finish a transcript from search or a Spotify link, you can again pick another episode from that show or follow it — the feed URL is saved with the job."
+    },
+    {
       "id": "history-title-links",
       "date": "2026-10-08",
       "title": "Tap a History title to open it",
