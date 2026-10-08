@@ -329,3 +329,55 @@ def test_snapshot_from_query_results_accepts_row_lists():
     assert snap.cta_by_key_baseline[('podskrift', 'hero')] == 5
     assert snap.event_counts_window['podcast_searched'] == 2
     assert snap.failed_by_reason_window['network'] == 1
+
+
+def test_trial_global_cap_warning_lines_at_thresholds():
+    import importlib.util
+    path = OPS / 'notion-daily-metrics.py'
+    spec = importlib.util.spec_from_file_location('notion_daily_metrics_cap', path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+
+    cap = 1800 * 60  # seconds
+    assert mod.trial_global_cap_warning_lines(0, cap) == []
+    assert mod.trial_global_cap_warning_lines(int(cap * 0.69), cap) == []
+    at70 = mod.trial_global_cap_warning_lines(int(cap * 0.70), cap)
+    assert len(at70) == 1
+    assert '70%+' in at70[0]
+    at90 = mod.trial_global_cap_warning_lines(int(cap * 0.91), cap)
+    assert len(at90) == 2  # both 70 and 90
+    assert any('90%+' in line for line in at90)
+    # Cap disabled → no warnings.
+    assert mod.trial_global_cap_warning_lines(10**9, 0) == []
+
+
+def test_collect_metrics_includes_global_trial_used_vs_cap():
+    import importlib.util
+    path = OPS / 'notion-daily-metrics.py'
+    spec = importlib.util.spec_from_file_location('notion_daily_metrics_collect', path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / 'podcast.db'
+        _minimal_podcast_db(db)
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "INSERT INTO users (id, created_at, trial_seconds_used, trial_seconds_limit) "
+            "VALUES (1, '2026-01-01 00:00:00', ?, 10800)",
+            (1260 * 60,),  # 1260 minutes used
+        )
+        conn.commit()
+        metrics = mod.collect_metrics(
+            conn, date(2026, 9, 26), trial_default_seconds=180 * 60,
+            trial_global_seconds=1800 * 60,
+        )
+        conn.close()
+
+    assert metrics['Trial minutes used'] == 1260.0
+    assert metrics['Trial global used minutes'] == 1260.0
+    assert metrics['Trial global cap minutes'] == 1800.0
+    assert metrics['_trial_global_used_seconds'] == 1260 * 60
+    assert metrics['_trial_global_cap_seconds'] == 1800 * 60

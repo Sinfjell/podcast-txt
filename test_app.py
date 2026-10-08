@@ -2307,12 +2307,17 @@ def test_concurrent_transcriptions_are_capped(trial_on, monkeypatch):
     monkeypatch.setattr(A, '_transcription_slots', _t.BoundedSemaphore(2))
 
     uid = _make_user('cap@test.com', limit=36000)
-    data = {'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
-            'duration_min': '5', 'language': 'no'}
+    # Distinct audio URLs: the web duplicate guard would otherwise reuse the
+    # first task and never ask for a third capacity slot.
+    def _start(n):
+        return _post_start(monkeypatch, uid, {
+            'audio_url': f'https://example.com/cap-{n}.mp3',
+            'episode_title': 'Ep', 'duration_min': '5', 'language': 'no',
+        })
 
-    assert _post_start(monkeypatch, uid, data).status_code == 200
-    assert _post_start(monkeypatch, uid, data).status_code == 200
-    third = _post_start(monkeypatch, uid, data)
+    assert _start(1).status_code == 200
+    assert _start(2).status_code == 200
+    third = _start(3)
     assert third.status_code == 503
     assert 'try again' in third.get_json()['error'].lower()
 
@@ -5739,7 +5744,14 @@ def test_transcript_started_includes_key_source(ph_events, monkeypatch, trial_on
     assert resp.status_code == 200
     started = [e for e in ph_events.events if e['event'] == 'transcript_started']
     assert len(started) == 1
-    assert started[0]['properties'] == {'key_source': 'user', 'source': 'web', 'app': 'podskrift'}
+    props = started[0]['properties']
+    assert props['key_source'] == 'user'
+    assert props['source'] == 'web'
+    assert props['app'] == 'podskrift'
+    assert props['duration_min'] == 1.0
+    assert props['input_origin'] == 'audio'
+    assert props['has_feed'] is False
+    assert props['nth_transcript'] == 1
 
 
 def test_transcript_started_trial_key_source(ph_events, monkeypatch, trial_on):
@@ -5752,7 +5764,10 @@ def test_transcript_started_trial_key_source(ph_events, monkeypatch, trial_on):
     assert resp.status_code == 200
     started = [e for e in ph_events.events if e['event'] == 'transcript_started']
     assert len(started) == 1
-    assert started[0]['properties'] == {'key_source': 'trial', 'source': 'web', 'app': 'podskrift'}
+    props = started[0]['properties']
+    assert props['key_source'] == 'trial'
+    assert props['source'] == 'web'
+    assert props['app'] == 'podskrift'
 
 
 def test_transcript_completed_includes_key_source(ph_events, monkeypatch, trial_on):
@@ -5778,7 +5793,12 @@ def test_transcript_completed_includes_key_source(ph_events, monkeypatch, trial_
     completed = [e for e in ph_events.events if e['event'] == 'transcript_completed']
     assert len(completed) == 1
     assert completed[0]['distinct_id'] == str(uid)
-    assert completed[0]['properties'] == {'key_source': 'user', 'source': 'web', 'app': 'podskrift'}
+    props = completed[0]['properties']
+    assert props['key_source'] == 'user'
+    assert props['source'] == 'web'
+    assert props['app'] == 'podskrift'
+    assert props['input_origin'] == 'audio'
+    assert 'nth_transcript' in props
 
 
 def test_transcript_completed_outside_request_context(ph_events, monkeypatch, trial_on):
@@ -5846,7 +5866,9 @@ def test_transcript_completed_outside_request_context(ph_events, monkeypatch, tr
     completed = [e for e in ph_events.events if e['event'] == 'transcript_completed']
     assert len(completed) == 1
     assert completed[0]['distinct_id'] == str(uid)
-    assert completed[0]['properties'] == {'key_source': 'trial', 'source': 'web', 'app': 'podskrift'}
+    assert completed[0]['properties']['key_source'] == 'trial'
+    assert completed[0]['properties']['source'] == 'web'
+    assert completed[0]['properties']['app'] == 'podskrift'
     assert not [e for e in ph_events.events if e['event'] == 'transcript_failed']
 
 
@@ -5938,10 +5960,11 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'apple-rss-link-resolve'
-    assert entries[1]['id'] == 'related-episodes-feed-fix'
-    assert entries[2]['id'] == 'stay-logged-in'
-    assert entries[3]['id'] == 'spotify-resolve-clarity'
+    assert entries[0]['id'] == 'no-double-charge-restart'
+    assert entries[1]['id'] == 'apple-rss-link-resolve'
+    assert entries[2]['id'] == 'related-episodes-feed-fix'
+    assert entries[3]['id'] == 'stay-logged-in'
+    assert entries[4]['id'] == 'spotify-resolve-clarity'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -6107,9 +6130,11 @@ def test_worker_reports_trial_exhausted_at_reconcile(ph_events, monkeypatch, tri
                    'duration_min': 1})
     assert status == 200, payload
     failed = [e for e in ph_events.events if e['event'] == 'transcript_failed']
-    assert [f['properties'] for f in failed] == [
-        {'key_source': 'trial', 'source': 'web', 'reason': 'trial_exhausted',
-         'app': 'podskrift'}]
+    assert len(failed) == 1
+    assert failed[0]['properties']['key_source'] == 'trial'
+    assert failed[0]['properties']['source'] == 'web'
+    assert failed[0]['properties']['reason'] == 'trial_exhausted'
+    assert failed[0]['properties']['app'] == 'podskrift'
     assert [h['properties'] for h in _limit_hits(ph_events)] == [
         {'scope': 'user', 'stage': 'reconcile', 'source': 'web',
          'estimate_min': 1, 'remaining_min': 60, 'app': 'podskrift'}]
@@ -6122,8 +6147,14 @@ def test_api_transcriptions_are_labelled_api(ph_events, agent_write):
         json_body={'publisher': 'Spårtsklubben', 'date': '2026-09-10'})
     assert r.status_code == 201, r.get_json()
     started = [e for e in ph_events.events if e['event'] == 'transcript_started']
-    assert [e['properties'] for e in started] == [
-        {'key_source': 'trial', 'source': 'api', 'app': 'podskrift'}]
+    assert len(started) == 1
+    props = started[0]['properties']
+    assert props['key_source'] == 'trial'
+    assert props['source'] == 'api'
+    assert props['app'] == 'podskrift'
+    assert props['input_origin'] == 'rss'
+    assert props['has_feed'] is True
+    assert props['podcast_name'] == 'Spårtsklubben'
 
 
 def test_search_emits_podcast_searched_with_query_and_input_type(monkeypatch):
@@ -8884,3 +8915,250 @@ def test_get_episodes_from_rss_timeout_uses_requests(monkeypatch):
     assert called['timeout'] == 8
     assert len(episodes) == 1
     assert episodes[0]['title'] == 'Ep'
+
+
+# --------------------------------------------------------------------------
+# Duplicate web enqueue guard, language normalisation, download filenames
+# --------------------------------------------------------------------------
+
+def test_web_enqueue_reuses_running_task_without_double_charge(monkeypatch, trial_on):
+    """Restarting the same audio URL while it is live must not reserve again."""
+    uid = _make_user('dup-run@test.com', limit=3600)
+    first = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/same-ep.mp3',
+        'episode_title': 'Same Ep',
+        'duration_min': '5',
+    })
+    assert first.status_code == 200, first.get_json()
+    first_id = first.get_json()['task_id']
+    used_after_first = _used(uid)
+    assert used_after_first == 300  # 5 min reserved
+
+    second = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/same-ep.mp3',
+        'episode_title': 'Same Ep again',
+        'duration_min': '5',
+    })
+    assert second.status_code == 200
+    body = second.get_json()
+    assert body['task_id'] == first_id
+    assert body.get('existing') is True
+    assert _used(uid) == used_after_first  # no second reservation
+
+
+def test_web_enqueue_reuses_completed_task_without_double_charge(monkeypatch, trial_on):
+    """A finished transcript is the redirect target; trial minutes stay put."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('dup-done@test.com', limit=3600)
+    audio = 'https://example.com/finished-ep.mp3'
+    first = _post_start(monkeypatch, uid, {
+        'audio_url': audio,
+        'episode_title': 'Done Ep',
+        'duration_min': '4',
+    })
+    assert first.status_code == 200, first.get_json()
+    task_id = first.get_json()['task_id']
+    used_after = _used(uid)
+
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        task.status = 'completed'
+        task.phase = 'completed'
+        task.transcript_text = 'hello'
+        db.session.commit()
+
+    second = _post_start(monkeypatch, uid, {
+        'audio_url': audio,
+        'episode_title': 'Done Ep',
+        'duration_min': '4',
+    })
+    assert second.status_code == 200
+    body = second.get_json()
+    assert body == {'task_id': task_id, 'existing': True}
+    assert _used(uid) == used_after
+
+
+def test_web_enqueue_allows_rerun_after_error(monkeypatch, trial_on):
+    """Error/cancelled tasks may be started again (and reserve again)."""
+    import threading as _t
+    from models import db, TranscriptionTask
+
+    # Default concurrency is 1; the stubbed worker never releases its slot.
+    monkeypatch.setattr(A, 'MAX_CONCURRENT_TRANSCRIPTIONS', 2)
+    monkeypatch.setattr(A, '_transcription_slots', _t.BoundedSemaphore(2))
+
+    uid = _make_user('dup-err@test.com', limit=3600)
+    audio = 'https://example.com/failed-ep.mp3'
+    first = _post_start(monkeypatch, uid, {
+        'audio_url': audio,
+        'episode_title': 'Fail Ep',
+        'duration_min': '3',
+    })
+    assert first.status_code == 200, first.get_json()
+    task_id = first.get_json()['task_id']
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        # Settle so a re-run is a clean new reservation (mirrors refund path).
+        A.trial_refund_task(task)
+        task.status = 'error'
+        task.phase = 'error'
+        db.session.commit()
+    used_before = _used(uid)
+
+    second = _post_start(monkeypatch, uid, {
+        'audio_url': audio,
+        'episode_title': 'Fail Ep',
+        'duration_min': '3',
+    })
+    assert second.status_code == 200, second.get_json()
+    body = second.get_json()
+    assert body.get('existing') is not True
+    assert body['task_id'] != task_id
+    assert _used(uid) == used_before + 180
+
+
+def test_api_enqueue_is_not_blocked_by_web_duplicate_guard(monkeypatch, trial_on):
+    """Duplicate guard is web-only; agent/api keeps its own reuse logic."""
+    import threading as _t
+    import types
+    from models import db, User
+
+    monkeypatch.setattr(A, 'MAX_CONCURRENT_TRANSCRIPTIONS', 2)
+    monkeypatch.setattr(A, '_transcription_slots', _t.BoundedSemaphore(2))
+    uid = _make_user('dup-api@test.com', key='sk-' + 'a' * 40)
+    audio = 'https://example.com/api-ep.mp3'
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda *a, **kw: types.SimpleNamespace(daemon=True, start=lambda: None))
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+
+    with A.app.app_context():
+        user = db.session.get(User, uid)
+        first, s1 = A.enqueue_transcription(
+            user, {'title': 'Ep', 'audio_url': audio, 'duration_min': 1},
+            source='api')
+        second, s2 = A.enqueue_transcription(
+            user, {'title': 'Ep', 'audio_url': audio, 'duration_min': 1},
+            source='api')
+    assert s1 == 200 and s2 == 200
+    assert first['task_id'] != second['task_id']
+    assert 'existing' not in second
+
+
+def test_normalize_language_code_maps_names_and_unknown_to_auto():
+    assert A.normalize_language_code('en') == 'en'
+    assert A.normalize_language_code('EN') == 'en'
+    assert A.normalize_language_code('english') == 'en'
+    assert A.normalize_language_code('Norwegian') == 'no'
+    assert A.normalize_language_code('not-a-language') == ''
+    assert A.normalize_language_code('') == ''
+    assert A.normalize_language_code(None) == ''
+
+
+def test_display_language_keeps_legacy_names_readable():
+    assert A.display_language('en') == 'English'
+    assert A.display_language('english') == 'English'
+    assert A.display_language('Klingon') == 'Klingon'
+
+
+def test_retry_payload_sends_iso_code_for_legacy_name(monkeypatch, trial_on):
+    """Old rows stored Whisper names; retry must post a code the picker accepts."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('lang-retry@test.com', key='sk-' + 'b' * 40)
+    with A.app.app_context():
+        task = TranscriptionTask(
+            id='lang-retry-1',
+            user_id=uid,
+            episode_title='Ep',
+            status='error',
+            phase='error',
+            error_message=(
+                'Your OpenAI account has no credit. '
+                'Add billing at platform.openai.com.'
+            ),
+            source_audio_url='https://cdn.example.com/ep.mp3',
+            audio_duration=120.0,
+            language='english',
+        )
+        db.session.add(task)
+        db.session.commit()
+
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    resp = client.get('/status/lang-retry-1')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['retry']['language'] == 'en'
+
+
+def test_safe_download_basename_strips_path_separators():
+    assert '/' not in A.safe_download_basename('a/b\\c:d')
+    assert '\\' not in A.safe_download_basename('a/b\\c:d')
+    assert A.safe_download_basename('Hello World') == 'Hello_World'
+    assert A.safe_download_basename('') == 'transcript'
+    assert A.safe_download_basename('///') == 'transcript'
+
+
+def test_download_filename_sanitises_slashes(monkeypatch, trial_on):
+    from models import db, TranscriptionTask
+
+    uid = _make_user('dl-slash@test.com', key='sk-' + 'c' * 40)
+    with A.app.app_context():
+        task = TranscriptionTask(
+            id='dl-slash-1',
+            user_id=uid,
+            episode_title='Show/Episode: Part 1?',
+            status='completed',
+            phase='completed',
+            transcript_text='hi',
+        )
+        db.session.add(task)
+        db.session.commit()
+
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    resp = client.get('/download/dl-slash-1/txt')
+    assert resp.status_code == 200
+    cd = resp.headers.get('Content-Disposition', '')
+    assert 'filename=' in cd
+    # The download name itself must not contain path separators.
+    name = cd.split('filename=')[-1].strip().strip('"')
+    assert '/' not in name
+    assert '\\' not in name
+
+
+def test_transcript_started_includes_measurement_props(ph_events, monkeypatch, trial_on):
+    uid = _make_user('ph-measure@test.com', key='sk-' + 'd' * 40)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Measured',
+        'podcast_name': 'Cool Show',
+        'duration_min': '12',
+        'language': 'no',
+        'input_origin': 'spotify',
+    })
+    assert resp.status_code == 200
+    started = [e for e in ph_events.events if e['event'] == 'transcript_started']
+    assert len(started) == 1
+    props = started[0]['properties']
+    assert props['duration_min'] == 12.0
+    assert props['language'] == 'no'
+    assert props['input_origin'] == 'spotify'
+    assert props['has_feed'] is False
+    assert props['podcast_name'] == 'Cool Show'
+    assert props['nth_transcript'] == 1
+
+
+def test_derive_input_origin_from_rss_and_apple():
+    assert A.derive_input_origin({}, rss_url='https://feeds.example.com/x.xml') == 'rss'
+    assert A.derive_input_origin(
+        {}, rss_url='https://podcasts.apple.com/us/podcast/x/id1') == 'apple'
+    assert A.derive_input_origin(
+        {'input_origin': 'itunes_episode'}, rss_url=None) == 'itunes_episode'
+    assert A.derive_input_origin({}, rss_url=None) == 'audio'

@@ -473,6 +473,7 @@
             };
             if (item.feed_url) fields.rss_url = item.feed_url;
             if (item.duration_min) fields.duration_min = item.duration_min;
+            if (item.origin) fields.input_origin = item.origin;
 
             if (!IS_AUTHENTICATED) {
                 // Stash the episode, then /register?next=/resume-transcription.
@@ -752,7 +753,8 @@
             feed_url: '',
             released: '',
             duration_min: null,
-            estimated_cost: null
+            estimated_cost: null,
+            origin: 'audio'
         }]);
         langRow.classList.remove('hidden');
     }
