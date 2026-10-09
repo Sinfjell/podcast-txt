@@ -9661,6 +9661,8 @@ def test_show_share_and_episode_pages_have_no_follow_ui(trial_on):
         assert 'Follow podcast' not in src, path
         assert 'Email me new episodes' not in src, path
         assert 'Email me when new episodes come out' not in src, path
+        assert "url_for('add_feed')" not in src, path
+        assert 'Save feed' not in src, path
 
 
 def test_new_episode_poller_not_in_deploy_docs():
