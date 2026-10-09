@@ -230,7 +230,6 @@ def test_notion_properties_omit_notes_when_healthy():
         'Returned 2+ days': 0,
         'Trial minutes used': 0.0,
         'Trial exhausted': 0,
-        'Saved feeds': 0,
     }
     props = mod.notion_properties(
         metrics, 'cron', datetime(2026, 9, 27, tzinfo=OSLO), notes_content=None,
@@ -267,10 +266,6 @@ def _minimal_podcast_db(path: Path) -> None:
             completed_at TEXT,
             heartbeat_at TEXT,
             trial_seconds_charged INTEGER
-        );
-        CREATE TABLE saved_feeds (
-            id INTEGER PRIMARY KEY,
-            created_at TEXT
         );
         CREATE TABLE trial_budget_days (
             day TEXT PRIMARY KEY,

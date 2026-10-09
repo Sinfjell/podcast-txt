@@ -1,6 +1,6 @@
-"""Tests for automatic transcripts summaries and summary-by-email.
+"""Tests for automatic transcript summaries (SUMMARY_ENABLED).
 
-OpenAI chat and Mailgun are always mocked — no network.
+OpenAI chat is always mocked — no network.
 """
 
 from __future__ import annotations
@@ -25,24 +25,20 @@ os.environ.setdefault('POSTHOG_HOST', '')
 os.environ.setdefault('PODSKRIFT_DISABLE_WATCHDOG', '1')
 os.environ.setdefault('EMAIL_ENABLED', '0')
 os.environ.setdefault('SUMMARY_ENABLED', '0')
-os.environ.setdefault('SUMMARY_EMAIL_ENABLED', '0')
 
 import app as A  # noqa: E402
 import email_notify  # noqa: E402
 import mail as mailer  # noqa: E402
 import summary as summary_mod  # noqa: E402
-import summary_email as summary_email_mod  # noqa: E402
 import analytics  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _reset_flags(monkeypatch):
     monkeypatch.setenv('SUMMARY_ENABLED', '0')
-    monkeypatch.setenv('SUMMARY_EMAIL_ENABLED', '0')
     monkeypatch.setenv('EMAIL_ENABLED', '0')
     monkeypatch.delenv('MAILGUN_API_KEY', raising=False)
     summary_mod.reset_sentry_kinds_for_tests()
-    summary_email_mod.reset_sentry_kinds_for_tests()
     mailer.reset_sentry_kinds_for_tests()
     yield
 
@@ -349,335 +345,6 @@ def test_result_page_has_summary_card_markup():
 # Summary-by-email
 # ---------------------------------------------------------------------------
 
-def test_feeds_page_shows_summary_checkbox():
-    uid = _make_user('sumfeeds@test.com')
-    client = A.app.test_client()
-    with client.session_transaction() as sess:
-        sess['_user_id'] = str(uid)
-        sess['_fresh'] = True
-    body = client.get('/feeds').data.decode()
-    assert 'Email me a summary of each new episode' in body
-    assert 'email_summaries' in body
-
-
-def test_opt_in_summary_email_stamps_trial_and_analytics(monkeypatch):
-    events = []
-    monkeypatch.setattr(
-        analytics, 'capture',
-        lambda e, d, p=None, **kw: events.append(e))
-    uid = _make_user('sumopt@test.com')
-    with A.app.app_context():
-        feed = A.SavedFeed(
-            user_id=uid, name='Show', rss_url='https://feeds.example.com/s.xml',
-            email_new_episodes=True, email_summaries=False,
-        )
-        A.db.session.add(feed)
-        A.db.session.commit()
-        feed_id = feed.id
-    client = A.app.test_client()
-    with client.session_transaction() as sess:
-        sess['_user_id'] = str(uid)
-        sess['_fresh'] = True
-    resp = client.post(f'/feeds/{feed_id}/email-summaries', data={
-        'email_summaries': '1',
-    })
-    assert resp.status_code in (200, 302)
-    with A.app.app_context():
-        feed = A.db.session.get(A.SavedFeed, feed_id)
-        assert feed.email_summaries is True
-        assert feed.summary_email_trial_started_at is not None
-    assert 'summary_email_opt_in' in events
-
-
-def test_summary_email_one_show_limit():
-    uid = _make_user('sumlimit@test.com')
-    with A.app.app_context():
-        A.db.session.add(A.SavedFeed(
-            user_id=uid, name='A', rss_url='https://feeds.example.com/a.xml',
-            email_summaries=True,
-            summary_email_trial_started_at=datetime.now(timezone.utc),
-        ))
-        A.db.session.add(A.SavedFeed(
-            user_id=uid, name='B', rss_url='https://feeds.example.com/b.xml',
-            email_summaries=False,
-        ))
-        A.db.session.commit()
-        assert summary_email_mod.can_opt_in_summary_email(
-            A.db, A.SavedFeed, uid) is False
-
-
-def test_daily_budget_reservation_atomic():
-    with A.app.app_context():
-        A.ensure_summary_email_tables()
-        day = summary_email_mod.utc_today()
-        # Cap at 10 minutes for this test via env is awkward; reserve against
-        # real default by reserving a huge chunk once.
-        monkey_limit = 60  # seconds
-        # Directly set a small limit by stubbing.
-        with mock.patch.object(summary_email_mod, 'daily_budget_seconds',
-                               return_value=monkey_limit):
-            assert summary_email_mod.reserve_daily_budget(
-                A.db, A.SummaryEmailBudgetDay, seconds=40, day=day)
-            assert not summary_email_mod.reserve_daily_budget(
-                A.db, A.SummaryEmailBudgetDay, seconds=40, day=day)
-            row = A.db.session.get(A.SummaryEmailBudgetDay, day)
-            assert row.seconds_used == 40
-
-
-def test_enqueue_job_idempotent(monkeypatch):
-    monkeypatch.setenv('SUMMARY_EMAIL_ENABLED', '1')
-    with A.app.app_context():
-        A.ensure_summary_email_tables()
-        a = summary_email_mod.enqueue_job(
-            A.db, A.SummaryEmailJob,
-            rss_url='https://feeds.example.com/x.xml',
-            audio_url='https://cdn.example.com/ep.mp3',
-            episode_guid='guid-1',
-            episode_title='Ep 1',
-            duration_seconds=1800,
-        )
-        b = summary_email_mod.enqueue_job(
-            A.db, A.SummaryEmailJob,
-            rss_url='https://feeds.example.com/x.xml',
-            audio_url='https://cdn.example.com/ep.mp3',
-            episode_guid='guid-1',
-            episode_title='Ep 1',
-            duration_seconds=1800,
-        )
-        assert a.id == b.id
-        assert A.SummaryEmailJob.query.count() >= 1
-
-
-def test_build_summary_email_has_no_full_transcript():
-    subject, text, html = summary_email_mod.build_summary_email_bodies(
-        podcast_name='Show',
-        episode_title='Ep',
-        summary={
-            'tldr': 'Short',
-            'key_points': ['a', 'b', 'c', 'd', 'e'],
-            'quotes': ['hi'],
-            'is_partial': False,
-        },
-        transcript_url='https://podskrift.com/transcription/abc',
-        unsub_url='https://podskrift.com/email/unsubscribe/tok',
-    )
-    assert 'Summary: Ep' in subject
-    assert 'TL;DR: Short' in text
-    assert 'utm_campaign=summary' in text
-    assert 'Read the full transcript' in text
-    # Must not include a long transcript body — only short quotes.
-    assert 'transcript_text' not in text
-    assert len(text) < 4000
-    assert 'List-Unsubscribe' not in html  # footer link only
-    assert 'Unsubscribe' in html
-
-
-def test_notify_summary_email_idempotent(monkeypatch):
-    _enable_mail(monkeypatch)
-    fake = mock.Mock(status_code=200, text='ok')
-    monkeypatch.setattr(mailer.requests, 'post', mock.Mock(return_value=fake))
-    uid = _make_user('summail@test.com')
-    with A.app.app_context():
-        A.ensure_email_sent_log_table()
-        task = A.TranscriptionTask(
-            id='sum-mail-task', user_id=uid, episode_title='Ep',
-            podcast_name='Show', status='completed',
-            transcript_text='secret full transcript should not appear',
-        )
-        A.db.session.add(task)
-        A.db.session.commit()
-        summary = {
-            'tldr': 'T', 'key_points': ['a'] * 5, 'quotes': [], 'is_partial': False,
-        }
-        user = A.db.session.get(A.User, uid)
-        assert summary_email_mod.notify_summary_email(
-            db=A.db, user=user, task_copy=task, summary=summary,
-            EmailSentLog=A.EmailSentLog,
-            public_base_url='https://podskrift.com',
-            secret_key=A.app.secret_key,
-            job_id=99,
-        )
-        assert not summary_email_mod.notify_summary_email(
-            db=A.db, user=user, task_copy=task, summary=summary,
-            EmailSentLog=A.EmailSentLog,
-            public_base_url='https://podskrift.com',
-            secret_key=A.app.secret_key,
-            job_id=99,
-        )
-        # Full transcript must not have been mailed.
-        sent_body = mailer.requests.post.call_args.kwargs.get('data') or \
-            mailer.requests.post.call_args[1].get('data')
-        assert 'secret full transcript' not in str(sent_body)
-
-
-def test_subscriber_copy_grants_access():
-    owner = _make_user('sumowner@test.com')
-    sub = _make_user('sumsub@test.com')
-    with A.app.app_context():
-        source = A.TranscriptionTask(
-            id='sum-src', user_id=owner, episode_title='Ep',
-            status='completed', transcript_text='Shared text',
-            source_audio_url='https://cdn.example.com/shared.mp3',
-            summary_json=json.dumps({
-                'tldr': 'T', 'key_points': ['a'] * 5, 'quotes': [],
-            }),
-            summary_status='ready',
-        )
-        A.db.session.add(source)
-        A.db.session.commit()
-        copy = summary_email_mod.create_subscriber_copy(
-            A.db, A.TranscriptionTask, source_task=source, user_id=sub)
-        assert copy.user_id == sub
-        assert copy.transcript_text == 'Shared text'
-        assert copy.summary_status == 'ready'
-        assert copy.summary_source_task_id == 'sum-src'
-        # Idempotent
-        copy2 = summary_email_mod.create_subscriber_copy(
-            A.db, A.TranscriptionTask, source_task=source, user_id=sub)
-        assert copy2.id == copy.id
-
-
-def test_process_job_skips_long_episodes(monkeypatch):
-    monkeypatch.setenv('SUMMARY_EMAIL_ENABLED', '1')
-    monkeypatch.setenv('SUMMARY_EMAIL_MAX_MINUTES', '120')
-    uid = _make_user('sumlong@test.com')
-    with A.app.app_context():
-        A.ensure_summary_email_tables()
-        A.db.session.add(A.SavedFeed(
-            user_id=uid, name='Show',
-            rss_url='https://feeds.example.com/long.xml',
-            email_summaries=True,
-            summary_email_trial_started_at=datetime.now(timezone.utc),
-        ))
-        job = summary_email_mod.enqueue_job(
-            A.db, A.SummaryEmailJob,
-            rss_url='https://feeds.example.com/long.xml',
-            audio_url='https://cdn.example.com/long.mp3',
-            episode_guid='long-1',
-            duration_seconds=180 * 60,
-        )
-        stats = {'jobs_seen': 0, 'jobs_started': 0, 'jobs_done': 0,
-                 'emails_sent': 0, 'skipped': 0, 'failed': 0}
-        summary_email_mod._process_one_job(
-            db=A.db, job=job, User=A.User, SavedFeed=A.SavedFeed,
-            TranscriptionTask=A.TranscriptionTask,
-            EmailSentLog=A.EmailSentLog,
-            SummaryEmailBudgetDay=A.SummaryEmailBudgetDay,
-            build_openai_client=lambda k: _fake_openai_client(),
-            platform_api_key='sk-test',
-            start_shared_transcription=lambda *a, **k: None,
-            public_base_url='https://podskrift.com',
-            secret_key=A.app.secret_key,
-            stats=stats,
-        )
-        A.db.session.refresh(job)
-        assert job.status == 'skipped'
-        assert job.skip_reason == 'episode_too_long'
-        assert stats['skipped'] == 1
-
-
-def test_process_job_reuses_cached_transcript_and_emails(monkeypatch):
-    monkeypatch.setenv('SUMMARY_EMAIL_ENABLED', '1')
-    _enable_mail(monkeypatch)
-    fake = mock.Mock(status_code=200, text='ok')
-    monkeypatch.setattr(mailer.requests, 'post', mock.Mock(return_value=fake))
-    uid = _make_user('sumcache@test.com')
-    audio = 'https://cdn.example.com/cached-ep.mp3'
-    with A.app.app_context():
-        A.ensure_summary_email_tables()
-        A.ensure_email_sent_log_table()
-        A.db.session.add(A.SavedFeed(
-            user_id=uid, name='Show',
-            rss_url='https://feeds.example.com/cache.xml',
-            email_summaries=True,
-            summary_email_trial_started_at=datetime.now(timezone.utc),
-        ))
-        A.db.session.add(A.TranscriptionTask(
-            id='cached-task', user_id=uid, episode_title='Ep',
-            podcast_name='Show', status='completed',
-            transcript_text='Cached full transcript body.',
-            source_audio_url=audio,
-            audio_duration=600,
-            summary_json=json.dumps({
-                'tldr': 'Cached tldr',
-                'key_points': ['a', 'b', 'c', 'd', 'e'],
-                'quotes': ['q'],
-                'is_partial': False,
-            }),
-            summary_status='ready',
-        ))
-        A.db.session.commit()
-        job = summary_email_mod.enqueue_job(
-            A.db, A.SummaryEmailJob,
-            rss_url='https://feeds.example.com/cache.xml',
-            audio_url=audio,
-            episode_guid='cache-1',
-            episode_title='Ep',
-            podcast_name='Show',
-            duration_seconds=600,
-        )
-        stats = {'jobs_seen': 0, 'jobs_started': 0, 'jobs_done': 0,
-                 'emails_sent': 0, 'skipped': 0, 'failed': 0}
-        summary_email_mod._process_one_job(
-            db=A.db, job=job, User=A.User, SavedFeed=A.SavedFeed,
-            TranscriptionTask=A.TranscriptionTask,
-            EmailSentLog=A.EmailSentLog,
-            SummaryEmailBudgetDay=A.SummaryEmailBudgetDay,
-            build_openai_client=lambda k: _fake_openai_client(),
-            platform_api_key='sk-test',
-            start_shared_transcription=lambda *a, **k: (_ for _ in ()).throw(
-                AssertionError('must reuse cache')),
-            public_base_url='https://podskrift.com',
-            secret_key=A.app.secret_key,
-            stats=stats,
-        )
-        A.db.session.refresh(job)
-        assert job.status == 'done'
-        assert job.task_id == 'cached-task'
-        assert stats['emails_sent'] == 1
-        assert stats['jobs_done'] == 1
-
-
-def test_trial_expired_skips_new_work(monkeypatch):
-    monkeypatch.setenv('SUMMARY_EMAIL_ENABLED', '1')
-    uid = _make_user('sumexp@test.com')
-    with A.app.app_context():
-        A.ensure_summary_email_tables()
-        A.db.session.add(A.SavedFeed(
-            user_id=uid, name='Show',
-            rss_url='https://feeds.example.com/exp.xml',
-            email_summaries=True,
-            summary_email_trial_started_at=(
-                datetime.now(timezone.utc) - timedelta(days=20)),
-        ))
-        A.db.session.commit()
-        job = summary_email_mod.enqueue_job(
-            A.db, A.SummaryEmailJob,
-            rss_url='https://feeds.example.com/exp.xml',
-            audio_url='https://cdn.example.com/exp.mp3',
-            episode_guid='exp-1',
-            duration_seconds=600,
-        )
-        stats = {'jobs_seen': 0, 'jobs_started': 0, 'jobs_done': 0,
-                 'emails_sent': 0, 'skipped': 0, 'failed': 0}
-        summary_email_mod._process_one_job(
-            db=A.db, job=job, User=A.User, SavedFeed=A.SavedFeed,
-            TranscriptionTask=A.TranscriptionTask,
-            EmailSentLog=A.EmailSentLog,
-            SummaryEmailBudgetDay=A.SummaryEmailBudgetDay,
-            build_openai_client=lambda k: _fake_openai_client(),
-            platform_api_key='sk-test',
-            start_shared_transcription=lambda *a, **k: (_ for _ in ()).throw(
-                AssertionError('expired must not start')),
-            public_base_url='https://podskrift.com',
-            secret_key=A.app.secret_key,
-            stats=stats,
-        )
-        A.db.session.refresh(job)
-        assert job.status == 'skipped'
-        assert job.skip_reason == 'trial_expired_only'
-
-
 def test_changelog_hides_summary_until_flags_on():
     entries = A.load_changelog_entries()
     ids = {e['id'] for e in entries}
@@ -697,13 +364,6 @@ def test_summary_task_columns_in_migrations():
     ):
         assert col in TASK_COLUMN_MIGRATIONS
         assert hasattr(TranscriptionTask, col)
-
-
-def test_summary_feed_columns_in_migrations():
-    from models import SAVED_FEED_COLUMN_MIGRATIONS, SavedFeed
-    assert 'email_summaries' in SAVED_FEED_COLUMN_MIGRATIONS
-    assert 'summary_email_trial_started_at' in SAVED_FEED_COLUMN_MIGRATIONS
-    assert hasattr(SavedFeed, 'email_summaries')
 
 
 def test_summary_migration_on_current_production_schema():
@@ -872,19 +532,3 @@ def test_format_summary_for_txt_partial_label():
     assert 'TL;DR: Preview only' in text
 
 
-def test_summary_email_refuses_transcription_outside_gunicorn(monkeypatch):
-    """Poller is a oneshot process: threads it starts would die on exit."""
-    import app as A
-    monkeypatch.setattr(A, '_SERVER_STARTED_AT_ENV', '')
-    monkeypatch.setattr(A, 'GLOBAL_OPENAI_KEY', 'sk-test')
-
-    class Job:
-        audio_url = 'https://cdn.example.com/ep.mp3'
-        episode_title = 'Ep'
-        rss_url = 'https://feeds.example.com/x.xml'
-        podcast_name = 'X'
-        duration_seconds = 600.0
-
-    with A.app.app_context():
-        assert A.start_shared_transcription_for_summary_email(
-            Job(), owner_user_id=1) is None
