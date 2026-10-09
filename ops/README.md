@@ -44,27 +44,79 @@ To return to tracking `main` afterward: `git checkout main && git pull --ff-only
 Until 2026-09-09 there were none. The database is the only copy of every user's
 account and transcripts.
 
-### Install (once, as root on the host)
+### Schedule
+
+`podskrift-backup.timer` runs at **23:45 UTC** every night
+(01:45 Europe/Oslo in CEST / 00:45 in CET). That is intentionally **before**
+the Plesk server backup to S3 at **02:05 Oslo**, so the offsite snapshot
+includes tonight's SQLite dump rather than yesterday's (~21 h stale).
+
+`Persistent=true` so a missed window (host down at 23:45) still runs once the
+machine is back.
+
+Local files land in `data/backups/podcast-YYYYMMDD-HHMMSS.db.gz` (mode **600**,
+via `umask 077` in `ops/backup-db.sh`). Retention: 14 days.
+
+### Offsite layer
+
+The Plesk scheduled server backup to S3 is the offsite copy of the whole host
+(including `data/backups/`). Treat it as the disaster-recovery layer; the
+systemd job is the consistent SQLite snapshot that must finish first.
+
+**Recommend a periodic test restore** (quarterly is fine): pick a recent
+`.db.gz` from `data/backups/`, restore it on a scratch path (not production),
+run `PRAGMA integrity_check` and `SELECT COUNT(*) FROM users`, and confirm the
+counts look right. A backup that has never been restored is unproven.
+
+### Install / update (as root on the host)
+
+After pulling a commit that changes the units or the schedule:
 
 ```bash
 cd /var/www/vhosts/podskrift.nettsmed.dev/app
-ln -sf $PWD/ops/podskrift-backup.service /etc/systemd/system/podskrift-backup.service
-ln -sf $PWD/ops/podskrift-backup.timer   /etc/systemd/system/podskrift-backup.timer
+cp ops/podskrift-backup.service /etc/systemd/system/podskrift-backup.service
+cp ops/podskrift-backup.timer /etc/systemd/system/podskrift-backup.timer
+cp ops/podskrift-backup-failed.service /etc/systemd/system/podskrift-backup-failed.service
 systemctl daemon-reload
 systemctl enable --now podskrift-backup.timer
-systemctl start podskrift-backup.service   # prove it works now, don't wait for 03:30
+systemctl restart podskrift-backup.timer
+systemctl start podskrift-backup.service   # prove it works now; don't wait for 23:45
 systemctl status podskrift-backup.service
+systemctl list-timers podskrift-backup.timer
 ```
+
+`podskrift-backup-failed.service` is only started by `OnFailure=`; do not
+enable it as a timer.
+
+### Failure alerting
+
+If `backup-db.sh` exits non-zero (missing DB, empty file, failed integrity
+check, user-count mismatch, etc.), systemd starts
+`podskrift-backup-failed.service`, which runs `ops/report-backup-failure.py`.
+That script loads `SENTRY_DSN` from the app `.env` the same way the app and
+`ops/sentry-check.py` do, and sends one Sentry error
+(`fingerprint=podskrift-backup-failed`). No new secrets in the repo.
+
+Manual dry check of the reporter (sends a real event if the DSN is set):
+
+```bash
+cd /var/www/vhosts/podskrift.nettsmed.dev/app
+sudo -u podskrift .venv/bin/python ops/report-backup-failure.py
+```
+
+The weekday Notion metrics job also flags when the newest
+`data/backups/podcast-*.db.gz` is older than **26 hours** (or missing) as a
+Notes warning — catches a timer that stopped without a clean failure.
 
 ### Verify it is still running
 
-A timer that silently stopped is the same as having no backups. Check that the
-newest backup is less than two days old:
-
 ```bash
 find /var/www/vhosts/podskrift.nettsmed.dev/app/data/backups \
-     -name 'podcast-*.db.gz' -mtime -2 | grep -q . \
+     -name 'podcast-*.db.gz' -mmin -1560 | grep -q . \
   && echo "backups OK" || echo "BACKUPS STALE"
+# -mmin -1560 ≈ 26 hours
+systemctl is-active podskrift-backup.timer
+journalctl -u podskrift-backup.service -n 20 --no-pager
 ```
 
 ### Restore
@@ -76,18 +128,15 @@ cp data/podcast.db data/podcast.db.before-restore-$(date +%Y%m%d-%H%M%S)
 gunzip -c data/backups/podcast-<STAMP>.db.gz > data/podcast.db
 rm -f data/podcast.db-wal data/podcast.db-shm   # stale WAL from the old database
 chown podskrift:psaserv data/podcast.db
+chmod 600 data/podcast.db
 sqlite3 data/podcast.db 'PRAGMA integrity_check; select count(*) from users;'
 systemctl start podskrift
 ```
 
-### Known gaps
+### Secrets in backups
 
-- Backups live on the same volume as the database, so host loss loses both.
-  An offsite copy (rsync to another host, or S3) is still to do.
-- The `.gz` files contain **plaintext OpenAI API keys** and password hashes.
-  `umask 077` keeps them owner-only; treat them as secrets.
-- No alerting on failure. Run the staleness check above, or wire `OnFailure=`
-  in the service unit to an alert unit once a mail relay exists.
+The `.gz` files contain **plaintext OpenAI API keys** and password hashes.
+`umask 077` / mode 600 keeps them owner-only; treat them as secrets.
 
 ## Runtime dependencies not in requirements.txt
 
@@ -162,7 +211,7 @@ Named events:
 | `user_signed_up`, `settings_viewed` | server | — |
 | `openai_key_saved` / `openai_key_validation_failed` | server | `status` / `reason` |
 | `transcript_started` / `transcript_completed` | server | `key_source` (trial/user), `source` (web/api) |
-| `transcript_failed` | server | the above + `reason` (`invalid_key`, `no_billing`, `rate_limit`, `network`, `trial_exhausted`, `abandoned`, `stale`, `source_audio_missing`, `source_audio_forbidden`, `other`) |
+| `transcript_failed` | server | the above + `reason` (`invalid_key`, `no_billing`, `own_key_invalid`, `own_key_no_credit`, `rate_limit`, `network`, `trial_exhausted`, `abandoned`, `stale`, `source_audio_missing`, `source_audio_forbidden`, `other`) |
 | `trial_limit_hit` | server | `scope` (`episode_length`, `user`, `global`), `stage` (`start`, `reconcile`), `source` |
 
 `trial_limit_hit` is the buying signal: a trial user wanted more than the free
@@ -186,7 +235,8 @@ exclude the same internal cohort as dashboard
 Warnings go only to the Notion `Notes` property (Norwegian lines, ⚠️-prefixed,
 capped at 2000 chars). No Notes write when everything looks fine. A missing
 `POSTHOG_PERSONAL_API_KEY`, timeout, or API error still upserts metrics and
-writes one “helsesjekk kjørte ikke” line. No email/Slack/webhooks.
+writes one “helsesjekk kjørte ikke” line. The same Notes channel also flags a
+missing or >26 h-old `data/backups/podcast-*.db.gz`. No email/Slack/webhooks.
 
 Thresholds (named constants in `ops/posthog_daily_health.py`): check window =
 metric day, or 3 days when the metric day is Sunday (covers Fri–Sat which the

@@ -4,7 +4,8 @@
 Python 3 stdlib only (sqlite3, urllib). Read-only against the SQLite database.
 Timezone for the metric day is Europe/Oslo; default day is yesterday.
 
-Each run also queries PostHog (EU) for a short product-health check. When
+Each run also queries PostHog (EU) for a short product-health check, and flags
+a stale/missing SQLite backup under data/backups/ (older than 26 h). When
 something looks abnormal — or the check cannot run — warning lines are written
 to the Notion rich-text property Notes (Norwegian, under 2000 chars). When
 everything is fine, Notes is omitted so manual notes stay untouched. A missing
@@ -50,6 +51,9 @@ DEFAULT_TRIAL_MINUTES = 180
 DEFAULT_TRIAL_GLOBAL_MINUTES = 6000
 # Warn (Notes + Sentry) when lifetime global trial usage crosses these ratios.
 TRIAL_GLOBAL_WARN_THRESHOLDS = (0.70, 0.90)
+# Nightly backup should land by 23:45 UTC; flag if the newest .gz is older than
+# this (covers a missed night plus a little slack before the weekday metrics run).
+BACKUP_STALE_AFTER_HOURS = 26
 
 try:
     import sentry_sdk
@@ -144,6 +148,59 @@ def trial_global_cap_warning_lines(
                 f'for alle kontoer.'
             )
     return lines
+
+
+def newest_backup_mtime(
+    backup_dir: Path,
+    *,
+    pattern: str = 'podcast-*.db.gz',
+) -> float | None:
+    """Epoch mtime of the newest matching backup, or None if none exist."""
+    if not backup_dir.is_dir():
+        return None
+    newest: float | None = None
+    for path in backup_dir.glob(pattern):
+        if not path.is_file():
+            continue
+        mtime = path.stat().st_mtime
+        if newest is None or mtime > newest:
+            newest = mtime
+    return newest
+
+
+def backup_staleness_warning_lines(
+    backup_dir: Path,
+    *,
+    max_age_hours: float = BACKUP_STALE_AFTER_HOURS,
+    now: datetime | None = None,
+) -> list[str]:
+    """Norwegian Notes lines when the newest backup is missing or too old."""
+    now_utc = now if now is not None else datetime.now(UTC)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=UTC)
+    else:
+        now_utc = now_utc.astimezone(UTC)
+
+    mtime = newest_backup_mtime(backup_dir)
+    if mtime is None:
+        return [
+            f'Ingen DB-backup funnet i {backup_dir} '
+            f'(forventet podcast-*.db.gz). Sjekk podskrift-backup.timer.'
+        ]
+
+    age_sec = max(0.0, now_utc.timestamp() - mtime)
+    age_hours = age_sec / 3600.0
+    if age_hours <= max_age_hours:
+        return []
+
+    newest_iso = datetime.fromtimestamp(mtime, tz=UTC).strftime(
+        '%Y-%m-%d %H:%M UTC'
+    )
+    return [
+        f'DB-backup eldre enn {max_age_hours:g} timer '
+        f'(nyeste: {newest_iso}, {age_hours:.0f} t gammel). '
+        f'Sjekk podskrift-backup.timer / podskrift-backup.service.'
+    ]
 
 
 def emit_trial_global_sentry_warnings(
@@ -584,6 +641,12 @@ def main(argv: list[str] | None = None) -> int:
     cap_s = metrics.pop('_trial_global_cap_seconds', trial_global_seconds)
     health_lines.extend(trial_global_cap_warning_lines(used_s, cap_s))
     emit_trial_global_sentry_warnings(used_s, cap_s, metric_day=day)
+    # Nightly SQLite backup — catches a stopped timer even if OnFailure never fired.
+    backup_dir = Path(
+        os.environ.get('BACKUP_DIR')
+        or (app_dir / 'data' / 'backups')
+    )
+    health_lines.extend(backup_staleness_warning_lines(backup_dir))
     notes_content = phh.format_notes_content(health_lines)
 
     # Public metrics JSON (no internal underscore keys).

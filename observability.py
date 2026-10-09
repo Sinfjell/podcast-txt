@@ -119,8 +119,10 @@ def report_task_failure(exc, task_id, key_source):
     """Report a transcription task that ended in error. Never raises.
 
     OpenAI failures are grouped by status and key source, so a wave of 429s on
-    the trial key is one issue that alerts once -- and is told apart from a
-    BYOK user's rejected key, which is theirs to fix, not ours.
+    the trial key is one issue that alerts once. Callers must skip this for
+    BYOK auth/billing failures (``own_key_no_credit`` / ``own_key_invalid``):
+    those are the user's OpenAI account, not our outage — warning-log only.
+    Platform-key quota/auth failures still call this.
     """
     try:
         tags = {'task.key_source': key_source or 'unknown'}

@@ -115,6 +115,10 @@ class TranscriptionTask(db.Model):
     # freshly created database and a migrated one have the same schema.
     trial_settled = db.Column(db.Boolean, nullable=False, default=False,
                               server_default='0')
+    # JSON blob for free-preview jobs: {"partial_seconds":N,"episode_seconds":M}.
+    # Dedicated column so completed previews never look like errors (error_message
+    # stays reserved for real failures / cancel).
+    partial_meta = db.Column(db.Text, nullable=True)
 
 
 class CreditPurchase(db.Model):
@@ -168,6 +172,7 @@ TASK_COLUMN_MIGRATIONS = {
     'trial_seconds_charged': 'INTEGER',
     'paid_seconds_charged': 'INTEGER',
     'trial_settled': 'BOOLEAN NOT NULL DEFAULT 0',
+    'partial_meta': 'TEXT',
 }
 
 #: Same, for the users table.

@@ -313,9 +313,9 @@ def trial_estimate_seconds(duration_min):
 
 
 def encode_partial_task_meta(partial_seconds, episode_seconds):
-    """Serialize partial-preview metadata into the error_message column."""
+    """Serialize partial-preview metadata for the partial_meta column."""
     import json as _json
-    return PARTIAL_META_MARKER + _json.dumps({
+    return _json.dumps({
         'partial_seconds': int(partial_seconds),
         'episode_seconds': int(max(partial_seconds, episode_seconds)),
     }, separators=(',', ':'))
@@ -326,11 +326,11 @@ def task_partial_meta(task):
     import json as _json
     if task is None:
         return None
-    raw = getattr(task, 'error_message', None) or ''
-    if not isinstance(raw, str) or not raw.startswith(PARTIAL_META_MARKER):
+    raw = getattr(task, 'partial_meta', None) or ''
+    if not isinstance(raw, str) or not raw.strip():
         return None
     try:
-        data = _json.loads(raw[len(PARTIAL_META_MARKER):])
+        data = _json.loads(raw)
         partial_seconds = int(data['partial_seconds'])
         episode_seconds = int(data['episode_seconds'])
     except (TypeError, ValueError, KeyError, _json.JSONDecodeError):
@@ -345,6 +345,11 @@ def task_partial_meta(task):
 
 def task_is_partial(task):
     return task_partial_meta(task) is not None
+
+
+def set_task_partial_meta(task, partial_seconds, episode_seconds):
+    """Write partial-preview metadata onto `task` (caller commits)."""
+    task.partial_meta = encode_partial_task_meta(partial_seconds, episode_seconds)
 
 
 def partial_minutes_pair(meta):
@@ -708,11 +713,6 @@ TRIAL_PARTIAL_MIN_SECONDS = _env_minutes('TRIAL_PARTIAL_MIN_MINUTES', 5) * 60
 #: Kill switch. Set TRIAL_ENABLED=0 to stop handing out our key entirely.
 TRIAL_ENABLED = os.getenv('TRIAL_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 
-#: Stored in TranscriptionTask.error_message while status is not an error, so a
-#: partial preview needs no schema migration. Agent payloads only expose
-#: error_message when status == 'error', so this stays out of the API.
-PARTIAL_META_MARKER = 'partial_preview:'
-
 # ---------------------------------------------------------------------------
 # Stripe credit pack (optional; unset keys hide Buy and skip webhook wiring)
 # ---------------------------------------------------------------------------
@@ -1045,6 +1045,30 @@ def _claim_task_platform_charges(task_id, expected_trial, expected_paid,
     return result.rowcount == 1
 
 
+def _pro_rata_platform_spend(trial_charged, paid_charged, chunk_total, chunk_index):
+    """Return (spent_trial, spent_paid, refund_trial, refund_paid).
+
+    chunk_index is written immediately BEFORE that chunk is uploaded, so
+    index k means k+1 chunks have been sent and billed to us. Rounding
+    toward charging is deliberate: refunding a chunk that did reach Whisper
+    is exactly how a swept single-chunk episode -- every episode under 24 MB,
+    so the common case -- came out free.
+    """
+    trial_charged = int(trial_charged or 0)
+    paid_charged = int(paid_charged or 0)
+    total = trial_charged + paid_charged
+    if total <= 0:
+        return 0, 0, 0, 0
+    if (chunk_total or 0) > 0 and chunk_index is not None:
+        started = min(int(chunk_total), max(0, int(chunk_index)) + 1)
+        spent = int(total * started / chunk_total)
+    else:
+        spent = 0  # nothing reached Whisper yet
+    spent_trial = min(trial_charged, spent)
+    spent_paid = spent - spent_trial
+    return spent_trial, spent_paid, trial_charged - spent_trial, paid_charged - spent_paid
+
+
 def trial_refund_task(task):
     """Refund the part of a failed task we did not actually spend.
 
@@ -1072,33 +1096,109 @@ def trial_refund_task(task):
     user_id, trial_charged, paid_charged, chunk_total, chunk_index, settled = row
     trial_charged = int(trial_charged or 0)
     paid_charged = int(paid_charged or 0)
-    total_charged = trial_charged + paid_charged
-    if settled or total_charged <= 0:
+    if settled or (trial_charged + paid_charged) <= 0:
         return 0
 
-    if (chunk_total or 0) > 0 and chunk_index is not None:
-        # chunk_index is written immediately BEFORE that chunk is uploaded, so
-        # index k means k+1 chunks have been sent and billed to us. Rounding
-        # toward charging is deliberate: refunding a chunk that did reach
-        # Whisper is exactly how a swept single-chunk episode -- every episode
-        # under 24 MB, so the common case -- came out free.
-        started = min(chunk_total, max(0, chunk_index) + 1)
-        spent = int(total_charged * started / chunk_total)
-    else:
-        spent = 0  # nothing reached Whisper yet
-
-    spent_trial = min(trial_charged, spent)
-    spent_paid = spent - spent_trial
+    spent_trial, spent_paid, refund_trial, refund_paid = _pro_rata_platform_spend(
+        trial_charged, paid_charged, chunk_total, chunk_index)
 
     # Settling is the claim, and it also pins the amounts we read.
     if not _claim_task_platform_charges(
             task.id, trial_charged, paid_charged, spent_trial, spent_paid,
             settle=True):
         return 0
-    refund_trial = trial_charged - spent_trial
-    refund_paid = paid_charged - spent_paid
     platform_release(user_id, refund_trial, refund_paid)
     return refund_trial + refund_paid
+
+
+def fail_task_and_refund(task_id, error_message):
+    """Mark a task failed and settle its reservation before the failure is visible.
+
+    When the task still holds a platform charge, one conditional UPDATE writes
+    ``status='error'``, the settled pro-rata charges, and ``trial_settled=1``
+    together — so a failed task is never observed with minutes still reserved.
+    The user-balance release runs only if that claim wins (same idempotency as
+    ``trial_refund_task``: a later call cannot double-credit).
+
+    If there is nothing to settle, or another worker already settled / terminalised
+    the row, still ensures ``status='error'`` (without clobbering completed /
+    cancelled) and calls ``trial_refund_task`` as a no-op backstop.
+    """
+    row = db.session.execute(text(
+        'SELECT user_id, trial_seconds_charged, paid_seconds_charged, '
+        'chunk_total, chunk_index, trial_settled '
+        'FROM transcription_tasks WHERE id = :tid'
+    ), {'tid': task_id}).first()
+    if row is None:
+        return 0
+    user_id, trial_charged, paid_charged, chunk_total, chunk_index, settled = row
+    trial_charged = int(trial_charged or 0)
+    paid_charged = int(paid_charged or 0)
+    total_charged = trial_charged + paid_charged
+
+    if not settled and total_charged > 0:
+        spent_trial, spent_paid, refund_trial, refund_paid = _pro_rata_platform_spend(
+            trial_charged, paid_charged, chunk_total, chunk_index)
+        now = datetime.now(timezone.utc)
+        # One transaction: task settle+error and user-balance release commit
+        # together, so neither "error with charge" nor "settled task / still
+        # debiting the user" is observable.
+        result = db.session.execute(text("""
+            UPDATE transcription_tasks
+               SET status = 'error', phase = 'error', error_message = :message,
+                   trial_seconds_charged = :new_trial,
+                   paid_seconds_charged = :new_paid,
+                   trial_settled = 1,
+                   heartbeat_at = :now
+             WHERE id = :tid AND trial_settled = 0
+               AND COALESCE(trial_seconds_charged, 0) = :exp_trial
+               AND COALESCE(paid_seconds_charged, 0) = :exp_paid
+               AND status NOT IN ('completed', 'error', 'cancelled')
+        """), {
+            'tid': task_id,
+            'message': error_message,
+            'new_trial': int(spent_trial),
+            'new_paid': int(spent_paid),
+            'exp_trial': trial_charged,
+            'exp_paid': paid_charged,
+            'now': now,
+        })
+        if result.rowcount == 1:
+            if refund_trial:
+                db.session.execute(text("""
+                    UPDATE users
+                       SET trial_seconds_used = MAX(
+                           0, COALESCE(trial_seconds_used, 0) - :n)
+                     WHERE id = :uid
+                """), {'n': int(refund_trial), 'uid': user_id})
+            if refund_paid:
+                db.session.execute(text("""
+                    UPDATE users
+                       SET paid_seconds_balance = COALESCE(
+                           paid_seconds_balance, 0) + :n
+                     WHERE id = :uid
+                """), {'n': int(refund_paid), 'uid': user_id})
+            db.session.commit()
+            return refund_trial + refund_paid
+        db.session.rollback()
+
+    # Nothing charged, already settled/terminal, or lost the joint claim:
+    # settle first (idempotent), then surface error so status='error' is never
+    # committed ahead of the refund on this fall-through path either.
+    task = db.session.get(TranscriptionTask, task_id)
+    refunded = trial_refund_task(task) if task is not None else 0
+    db.session.execute(text("""
+        UPDATE transcription_tasks
+           SET status = 'error', phase = 'error', error_message = :message,
+               heartbeat_at = :now
+         WHERE id = :tid AND status NOT IN ('completed', 'cancelled')
+    """), {
+        'tid': task_id,
+        'message': error_message,
+        'now': datetime.now(timezone.utc),
+    })
+    db.session.commit()
+    return refunded
 
 
 def settle_stranded_charges():
@@ -1199,7 +1299,7 @@ def trial_reconcile_task(task_id, actual_seconds):
             return None
         # No paid cover: trim to the reservation (unknown / under-claimed
         # duration) rather than failing after the download already happened.
-        task.error_message = encode_partial_task_meta(total_reserved, actual)
+        set_task_partial_meta(task, total_reserved, actual)
         db.session.commit()
         return 'trim'
 
@@ -1213,8 +1313,7 @@ def trial_reconcile_task(task_id, actual_seconds):
             if is_partial or (paid_reserved <= 0 and trial_reserved > 0
                               and not over_free_cap):
                 if not is_partial:
-                    task.error_message = encode_partial_task_meta(
-                        total_reserved, actual)
+                    set_task_partial_meta(task, total_reserved, actual)
                     db.session.commit()
                 return 'trim'
             owner = db.session.get(User, user_id)
@@ -1263,8 +1362,8 @@ def trial_reconcile_task(task_id, actual_seconds):
         if is_partial:
             meta = task_partial_meta(task)
             if meta:
-                task.error_message = encode_partial_task_meta(
-                    new_trial + new_paid, meta['episode_seconds'])
+                set_task_partial_meta(
+                    task, new_trial + new_paid, meta['episode_seconds'])
                 db.session.commit()
     return None
 
@@ -1367,19 +1466,30 @@ def _is_openai_error(exc):
     return type(exc).__module__.split('.')[0] == 'openai'
 
 
-def describe_openai_error(exc, context='transcription'):
+def describe_openai_error(exc, context='transcription', key_source=None):
     """Turn an OpenAI SDK exception into something a human can act on.
 
     Users were shown the raw error JSON, which is both unreadable and unsafe:
     OpenAI echoes the submitted key back in 401s, and people paste passwords
     into that field, so the raw text put a third party's password in our
     database. Never surface the provider's message verbatim.
+
+    When `key_source` is ``'user'`` (BYOK), auth/billing copy also hints that
+    removing the key falls back to Podskrift free or paid minutes.
     """
+    byok = key_source == 'user'
+    remove_hint = (
+        ' Or remove the key in Settings to use Podskrift free or paid minutes '
+        'instead.'
+    )
     status = getattr(exc, 'status_code', None)
     if status == 401:
-        return ('OpenAI rejected this key. It may have been deleted, or copied '
-                'incompletely. Create a new one at platform.openai.com/api-keys '
-                'and paste the whole thing.')
+        msg = ('OpenAI rejected this key. It may have been deleted, or copied '
+               'incompletely. Create a new one at platform.openai.com/api-keys '
+               'and paste the whole thing.')
+        if byok and context == 'transcription':
+            return msg + remove_hint
+        return msg
     if status == 429:
         code = product_analytics.openai_error_code(exc)
         if code == 'rate_limit_exceeded':
@@ -1394,13 +1504,18 @@ def describe_openai_error(exc, context='transcription'):
             return ('Your OpenAI account has no credit yet, so transcription won\'t '
                     'work. Add a payment method or prepaid credit at '
                     'platform.openai.com/account/billing.')
-        return ('OpenAI refused the job: your OpenAI account has no credit left. '
-                'Add credit at platform.openai.com/account/billing — it can take a '
-                'minute to activate — then retry this episode. Nothing was charged '
-                'by Podskrift.')
+        msg = ('OpenAI refused the job: your OpenAI account has no credit left. '
+               'Add credit at platform.openai.com/account/billing — it can take a '
+               'minute to activate — then retry this episode.')
+        if byok:
+            msg += remove_hint
+        return msg + ' Nothing was charged by Podskrift.'
     if status == 403:
-        return ('Your OpenAI key is not allowed to use the Whisper API. Check its '
-                'permissions at platform.openai.com.')
+        msg = ('Your OpenAI key is not allowed to use the Whisper API. Check its '
+               'permissions at platform.openai.com.')
+        if byok and context == 'transcription':
+            return msg + remove_hint
+        return msg
     if status and 500 <= status < 600:
         return 'OpenAI had a server error. Wait a moment and try again.'
     if isinstance(exc, APITimeoutError):
@@ -2037,7 +2152,7 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
     full_episode_seconds = billable_duration
 
     task_row = db.session.get(TranscriptionTask, task_id)
-    partial_meta = task_partial_meta(task_row) if task_row else None
+    partial_info = task_partial_meta(task_row) if task_row else None
     reserved_seconds = 0
     if task_row is not None:
         reserved_seconds = (
@@ -2047,10 +2162,11 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
 
     # Partial preview: never send more audio than we reserved. Trim before
     # reconcile so billing matches the file Whisper will see.
-    if partial_meta and reserved_seconds > 0 and billable_duration > reserved_seconds:
+    if partial_info and reserved_seconds > 0 and billable_duration > reserved_seconds:
         # Remember the real length for the result-page "first N of M" copy.
-        task_row.error_message = encode_partial_task_meta(
-            reserved_seconds, max(full_episode_seconds, partial_meta['episode_seconds']))
+        set_task_partial_meta(
+            task_row, reserved_seconds,
+            max(full_episode_seconds, partial_info['episode_seconds']))
         db.session.commit()
         trim_audio_file(audio_file, reserved_seconds)
         measured_duration = probe_audio_duration(audio_file)
@@ -2073,8 +2189,8 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
             )
             meta = task_partial_meta(task_row)
             if meta is None and reserved_seconds > 0:
-                task_row.error_message = encode_partial_task_meta(
-                    reserved_seconds, full_episode_seconds)
+                set_task_partial_meta(
+                    task_row, reserved_seconds, full_episode_seconds)
                 db.session.commit()
         if reserved_seconds > 0 and billable_duration > reserved_seconds:
             trim_audio_file(audio_file, reserved_seconds)
@@ -4476,7 +4592,7 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                 language=language or None,
                 trial_seconds_charged=trial_charge,
                 paid_seconds_charged=paid_charge,
-                error_message=(
+                partial_meta=(
                     encode_partial_task_meta(trial_charge, estimate)
                     if partial_job and trial_charge else None
                 ),
@@ -4516,13 +4632,17 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                                 {**ph_props, 'reason': 'abandoned'},
                             )
                     except Exception as e:
-                        _update_task(task_id, status='error', phase='error',
-                                     error_message=describe_openai_error(e)
-                                     if _is_openai_error(e) else str(e))
-                        # A job that never produced a transcript must not consume the
-                        # trial allowance it reserved.
+                        # Settle the reservation in the same write as status='error'
+                        # (see fail_task_and_refund) so a failed task is never
+                        # observed with minutes still charged.
+                        error_message = (
+                            describe_openai_error(e, key_source=key_source)
+                            if _is_openai_error(e) else str(e))
+                        fail_task_and_refund(task_id, error_message)
                         failed = db.session.get(TranscriptionTask, task_id)
+                        reason = None
                         if failed:
+                            # Idempotent backstop — cannot double-credit once settled.
                             trial_refund_task(failed)
                             if isinstance(e, TrialExhausted):
                                 reason = 'trial_exhausted'
@@ -4539,7 +4659,8 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                             elif isinstance(e, SourceAudioUnavailable):
                                 reason = e.reason
                             elif _is_openai_error(e):
-                                reason = product_analytics.openai_fail_reason(e)
+                                reason = product_analytics.openai_fail_reason(
+                                    e, key_source=key_source)
                             else:
                                 reason = 'other'
                             product_analytics.capture(
@@ -4549,13 +4670,19 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                             )
                         # After the refund, and it cannot raise: reporting must
                         # never cost a user the allowance they are owed.
-                        # Dead enclosure / host block is expected user-side noise
-                        # — log it, but do not fire the Sentry error alert.
+                        # Dead enclosure / host block, and BYOK auth/billing
+                        # (user's OpenAI account), are expected user-side noise
+                        # — log them, but do not fire the Sentry error alert.
+                        # Platform-key quota/auth failures still go to Sentry.
                         if isinstance(e, SourceAudioUnavailable):
                             app.logger.warning(
                                 'Source audio unavailable for task %s: %s '
                                 '(HTTP %s)',
                                 task_id, e.reason, e.status_code)
+                        elif reason in ('own_key_no_credit', 'own_key_invalid'):
+                            app.logger.warning(
+                                'Own-key OpenAI account error for task %s: %s',
+                                task_id, reason)
                         else:
                             report_task_failure(
                                 e, task_id=task_id, key_source=key_source)
