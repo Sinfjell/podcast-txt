@@ -390,6 +390,13 @@ WHISPER_MAX_RETRIES = WHISPER_CLIENT_MAX_RETRIES
 # the read timeout between iter_content chunks, so a stalled CDN cannot hang
 # the worker indefinitely after the first byte.
 DOWNLOAD_TIMEOUT_SECONDS = 30
+# One short pause before retrying a transient download failure (5xx / timeout).
+DOWNLOAD_RETRY_PAUSE_SEC = 0.4
+# Permanent host refusals: the enclosure is gone or the CDN forbids the fetch.
+# These are expected user-side outcomes, not app bugs — see SourceAudioUnavailable.
+SOURCE_AUDIO_MISSING_STATUSES = frozenset({404, 410})
+SOURCE_AUDIO_FORBIDDEN_STATUSES = frozenset({403})
+SOURCE_AUDIO_TRANSIENT_STATUSES = frozenset({500, 502, 503, 504})
 
 # Caps on the audio we will pull down from a client-supplied URL.
 #
@@ -712,6 +719,36 @@ class TrialExhausted(Exception):
     def __init__(self, message, scope='user'):
         super().__init__(message)
         self.scope = scope
+
+
+class SourceAudioUnavailable(Exception):
+    """The podcast host permanently cannot or will not serve the episode audio.
+
+    Expected user-side outcome (dead enclosure, private CDN, geo-block) — not
+    an app bug. Fail the task with a clear message, refund any reservation,
+    emit transcript_failed with a specific reason, and do not raise to Sentry.
+    """
+
+    REASON_MISSING = 'source_audio_missing'
+    REASON_FORBIDDEN = 'source_audio_forbidden'
+
+    _MESSAGES = {
+        REASON_MISSING: (
+            "The podcast host no longer serves this episode's audio. "
+            "Try another episode."
+        ),
+        REASON_FORBIDDEN: (
+            "The podcast host blocked access to this episode's audio. "
+            "Try another episode."
+        ),
+    }
+
+    def __init__(self, reason, status_code=None):
+        if reason not in self._MESSAGES:
+            raise ValueError(f'unknown source-audio reason: {reason!r}')
+        super().__init__(self._MESSAGES[reason])
+        self.reason = reason
+        self.status_code = status_code
 
 
 class TaskAbandoned(Exception):
@@ -1503,25 +1540,69 @@ def download_audio(url, filename, task_id):
                 raise
             return resp
 
-    try:
-        response = _fetch(headers)
-    except requests.exceptions.HTTPError as e:
-        status = e.response.status_code if e.response is not None else None
-        if status == 403:
+    def _raise_permanent_or_generic(status, original_exc):
+        """Map permanent host refusals to SourceAudioUnavailable; else generic."""
+        if status in SOURCE_AUDIO_MISSING_STATUSES:
+            raise SourceAudioUnavailable(
+                SourceAudioUnavailable.REASON_MISSING, status_code=status)
+        if status in SOURCE_AUDIO_FORBIDDEN_STATUSES:
+            raise SourceAudioUnavailable(
+                SourceAudioUnavailable.REASON_FORBIDDEN, status_code=status)
+        raise Exception(
+            f"HTTP error {status}" if status else f"HTTP error: {original_exc}")
+
+    def _fetch_with_403_fallback():
+        """First request; on 403, retry once with a plainer User-Agent.
+
+        Permanent refusals on the fallback become SourceAudioUnavailable here.
+        Transient HTTP errors are re-raised so the outer loop can retry once.
+        """
+        try:
+            return _fetch(headers)
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status not in SOURCE_AUDIO_FORBIDDEN_STATUSES:
+                raise
             try:
-                response = _fetch({'User-Agent': 'podcast-downloader/1.0', 'Accept': '*/*'})
+                return _fetch({'User-Agent': 'podcast-downloader/1.0', 'Accept': '*/*'})
             except requests.exceptions.HTTPError as e2:
-                status2 = e2.response.status_code if e2.response is not None else 'unknown'
-                raise Exception(
-                    f"Access denied ({status2}) for audio file. "
-                    "This podcast may restrict direct downloads."
-                )
+                status2 = (
+                    e2.response.status_code if e2.response is not None else None)
+                if status2 in (SOURCE_AUDIO_MISSING_STATUSES
+                               | SOURCE_AUDIO_FORBIDDEN_STATUSES):
+                    _raise_permanent_or_generic(status2, e2)
+                raise
             except requests.exceptions.RequestException as e2:
-                raise Exception(f"Failed to download audio: {e2}")
-        else:
-            raise Exception(f"HTTP error {status}" if status else f"HTTP error: {e}")
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Failed to download audio: {e}")
+                raise Exception(f"Failed to download audio: {e2}") from e2
+
+    # One retry on 5xx / timeout: podcast CDNs flap; a permanent 4xx must not.
+    response = None
+    last_exc = None
+    for attempt in range(2):
+        try:
+            response = _fetch_with_403_fallback()
+            break
+        except SourceAudioUnavailable:
+            raise
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if (status in SOURCE_AUDIO_TRANSIENT_STATUSES and attempt == 0):
+                last_exc = e
+                time.sleep(DOWNLOAD_RETRY_PAUSE_SEC)
+                continue
+            _raise_permanent_or_generic(status, e)
+        except requests.exceptions.Timeout as e:
+            if attempt == 0:
+                last_exc = e
+                time.sleep(DOWNLOAD_RETRY_PAUSE_SEC)
+                continue
+            raise Exception(f"Failed to download audio: {e}") from e
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Failed to download audio: {e}") from e
+    if response is None:
+        raise Exception(
+            f"Failed to download audio: {last_exc or 'transient host error'}"
+        )
 
     total_size = int(response.headers.get('content-length', 0) or 0)
     downloaded = 0
@@ -4203,6 +4284,8 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                                 _capture_trial_limit_hit(
                                     failed.user_id, e.scope, 'reconcile', source,
                                     estimate_min=est_min, remaining_min=rem_min)
+                            elif isinstance(e, SourceAudioUnavailable):
+                                reason = e.reason
                             elif _is_openai_error(e):
                                 reason = product_analytics.openai_fail_reason(e)
                             else:
@@ -4214,7 +4297,16 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                             )
                         # After the refund, and it cannot raise: reporting must
                         # never cost a user the allowance they are owed.
-                        report_task_failure(e, task_id=task_id, key_source=key_source)
+                        # Dead enclosure / host block is expected user-side noise
+                        # — log it, but do not fire the Sentry error alert.
+                        if isinstance(e, SourceAudioUnavailable):
+                            app.logger.warning(
+                                'Source audio unavailable for task %s: %s '
+                                '(HTTP %s)',
+                                task_id, e.reason, e.status_code)
+                        else:
+                            report_task_failure(
+                                e, task_id=task_id, key_source=key_source)
                     else:
                         # Outside the except that marks the job failed: analytics
                         # must never be able to turn a completed transcript into
