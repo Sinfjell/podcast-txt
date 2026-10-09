@@ -527,20 +527,45 @@
 
     // A pasted Spotify link is resolved to the show's public feed server-side
     // instead of being searched for as text. Also catches mangled hosts that
-    // still end in episode|show|sode/<22-char-id>.
-    var SPOTIFY_RE = /(open\.spotify\.com\/.*(episode|show)\/[A-Za-z0-9]{22}|spotify:(episode|show):[A-Za-z0-9]{22}|(?:^|[^A-Za-z0-9])(?:episode|show|sode)\/[A-Za-z0-9]{22}(?![A-Za-z0-9]))/i;
+    // still end in episode|show|sode/<22-char-id>, including glued junk after
+    // the id (si= param pasted without '?').
+    var SPOTIFY_RE = /(open\.spotify\.com\/.*(episode|show)\/[A-Za-z0-9]{22}|spotify:(episode|show):[A-Za-z0-9]{22}|(?:^|[^A-Za-z0-9])(?:episode|show|sode)\/[A-Za-z0-9]{22})/i;
     var APPLE_RE = /podcasts\.apple\.com/i;
     var YOUTUBE_RE = /(youtube\.com|youtu\.be)\//i;
     var AUDIO_EXT_RE = /\.(mp3|m4a|wav|aac|ogg|mp4|mpeg)(\?|#|$)/i;
     var RSS_HINT_RE = /(\/feed\b|\/rss\b|\.xml(\?|#|$)|feeds?\.)/i;
     var RSS_HELP_URL = {{ url_for('rss_help')|tojson }};
+    var FIRST_HTTP_URL_RE = /https?:\/\/[^\s"'<>]+/i;
+    var SPOTIFY_EMBED_URL_RE = /^(https?:\/\/open\.spotify\.com)\/embed\/(episode|show)\/([A-Za-z0-9]{22})/i;
 
     // Every search bumps this; a response for an older one is dropped, so a slow
     // Spotify lookup can't overwrite results for whatever the box holds now.
     var searchSeq = 0;
 
+    // Pull the first http(s) URL out of pasted iframe/embed HTML or prose, then
+    // normalise open.spotify.com/embed/… to the plain episode/show URL so the
+    // query string stays short (mod_security often 403s full iframe markup).
+    function extractFirstHttpUrl(text) {
+        var m = FIRST_HTTP_URL_RE.exec(text || '');
+        if (!m) return '';
+        return m[0].replace(/[.,);]+$/, '');
+    }
+
+    function normalizeSpotifyEmbedUrl(url) {
+        var m = SPOTIFY_EMBED_URL_RE.exec(url || '');
+        if (!m) return url || '';
+        return m[1] + '/' + m[2].toLowerCase() + '/' + m[3];
+    }
+
+    function prepareSearchQuery(raw) {
+        var q = (raw || '').trim();
+        var extracted = extractFirstHttpUrl(q);
+        if (extracted) q = extracted;
+        return normalizeSpotifyEmbedUrl(q);
+    }
+
     function detectInputType(q) {
-        var s = (q || '').trim();
+        var s = prepareSearchQuery(q);
         if (!s) return 'other';
         if (SPOTIFY_RE.test(s)) return 'spotify_link';
         if (APPLE_RE.test(s)) return 'apple_link';
@@ -553,7 +578,7 @@
         return 'name';
     }
 
-    function searchProps(query, resultCount, errored, errorKind) {
+    function searchProps(query, resultCount, errored, errorKind, errorDetail) {
         var props = {
             query: (query || '').trim().slice(0, 200),
             result_count: resultCount,
@@ -562,14 +587,15 @@
             search_type: searchType
         };
         if (errorKind) props.error_kind = errorKind;
+        if (errorDetail) props.error_detail = String(errorDetail).slice(0, 80);
         return props;
     }
 
     // Top of the funnel. Query is fine to send (not a secret); transcript text
     // stays out of analytics elsewhere.
-    function trackSearch(query, resultCount, errored, errorKind) {
+    function trackSearch(query, resultCount, errored, errorKind, errorDetail) {
         if (!(window.posthog && window.posthog.capture)) return;
-        var props = searchProps(query, resultCount, errored, errorKind);
+        var props = searchProps(query, resultCount, errored, errorKind, errorDetail);
         window.posthog.capture('podcast_searched', props);
         if (errored || !resultCount) {
             window.posthog.capture('podcast_search_no_results', props);
@@ -642,7 +668,7 @@
     }
 
     function showSearchEmptyState(opts) {
-        // opts: { query, errored, errorText, resultCount, errorKind, showName }
+        // opts: { query, errored, errorText, resultCount, errorKind, showName, errorDetail }
         clearResults();
         resultsDiv.style.padding = '12px 0';
         resultsDiv.style.color = '';
@@ -672,7 +698,8 @@
         if (opts.showName && opts.errorKind === 'no_feed') {
             offerShowNameSearch(opts.showName);
         }
-        trackSearch(opts.query, opts.resultCount || 0, !!opts.errored, opts.errorKind);
+        trackSearch(opts.query, opts.resultCount || 0, !!opts.errored,
+            opts.errorKind, opts.errorDetail);
     }
 
     function applyResolveResults(url, data, seq) {
@@ -682,6 +709,7 @@
         resultsDiv.style.color = '';
         var results = data.results || [];
         var errorKind = data.error_kind || '';
+        var errorDetail = data.error_detail || '';
         // Empty results → empty state. Results + error → notice above cards.
         if (!results.length) {
             showSearchEmptyState({
@@ -690,6 +718,7 @@
                 errorText: data.error || '',
                 resultCount: 0,
                 errorKind: errorKind,
+                errorDetail: errorDetail,
                 showName: data.show_name || ''
             });
             return;
@@ -698,17 +727,37 @@
         if (data.error) {
             showSearchNotice(data.error);
         }
-        trackSearch(url, results.length, !!data.error, errorKind);
+        trackSearch(url, results.length, !!data.error, errorKind, errorDetail);
         renderList(results);
         // An episode hit transcribes directly, so the language must be pickable
         langRow.classList.toggle('hidden',
             !(results.length && results[0].type === 'episode') && searchType !== 'episode');
     }
 
+    function parseResolveResponse(r) {
+        // /resolve-* always returns JSON 200 from the app; a non-JSON body or
+        // non-2xx status is usually the reverse proxy (e.g. mod_security 403).
+        return r.text().then(function(text) {
+            var data = null;
+            try { data = JSON.parse(text); } catch (e) { data = null; }
+            if (!r.ok || !data || typeof data !== 'object') {
+                return {
+                    results: [],
+                    error: 'Could not look up that link (HTTP ' + r.status + '). '
+                        + 'Try pasting only the open.spotify.com URL, not embed code.',
+                    error_kind: 'http_error',
+                    error_detail: 'status_' + r.status,
+                    show_name: ''
+                };
+            }
+            return data;
+        });
+    }
+
     function resolveSpotify(url, seq) {
         setMessage('Looking up the Spotify link…');
         fetch('/resolve-spotify?url=' + encodeURIComponent(url))
-            .then(function(r) { return r.json(); })
+            .then(parseResolveResponse)
             .then(function(data) { applyResolveResults(url, data, seq); })
             .catch(function() {
                 if (seq !== searchSeq) return;
@@ -717,7 +766,8 @@
                     errored: true,
                     errorText: 'Could not look up that Spotify link.',
                     resultCount: 0,
-                    errorKind: 'unreadable_link'
+                    errorKind: 'http_error',
+                    errorDetail: 'network'
                 });
             });
     }
@@ -725,7 +775,7 @@
     function resolveApple(url, seq) {
         setMessage('Looking up the Apple Podcasts link…');
         fetch('/resolve-apple?url=' + encodeURIComponent(url))
-            .then(function(r) { return r.json(); })
+            .then(parseResolveResponse)
             .then(function(data) { applyResolveResults(url, data, seq); })
             .catch(function() {
                 if (seq !== searchSeq) return;
@@ -734,7 +784,8 @@
                     errored: true,
                     errorText: 'Could not look up that Apple Podcasts link.',
                     resultCount: 0,
-                    errorKind: 'unreadable_link'
+                    errorKind: 'http_error',
+                    errorDetail: 'network'
                 });
             });
     }
@@ -760,7 +811,8 @@
     }
 
     function doSearch() {
-        var query = searchInput.value.trim();
+        var rawQuery = searchInput.value.trim();
+        var query = prepareSearchQuery(rawQuery);
         var seq = ++searchSeq;
         if (query.length < 2) { clearResults(); return; }
 
