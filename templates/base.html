@@ -1026,6 +1026,8 @@
             color: var(--muted);
         }
         .stat-value { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+        /* Tabular figures give the decimal point a full digit width ("$0 . 360"). */
+        #statCost { font-variant-numeric: proportional-nums; }
 
         /* Live transcript pane: the one place the serif face is used. */
         .transcript-pane {

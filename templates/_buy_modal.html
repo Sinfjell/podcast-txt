@@ -79,6 +79,7 @@
                 Buy {{ credit_pack_minutes }} min, ${{ credit_pack_price_usd }}
             </button>
         </form>
+        <p class="buy-modal-foot">{{ credit_pack_payment_hint }}</p>
         <p class="buy-modal-foot">One-time · VAT included · minutes never expire · Stripe</p>
         <p class="buy-modal-alt">
             <a href="{{ url_for('settings') }}#openai">Use my own OpenAI key instead</a>

@@ -313,8 +313,8 @@ def security_txt():
 
 @bp.route('/.well-known/change-password')
 def change_password():
-    """Password managers land here. Password changes live under Settings."""
-    return redirect(url_for('settings'), code=302)
+    """Password managers land here. Self-serve reset is /forgot-password."""
+    return redirect(url_for('forgot_password'), code=302)
 
 
 @bp.route('/.well-known/api-catalog')

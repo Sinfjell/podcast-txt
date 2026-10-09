@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% block head_links %}<link rel="preload" href="{{ asset_url('fonts/newsreader-latin.woff2') }}" as="font" type="font/woff2" crossorigin>{% endblock %}
 {% block title %}{{ task.episode_title or 'Transcript' }} — Podskrift{% endblock %}
 {% block meta_description %}{{ og_description }}{% endblock %}
 {% block robots_meta %}<meta name="robots" content="noindex">{% endblock %}

@@ -58,10 +58,12 @@ from sqlalchemy.exc import IntegrityError as SaIntegrityError
 
 from models import (db, User, SavedFeed, TranscriptionTask, CreditPurchase,
                     TranscriptShare, EmailSentLog, SummaryEmailJob, SummaryEmailBudgetDay,
+                    PasswordResetToken,
                     TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS,
                     CREDIT_PURCHASE_COLUMN_MIGRATIONS,
                     SAVED_FEED_COLUMN_MIGRATIONS,
-                    TRANSCRIPT_SHARE_COLUMN_MIGRATIONS)
+                    TRANSCRIPT_SHARE_COLUMN_MIGRATIONS,
+                    PASSWORD_RESET_TOKEN_COLUMN_MIGRATIONS)
 from observability import init_sentry, report_stale_task, report_task_failure
 import analytics as product_analytics
 from site_standards import init_site_standards
@@ -137,7 +139,31 @@ login_manager.login_message_category = 'info'
 
 @login_manager.user_loader
 def load_user(user_id):
-    return db.session.get(User, int(user_id))
+    """Load by id, honouring session_version when present.
+
+    Bare ids (pre-ship cookies and test helpers) stay valid only while
+    ``session_version`` is still 0 — a password reset bumps the version and
+    drops those sessions too.
+    """
+    raw = str(user_id or '')
+    parts = raw.split(':', 1)
+    try:
+        uid = int(parts[0])
+    except (TypeError, ValueError):
+        return None
+    user = db.session.get(User, uid)
+    if user is None:
+        return None
+    current_ver = int(getattr(user, 'session_version', 0) or 0)
+    if len(parts) == 1:
+        return user if current_ver == 0 else None
+    try:
+        ver = int(parts[1])
+    except ValueError:
+        return None
+    if ver != current_ver:
+        return None
+    return user
 
 
 #: Canonical public origin. url_for(_external=True) builds from the request,
@@ -778,6 +804,10 @@ CREDIT_PACK_CURRENCY = 'usd'
 CREDIT_PACK_LABEL = 'Buy 5 hours for $5'
 #: Shown under Buy buttons — do not fold into CREDIT_PACK_LABEL (SKU/analytics).
 CREDIT_PACK_SUBLINE = 'One-time · 300 min · VAT incl.'
+#: Trust line near Buy CTAs. Methods match Managed Payments dynamic PMs
+#: (cards + wallets); we never pass payment_method_types on the session.
+CREDIT_PACK_PAYMENT_HINT = (
+    'Card · Apple Pay · Google Pay · secure checkout by Stripe')
 CREDIT_PACK_SKU = 'minutes_300_usd500_v1'
 CREDIT_PACK_TAX_BEHAVIOR = STRIPE_TAX_BEHAVIOR if STRIPE_TAX_BEHAVIOR in (
     'inclusive', 'exclusive') else 'inclusive'
@@ -1546,6 +1576,21 @@ UTM_SESSION_KEY = '_utm_source'
 _share_create_attempts = collections.defaultdict(list)
 _share_create_lock = threading.Lock()
 
+#: Password-reset requests per email and per IP per hour. Same neutral UI
+#: whether the address exists; the limit only throttles send/lookup work.
+PASSWORD_RESET_MAX_PER_KEY = 5
+PASSWORD_RESET_WINDOW_SECONDS = 3600
+PASSWORD_RESET_TOKEN_BYTES = 32  # secrets.token_urlsafe(32)
+PASSWORD_RESET_TTL_SECONDS = 60 * 60
+#: Pad forgot-password responses so existence checks are harder to time.
+PASSWORD_RESET_MIN_RESPONSE_SEC = 0.25
+PASSWORD_RESET_NEUTRAL_MSG = (
+    "If an account exists for that email, we've sent a reset link."
+)
+
+_password_reset_attempts = collections.defaultdict(list)
+_password_reset_lock = threading.Lock()
+
 
 def _client_ip():
     """Real client IP, from a source the client cannot forge.
@@ -1610,6 +1655,53 @@ def register_release_slot(ip, token):
             return          # already pruned by the window
         if not held:
             _register_attempts.pop(ip, None)
+
+
+def _password_reset_rate_limited(*keys):
+    """True if any key has already hit PASSWORD_RESET_MAX_PER_KEY this hour.
+
+    Records a hit for every key when under the limit so email and IP share one
+    atomic check-and-record step (same hole register used to have when split).
+    """
+    now = time.time()
+    with _password_reset_lock:
+        for key in keys:
+            if not key:
+                continue
+            seen = [t for t in _password_reset_attempts.get(key, ())
+                    if now - t < PASSWORD_RESET_WINDOW_SECONDS]
+            if len(seen) >= PASSWORD_RESET_MAX_PER_KEY:
+                _password_reset_attempts[key] = seen
+                return True
+        for key in keys:
+            if not key:
+                continue
+            seen = [t for t in _password_reset_attempts.get(key, ())
+                    if now - t < PASSWORD_RESET_WINDOW_SECONDS]
+            seen.append(now)
+            _password_reset_attempts[key] = seen
+        if len(_password_reset_attempts) > 10000:
+            stale = [k for k, v in list(_password_reset_attempts.items())
+                     if not v or now - v[-1] > PASSWORD_RESET_WINDOW_SECONDS]
+            for k in stale:
+                _password_reset_attempts.pop(k, None)
+        return False
+
+
+def _password_reset_pad(started_at):
+    """Sleep so forgot-password responses take a similar time when not testing."""
+    if app.config.get('TESTING'):
+        return
+    minimum = PASSWORD_RESET_MIN_RESPONSE_SEC
+    if minimum <= 0:
+        return
+    elapsed = time.monotonic() - started_at
+    if elapsed < minimum:
+        time.sleep(minimum - elapsed)
+
+
+def _hash_password_reset_token(token: str) -> str:
+    return hashlib.sha256(token.encode('utf-8')).hexdigest()
 
 
 def is_disposable_email(email):
@@ -3059,6 +3151,183 @@ def login():
     )
 
 
+def _password_reset_security_headers(resp):
+    """Token pages must not be indexed or leak the credential via Referer."""
+    resp.headers['X-Robots-Tag'] = 'noindex'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+def _forgot_password_template(**extra):
+    resp = make_response(render_template(
+        'forgot_password.html',
+        mail_ready=mailer.mail_ready(),
+        **extra,
+    ))
+    resp.headers['X-Robots-Tag'] = 'noindex'
+    return resp
+
+
+def _reset_password_template(token, *, expired=False, invalid=False,
+                             status=200, **extra):
+    resp = make_response(render_template(
+        'reset_password.html',
+        token=token,
+        expired=expired,
+        invalid=invalid,
+        **extra,
+    ), status)
+    return _password_reset_security_headers(resp)
+
+
+@app.route('/forgot-password', methods=['GET', 'POST'])
+def forgot_password():
+    """Request a password-reset email. Always the same neutral success copy."""
+    if current_user.is_authenticated:
+        return redirect(url_for('settings'))
+
+    if request.method != 'POST':
+        return _forgot_password_template()
+
+    started = time.monotonic()
+    if not validate_csrf_token():
+        _password_reset_pad(started)
+        flash('Something went wrong. Please try again.', 'error')
+        return _forgot_password_template()
+
+    if not mailer.mail_ready():
+        _password_reset_pad(started)
+        return _forgot_password_template()
+
+    email = request.form.get('email', '').strip().lower()
+    ip = _client_ip()
+    # Rate-limit before any DB lookup. Under the limit we still show the
+    # neutral message (no account enumeration via a distinct error).
+    if _password_reset_rate_limited(f'ip:{ip}', f'email:{email}' if email else ''):
+        _password_reset_pad(started)
+        flash('Too many reset requests. Try again later.', 'error')
+        return _forgot_password_template()
+
+    user = User.query.filter_by(email=email).first() if email and '@' in email else None
+    if user is not None:
+        # Invalidate outstanding tokens for this user (single active link).
+        now = datetime.now(timezone.utc)
+        PasswordResetToken.query.filter(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.used_at.is_(None),
+        ).update({'used_at': now}, synchronize_session=False)
+
+        raw = secrets.token_urlsafe(PASSWORD_RESET_TOKEN_BYTES)
+        row = PasswordResetToken(
+            user_id=user.id,
+            token_hash=_hash_password_reset_token(raw),
+            expires_at=now + timedelta(seconds=PASSWORD_RESET_TTL_SECONDS),
+        )
+        db.session.add(row)
+        db.session.commit()
+
+        reset_url = public_url('reset_password', token=raw)
+        # Security mail: send even if the user unsubscribed from digests.
+        outcome = email_notify.send_password_reset_email(
+            to=user.email, reset_url=reset_url, user_id=user.id)
+        if outcome == mailer.SEND_SENT:
+            product_analytics.capture('password_reset_requested', user.id)
+            app.logger.info('password_reset_requested user_id=%s', user.id)
+        else:
+            # Do not surface delivery failure — same neutral copy either way.
+            app.logger.warning(
+                'password_reset email failed user_id=%s outcome=%s',
+                user.id, outcome)
+
+    _password_reset_pad(started)
+    flash(PASSWORD_RESET_NEUTRAL_MSG, 'success')
+    return _forgot_password_template(submitted=True)
+
+
+@app.route('/reset-password/<token>', methods=['GET', 'POST'])
+def reset_password(token):
+    """Show the new-password form (GET) or apply it (POST). Link-scanner safe."""
+    token = (token or '').strip()
+    if not token or len(token) > 128:
+        return _reset_password_template('', invalid=True, status=404)
+
+    token_hash = _hash_password_reset_token(token)
+    row = PasswordResetToken.query.filter_by(token_hash=token_hash).first()
+    now = datetime.now(timezone.utc)
+
+    if row is None:
+        return _reset_password_template(token, invalid=True, status=404)
+
+    expires_at = row.expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    if row.used_at is not None:
+        return _reset_password_template(token, invalid=True, status=404)
+
+    if expires_at is not None and expires_at <= now:
+        return _reset_password_template(token, expired=True, status=410)
+
+    if request.method != 'POST':
+        return _reset_password_template(token)
+
+    if not validate_csrf_token():
+        flash('Something went wrong. Please try again.', 'error')
+        return _reset_password_template(token)
+
+    password = request.form.get('password', '')
+    password2 = request.form.get('password2', '')
+    if len(password) < 8:
+        flash('Password must be at least 8 characters.', 'error')
+        return _reset_password_template(token)
+    if password != password2:
+        flash('Passwords do not match.', 'error')
+        return _reset_password_template(token)
+
+    user = db.session.get(User, row.user_id)
+    if user is None:
+        return _reset_password_template(token, invalid=True, status=404)
+
+    # Claim the token first (conditional) so a double-submit cannot reset twice.
+    claimed = db.session.execute(
+        sa_update(PasswordResetToken)
+        .where(
+            PasswordResetToken.id == row.id,
+            PasswordResetToken.used_at.is_(None),
+        )
+        .values(used_at=now)
+    ).rowcount
+    if not claimed:
+        db.session.rollback()
+        return _reset_password_template(token, invalid=True, status=404)
+
+    user.set_password(password)
+    user.session_version = int(getattr(user, 'session_version', 0) or 0) + 1
+    # Supersede any other outstanding tokens for this account.
+    PasswordResetToken.query.filter(
+        PasswordResetToken.user_id == user.id,
+        PasswordResetToken.id != row.id,
+        PasswordResetToken.used_at.is_(None),
+    ).update({'used_at': now}, synchronize_session=False)
+    db.session.commit()
+
+    product_analytics.capture('password_reset_completed', user.id)
+    app.logger.info('password_reset_completed user_id=%s', user.id)
+
+    # Confirmation mail is best-effort; reset already succeeded.
+    try:
+        email_notify.send_password_changed_email(to=user.email, user_id=user.id)
+    except Exception:  # noqa: BLE001
+        app.logger.exception(
+            'password_changed email failed user_id=%s', user.id)
+
+    _persist_login(user)
+    flash('Your password has been updated.', 'success')
+    resp = redirect(url_for('index'))
+    return _password_reset_security_headers(resp)
+
+
 def _stash_pending_from_request():
     """Pull episode fields off the request into the session. Returns an error or None."""
     language = normalize_language_code(request.form.get('language', ''))
@@ -3217,11 +3486,10 @@ def _openai_key_hint(user):
 
 
 def generate_csrf_token():
-    """Session CSRF token for billing Buy POSTs.
+    """Session CSRF token for billing Buy POSTs and password-reset forms.
 
-    Call only from templates that render a Buy form for a logged-in user.
-    Minting here writes the session and would otherwise give anonymous
-    homepage visitors a cookie for nothing.
+    Prefer calling only from templates that actually POST (Buy, forgot/
+    reset password). Minting writes the session cookie.
     """
     token = session.get('_csrf_token')
     if not token:
@@ -4019,8 +4287,12 @@ def billing_checkout():
         'client_reference_id': str(current_user.id),
         'customer_email': current_user.email,
         'customer_creation': 'always',
-        'billing_address_collection': 'required',
-'metadata': meta,
+        # auto: Checkout collects the minimum address fields needed for tax
+        # (Managed Payments / automatic_tax). required would force a full
+        # street address on every buyer. Do not pass payment_method_types —
+        # Managed Payments uses dynamic payment methods (card + wallets).
+        'billing_address_collection': 'auto',
+        'metadata': meta,
         'payment_intent_data': {
             'metadata': pi_meta,
         },
@@ -8069,6 +8341,7 @@ def inject_trial_badge():
         'stripe_buy_enabled': stripe_checkout_enabled(),
         'credit_pack_label': CREDIT_PACK_LABEL,
         'credit_pack_subline': CREDIT_PACK_SUBLINE,
+        'credit_pack_payment_hint': CREDIT_PACK_PAYMENT_HINT,
         'credit_pack_minutes': CREDIT_PACK_MINUTES,
         'credit_pack_price_usd': f'{CREDIT_PACK_AMOUNT_CENTS / 100:.0f}',
         'nav_minutes_left': nav['nav_minutes_left'],
@@ -9908,6 +10181,79 @@ def ensure_summary_email_tables():
             app.logger.exception('Could not create summary_email index')
 
 
+def ensure_password_reset_tokens_table():
+    """Create password_reset_tokens if missing. Index only after columns exist.
+
+    Same IF NOT EXISTS pattern as transcript_shares: two gunicorn workers race
+    boot, and indexes that mention a column are created only after that column
+    is known to exist (CREATE TABLE includes it, or an ALTER has added it).
+    """
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        db.session.execute(text("""
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                id INTEGER NOT NULL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                token_hash VARCHAR(64) NOT NULL UNIQUE,
+                expires_at DATETIME NOT NULL,
+                used_at DATETIME,
+                created_at DATETIME,
+                FOREIGN KEY(user_id) REFERENCES users (id)
+            )
+        """))
+        db.session.commit()
+    except OperationalError as exc:
+        db.session.rollback()
+        msg = str(exc).lower()
+        if 'already exists' not in msg:
+            raise
+        app.logger.info(
+            'password_reset_tokens was created by another worker; continuing')
+
+    existing = _live_columns('password_reset_tokens')
+    if not existing:
+        return
+    for column, ddl_type in PASSWORD_RESET_TOKEN_COLUMN_MIGRATIONS.items():
+        if column in existing:
+            continue
+        try:
+            db.session.execute(text(
+                f'ALTER TABLE password_reset_tokens ADD COLUMN {column} {ddl_type}'
+            ))
+            db.session.commit()
+        except OperationalError as exc:
+            db.session.rollback()
+            if 'duplicate column name' not in str(exc).lower():
+                raise
+            app.logger.info(
+                'password_reset_tokens.%s was added by another worker; continuing',
+                column)
+
+    existing = _live_columns('password_reset_tokens')
+    index_specs = []
+    if 'token_hash' in existing:
+        index_specs.append(
+            ('ix_password_reset_tokens_token_hash',
+             'CREATE UNIQUE INDEX IF NOT EXISTS '
+             'ix_password_reset_tokens_token_hash '
+             'ON password_reset_tokens (token_hash)')
+        )
+    if 'user_id' in existing:
+        index_specs.append(
+            ('ix_password_reset_tokens_user_id',
+             'CREATE INDEX IF NOT EXISTS ix_password_reset_tokens_user_id '
+             'ON password_reset_tokens (user_id)')
+        )
+    for name, ddl in index_specs:
+        try:
+            db.session.execute(text(ddl))
+            db.session.commit()
+        except OperationalError:
+            db.session.rollback()
+            app.logger.exception('Could not create %s', name)
+
+
 def start_shared_transcription_for_summary_email(job, *, owner_user_id):
     """Start one platform-funded transcription for a summary-email job.
 
@@ -10127,6 +10473,7 @@ with app.app_context():
     ensure_transcript_shares_table()
     ensure_email_sent_log_table()
     ensure_summary_email_tables()
+    ensure_password_reset_tokens_table()
 
     apply_column_migrations()
     # Admin dashboard indexes: only after columns exist (same rule as

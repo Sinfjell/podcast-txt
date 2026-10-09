@@ -178,9 +178,9 @@ def test_security_txt_is_valid(client):
     assert m
 
 
-def test_change_password_points_at_settings(client):
+def test_change_password_points_at_forgot_password(client):
     r = client.get('/.well-known/change-password')
-    assert r.status_code == 302 and r.headers['Location'].endswith('/settings')
+    assert r.status_code == 302 and r.headers['Location'].endswith('/forgot-password')
 
 
 def test_api_catalog_is_a_linkset(client):
