@@ -6520,11 +6520,12 @@ def _itunes_show_result(item):
 # ---------------------------------------------------------------------------
 
 #: open.spotify.com/episode/<id>, /intl-no/show/<id>, /embed/..., spotify:episode:<id>.
-#: Only the 22-character id is ever used to build a request, so nothing the
-#: user typed decides which host the server talks to.
+#: Only the first 22 base62 characters of the id are used to build a request,
+#: so glued junk after the id (e.g. an si= param pasted without '?') is ignored
+#: and nothing the user typed decides which host the server talks to.
 SPOTIFY_URL_RE = re.compile(
     r'(?:open\.spotify\.com/(?:intl-[a-z]{2}(?:-[a-z]{2})?/)?(?:embed/)?|spotify:)'
-    r'(episode|show)[/:]([A-Za-z0-9]{22})(?![A-Za-z0-9])'
+    r'(episode|show)[/:]([A-Za-z0-9]{22})'
 )
 #: Pasted links sometimes lose a slash or letters ("open.spotify.comsode/<id>",
 #: "sode/<id>"). Still route a bare episode|show/<22-char-id> — and the common
@@ -6532,9 +6533,13 @@ SPOTIFY_URL_RE = re.compile(
 #: group1=episode|show (needs a non-alnum boundary so "myepisode/…" is ignored),
 #: group2=sode (may sit inside a mangled host like "comsode"), group3=id.
 SPOTIFY_LOOSE_ID_RE = re.compile(
-    r'(?:(?:^|[^A-Za-z0-9])(episode|show)|(sode))/([A-Za-z0-9]{22})(?![A-Za-z0-9])',
+    r'(?:(?:^|[^A-Za-z0-9])(episode|show)|(sode))/([A-Za-z0-9]{22})',
     re.I,
 )
+#: spotify:show:<id> on an episode embed's relatedEntityUri.
+SPOTIFY_SHOW_URI_RE = re.compile(r'^spotify:show:([A-Za-z0-9]{22})$')
+#: Embed subtitle is sometimes the generic label "Podcast" / "Podcasts".
+_GENERIC_SPOTIFY_SHOW_NAMES = frozenset({'podcast', 'podcasts'})
 
 SPOTIFY_NO_FEED_HINT = (
     "If the show has one, paste the feed URL, or try searching for the show by name."
@@ -6542,6 +6547,11 @@ SPOTIFY_NO_FEED_HINT = (
 
 #: One short pause before retrying a transient directory failure.
 SPOTIFY_DIRECTORY_RETRY_PAUSE_SEC = 0.4
+#: Metadata fetch (embed / oEmbed): keep timeouts short so one retry still
+#: finishes well under ~12s worst case (4 attempts × 2.5s + pauses).
+SPOTIFY_META_TIMEOUT_SEC = 2.5
+SPOTIFY_META_RETRY_PAUSE_SEC = 0.4
+_SPOTIFY_META_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 _SPOTIFY_HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; Podskrift/1.0)'}
 _NEXT_DATA_RE = re.compile(
@@ -6550,7 +6560,12 @@ _SHOW_SUFFIX_RE = re.compile(r'\s*[\(\[\{][^\)\]\}]*[\)\]\}]\s*$')
 
 
 def parse_spotify_url(raw):
-    """Return (kind, id) for a Spotify episode/show link, or (None, None)."""
+    """Return (kind, id) for a Spotify episode/show link, or (None, None).
+
+    IDs shorter than 22 characters are rejected. Trailing base62 junk after a
+    full 22-character id is ignored; the truncated id is only useful when
+    Spotify metadata for it resolves.
+    """
     text = raw or ''
     match = SPOTIFY_URL_RE.search(text)
     if match:
@@ -6560,6 +6575,14 @@ def parse_spotify_url(raw):
         return None, None
     kind = (loose.group(1) or 'episode').lower()
     return kind, loose.group(3)
+
+
+def _is_generic_spotify_show_name(name):
+    """True when the embed subtitle is empty or a useless generic label."""
+    stripped = (name or '').strip()
+    if not stripped:
+        return True
+    return _normalize_title(stripped) in _GENERIC_SPOTIFY_SHOW_NAMES
 
 
 def _normalize_title(text):
@@ -6593,9 +6616,38 @@ def _show_name_variants(show_name):
 
 def _empty_spotify_meta():
     return {
-        'title': '', 'show': '',
+        'title': '', 'show': '', 'related_show_id': None,
         'playability_reason': None, 'is_playable': None, 'has_video': None,
     }
+
+
+def _spotify_http_get(url, params=None, timeout=SPOTIFY_META_TIMEOUT_SEC):
+    """GET with one retry on timeout / 429 / 5xx. Returns (resp, error_detail).
+
+    error_detail is a short non-sensitive token (status_503, Timeout, …) for
+    logs and the resolve JSON; None when the response is usable (2xx/3xx/4xx
+    other than 429 — caller decides whether the body is useful).
+    """
+    last_detail = None
+    for attempt in range(2):
+        try:
+            resp = requests.get(url, params=params, headers=_SPOTIFY_HEADERS,
+                                timeout=timeout)
+        except requests.Timeout:
+            last_detail = 'Timeout'
+        except requests.RequestException as exc:
+            last_detail = type(exc).__name__
+            # Non-timeout transport errors are unlikely to heal in 400ms.
+            return None, last_detail
+        else:
+            if resp.status_code in _SPOTIFY_META_RETRY_STATUSES:
+                last_detail = f'status_{resp.status_code}'
+            else:
+                return resp, (
+                    f'status_{resp.status_code}' if resp.status_code >= 400 else None)
+        if attempt == 0 and last_detail:
+            time.sleep(SPOTIFY_META_RETRY_PAUSE_SEC)
+    return None, last_detail
 
 
 def _spotify_embed_metadata(kind, spotify_id):
@@ -6604,55 +6656,98 @@ def _spotify_embed_metadata(kind, spotify_id):
     The Web API needs an app registration; the embed player does not, and its
     __NEXT_DATA__ carries both names. It is not a documented API, so any shape
     change lands here as None and the caller falls back to oEmbed.
+
+    Returns (meta_dict_or_None, error_detail_or_None).
     """
+    resp, detail = _spotify_http_get(
+        f'https://open.spotify.com/embed/{kind}/{spotify_id}')
+    if resp is None:
+        return None, detail
+    if resp.status_code >= 400:
+        return None, detail or f'status_{resp.status_code}'
     try:
-        resp = requests.get(f'https://open.spotify.com/embed/{kind}/{spotify_id}',
-                            headers=_SPOTIFY_HEADERS, timeout=10)
-        resp.raise_for_status()
         entity = json.loads(_NEXT_DATA_RE.search(resp.text).group(1))[
             'props']['pageProps']['state']['data']['entity']
-    except (requests.RequestException, AttributeError, KeyError, TypeError, ValueError):
-        return None
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None, 'embed_parse'
     name = entity.get('name') or entity.get('title') or ''
     meta = _empty_spotify_meta()
     meta['playability_reason'] = entity.get('playabilityReason')
     meta['is_playable'] = entity.get('isPlayable')
     meta['has_video'] = entity.get('hasVideo')
+    related = entity.get('relatedEntityUri') or ''
+    related_match = SPOTIFY_SHOW_URI_RE.match(related)
+    if related_match:
+        meta['related_show_id'] = related_match.group(1)
     if entity.get('type') == 'episode':
         # A show embed renders its latest episode: the show is the subtitle.
         meta['title'] = name if kind == 'episode' else ''
         meta['show'] = entity.get('subtitle') or ''
-        return meta
+        return meta, None
     meta['show'] = name
-    return meta
+    return meta, None
 
 
 def _spotify_oembed_metadata(kind, spotify_id):
-    """oEmbed is documented but only carries one title: the episode's or the show's."""
+    """oEmbed is documented but only carries one title: the episode's or the show's.
+
+    Returns (meta_dict_or_None, error_detail_or_None).
+    """
+    resp, detail = _spotify_http_get(
+        'https://open.spotify.com/oembed',
+        params={'url': f'https://open.spotify.com/{kind}/{spotify_id}'})
+    if resp is None:
+        return None, detail
+    if resp.status_code >= 400:
+        return None, detail or f'status_{resp.status_code}'
     try:
-        resp = requests.get('https://open.spotify.com/oembed',
-                            params={'url': f'https://open.spotify.com/{kind}/{spotify_id}'},
-                            headers=_SPOTIFY_HEADERS, timeout=10)
-        resp.raise_for_status()
         title = (resp.json().get('title') or '').strip()
-    except (requests.RequestException, ValueError, AttributeError):
-        return None
+    except (ValueError, AttributeError):
+        return None, 'oembed_parse'
     if not title:
-        return None
+        return None, 'oembed_empty'
     meta = _empty_spotify_meta()
     if kind == 'episode':
         meta['title'] = title
     else:
         meta['show'] = title
-    return meta
+    return meta, None
+
+
+def _spotify_resolve_show_name(show_id):
+    """Real show title from the show's embed, then oEmbed. Empty when unknown."""
+    meta, _ = _spotify_embed_metadata('show', show_id)
+    if meta:
+        name = (meta.get('show') or '').strip()
+        if name and not _is_generic_spotify_show_name(name):
+            return name
+    oem, _ = _spotify_oembed_metadata('show', show_id)
+    if oem:
+        return (oem.get('show') or '').strip()
+    return ''
 
 
 def fetch_spotify_metadata(kind, spotify_id):
-    """{'title', 'show', playability…} for a Spotify link, or None when empty."""
-    meta = _spotify_embed_metadata(kind, spotify_id)
-    if meta and (meta['show'] or meta['title']):
-        return meta
-    return _spotify_oembed_metadata(kind, spotify_id)
+    """{'title', 'show', playability…} for a Spotify link, or None when empty.
+
+    Returns (meta_or_None, error_detail_or_None). error_detail is set when the
+    link could not be read, for logs and the resolve JSON.
+    """
+    meta, detail = _spotify_embed_metadata(kind, spotify_id)
+    if meta:
+        related_show_id = meta.get('related_show_id')
+        # Prefer the show page's name whenever relatedEntityUri gives a show id
+        # (episode subtitle is sometimes the generic label "Podcast ").
+        if related_show_id:
+            resolved = _spotify_resolve_show_name(related_show_id)
+            if resolved:
+                meta['show'] = resolved
+        if meta['show'] or meta['title']:
+            return meta, None
+    oem, oem_detail = _spotify_oembed_metadata(kind, spotify_id)
+    if oem and (oem['show'] or oem['title']):
+        return oem, None
+    return None, detail or oem_detail or 'unreadable'
 
 
 def _itunes_search(term, entity):
@@ -6826,19 +6921,21 @@ def _paid_episode_message(show_name):
     return base
 
 
-def _spotify_resolve_outcome(results, error=None, error_kind=None, show_name=None):
+def _spotify_resolve_outcome(results, error=None, error_kind=None, show_name=None,
+                             error_detail=None):
     return {
         'results': results,
         'error': error,
         'error_kind': error_kind,
         'show_name': show_name or '',
+        'error_detail': error_detail or '',
     }
 
 
 def resolve_spotify_url(raw):
     """Map a Spotify link onto the public feed Podskrift can fetch.
 
-    Returns a dict: results, error, error_kind, show_name. Raises
+    Returns a dict: results, error, error_kind, show_name, error_detail. Raises
     requests.RequestException when a directory lookup itself fails.
     """
     kind, spotify_id = parse_spotify_url(raw)
@@ -6846,11 +6943,11 @@ def resolve_spotify_url(raw):
         return _spotify_resolve_outcome(
             [], "That doesn't look like a Spotify episode or show link.",
             'unreadable_link')
-    meta = fetch_spotify_metadata(kind, spotify_id)
+    meta, meta_detail = fetch_spotify_metadata(kind, spotify_id)
     if not meta:
         return _spotify_resolve_outcome(
             [], "Couldn't read that Spotify link. Check that it's a public episode or show.",
-            'unreadable_link')
+            'unreadable_link', error_detail=meta_detail)
 
     show_name = meta.get('show') or ''
     title = meta.get('title') or ''
@@ -6904,12 +7001,12 @@ def resolve_spotify_url(raw):
         [], _no_feed_message(name), 'no_feed', show_name or name)
 
 
-def _log_spotify_resolve_failure(spotify_id, kind, error_kind):
+def _log_spotify_resolve_failure(spotify_id, kind, error_kind, error_detail=None):
     if not error_kind:
         return
     app.logger.info(
-        'spotify resolve failed id=%s type=%s error_kind=%s',
-        spotify_id or '-', kind or '-', error_kind)
+        'spotify resolve failed id=%s type=%s error_kind=%s detail=%s',
+        spotify_id or '-', kind or '-', error_kind, error_detail or '-')
 
 
 @app.route('/resolve-spotify', methods=['GET'])
@@ -6927,13 +7024,15 @@ def resolve_spotify():
         except requests.RequestException:
             outcome = _spotify_resolve_outcome(
                 [], "Couldn't reach the podcast directory. Try again in a moment.",
-                'directory_unreachable')
-    _log_spotify_resolve_failure(spotify_id, kind, outcome.get('error_kind'))
+                'directory_unreachable', error_detail='directory_unreachable')
+    _log_spotify_resolve_failure(
+        spotify_id, kind, outcome.get('error_kind'), outcome.get('error_detail'))
     return jsonify({
         'results': outcome['results'],
         'error': outcome['error'],
         'error_kind': outcome['error_kind'],
         'show_name': outcome.get('show_name') or '',
+        'error_detail': outcome.get('error_detail') or '',
     })
 
 
