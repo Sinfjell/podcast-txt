@@ -7,6 +7,7 @@ unvalidated server-side fetch of a client-supplied URL.
 Run: pytest test_app.py
 """
 
+import json
 import os
 import re
 import secrets
@@ -6101,6 +6102,276 @@ def test_homepage_faq_mentions_api_and_docs(trial_on):
     home = A.app.test_client().get('/').data.decode()
     assert 'Is there an HTTP API?' in home
     assert 'Developers' not in home
+
+
+# --------------------------------------------------------------------------
+# Remote MCP server (/mcp) — feature-flagged, reuses customer API helpers
+# --------------------------------------------------------------------------
+
+import mcp_server as MCP  # noqa: E402 — after app import / test DB wiring
+
+
+@pytest.fixture
+def mcp_on(customer_api, monkeypatch):
+    """MCP_ENABLED + customer key; catalog/enqueue stubs from customer_api."""
+    monkeypatch.setenv('MCP_ENABLED', '1')
+    MCP._mcp_rate_attempts.clear()
+    A._agent_write_attempts.clear()
+    return customer_api
+
+
+def _mcp_rpc(key, method, params=None, req_id=1):
+    headers = {'Authorization': f'Bearer {key}'}
+    body = {'jsonrpc': '2.0', 'id': req_id, 'method': method}
+    if params is not None:
+        body['params'] = params
+    return A.app.test_client().post('/mcp', json=body, headers=headers)
+
+
+def _mcp_tool(key, name, arguments=None):
+    r = _mcp_rpc(key, 'tools/call', {
+        'name': name,
+        'arguments': arguments or {},
+    })
+    assert r.status_code == 200, r.data
+    data = r.get_json()
+    assert 'result' in data, data
+    result = data['result']
+    if 'structuredContent' in result:
+        payload = result['structuredContent']
+    else:
+        payload = json.loads(result['content'][0]['text'])
+    return payload, result
+
+
+def test_mcp_flag_off_returns_404(customer_api, monkeypatch):
+    monkeypatch.setenv('MCP_ENABLED', '0')
+    r = _mcp_rpc(customer_api['key_a'], 'initialize', {})
+    assert r.status_code == 404
+    assert r.get_json()['error'] == 'Not found'
+
+
+def test_mcp_requires_auth(mcp_on):
+    r = A.app.test_client().post('/mcp', json={
+        'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {},
+    })
+    assert r.status_code == 401
+    r = A.app.test_client().post(
+        '/mcp',
+        json={'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {}},
+        headers={'Authorization': 'Bearer psk_not-a-real-key'})
+    assert r.status_code == 401
+
+
+def test_mcp_initialize_and_tools_list(mcp_on):
+    r = _mcp_rpc(mcp_on['key_a'], 'initialize', {
+        'protocolVersion': '2025-03-26',
+        'capabilities': {},
+        'clientInfo': {'name': 'test', 'version': '0'},
+    })
+    assert r.status_code == 200
+    result = r.get_json()['result']
+    assert result['protocolVersion'] == '2025-03-26'
+    assert 'tools' in result['capabilities']
+    assert result['serverInfo']['name'] == 'podskrift'
+
+    listed = _mcp_rpc(mcp_on['key_a'], 'tools/list', {})
+    names = {t['name'] for t in listed.get_json()['result']['tools']}
+    assert names == {
+        'search_podcasts', 'list_episodes', 'get_transcript',
+        'get_transcript_status',
+    }
+
+
+def test_mcp_search_podcasts_tool(mcp_on, monkeypatch):
+    monkeypatch.setattr(A, '_itunes_search', lambda term, entity: [{
+        'collectionName': 'Spårtsklubben',
+        'artistName': 'NRK',
+        'feedUrl': 'https://feeds.example.com/spart.xml',
+        'artworkUrl100': 'https://cdn.example.com/art.jpg',
+        'primaryGenreName': 'Sports',
+        'collectionViewUrl': 'https://podcasts.apple.com/podcast/id1',
+        'collectionId': 1,
+    }])
+    payload, result = _mcp_tool(mcp_on['key_a'], 'search_podcasts', {
+        'query': 'Spårtsklubben',
+    })
+    assert result.get('isError') is False
+    assert payload['count'] >= 1
+    assert payload['results'][0]['name'] == 'Spårtsklubben'
+    assert payload['results'][0]['feed_url']
+
+
+def test_mcp_list_episodes_tool(mcp_on):
+    payload, result = _mcp_tool(mcp_on['key_a'], 'list_episodes', {
+        'podcast': 'Spårtsklubben',
+    })
+    assert result.get('isError') is False
+    assert payload['count'] >= 1
+    ep = payload['episodes'][0]
+    assert ep['title']
+    assert ep['date']
+    assert 'duration_min' in ep
+    assert ep['id']
+
+
+def test_mcp_get_transcript_ready_existing(mcp_on):
+    payload, result = _mcp_tool(mcp_on['key_a'], 'get_transcript', {
+        'episode': 'cust-a-ep',
+    })
+    assert result.get('isError') is False
+    assert payload['transcript_status'] == 'ready'
+    assert payload['text'] == 'Transcript belonging to A.'
+    assert payload['job_id'] == 'cust-a-ep'
+    assert 'balance' in payload
+
+
+def test_mcp_get_transcript_starts_job(mcp_on, ph_events):
+    payload, result = _mcp_tool(mcp_on['key_a'], 'get_transcript', {
+        'episode': 'Spårtsklubben|2026-09-10',
+    })
+    assert result.get('isError') is False
+    assert payload.get('error') is None
+    assert payload['transcript_status'] == 'pending'
+    assert payload['job_id']
+    assert payload['cost_minutes'] == 42
+    assert 'balance_before' in payload
+    assert 'balance_after' in payload
+    # Minutes reserved → free balance dropped
+    assert (payload['balance_after']['remaining_minutes']
+            < payload['balance_before']['remaining_minutes'])
+
+    status_payload, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript_status', {
+        'job_id': payload['job_id'],
+    })
+    assert status_payload['job_id'] == payload['job_id']
+    assert status_payload['transcript_status'] == 'pending'
+
+    called = [e for e in ph_events.events if e['event'] == 'mcp_tool_called']
+    assert called
+    assert all('email' not in (e.get('properties') or {}) for e in called)
+    tools = {e['properties']['tool'] for e in called}
+    assert 'get_transcript' in tools
+    assert 'get_transcript_status' in tools
+    assert all(isinstance(e['properties'].get('success'), bool) for e in called)
+
+
+def test_mcp_get_transcript_insufficient_balance(mcp_on):
+    from models import db, User
+    with A.app.app_context():
+        u = db.session.get(User, mcp_on['a'])
+        u.trial_seconds_used = u.trial_seconds_limit or 3600
+        u.paid_seconds_balance = 0
+        db.session.commit()
+
+    payload, result = _mcp_tool(mcp_on['key_a'], 'get_transcript', {
+        'episode': 'Spårtsklubben|2026-09-10',
+    })
+    assert result.get('isError') is True
+    assert payload['error'] == 'insufficient_balance'
+    assert payload['pricing_url'].endswith('/pricing')
+    assert 'cost_minutes' in payload
+    assert 'balance' in payload or 'balance_before' in payload
+
+
+def test_mcp_cannot_read_other_users_job(mcp_on):
+    payload, result = _mcp_tool(mcp_on['key_a'], 'get_transcript_status', {
+        'job_id': 'cust-b-ep',
+    })
+    assert result.get('isError') is True
+    assert payload['error'] == 'Job not found'
+
+
+def test_mcp_get_transcript_by_list_id_does_not_charge_twice(mcp_on):
+    """list_episodes id is the audio URL; a repeat call must reuse the job."""
+    listed, _ = _mcp_tool(mcp_on['key_a'], 'list_episodes', {
+        'podcast': 'Spårtsklubben',
+    })
+    ep = listed['episodes'][0]
+    args = {
+        'episode': ep['id'], 'title': ep['title'], 'publisher': ep['publisher'],
+        'date': ep['date'], 'duration_min': ep['duration_min'],
+        'rss_url': ep['rss_url'],
+    }
+    first, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript', args)
+    assert first['reused'] is False
+    assert first['title'] == ep['title']
+    assert first['cost_minutes'] == 42
+    second, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript', {'episode': ep['id']})
+    assert second['job_id'] == first['job_id']
+    assert second['reused'] is True
+    assert (second['balance']['remaining_minutes']
+            == first['balance_after']['remaining_minutes'])
+
+
+def test_mcp_list_episodes_spotify_show(mcp_on, monkeypatch):
+    monkeypatch.setattr(A, 'resolve_spotify_url', lambda raw: {
+        'results': [{'type': 'show', 'name': 'Spårtsklubben',
+                     'artist': 'Spårtsklubben',
+                     'feed_url': 'https://feeds.example.com/spart.xml'}],
+        'error': None, 'error_kind': None, 'show_name': 'Spårtsklubben',
+        'error_detail': '',
+    })
+    payload, result = _mcp_tool(mcp_on['key_a'], 'list_episodes', {
+        'podcast': 'https://open.spotify.com/show/2MAi0BvDc6GTFvKFPXnkCL',
+    })
+    assert result.get('isError') is False, payload
+    assert payload['count'] >= 1
+
+
+def test_mcp_jsonrpc_edge_cases(mcp_on):
+    key = mcp_on['key_a']
+    headers = {'Authorization': f'Bearer {key}'}
+    c = A.app.test_client()
+    r = c.post('/mcp', json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                             'params': [1]}, headers=headers)
+    assert r.status_code == 200
+    assert r.get_json()['error']['code'] == -32602
+    r = c.post('/mcp', json=[{'jsonrpc': '2.0', 'method': 'notifications/initialized'}],
+               headers=headers)
+    assert r.status_code == 202
+    r = c.post('/mcp', json=[], headers=headers)
+    assert r.status_code == 400
+    r = c.post('/mcp', json={'jsonrpc': '2.0', 'id': 1, 'method': 'initialize'})
+    assert r.status_code == 401
+    assert r.headers.get('WWW-Authenticate', '').startswith('Bearer')
+
+
+def test_mcp_batch_consumes_rate_limit(mcp_on, monkeypatch):
+    monkeypatch.setattr(MCP, 'MCP_MAX_PER_WINDOW', 3)
+    batch = [{'jsonrpc': '2.0', 'id': i, 'method': 'ping'} for i in range(10)]
+    r = A.app.test_client().post(
+        '/mcp', json=batch,
+        headers={'Authorization': f'Bearer {mcp_on["key_a"]}'})
+    out = r.get_json()
+    assert len(out) == 10
+    assert sum(1 for m in out if 'result' in m) == 3
+    assert all(m['error']['code'] == -32002 for m in out if 'error' in m)
+
+
+def test_mcp_docs_section_only_when_flag_on(trial_on, monkeypatch):
+    monkeypatch.setenv('MCP_ENABLED', '0')
+    off = A.app.test_client().get('/docs/api').data.decode()
+    assert 'MCP' not in off
+    assert 'podskrift.com/mcp' not in off
+
+    monkeypatch.setenv('MCP_ENABLED', '1')
+    on = A.app.test_client().get('/docs/api').data.decode()
+    assert 'MCP (ChatGPT / Claude / Cursor)' in on
+    assert 'podskrift.com/mcp' in on
+    assert 'search_podcasts' in on
+
+
+def test_mcp_path_not_redirected_off_canonical_host(monkeypatch):
+    monkeypatch.setenv('PUBLIC_BASE_URL', 'https://podskrift.com')
+    monkeypatch.setenv('MCP_ENABLED', '1')
+    r = A.app.test_client().post(
+        '/mcp',
+        base_url='http://www.podskrift.com',
+        json={'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {}},
+    )
+    # Auth fails closed with 401 — must not 301/308 off the host.
+    assert r.status_code == 401
 
 
 # --------------------------------------------------------------------------
