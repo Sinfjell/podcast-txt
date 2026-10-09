@@ -774,8 +774,15 @@ def _env_minutes_optional(name):
 TRIAL_DEFAULT_SECONDS = _env_minutes('TRIAL_MINUTES', 180) * 60
 #: Minutes stamped onto users.trial_seconds_limit at registration. Existing
 #: rows keep their stored limit (or NULL → TRIAL_MINUTES); only new signups
-#: get this grant. No DB migration — set at create time only.
-NEW_USER_TRIAL_SECONDS = _env_minutes('NEW_USER_TRIAL_MINUTES', 60) * 60
+#: get this grant, except the one-off 60 → 120 cohort lift below.
+NEW_USER_TRIAL_SECONDS = _env_minutes('NEW_USER_TRIAL_MINUTES', 120) * 60
+#: The 60-minute signup grant (PR #54) ran from 2026-10-09 ~06:40 UTC until
+#: the 120-minute default shipped. raise_60_minute_trial_cohort() lifts those
+#: rows once at boot. Bounds are UTC, matching how users.created_at is stored;
+#: the end bound keeps a later manual 3600 grant from being bumped on restart.
+TRIAL_60_COHORT_SECONDS = 60 * 60
+TRIAL_60_COHORT_CREATED_FROM = '2026-10-09 06:00:00'
+TRIAL_60_COHORT_CREATED_BEFORE = '2026-10-11 00:00:00'
 #: Shared free-trial budget for one Europe/Oslo calendar day. Resets at Oslo
 #: midnight. Reservations count immediately (trial_budget_days); refunds and
 #: failed-before-Whisper jobs release the day the task was started.
@@ -9944,6 +9951,38 @@ def apply_column_migrations():
     return added
 
 
+def raise_60_minute_trial_cohort():
+    """Lift accounts that signed up under the 60-minute grant to the current one.
+
+    Idempotent and safe when two gunicorn workers race: one conditional UPDATE
+    that only matches rows still at exactly 60 minutes inside the PR #54 signup
+    window. After it runs no row matches, so a second worker or a later boot
+    updates nothing. ``trial_seconds_used`` is untouched, and trial_reserve()
+    reads the limit inside its own UPDATE, so a job in flight is unaffected.
+    NULL (legacy 180) and hand-set limits are never touched. Returns rowcount.
+    """
+    if NEW_USER_TRIAL_SECONDS <= TRIAL_60_COHORT_SECONDS:
+        return 0
+    if 'trial_seconds_limit' not in _live_columns('users'):
+        return 0
+    result = db.session.execute(text(
+        'UPDATE users SET trial_seconds_limit = :new_limit '
+        'WHERE trial_seconds_limit = :old_limit '
+        'AND created_at >= :created_from AND created_at < :created_before'
+    ), {
+        'new_limit': NEW_USER_TRIAL_SECONDS,
+        'old_limit': TRIAL_60_COHORT_SECONDS,
+        'created_from': TRIAL_60_COHORT_CREATED_FROM,
+        'created_before': TRIAL_60_COHORT_CREATED_BEFORE,
+    })
+    db.session.commit()
+    raised = result.rowcount or 0
+    if raised:
+        app.logger.info('Raised %d 60-minute trial accounts to %d minutes',
+                        raised, NEW_USER_TRIAL_SECONDS // 60)
+    return raised
+
+
 def ensure_credit_purchases_table():
     """Create credit_purchases if missing. Safe when two gunicorn workers race.
 
@@ -10336,6 +10375,7 @@ with app.app_context():
     ensure_password_reset_tokens_table()
 
     apply_column_migrations()
+    raise_60_minute_trial_cohort()
     # Admin dashboard indexes: only after columns exist (same rule as
     # credit_purchases payment_intent index). Additive IF NOT EXISTS.
     ensure_admin_indexes(db)

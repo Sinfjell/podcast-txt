@@ -6634,20 +6634,21 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'new-look'
-    assert entries[1]['id'] == 'forgot-password'
-    assert entries[2]['id'] == 'share-listen-links'
-    assert entries[3]['id'] == 'keyboard-and-faster-loading'
-    assert entries[4]['id'] == 'show-landing-pages'
-    assert entries[5]['id'] == 'public-share-links'
-    assert entries[6]['id'] == 'unsubscribe-confirm-click'
-    assert entries[7]['id'] == 'partial-preview-minutes-wording'
-    assert entries[8]['id'] == 'partial-trial-preview'
-    assert entries[9]['id'] == 'own-key-billing-clarity'
-    assert entries[10]['id'] == 'clearer-missing-episode-audio'
-    assert entries[11]['id'] == 'new-signup-60-min-trial'
-    assert entries[12]['id'] == 'spotify-paste-robustness'
-    assert entries[13]['id'] == 'no-double-charge-restart'
+    assert entries[0]['id'] == 'new-signup-120-min-trial'
+    assert entries[1]['id'] == 'new-look'
+    assert entries[2]['id'] == 'forgot-password'
+    assert entries[3]['id'] == 'share-listen-links'
+    assert entries[4]['id'] == 'keyboard-and-faster-loading'
+    assert entries[5]['id'] == 'show-landing-pages'
+    assert entries[6]['id'] == 'public-share-links'
+    assert entries[7]['id'] == 'unsubscribe-confirm-click'
+    assert entries[8]['id'] == 'partial-preview-minutes-wording'
+    assert entries[9]['id'] == 'partial-trial-preview'
+    assert entries[10]['id'] == 'own-key-billing-clarity'
+    assert entries[11]['id'] == 'clearer-missing-episode-audio'
+    assert entries[12]['id'] == 'new-signup-60-min-trial'
+    assert entries[13]['id'] == 'spotify-paste-robustness'
+    assert entries[14]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -7064,7 +7065,8 @@ def test_homepage_copy_leads_with_spotify(trial_on):
     assert 'even on Spotify' in body
     assert 'Paste a Spotify link or search a podcast' in body
     assert 'badge-needs-key' in body
-    assert 'Your first' in body and 'minutes run on our key' in body
+    assert f'Your first {A.NEW_USER_TRIAL_SECONDS // 60} minutes' in body
+    assert 'run on our key' in body
     assert 'Download .txt or .srt transcript' not in body
     assert f'${A.openai_whisper_cost_usd(90):.2f}' in body
     assert f'${A.openai_whisper_cost_usd(60):.2f}' in body
@@ -7623,11 +7625,11 @@ def test_anon_homepage_exposes_new_account_trial_badge(trial_on):
 
 
 def test_default_trial_grants_and_daily_budget():
-    """New signups get 60 minutes; NULL-limit legacy rows use 180; daily is 750.
+    """New signups get 120 minutes; NULL-limit legacy rows use 180; daily is 750.
     Lifetime safety is off when TRIAL_GLOBAL_MINUTES is unset. Per-episode max
-    still tracks TRIAL_MINUTES so a 60-min user over remaining balance hits the
+    still tracks TRIAL_MINUTES so a 120-min user over remaining balance hits the
     paywall, not the hard episode-length refusal."""
-    assert A.NEW_USER_TRIAL_SECONDS == 60 * 60
+    assert A.NEW_USER_TRIAL_SECONDS == 120 * 60
     assert A.TRIAL_DEFAULT_SECONDS == 180 * 60
     assert A.TRIAL_MAX_EPISODE_SECONDS == A.TRIAL_DEFAULT_SECONDS
     assert A.TRIAL_DAILY_SECONDS == 750 * 60
@@ -7647,7 +7649,7 @@ def test_null_limit_accounts_pick_up_the_raised_default(monkeypatch, trial_on):
 
 
 def test_register_stamps_new_user_trial_limit(trial_on):
-    """Registration sets trial_seconds_limit to NEW_USER_TRIAL_MINUTES (60)."""
+    """Registration sets trial_seconds_limit to NEW_USER_TRIAL_MINUTES (120)."""
     email = 'newgrant@example.com'
     _purge([email])
     A._register_attempts.clear()
@@ -7661,12 +7663,73 @@ def test_register_stamps_new_user_trial_limit(trial_on):
         u = A.User.query.filter_by(email=email).first()
         assert u is not None
         assert u.trial_seconds_limit == A.NEW_USER_TRIAL_SECONDS
-        assert u.trial_seconds_limit == 60 * 60
+        assert u.trial_seconds_limit == 120 * 60
         limit, used, remaining = A.trial_status(u)
-        assert limit == 60 * 60
+        assert limit == 120 * 60
         assert used == 0
-        assert remaining == 60 * 60
+        assert remaining == 120 * 60
     _purge([email])
+
+
+def _set_created(uid, created_at):
+    with A.app.app_context():
+        A.db.session.execute(A.text(
+            'UPDATE users SET created_at = :c WHERE id = :id'),
+            {'c': created_at, 'id': uid})
+        A.db.session.commit()
+
+
+def _limit_of(uid):
+    with A.app.app_context():
+        return A.db.session.execute(A.text(
+            'SELECT trial_seconds_limit FROM users WHERE id = :id'),
+            {'id': uid}).scalar()
+
+
+def test_raise_60_minute_trial_cohort_lifts_only_that_cohort(monkeypatch):
+    """Accounts stamped with the 60-minute grant (PR #54) move to the current
+    grant once; used minutes stay; legacy NULL, hand-set limits and 3600 rows
+    outside the signup window are untouched; a rerun is a no-op.
+
+    The window is shifted to 2001 so other tests' users (created "now") can
+    never fall inside it; the production bounds are asserted separately."""
+    assert A.TRIAL_60_COHORT_CREATED_FROM == '2026-10-09 06:00:00'
+    assert A.TRIAL_60_COHORT_CREATED_BEFORE == '2026-10-11 00:00:00'
+    monkeypatch.setattr(A, 'TRIAL_60_COHORT_CREATED_FROM', '2001-01-09 06:00:00')
+    monkeypatch.setattr(A, 'TRIAL_60_COHORT_CREATED_BEFORE', '2001-01-11 00:00:00')
+    cohort = _make_user('cohort60@test.com', limit=3600, used=2832)
+    cohort_late = _make_user('cohort60late@test.com', limit=3600, used=0)
+    before = _make_user('pre54-3600@test.com', limit=3600, used=0)
+    after = _make_user('manual-3600@test.com', limit=3600, used=0)
+    legacy = _make_user('legacy-null-cohort@test.com', limit=None, used=100)
+    tester = _make_user('partial-1500@test.com', limit=1500, used=0)
+    _set_created(cohort, '2001-01-09 07:09:18.135131')
+    _set_created(cohort_late, '2001-01-10 23:59:59.000000')
+    _set_created(before, '2001-01-09 05:59:59.000000')
+    _set_created(after, '2001-01-11 00:00:00.000000')
+    _set_created(legacy, '2001-01-09 08:00:00.000000')
+    _set_created(tester, '2001-01-09 11:37:18.743825')
+    with A.app.app_context():
+        assert A.raise_60_minute_trial_cohort() == 2
+        assert A.raise_60_minute_trial_cohort() == 0
+    assert _limit_of(cohort) == A.NEW_USER_TRIAL_SECONDS == 120 * 60
+    assert _limit_of(cohort_late) == 120 * 60
+    assert _limit_of(before) == 3600
+    assert _limit_of(after) == 3600
+    assert _limit_of(legacy) is None
+    assert _limit_of(tester) == 1500
+    assert _used(cohort) == 2832
+
+
+def test_raise_60_minute_trial_cohort_noop_when_grant_not_larger(monkeypatch):
+    monkeypatch.setattr(A, 'TRIAL_60_COHORT_CREATED_FROM', '2001-02-09 06:00:00')
+    monkeypatch.setattr(A, 'TRIAL_60_COHORT_CREATED_BEFORE', '2001-02-11 00:00:00')
+    uid = _make_user('cohort60-noop@test.com', limit=3600, used=0)
+    _set_created(uid, '2001-02-09 09:00:00.000000')
+    monkeypatch.setattr(A, 'NEW_USER_TRIAL_SECONDS', 60 * 60)
+    with A.app.app_context():
+        assert A.raise_60_minute_trial_cohort() == 0
+    assert _limit_of(uid) == 3600
 
 
 def test_existing_null_limit_user_still_gets_trial_minutes_default(trial_on):
@@ -10892,7 +10955,8 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'new-look'
+    assert entries[0]['id'] == 'new-signup-120-min-trial'
+    assert entries[1]['id'] == 'new-look'
 
 
 # --------------------------------------------------------------------------
