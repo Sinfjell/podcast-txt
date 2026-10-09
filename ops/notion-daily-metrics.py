@@ -47,10 +47,15 @@ DEFAULT_DATABASE_ID = '0d846d9fc2a4441ba5d542eb4e7609da'
 NOTION_VERSION = '2022-06-28'
 # Matches app.py TRIAL_MINUTES default when users.trial_seconds_limit is NULL.
 DEFAULT_TRIAL_MINUTES = 180
-# Matches app.py TRIAL_GLOBAL_MINUTES — lifetime ceiling across all accounts.
-DEFAULT_TRIAL_GLOBAL_MINUTES = 6000
-# Warn (Notes + Sentry) when lifetime global trial usage crosses these ratios.
-TRIAL_GLOBAL_WARN_THRESHOLDS = (0.70, 0.90)
+# Matches app.py TRIAL_DAILY_MINUTES — shared free-trial budget per Oslo day.
+DEFAULT_TRIAL_DAILY_MINUTES = 750
+# Optional lifetime safety (app default: unset = off). Kept for ops that still
+# set TRIAL_GLOBAL_MINUTES.
+DEFAULT_TRIAL_GLOBAL_MINUTES = 0
+# Warn (Notes + Sentry) when that Oslo day's trial usage crosses these ratios.
+TRIAL_DAILY_WARN_THRESHOLDS = (0.70, 0.90)
+# Back-compat alias used by older tests / callers.
+TRIAL_GLOBAL_WARN_THRESHOLDS = TRIAL_DAILY_WARN_THRESHOLDS
 # Nightly backup should land by 23:45 UTC; flag if the newest .gz is older than
 # this (covers a missed night plus a little slack before the weekday metrics run).
 BACKUP_STALE_AFTER_HOURS = 26
@@ -128,26 +133,34 @@ def trial_global_usage_ratio(used_seconds: int | float, cap_seconds: int | float
     return max(0.0, float(used_seconds or 0) / cap)
 
 
-def trial_global_cap_warning_lines(
+def trial_daily_cap_warning_lines(
     used_seconds: int | float,
     cap_seconds: int | float,
 ) -> list[str]:
-    """Norwegian Notes lines when usage crosses 70% / 90% of the lifetime cap."""
+    """Norwegian Notes lines when usage crosses 70% / 90% of the daily budget."""
     ratio = trial_global_usage_ratio(used_seconds, cap_seconds)
     if ratio is None:
         return []
     used_min = float(used_seconds or 0) / 60.0
     cap_min = float(cap_seconds) / 60.0
     lines: list[str] = []
-    for threshold in TRIAL_GLOBAL_WARN_THRESHOLDS:
+    for threshold in TRIAL_DAILY_WARN_THRESHOLDS:
         if ratio >= threshold:
             lines.append(
-                f'Global trial-tak: {used_min:.0f}/{cap_min:.0f} min brukt '
-                f'({ratio:.0%} av TRIAL_GLOBAL_MINUTES-taket, varsel ved '
+                f'Daglig trial-budsjett: {used_min:.0f}/{cap_min:.0f} min brukt '
+                f'({ratio:.0%} av TRIAL_DAILY_MINUTES, varsel ved '
                 f'{int(threshold * 100)}%+). Gratis-minutter kan snart stoppe '
-                f'for alle kontoer.'
+                f'for alle kontoer til midnatt (Oslo).'
             )
     return lines
+
+
+def trial_global_cap_warning_lines(
+    used_seconds: int | float,
+    cap_seconds: int | float,
+) -> list[str]:
+    """Back-compat alias — warnings now refer to the daily budget."""
+    return trial_daily_cap_warning_lines(used_seconds, cap_seconds)
 
 
 def newest_backup_mtime(
@@ -245,11 +258,11 @@ def emit_trial_global_sentry_warnings(
         pct = int(threshold * 100)
         try:
             sentry_sdk.capture_message(
-                f'Global trial allowance at {ratio:.0%} of cap '
-                f'({used_min:.0f}/{cap_min:.0f} min)',
+                f'Daily trial budget at {ratio:.0%} of cap '
+                f'({used_min:.0f}/{cap_min:.0f} min, Oslo day)',
                 level='warning',
                 fingerprint=[
-                    'trial-global-cap',
+                    'trial-daily-cap',
                     str(pct),
                     metric_day.isoformat(),
                 ],
@@ -262,7 +275,8 @@ def emit_trial_global_sentry_warnings(
 
 def collect_metrics(conn: sqlite3.Connection, day: date,
                     trial_default_seconds: int,
-                    trial_global_seconds: int | None = None) -> dict:
+                    trial_global_seconds: int | None = None,
+                    trial_daily_seconds: int | None = None) -> dict:
     start, end = day_bounds_utc(day)
 
     users_total = _scalar(
@@ -363,10 +377,35 @@ def collect_metrics(conn: sqlite3.Connection, day: date,
         'SELECT COALESCE(SUM(trial_seconds_used), 0) FROM users',
     ))
     trial_minutes_used = round(trial_seconds_used_total / 60.0, 1)
-    if trial_global_seconds is None:
-        trial_global_seconds = DEFAULT_TRIAL_GLOBAL_MINUTES * 60
-    trial_global_cap_minutes = round(int(trial_global_seconds) / 60.0, 1)
-    trial_global_used_minutes = trial_minutes_used
+
+    day_key = day.isoformat()
+    # Prefer the atomic daily ledger; fall back to summing task charges for
+    # that Oslo day when the table is absent on an old DB snapshot.
+    try:
+        trial_daily_used_seconds = int(_scalar(
+            conn,
+            'SELECT COALESCE(seconds_used, 0) FROM trial_budget_days WHERE day = ?',
+            (day_key,),
+        ))
+    except sqlite3.OperationalError:
+        trial_daily_used_seconds = int(_scalar(
+            conn,
+            '''
+            SELECT COALESCE(SUM(COALESCE(trial_seconds_charged, 0)), 0)
+              FROM transcription_tasks
+             WHERE trial_seconds_charged IS NOT NULL
+               AND started_at >= ? AND started_at < ?
+            ''',
+            (start, end),
+        ))
+    if trial_daily_seconds is None:
+        if trial_global_seconds is not None and int(trial_global_seconds) > 0:
+            # Older callers passed the daily figure via trial_global_seconds.
+            trial_daily_seconds = int(trial_global_seconds)
+        else:
+            trial_daily_seconds = DEFAULT_TRIAL_DAILY_MINUTES * 60
+    trial_daily_used_minutes = round(trial_daily_used_seconds / 60.0, 1)
+    trial_daily_cap_minutes = round(int(trial_daily_seconds) / 60.0, 1)
 
     trial_exhausted = _scalar(
         conn,
@@ -394,15 +433,20 @@ def collect_metrics(conn: sqlite3.Connection, day: date,
         'Ever completed': int(ever_completed),
         'Returned 2+ days': int(returned_2plus),
         'Trial minutes used': trial_minutes_used,
-        # Lifetime global ceiling (same SUM as Trial minutes used vs TRIAL_GLOBAL).
+        # Shared free-trial budget for this Oslo calendar day.
         # Printed in the cron JSON; not synced as Notion columns (no schema change).
-        'Trial global used minutes': trial_global_used_minutes,
-        'Trial global cap minutes': trial_global_cap_minutes,
+        'Trial daily used minutes': trial_daily_used_minutes,
+        'Trial daily cap minutes': trial_daily_cap_minutes,
+        # Back-compat keys for older dashboards / tests.
+        'Trial global used minutes': trial_daily_used_minutes,
+        'Trial global cap minutes': trial_daily_cap_minutes,
         'Trial exhausted': int(trial_exhausted),
         'Saved feeds': int(saved_feeds),
         # Internal seconds for threshold checks (not Notion-bound).
-        '_trial_global_used_seconds': trial_seconds_used_total,
-        '_trial_global_cap_seconds': int(trial_global_seconds),
+        '_trial_daily_used_seconds': trial_daily_used_seconds,
+        '_trial_daily_cap_seconds': int(trial_daily_seconds),
+        '_trial_global_used_seconds': trial_daily_used_seconds,
+        '_trial_global_cap_seconds': int(trial_daily_seconds),
     }
 
 
@@ -622,24 +666,32 @@ def main(argv: list[str] | None = None) -> int:
     trial_minutes = int(os.environ.get('TRIAL_MINUTES', DEFAULT_TRIAL_MINUTES))
     trial_default_seconds = trial_minutes * 60
 
-    trial_global_minutes = int(
-        os.environ.get('TRIAL_GLOBAL_MINUTES', DEFAULT_TRIAL_GLOBAL_MINUTES)
+    trial_daily_minutes = int(
+        os.environ.get('TRIAL_DAILY_MINUTES', DEFAULT_TRIAL_DAILY_MINUTES)
     )
-    trial_global_seconds = max(0, trial_global_minutes) * 60
+    trial_daily_seconds = max(0, trial_daily_minutes) * 60
 
     day = parse_day(args.day)
     with open_db(db_path) as conn:
         metrics = collect_metrics(
             conn, day, trial_default_seconds,
-            trial_global_seconds=trial_global_seconds,
+            trial_daily_seconds=trial_daily_seconds,
         )
 
     # Health check after metrics collect; failures become a single Notes line.
     health_lines = run_health_check(day)
-    # Lifetime global trial ceiling — silent stop risk for every free-trial user.
-    used_s = metrics.pop('_trial_global_used_seconds', 0)
-    cap_s = metrics.pop('_trial_global_cap_seconds', trial_global_seconds)
-    health_lines.extend(trial_global_cap_warning_lines(used_s, cap_s))
+    # Daily free-trial budget — silent stop risk for every free-trial user.
+    used_s = metrics.pop(
+        '_trial_daily_used_seconds',
+        metrics.pop('_trial_global_used_seconds', 0),
+    )
+    cap_s = metrics.pop(
+        '_trial_daily_cap_seconds',
+        metrics.pop('_trial_global_cap_seconds', trial_daily_seconds),
+    )
+    metrics.pop('_trial_global_used_seconds', None)
+    metrics.pop('_trial_global_cap_seconds', None)
+    health_lines.extend(trial_daily_cap_warning_lines(used_s, cap_s))
     emit_trial_global_sentry_warnings(used_s, cap_s, metric_day=day)
     # Nightly SQLite backup — catches a stopped timer even if OnFailure never fired.
     backup_dir = Path(

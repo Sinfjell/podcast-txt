@@ -58,6 +58,7 @@ from sqlalchemy.exc import IntegrityError as SaIntegrityError
 
 from models import (db, User, SavedFeed, TranscriptionTask, CreditPurchase,
                     TranscriptShare, EmailSentLog, SummaryEmailJob, SummaryEmailBudgetDay,
+                    TrialBudgetDay,
                     PasswordResetToken,
                     TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS,
                     CREDIT_PURCHASE_COLUMN_MIGRATIONS,
@@ -470,7 +471,8 @@ def trial_badge_remaining_minutes():
 
     Anonymous visitors see the new-account grant. Logged-in trial users see
     what they have left. Own-key users get None (badge hidden). Paid minutes
-    are exposed separately via trial_badge_paid_minutes().
+    are exposed separately via trial_badge_paid_minutes(). When today's shared
+    daily budget is empty, returns 0 so we do not advertise unusable minutes.
     """
     if current_user.is_authenticated and current_user.openai_api_key:
         return None
@@ -479,6 +481,8 @@ def trial_badge_remaining_minutes():
         return None
     if current_user.is_authenticated:
         if trial_available():
+            if not trial_daily_budget_available():
+                return 0
             return trial_status(current_user)[2] // 60
         return 0
     if trial_available():
@@ -730,8 +734,9 @@ def build_openai_client(key):
 # A user with their own OpenAI key spends their own quota and is never metered.
 # Everyone else transcribes on OUR key, which is real money -- so every second
 # of audio is reserved against a per-account allowance before any request
-# reaches Whisper, and a global ceiling caps what the whole service can spend
-# no matter how many accounts exist.
+# reaches Whisper. A daily global budget (Europe/Oslo midnight) caps what the
+# whole service can spend that calendar day; an optional lifetime ceiling is
+# a safety net only (unset / 0 = off).
 
 
 def _env_minutes(name, default):
@@ -751,6 +756,23 @@ def _env_minutes(name, default):
         return int(default)
 
 
+def _env_minutes_optional(name):
+    """Minutes-valued env var where unset/blank means disabled (returns 0).
+
+    Distinct from ``_env_minutes``: a missing lifetime safety cap must not
+    restore a permissive multi-thousand-minute default.
+    """
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == '':
+        return 0
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError):
+        app.logger.warning('%s=%r is not a number; treating as disabled (0)',
+                           name, raw)
+        return 0
+
+
 #: Free audio minutes for accounts with NULL trial_seconds_limit (legacy /
 #: pre-NEW_USER_TRIAL_MINUTES rows). Raising this lifts every NULL-limit user.
 TRIAL_DEFAULT_SECONDS = _env_minutes('TRIAL_MINUTES', 180) * 60
@@ -758,11 +780,13 @@ TRIAL_DEFAULT_SECONDS = _env_minutes('TRIAL_MINUTES', 180) * 60
 #: rows keep their stored limit (or NULL → TRIAL_MINUTES); only new signups
 #: get this grant. No DB migration — set at create time only.
 NEW_USER_TRIAL_SECONDS = _env_minutes('NEW_USER_TRIAL_MINUTES', 60) * 60
-#: Hard ceiling on trial minutes across ALL accounts. Without this, the per-user
-#: cap bounds nothing -- signups are free, so N accounts cost N x the grant.
-#: Lifetime (not daily/monthly): nothing resets it on a schedule. Counts minutes
-#: actually spent; a refused/failed-before-Whisper job releases its reservation.
-TRIAL_GLOBAL_SECONDS = _env_minutes('TRIAL_GLOBAL_MINUTES', 6000) * 60
+#: Shared free-trial budget for one Europe/Oslo calendar day. Resets at Oslo
+#: midnight. Reservations count immediately (trial_budget_days); refunds and
+#: failed-before-Whisper jobs release the day the task was started.
+TRIAL_DAILY_SECONDS = _env_minutes('TRIAL_DAILY_MINUTES', 750) * 60
+#: Optional lifetime safety ceiling across ALL accounts. Unset or 0 = off.
+#: Prefer TRIAL_DAILY_MINUTES for day-to-day cost control.
+TRIAL_GLOBAL_SECONDS = _env_minutes_optional('TRIAL_GLOBAL_MINUTES') * 60
 #: What to reserve when the feed publishes no itunes:duration. Reconciled
 #: against the real duration after download, before a single Whisper call.
 TRIAL_UNKNOWN_ESTIMATE_SECONDS = _env_minutes('TRIAL_UNKNOWN_ESTIMATE_MINUTES', 30) * 60
@@ -779,6 +803,8 @@ TRIAL_MAX_EPISODE_SECONDS = _env_minutes(
 TRIAL_PARTIAL_MIN_SECONDS = _env_minutes('TRIAL_PARTIAL_MIN_MINUTES', 5) * 60
 #: Kill switch. Set TRIAL_ENABLED=0 to stop handing out our key entirely.
 TRIAL_ENABLED = os.getenv('TRIAL_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+#: Calendar timezone for the daily free-trial budget boundary.
+TRIAL_BUDGET_TZ = ZoneInfo('Europe/Oslo')
 
 # ---------------------------------------------------------------------------
 # Stripe credit pack (optional; unset keys hide Buy and skip webhook wiring)
@@ -1016,15 +1042,72 @@ def advertised_trial_minutes():
     return NEW_USER_TRIAL_SECONDS // 60
 
 
-def trial_global_pool_available():
-    """True when the lifetime global free-trial pool still has room.
+def trial_oslo_day_str(when=None):
+    """Europe/Oslo calendar day as YYYY-MM-DD.
 
-    Non-sensitive: used by /health so deploy checks can confirm the ceiling
-    re-opened without exposing used/limit numbers.
+    ``when`` is a timezone-aware or naive-UTC datetime, or an ISO/SQLite
+    datetime string; default is now.
     """
-    if TRIAL_GLOBAL_SECONDS <= 0:
+    if when is None:
+        when = datetime.now(timezone.utc)
+    elif isinstance(when, str):
+        raw = when.strip().replace('Z', '+00:00')
+        try:
+            when = datetime.fromisoformat(raw)
+        except ValueError:
+            return trial_oslo_day_str(None)
+    if isinstance(when, datetime) and when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    if isinstance(when, date) and not isinstance(when, datetime):
+        return when.isoformat()
+    return when.astimezone(TRIAL_BUDGET_TZ).date().isoformat()
+
+
+def trial_oslo_day_bounds_naive_utc(day=None):
+    """Half-open [start, end) naive-UTC datetimes for an Oslo calendar day.
+
+    SQLite stores naive UTC timestamps; compare with these bounds.
+    ``day`` is a YYYY-MM-DD string or ``date``; default is today in Oslo.
+    """
+    if day is None:
+        day = trial_oslo_day_str()
+    if isinstance(day, str):
+        day = date.fromisoformat(day)
+    start = datetime(day.year, day.month, day.day, tzinfo=TRIAL_BUDGET_TZ).astimezone(
+        timezone.utc).replace(tzinfo=None)
+    end = start + timedelta(days=1)
+    return start, end
+
+
+def trial_daily_used_seconds(day=None):
+    """Trial seconds reserved/consumed against the Oslo-day budget ledger."""
+    day = day or trial_oslo_day_str()
+    return int(db.session.execute(text(
+        'SELECT COALESCE(seconds_used, 0) FROM trial_budget_days WHERE day = :day'
+    ), {'day': day}).scalar() or 0)
+
+
+def trial_daily_remaining_seconds(day=None):
+    """Seconds still available on today's (or ``day``'s) shared free-trial budget."""
+    if TRIAL_DAILY_SECONDS <= 0:
+        return 0
+    return max(0, TRIAL_DAILY_SECONDS - trial_daily_used_seconds(day))
+
+
+def trial_daily_budget_available():
+    """True when today's shared free-trial budget still has room.
+
+    Used by /health (`trial_available`) and UI counters. Lifetime safety cap
+    (TRIAL_GLOBAL_SECONDS) is separate and optional.
+    """
+    if not trial_available() or TRIAL_DAILY_SECONDS <= 0:
         return False
-    return trial_global_used_seconds() < TRIAL_GLOBAL_SECONDS
+    return trial_daily_used_seconds() < TRIAL_DAILY_SECONDS
+
+
+def trial_global_pool_available():
+    """Back-compat alias: today's daily budget still has room."""
+    return trial_daily_budget_available()
 
 
 def trial_status(user):
@@ -1037,16 +1120,39 @@ def trial_status(user):
 
 
 def trial_refusal_scope(user, needed_seconds):
-    """Which cap refused a reservation: 'user' if the account is short, else 'global'."""
+    """Which cap refused a reservation: 'user', 'daily', or 'global'."""
     _, _, remaining = trial_status(user)
-    return 'user' if remaining < needed_seconds else 'global'
+    if remaining < needed_seconds:
+        return 'user'
+    if TRIAL_DAILY_SECONDS > 0 and trial_daily_remaining_seconds() < needed_seconds:
+        return 'daily'
+    return 'global'
 
 
 def trial_global_used_seconds():
-    """Trial seconds spent across every account."""
+    """Lifetime trial seconds spent across every account (optional safety cap)."""
     return int(db.session.execute(text(
         'SELECT COALESCE(SUM(trial_seconds_used), 0) FROM users'
     )).scalar() or 0)
+
+
+def _ensure_trial_budget_day(day):
+    """Insert the ledger row for ``day`` if missing. Safe under worker races."""
+    existing = db.session.get(TrialBudgetDay, day)
+    if existing is not None:
+        return
+    try:
+        db.session.add(TrialBudgetDay(day=day, seconds_used=0))
+        db.session.commit()
+    except Exception:  # noqa: BLE001 — race with another worker
+        db.session.rollback()
+
+
+def _trial_budget_day_for_timestamp(ts):
+    """Oslo day string for a task ``started_at`` (naive UTC or aware)."""
+    if ts is None:
+        return trial_oslo_day_str()
+    return trial_oslo_day_str(ts)
 
 
 def resolve_openai_key(user):
@@ -1072,50 +1178,92 @@ def paid_balance_seconds(user):
     return max(0, int(getattr(user, 'paid_seconds_balance', 0) or 0))
 
 
-def trial_reserve(user_id, seconds):
+def trial_reserve(user_id, seconds, *, budget_day=None):
     """Atomically reserve `seconds` of allowance. True only if granted.
 
-    Deliberately one statement. Podskrift runs two gunicorn workers, so a
-    threading.Lock would guard one process and let the other one through;
-    SQLite serialises the write, and both the per-user cap and the global
-    ceiling are evaluated inside it. Two parallel starts therefore cannot
-    both be told there is room that only one of them can have.
+    Podskrift runs two gunicorn workers, so a threading.Lock would guard one
+    process and let the other one through. The per-user cap, optional lifetime
+    ceiling, and today's daily budget are evaluated inside one users UPDATE;
+    the daily ledger bump then runs in the same transaction before commit.
+    SQLite holds the write lock until commit, so parallel starts cannot both
+    be told there is room that only one of them can have.
     """
     seconds = int(math.ceil(seconds))
     if seconds <= 0:
         return True
-    result = db.session.execute(text("""
+    # Daily budget of 0 (or unset kill) means no free trial room at all.
+    if TRIAL_DAILY_SECONDS <= 0:
+        return False
+    day = budget_day or trial_oslo_day_str()
+    _ensure_trial_budget_day(day)
+
+    params = {
+        'n': seconds,
+        'uid': user_id,
+        'default_limit': TRIAL_DEFAULT_SECONDS,
+        'day': day,
+        'daily_limit': TRIAL_DAILY_SECONDS,
+    }
+    lifetime_clause = ''
+    if TRIAL_GLOBAL_SECONDS > 0:
+        lifetime_clause = """
+           AND (SELECT COALESCE(SUM(trial_seconds_used), 0) FROM users) + :n
+               <= :global_limit
+        """
+        params['global_limit'] = TRIAL_GLOBAL_SECONDS
+
+    result = db.session.execute(text(f"""
         UPDATE users
            SET trial_seconds_used = COALESCE(trial_seconds_used, 0) + :n
          WHERE id = :uid
            AND COALESCE(trial_seconds_used, 0) + :n
                <= COALESCE(trial_seconds_limit, :default_limit)
-           AND (SELECT COALESCE(SUM(trial_seconds_used), 0) FROM users) + :n
-               <= :global_limit
-    """), {'n': seconds, 'uid': user_id,
-           'default_limit': TRIAL_DEFAULT_SECONDS,
-           'global_limit': TRIAL_GLOBAL_SECONDS})
+           AND (SELECT COALESCE(seconds_used, 0) FROM trial_budget_days
+                 WHERE day = :day) + :n <= :daily_limit
+           {lifetime_clause}
+    """), params)
+    if result.rowcount != 1:
+        db.session.commit()
+        return False
+
+    db.session.execute(text("""
+        UPDATE trial_budget_days
+           SET seconds_used = seconds_used + :n
+         WHERE day = :day
+    """), {'n': seconds, 'day': day})
     db.session.commit()
-    return result.rowcount == 1
+    return True
 
 
-def trial_release(user_id, seconds):
-    """Hand back reserved seconds that were never spent."""
+def trial_release(user_id, seconds, *, budget_day=None):
+    """Hand back reserved seconds that were never spent.
+
+    ``budget_day`` is the Oslo day the reservation counted against (task
+    ``started_at``); default is today.
+    """
     seconds = int(seconds)
     if seconds <= 0:
         return
+    day = budget_day or trial_oslo_day_str()
     db.session.execute(text("""
         UPDATE users
            SET trial_seconds_used = MAX(0, COALESCE(trial_seconds_used, 0) - :n)
          WHERE id = :uid
     """), {'n': seconds, 'uid': user_id})
+    if TRIAL_DAILY_SECONDS > 0:
+        db.session.execute(text("""
+            UPDATE trial_budget_days
+               SET seconds_used = MAX(0, seconds_used - :n)
+             WHERE day = :day
+        """), {'n': seconds, 'day': day})
     db.session.commit()
 
 
 def paid_reserve(user_id, seconds):
     """Atomically debit paid credit-pack seconds. True only if granted.
 
-    Not subject to the free-trial global ceiling — the user already paid.
+    Not subject to the free-trial daily budget or lifetime ceiling — the user
+    already paid.
     """
     seconds = int(math.ceil(seconds))
     if seconds <= 0:
@@ -1143,14 +1291,15 @@ def paid_release(user_id, seconds):
     db.session.commit()
 
 
-def platform_reserve(user_id, seconds, *, paid_only=False):
+def platform_reserve(user_id, seconds, *, paid_only=False, budget_day=None):
     """Reserve platform minutes: free trial first, then paid.
 
     Returns (trial_seconds, paid_seconds) on success, or None if the full
     amount cannot be covered. `paid_only` skips the free trial (used for
     episodes over the free per-episode cap — those must not burn free minutes).
 
-    Paid minutes are never limited by TRIAL_GLOBAL_SECONDS.
+    Paid minutes are never limited by the free-trial daily budget or lifetime
+    ceiling.
     """
     seconds = int(math.ceil(seconds))
     if seconds <= 0:
@@ -1159,28 +1308,33 @@ def platform_reserve(user_id, seconds, *, paid_only=False):
     if paid_only:
         return (0, seconds) if paid_reserve(user_id, seconds) else None
 
-    if trial_reserve(user_id, seconds):
+    if trial_reserve(user_id, seconds, budget_day=budget_day):
         return (seconds, 0)
 
     user = db.session.get(User, user_id)
     if user is None:
         return None
     _, _, trial_rem = trial_status(user)
-    global_rem = max(0, TRIAL_GLOBAL_SECONDS - trial_global_used_seconds())
-    trial_take = min(seconds, trial_rem, global_rem)
-    if trial_take > 0 and not trial_reserve(user_id, trial_take):
+    daily_rem = trial_daily_remaining_seconds(budget_day)
+    if TRIAL_GLOBAL_SECONDS > 0:
+        lifetime_rem = max(0, TRIAL_GLOBAL_SECONDS - trial_global_used_seconds())
+    else:
+        lifetime_rem = trial_rem + seconds  # no lifetime cap
+    trial_take = min(seconds, trial_rem, daily_rem, lifetime_rem)
+    if trial_take > 0 and not trial_reserve(
+            user_id, trial_take, budget_day=budget_day):
         trial_take = 0
     paid_need = seconds - trial_take
     if paid_need > 0 and not paid_reserve(user_id, paid_need):
         if trial_take:
-            trial_release(user_id, trial_take)
+            trial_release(user_id, trial_take, budget_day=budget_day)
         return None
     return (trial_take, paid_need)
 
 
-def platform_release(user_id, trial_seconds, paid_seconds):
+def platform_release(user_id, trial_seconds, paid_seconds, *, budget_day=None):
     """Hand back a platform reservation that never reached Whisper spend."""
-    trial_release(user_id, trial_seconds or 0)
+    trial_release(user_id, trial_seconds or 0, budget_day=budget_day)
     paid_release(user_id, paid_seconds or 0)
 
 
@@ -1258,7 +1412,8 @@ def trial_refund_task(task):
     task is what decides which caller may move the balance.
 
     Spend is applied to free trial first, then paid (matching charge order).
-    Unspent minutes are released to the same buckets.
+    Unspent minutes are released to the same buckets (and the Oslo day the
+    task was started on for the shared daily budget).
     """
     # Read the row rather than trusting the caller's copy. /status hands us an
     # object loaded at the top of the request; if the worker reconciled the
@@ -1266,12 +1421,13 @@ def trial_refund_task(task):
     # nothing and the user forfeits the allowance with no path to get it back.
     row = db.session.execute(text(
         'SELECT user_id, trial_seconds_charged, paid_seconds_charged, '
-        'chunk_total, chunk_index, trial_settled '
+        'chunk_total, chunk_index, trial_settled, started_at '
         'FROM transcription_tasks WHERE id = :tid'
     ), {'tid': task.id}).first()
     if row is None:
         return 0
-    user_id, trial_charged, paid_charged, chunk_total, chunk_index, settled = row
+    (user_id, trial_charged, paid_charged, chunk_total, chunk_index,
+     settled, started_at) = row
     trial_charged = int(trial_charged or 0)
     paid_charged = int(paid_charged or 0)
     if settled or (trial_charged + paid_charged) <= 0:
@@ -1285,7 +1441,9 @@ def trial_refund_task(task):
             task.id, trial_charged, paid_charged, spent_trial, spent_paid,
             settle=True):
         return 0
-    platform_release(user_id, refund_trial, refund_paid)
+    platform_release(
+        user_id, refund_trial, refund_paid,
+        budget_day=_trial_budget_day_for_timestamp(started_at))
     return refund_trial + refund_paid
 
 
@@ -1304,15 +1462,17 @@ def fail_task_and_refund(task_id, error_message):
     """
     row = db.session.execute(text(
         'SELECT user_id, trial_seconds_charged, paid_seconds_charged, '
-        'chunk_total, chunk_index, trial_settled '
+        'chunk_total, chunk_index, trial_settled, started_at '
         'FROM transcription_tasks WHERE id = :tid'
     ), {'tid': task_id}).first()
     if row is None:
         return 0
-    user_id, trial_charged, paid_charged, chunk_total, chunk_index, settled = row
+    (user_id, trial_charged, paid_charged, chunk_total, chunk_index,
+     settled, started_at) = row
     trial_charged = int(trial_charged or 0)
     paid_charged = int(paid_charged or 0)
     total_charged = trial_charged + paid_charged
+    budget_day = _trial_budget_day_for_timestamp(started_at)
 
     if not settled and total_charged > 0:
         spent_trial, spent_paid, refund_trial, refund_paid = _pro_rata_platform_spend(
@@ -1349,6 +1509,13 @@ def fail_task_and_refund(task_id, error_message):
                            0, COALESCE(trial_seconds_used, 0) - :n)
                      WHERE id = :uid
                 """), {'n': int(refund_trial), 'uid': user_id})
+                if TRIAL_DAILY_SECONDS > 0:
+                    _ensure_trial_budget_day(budget_day)
+                    db.session.execute(text("""
+                        UPDATE trial_budget_days
+                           SET seconds_used = MAX(0, seconds_used - :n)
+                         WHERE day = :day
+                    """), {'n': int(refund_trial), 'day': budget_day})
             if refund_paid:
                 db.session.execute(text("""
                     UPDATE users
@@ -1416,7 +1583,7 @@ def trial_reconcile_task(task_id, actual_seconds):
 
     Charge order: free trial first, then paid. Episodes over the free
     per-episode cap must be covered by paid minutes (or BYOK) — they do not
-    burn free trial, and paid is not subject to the global free-trial ceiling.
+    burn free trial, and paid is not subject to the free-trial daily budget.
     """
     task = db.session.get(TranscriptionTask, task_id)
     if not task or task.trial_settled:
@@ -1431,6 +1598,7 @@ def trial_reconcile_task(task_id, actual_seconds):
     total_reserved = trial_reserved + paid_reserved
     actual = int(math.ceil(max(0.0, actual_seconds or 0.0)))
     user_id = task.user_id
+    budget_day = _trial_budget_day_for_timestamp(task.started_at)
     over_free_cap = bool(
         TRIAL_MAX_EPISODE_SECONDS and actual > TRIAL_MAX_EPISODE_SECONDS)
     is_partial = task_is_partial(task)
@@ -1471,7 +1639,7 @@ def trial_reconcile_task(task_id, actual_seconds):
                 paid_release(user_id, actual)
                 raise TrialExhausted(refuse_msg, scope='episode_length')
             # Paid is now on the task; only now release the free-trial reservation.
-            trial_release(user_id, trial_reserved)
+            trial_release(user_id, trial_reserved, budget_day=budget_day)
             _capture_minutes_exhausted_if_depleted(
                 user_id, 'reconcile', before_trial, before_paid)
             return None
@@ -1484,7 +1652,8 @@ def trial_reconcile_task(task_id, actual_seconds):
     if actual > total_reserved:
         extra = actual - total_reserved
         before_trial, before_paid = _platform_remaining_seconds(user_id)
-        split = platform_reserve(user_id, extra, paid_only=over_free_cap)
+        split = platform_reserve(
+            user_id, extra, paid_only=over_free_cap, budget_day=budget_day)
         if split is None:
             # Partial job, or trial-only unknown-duration overrun: keep the
             # reservation and let the worker trim audio to it.
@@ -1521,7 +1690,8 @@ def trial_reconcile_task(task_id, actual_seconds):
         new_paid = paid_reserved + extra_paid
         if not _claim_task_platform_charges(
                 task_id, trial_reserved, paid_reserved, new_trial, new_paid):
-            platform_release(user_id, extra_trial, extra_paid)
+            platform_release(
+                user_id, extra_trial, extra_paid, budget_day=budget_day)
         else:
             _capture_minutes_exhausted_if_depleted(
                 user_id, 'reconcile', before_trial, before_paid)
@@ -1535,7 +1705,8 @@ def trial_reconcile_task(task_id, actual_seconds):
         new_trial = trial_reserved - shrink_trial
         if _claim_task_platform_charges(
                 task_id, trial_reserved, paid_reserved, new_trial, new_paid):
-            platform_release(user_id, shrink_trial, shrink_paid)
+            platform_release(
+                user_id, shrink_trial, shrink_paid, budget_day=budget_day)
         # Keep partial meta in sync with the shorter reservation.
         if is_partial:
             meta = task_partial_meta(task)
@@ -4906,20 +5077,34 @@ def _trial_context():
     else:
         limit = used = remaining = 0
     remaining_minutes = remaining // 60
-    exhausted = (remaining <= 0 and paid_seconds <= 0)
+    daily_exhausted = (
+        trial_available()
+        and not on_own_key
+        and paid_seconds <= 0
+        and not trial_daily_budget_available()
+    )
+    # Per-user exhausted OR shared daily budget gone — both block free starts.
+    exhausted = (
+        (remaining <= 0 and paid_seconds <= 0)
+        or daily_exhausted
+    )
     total_minutes = remaining_minutes + paid_minutes
     low_balance = (
         not on_own_key
         and not exhausted
+        and not daily_exhausted
         and total_minutes < LOW_BALANCE_MINUTES
     )
     return {
         'limit_minutes': limit // 60,
         'used_minutes': used // 60,
-        'remaining_minutes': remaining_minutes,
+        # Hide the personal counter while the daily pool is empty so we do not
+        # imply the user can still spend "X min left".
+        'remaining_minutes': 0 if daily_exhausted else remaining_minutes,
         'paid_minutes': paid_minutes,
-        'total_minutes': total_minutes,
+        'total_minutes': paid_minutes if daily_exhausted else total_minutes,
         'exhausted': exhausted,
+        'daily_exhausted': daily_exhausted,
         'low_balance': low_balance,
         'on_own_key': on_own_key,
         'stripe_buy': stripe_checkout_enabled(),
@@ -4934,15 +5119,30 @@ def _nav_credits_context():
     if not current_user.is_authenticated:
         return {
             'nav_minutes_left': None,
+            'nav_daily_exhausted': False,
             'nav_show_buy': False,
         }
     on_own_key = bool(current_user.openai_api_key)
     if on_own_key:
         return {
             'nav_minutes_left': None,
+            'nav_daily_exhausted': False,
             'nav_show_buy': False,
         }
     paid_minutes = paid_balance_seconds(current_user) // 60
+    daily_exhausted = (
+        trial_available()
+        and paid_minutes <= 0
+        and not trial_daily_budget_available()
+    )
+    if daily_exhausted:
+        # Do not show a misleading personal "X min left" while the shared
+        # daily budget is empty.
+        return {
+            'nav_minutes_left': None,
+            'nav_daily_exhausted': True,
+            'nav_show_buy': stripe_checkout_enabled(),
+        }
     if trial_available():
         remaining_minutes = trial_status(current_user)[2] // 60
     else:
@@ -4950,6 +5150,7 @@ def _nav_credits_context():
     # Always show a pill for metered users so "0 min left" is still obvious.
     return {
         'nav_minutes_left': remaining_minutes + paid_minutes,
+        'nav_daily_exhausted': False,
         'nav_show_buy': stripe_checkout_enabled(),
     }
 
@@ -4967,6 +5168,9 @@ def _is_minutes_limit_error(message):
         CREDIT_PACK_LABEL.lower(),
         'not enough minutes',
         'trial is used up',
+        "today's free minutes are used up",
+        'free minutes refill at midnight',
+        'handed out all the free minutes',
     ))
 
 
@@ -4984,6 +5188,8 @@ def _user_has_api_key():
     if paid_balance_seconds(current_user) > 0:
         return True
     if trial_available():
+        if not trial_daily_budget_available():
+            return False
         return trial_status(current_user)[2] > 0
     return False
 
@@ -5132,8 +5338,9 @@ def _capture_trial_limit_hit(user_id, scope, stage, source,
                              estimate_min=None, remaining_min=None):
     """The buying signal: a trial user wanted more than the free allowance gives.
 
-    scope: episode_length | user | global. stage: start (refused before the job
-    existed) or reconcile (the real audio turned out longer than the feed said).
+    scope: episode_length | user | daily | global. stage: start (refused before
+    the job existed) or reconcile (the real audio turned out longer than the
+    feed said).
     """
     props = {'scope': scope, 'stage': stage, 'source': source}
     if estimate_min is not None:
@@ -5141,6 +5348,38 @@ def _capture_trial_limit_hit(user_id, scope, stage, source,
     if remaining_min is not None:
         props['remaining_min'] = int(remaining_min)
     product_analytics.capture('trial_limit_hit', user_id, props)
+
+
+def _capture_trial_daily_budget_exhausted(user_id, source='web'):
+    """Fire trial_daily_budget_exhausted once per Oslo day (first hit wins).
+
+    Stable uuid keyed by day so PostHog dedupes across workers/retries.
+    """
+    day = trial_oslo_day_str()
+    product_analytics.capture(
+        'trial_daily_budget_exhausted',
+        user_id or 'system',
+        {
+            'day': day,
+            'source': source,
+            'daily_limit_min': TRIAL_DAILY_SECONDS // 60,
+            'daily_used_min': trial_daily_used_seconds(day) // 60,
+        },
+        uuid=f'trial-daily-budget-exhausted-{day}',
+    )
+
+
+def trial_daily_exhausted_message():
+    """User-facing copy when today's shared free-trial budget is gone."""
+    buy = (
+        f'Buy {CREDIT_PACK_MINUTES} min for $5 to continue now.'
+        if stripe_checkout_enabled()
+        else 'Add your own OpenAI API key in Settings to keep transcribing.'
+    )
+    return (
+        "Today's free minutes are used up — they refill at midnight "
+        f"(Norway time). {buy}"
+    )
 
 
 def _find_existing_web_task(user_id, source_audio_url):
@@ -5308,9 +5547,15 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
             if trial_charge is None and paid_charge is None:
                 # Partial free preview only when the episode is longer than the
                 # account's remaining trial (not when the per-episode max is the
-                # sole blocker — that stays the episode_length paywall).
-                global_rem = max(0, TRIAL_GLOBAL_SECONDS - trial_global_used_seconds())
-                partial_n = min(before_trial, global_rem)
+                # sole blocker — that stays the episode_length paywall). Daily
+                # budget remaining also caps the preview length.
+                daily_rem = trial_daily_remaining_seconds()
+                if TRIAL_GLOBAL_SECONDS > 0:
+                    lifetime_rem = max(
+                        0, TRIAL_GLOBAL_SECONDS - trial_global_used_seconds())
+                else:
+                    lifetime_rem = before_trial
+                partial_n = min(before_trial, daily_rem, lifetime_rem)
                 episode_exceeds_remaining = estimate > before_trial
                 if (paid_bal <= 0
                         and episode_exceeds_remaining
@@ -5348,12 +5593,15 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
 
                     scope = trial_refusal_scope(user, estimate)
                     if remaining >= estimate and paid_balance_seconds(user) <= 0:
-                        scope = 'global'
-                    # Global pool blocked a partial that the account could afford.
+                        # Account could afford it — shared budget (or lifetime) blocked.
+                        scope = (
+                            'daily' if daily_rem < max(estimate, TRIAL_PARTIAL_MIN_SECONDS)
+                            else 'global')
+                    # Daily budget blocked a partial that the account could afford.
                     if (paid_bal <= 0 and episode_exceeds_remaining
                             and before_trial >= TRIAL_PARTIAL_MIN_SECONDS
-                            and global_rem < TRIAL_PARTIAL_MIN_SECONDS):
-                        scope = 'global'
+                            and daily_rem < TRIAL_PARTIAL_MIN_SECONDS):
+                        scope = 'daily'
                     _capture_trial_limit_hit(
                         user_id, scope, 'start', source,
                         estimate_min=estimate_min, remaining_min=remaining // 60)
@@ -5379,19 +5627,10 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                         else:
                             paywall_reason = 'low_balance'
                     else:
-                        paywall_reason = 'global_cap'
-                        if stripe_checkout_enabled():
-                            message = (
-                                'Podskrift has handed out all the free minutes it has '
-                                f'budgeted. {CREDIT_PACK_LABEL}, or add your own OpenAI '
-                                'API key in Settings to keep transcribing.'
-                            )
-                        else:
-                            message = (
-                                'Podskrift has handed out all the free minutes it has '
-                                'budgeted. Add your own OpenAI API key in Settings to '
-                                'keep transcribing.'
-                            )
+                        paywall_reason = 'daily_cap' if scope == 'daily' else 'global_cap'
+                        message = trial_daily_exhausted_message()
+                        if scope == 'daily':
+                            _capture_trial_daily_budget_exhausted(user_id, source)
                     payload = {'error': message}
                     payload.update(_minutes_limit_actions(
                         user_id, 'enqueue', reason=paywall_reason))
@@ -6278,6 +6517,9 @@ def get_status(task_id):
             low = err.lower()
             if 'too long for the free trial' in low:
                 reason = 'episode_too_long'
+            elif ("today's free minutes are used up" in low
+                  or 'refill at midnight' in low):
+                reason = 'daily_cap'
             elif 'handed out all the free minutes' in low:
                 reason = 'global_cap'
             elif 'paid minutes you have left' in low:
@@ -8345,6 +8587,7 @@ def inject_trial_badge():
         'credit_pack_minutes': CREDIT_PACK_MINUTES,
         'credit_pack_price_usd': f'{CREDIT_PACK_AMOUNT_CENTS / 100:.0f}',
         'nav_minutes_left': nav['nav_minutes_left'],
+        'nav_daily_exhausted': nav['nav_daily_exhausted'],
         'nav_show_buy': nav['nav_show_buy'],
         'csrf_token': generate_csrf_token,
     }
@@ -8955,14 +9198,18 @@ init_site_standards(
 
 @app.route('/health')
 def health():
-    """Liveness probe JSON. Includes a non-sensitive trial pool flag.
+    """Liveness probe JSON. Includes today's free-trial budget status.
 
-    `trial_available` is True when the lifetime global free-trial pool still
-    has room — no used/limit numbers, so it is safe for public probes.
+    `trial_available` is True when today's shared daily budget still has room.
+    `trial_daily_used` / `trial_daily_limit` are minute integers (not secrets).
     """
+    used = trial_daily_used_seconds() if trial_available() else 0
+    limit = TRIAL_DAILY_SECONDS if trial_available() else 0
     return jsonify({
         'ok': True,
-        'trial_available': trial_global_pool_available(),
+        'trial_available': trial_daily_budget_available(),
+        'trial_daily_used': used // 60,
+        'trial_daily_limit': limit // 60,
     })
 
 
@@ -10181,6 +10428,31 @@ def ensure_summary_email_tables():
             app.logger.exception('Could not create summary_email index')
 
 
+def ensure_trial_budget_days_table():
+    """Create the shared free-trial daily budget ledger if missing.
+
+    Additive only — PK on Europe/Oslo day string. Same IF NOT EXISTS race
+    pattern as summary_email_budget_days.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        db.session.execute(text("""
+            CREATE TABLE IF NOT EXISTS trial_budget_days (
+                day VARCHAR(10) NOT NULL PRIMARY KEY,
+                seconds_used INTEGER NOT NULL DEFAULT 0
+            )
+        """))
+        db.session.commit()
+    except OperationalError as exc:
+        db.session.rollback()
+        msg = str(exc).lower()
+        if 'already exists' not in msg:
+            raise
+        app.logger.info(
+            'trial_budget_days created by another worker; continuing')
+
+
 def ensure_password_reset_tokens_table():
     """Create password_reset_tokens if missing. Index only after columns exist.
 
@@ -10473,6 +10745,7 @@ with app.app_context():
     ensure_transcript_shares_table()
     ensure_email_sent_log_table()
     ensure_summary_email_tables()
+    ensure_trial_budget_days_table()
     ensure_password_reset_tokens_table()
 
     apply_column_migrations()
@@ -10552,10 +10825,17 @@ if __name__ == '__main__':
     print("=" * 50)
     print(f"OpenAI API Key (global): {'Yes' if GLOBAL_OPENAI_KEY else 'No'}")
     if trial_available():
+        daily_bit = (
+            f"{TRIAL_DAILY_SECONDS // 60} min/day Oslo "
+            f"(~${TRIAL_DAILY_SECONDS / 60 * WHISPER_COST_PER_MINUTE:.2f}/day)"
+        )
+        life_bit = (
+            f", lifetime safety {TRIAL_GLOBAL_SECONDS // 60} min"
+            if TRIAL_GLOBAL_SECONDS > 0 else ', lifetime safety off'
+        )
         print(f"Trial: {NEW_USER_TRIAL_SECONDS // 60} min/new account "
               f"(NULL limit → {TRIAL_DEFAULT_SECONDS // 60}), "
-              f"{TRIAL_GLOBAL_SECONDS // 60} min total ceiling "
-              f"(~${TRIAL_GLOBAL_SECONDS / 60 * WHISPER_COST_PER_MINUTE:.2f} max spend)")
+              f"{daily_bit}{life_bit}")
     else:
         print("Trial: off (no global key, or TRIAL_ENABLED=0)")
     print(f"Environment: {os.getenv('FLASK_ENV', 'development')}")

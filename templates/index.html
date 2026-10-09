@@ -98,7 +98,22 @@
        node and link became its own unwrappable flex item and the sentence
        rendered as broken columns on a narrow screen. #}
     <span>
-        {% if trial.exhausted %}
+        {% if trial.daily_exhausted %}
+        Free minutes refill at midnight.
+        Today's free minutes are used up — they refill at midnight (Norway time).
+        {% if trial.stripe_buy %}
+        Buy {{ credit_pack_minutes }} min for ${{ credit_pack_price_usd }} to continue now.
+        <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="source" value="home_banner">
+            <input type="hidden" name="ph_sid" value="">
+            <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
+        </form>
+        or
+        {% endif %}
+        <a href="{{ url_for('settings') }}#openai">Add your own OpenAI API key</a>
+        — the app is free; OpenAI bills you.
+        {% elif trial.exhausted %}
         Your free trial is used up.
         {% if trial.stripe_buy %}
         <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;">

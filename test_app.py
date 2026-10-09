@@ -1472,7 +1472,8 @@ def trial_on(monkeypatch):
     monkeypatch.setattr(A, 'GLOBAL_OPENAI_KEY', 'sk-global-not-a-real-key')
     monkeypatch.setattr(A, 'TRIAL_ENABLED', True)
     monkeypatch.setattr(A, 'TRIAL_DEFAULT_SECONDS', 600)        # 10 min
-    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 10 ** 7)     # effectively off
+    monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', 10 ** 7)      # effectively off
+    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 0)           # lifetime safety off
     monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 10800)
     return True
 
@@ -1519,19 +1520,37 @@ def test_reserve_stops_at_the_per_user_limit(trial_on):
     assert _used(uid) == 600
 
 
-def test_reserve_stops_at_the_global_ceiling(trial_on, monkeypatch):
+def test_reserve_stops_at_the_daily_ceiling(trial_on, monkeypatch):
     """The per-user cap bounds nothing on its own -- signups are free, so N
-    accounts cost N x the grant. This ceiling is what caps the actual bill."""
-    from models import db, User
+    accounts cost N x the grant. The daily budget is what caps the actual bill."""
+    from models import db
     with A.app.app_context():
         db.session.execute(A.text('UPDATE users SET trial_seconds_used = 0'))
+        db.session.execute(A.text('DELETE FROM trial_budget_days'))
         db.session.commit()
-    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 900)
+    monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', 900)
     a = _make_user('g1@test.com', limit=6000)
     b = _make_user('g2@test.com', limit=6000)
     with A.app.app_context():
         assert A.trial_reserve(a, 600) is True
-        # b is nowhere near its own limit, but the service as a whole is.
+        # b is nowhere near its own limit, but today's shared budget is.
+        assert A.trial_reserve(b, 600) is False
+        assert A.trial_reserve(b, 300) is True
+
+
+def test_optional_lifetime_ceiling_still_enforced(trial_on, monkeypatch):
+    """TRIAL_GLOBAL_MINUTES is an optional safety net on top of the daily budget."""
+    from models import db
+    with A.app.app_context():
+        db.session.execute(A.text('UPDATE users SET trial_seconds_used = 0'))
+        db.session.execute(A.text('DELETE FROM trial_budget_days'))
+        db.session.commit()
+    monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', 10 ** 7)
+    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 900)
+    a = _make_user('life1@test.com', limit=6000)
+    b = _make_user('life2@test.com', limit=6000)
+    with A.app.app_context():
+        assert A.trial_reserve(a, 600) is True
         assert A.trial_reserve(b, 600) is False
         assert A.trial_reserve(b, 300) is True
 
@@ -1931,21 +1950,92 @@ def test_negative_duration_is_treated_as_unstated(trial_on, monkeypatch):
     assert _used(uid) == A.TRIAL_UNKNOWN_ESTIMATE_SECONDS
 
 
-def test_global_ceiling_message_does_not_contradict_itself(trial_on, monkeypatch):
-    """"You have 60 minutes left, and this needs 30" -- while refusing."""
+def test_daily_ceiling_message_does_not_contradict_itself(trial_on, monkeypatch):
+    """Personal balance still has room, but today's shared budget does not."""
     from models import db
     with A.app.app_context():
         db.session.execute(A.text('UPDATE users SET trial_seconds_used = 0'))
+        db.session.execute(A.text('DELETE FROM trial_budget_days'))
         db.session.commit()
-    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 60)
+    monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', 60)
+    monkeypatch.setattr(A, 'STRIPE_SECRET_KEY', 'sk_test_x')
+    monkeypatch.setattr(A, 'STRIPE_PRICE_ID', 'price_x')
     uid = _make_user('ceiling@test.com', limit=36000)
     resp = _post_start(monkeypatch, uid, {'audio_url': 'https://example.com/ep.mp3',
                              'episode_title': 'Ep', 'duration_min': '30',
                              'language': 'no'})
     assert resp.status_code == 402
     error = resp.get_json()['error']
-    assert 'budgeted' in error, error
+    assert "Today's free minutes are used up" in error, error
+    assert 'midnight' in error.lower(), error
     assert 'minutes left' not in error, f'contradicts itself: {error}'
+    assert 'handed out all the free minutes' not in error
+
+
+def test_daily_budget_resets_at_oslo_midnight(trial_on, monkeypatch):
+    """Reservations on day D do not consume day D+1's budget (Oslo boundary)."""
+    from models import db
+    with A.app.app_context():
+        db.session.execute(A.text('DELETE FROM trial_budget_days'))
+        db.session.commit()
+    monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', 600)
+    monkeypatch.setattr(A, 'trial_oslo_day_str', lambda when=None: '2026-10-08')
+    a = _make_user('oslo-day1@test.com', limit=6000)
+    b = _make_user('oslo-day2@test.com', limit=6000)
+    with A.app.app_context():
+        assert A.trial_reserve(a, 600, budget_day='2026-10-08') is True
+        assert A.trial_reserve(b, 60, budget_day='2026-10-08') is False
+        monkeypatch.setattr(A, 'trial_oslo_day_str', lambda when=None: '2026-10-09')
+        assert A.trial_reserve(b, 600, budget_day='2026-10-09') is True
+        assert A.trial_daily_used_seconds('2026-10-08') == 600
+        assert A.trial_daily_used_seconds('2026-10-09') == 600
+
+
+def test_daily_budget_reservations_count_and_refunds_release(trial_on, monkeypatch):
+    """In-flight reservations consume today's budget; refunds free it again."""
+    from models import db, TranscriptionTask
+    with A.app.app_context():
+        db.session.execute(A.text('DELETE FROM trial_budget_days'))
+        db.session.commit()
+    monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', 900)
+    uid = _make_user('daily-refund@test.com', limit=6000)
+    with A.app.app_context():
+        assert A.trial_reserve(uid, 600) is True
+        assert A.trial_daily_used_seconds() == 600
+        db.session.add(TranscriptionTask(
+            id='daily-refund-task', user_id=uid, episode_title='x',
+            status='error', trial_seconds_charged=600, trial_settled=False))
+        db.session.commit()
+        task = db.session.get(TranscriptionTask, 'daily-refund-task')
+        assert A.trial_refund_task(task) == 600
+        assert A.trial_daily_used_seconds() == 0
+        assert A.trial_reserve(uid, 900) is True
+
+
+def test_daily_exhausted_hides_personal_minutes_counter(trial_on, monkeypatch):
+    """UI must not show a personal 'X min left' while the daily pool is empty."""
+    from models import db, TrialBudgetDay
+    with A.app.app_context():
+        db.session.execute(A.text('DELETE FROM trial_budget_days'))
+        day = A.trial_oslo_day_str()
+        db.session.add(TrialBudgetDay(day=day, seconds_used=0))
+        db.session.commit()
+    monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', 60)
+    uid = _make_user('daily-ui@test.com', limit=3600, used=0)
+    with A.app.app_context():
+        assert A.trial_reserve(uid, 60) is True
+        assert not A.trial_daily_budget_available()
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    home = client.get('/').data.decode()
+    assert 'Free minutes refill at midnight' in home
+    assert 'minutes</strong> left on our key' not in home
+    settings = client.get('/settings').data.decode()
+    assert 'Free minutes refill at midnight' in settings
+    # Nav pill uses the same copy, not a personal counter.
+    assert 'min left' not in home or 'Free minutes refill at midnight' in home
 
 
 def test_start_transcription_refuses_an_exhausted_trial(trial_on, monkeypatch):
@@ -1991,7 +2081,8 @@ def test_reservations_are_atomic_across_processes(trial_on):
         'sys.path.insert(0, %r);' % os.path.dirname(os.path.abspath(__file__)) +
         'import app;'
         'app.TRIAL_DEFAULT_SECONDS = 600;'
-        'app.TRIAL_GLOBAL_SECONDS = 10 ** 7;'
+        'app.TRIAL_DAILY_SECONDS = 10 ** 7;'
+        'app.TRIAL_GLOBAL_SECONDS = 0;'
         f'ctx = app.app.app_context(); ctx.push();'
         f'print("GRANTED" if app.trial_reserve({uid}, 100) else "REFUSED")'
     )
@@ -6612,8 +6703,12 @@ def test_trial_limit_hit_when_the_account_is_short(ph_events, monkeypatch, trial
 
 
 def test_trial_limit_hit_when_the_service_is_out(ph_events, monkeypatch, trial_on):
-    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 0)
-    uid = _make_user('phlimit-global@test.com', limit=3600)
+    from models import db
+    with A.app.app_context():
+        db.session.execute(A.text('DELETE FROM trial_budget_days'))
+        db.session.commit()
+    monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', 0)
+    uid = _make_user('phlimit-daily@test.com', limit=3600)
     resp = _post_start(monkeypatch, uid, {
         'audio_url': 'https://example.com/ep.mp3',
         'episode_title': 'Ep',
@@ -6621,7 +6716,10 @@ def test_trial_limit_hit_when_the_service_is_out(ph_events, monkeypatch, trial_o
     })
     assert resp.status_code == 402
     hits = _limit_hits(ph_events)
-    assert [h['properties']['scope'] for h in hits] == ['global']
+    assert [h['properties']['scope'] for h in hits] == ['daily']
+    exhausted = [e for e in ph_events.events
+                 if e['event'] == 'trial_daily_budget_exhausted']
+    assert len(exhausted) == 1
 
 
 def test_trial_limit_hit_for_an_over_long_episode(ph_events, monkeypatch, trial_on):
@@ -6756,19 +6854,19 @@ def test_search_emits_podcast_searched_with_query_and_input_type(monkeypatch):
         assert f"'{kind}'" in body
 
 
-def test_reconcile_trims_when_global_cap_blocks_top_up(trial_on, monkeypatch):
-    """The account has room; the service does not — keep the reservation and trim."""
+def test_reconcile_trims_when_daily_cap_blocks_top_up(trial_on, monkeypatch):
+    """The account has room; today's budget does not — keep the reservation and trim."""
     from models import db, TranscriptionTask
-    uid = _make_user('phrecon-global@test.com', limit=10 ** 6)
+    uid = _make_user('phrecon-daily@test.com', limit=10 ** 6)
     with A.app.app_context():
         A.trial_reserve(uid, 600)
-        db.session.add(TranscriptionTask(id='trial-recon-global', user_id=uid,
+        db.session.add(TranscriptionTask(id='trial-recon-daily', user_id=uid,
                                          episode_title='x', status='transcribing',
                                          trial_seconds_charged=600))
         db.session.commit()
-        monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', A.trial_global_used_seconds())
-        assert A.trial_reconcile_task('trial-recon-global', 1200) == 'trim'
-        task = db.session.get(TranscriptionTask, 'trial-recon-global')
+        monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', A.trial_daily_used_seconds())
+        assert A.trial_reconcile_task('trial-recon-daily', 1200) == 'trim'
+        task = db.session.get(TranscriptionTask, 'trial-recon-daily')
         assert task.trial_seconds_charged == 600
         assert A.task_is_partial(task)
     assert _used(uid) == 600
@@ -7501,14 +7599,16 @@ def test_anon_homepage_exposes_new_account_trial_badge(trial_on):
     assert f'var TRIAL_REMAINING_MIN = {A.NEW_USER_TRIAL_SECONDS // 60};' in body
 
 
-def test_default_trial_grants_and_global_ceiling():
-    """New signups get 60 minutes; NULL-limit legacy rows use 180; global is 6000.
-    Per-episode max still tracks TRIAL_MINUTES so a 60-min user over remaining
-    balance hits the paywall, not the hard episode-length refusal."""
+def test_default_trial_grants_and_daily_budget():
+    """New signups get 60 minutes; NULL-limit legacy rows use 180; daily is 750.
+    Lifetime safety is off when TRIAL_GLOBAL_MINUTES is unset. Per-episode max
+    still tracks TRIAL_MINUTES so a 60-min user over remaining balance hits the
+    paywall, not the hard episode-length refusal."""
     assert A.NEW_USER_TRIAL_SECONDS == 60 * 60
     assert A.TRIAL_DEFAULT_SECONDS == 180 * 60
     assert A.TRIAL_MAX_EPISODE_SECONDS == A.TRIAL_DEFAULT_SECONDS
-    assert A.TRIAL_GLOBAL_SECONDS == 6000 * 60
+    assert A.TRIAL_DAILY_SECONDS == 750 * 60
+    assert A.TRIAL_GLOBAL_SECONDS == 0
 
 
 def test_null_limit_accounts_pick_up_the_raised_default(monkeypatch, trial_on):
@@ -7554,30 +7654,29 @@ def test_existing_null_limit_user_still_gets_trial_minutes_default(trial_on):
         assert u.trial_seconds_limit is None
         limit, _, remaining = A.trial_status(u)
         # Under trial_on the default is patched to 600s; production default
-        # of 180 minutes is asserted in test_default_trial_grants_and_global_ceiling.
+        # of 180 minutes is asserted in test_default_trial_grants_and_daily_budget.
         assert limit == A.TRIAL_DEFAULT_SECONDS
         assert remaining == A.TRIAL_DEFAULT_SECONDS
         assert limit != A.NEW_USER_TRIAL_SECONDS
 
 
-def test_health_reports_trial_available_without_numbers(trial_on, monkeypatch):
-    """GET /health exposes a boolean for the global pool; never used/limit."""
-    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 6000 * 60)
-    monkeypatch.setattr(A, 'trial_global_used_seconds', lambda: 100)
+def test_health_reports_trial_daily_budget_fields(trial_on, monkeypatch):
+    """GET /health exposes today's budget availability plus used/limit minutes."""
+    monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', 750 * 60)
+    monkeypatch.setattr(A, 'trial_daily_used_seconds', lambda day=None: 100 * 60)
     resp = A.app.test_client().get('/health')
     assert resp.status_code == 200
     data = resp.get_json()
     assert data['ok'] is True
     assert data['trial_available'] is True
-    blob = resp.data.decode()
-    assert '6000' not in blob
-    assert '100' not in blob
-    assert 'seconds' not in blob
+    assert data['trial_daily_used'] == 100
+    assert data['trial_daily_limit'] == 750
 
-    monkeypatch.setattr(A, 'trial_global_used_seconds', lambda: 6000 * 60)
+    monkeypatch.setattr(A, 'trial_daily_used_seconds', lambda day=None: 750 * 60)
     exhausted = A.app.test_client().get('/health').get_json()
     assert exhausted['trial_available'] is False
-    assert A.trial_global_pool_available() is False
+    assert exhausted['trial_daily_used'] == 750
+    assert A.trial_daily_budget_available() is False
 
 
 def test_new_user_long_episode_starts_partial_preview_not_max_cap(
@@ -7586,7 +7685,7 @@ def test_new_user_long_episode_starts_partial_preview_not_max_cap(
     but over remaining trial — start a partial preview of the first 60 min."""
     from models import db, TranscriptionTask
     monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
-    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 10 ** 7)
+    monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', 10 ** 7)
     uid = _make_user('sixty-partial@test.com', limit=60 * 60, used=0)
     resp = _post_start(monkeypatch, uid, {
         'audio_url': 'https://example.com/ep.mp3',
@@ -8130,12 +8229,12 @@ def test_paid_only_covers_over_long_episode(trial_on, monkeypatch):
     assert _paid(uid) == 3600
 
 
-def test_paid_not_limited_by_global_trial_ceiling(trial_on, monkeypatch):
-    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 0)
-    uid = _make_user('paidglobal@test.com', limit=3600, used=0)
+def test_paid_not_limited_by_daily_trial_budget(trial_on, monkeypatch):
+    monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', 0)
+    uid = _make_user('paiddaily@test.com', limit=3600, used=0)
     _set_paid(uid, 600)
     with A.app.app_context():
-        # Free trial blocked by global ceiling; paid still works.
+        # Free trial blocked by today's budget; paid still works.
         assert A.trial_reserve(uid, 60) is False
         assert A.platform_reserve(uid, 300) == (0, 300)
     assert _paid(uid) == 300
@@ -10911,19 +11010,19 @@ def test_partial_preview_not_used_for_own_key(monkeypatch, trial_on):
     assert _used(uid) == 0
 
 
-def test_partial_preview_respects_global_pool(monkeypatch, trial_on):
+def test_partial_preview_respects_daily_budget(monkeypatch, trial_on):
     monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
-    # Seal the global pool at whatever the shared test DB has already used.
+    # Seal today's budget at whatever the shared test DB has already reserved.
     with A.app.app_context():
-        monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', A.trial_global_used_seconds())
-    uid_b = _make_user('partial-global-b@test.com', limit=60 * 60, used=0)
+        monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', A.trial_daily_used_seconds())
+    uid_b = _make_user('partial-daily-b@test.com', limit=60 * 60, used=0)
     resp = _post_start(monkeypatch, uid_b, {
-        'audio_url': 'https://example.com/global-block.mp3',
+        'audio_url': 'https://example.com/daily-block.mp3',
         'episode_title': 'Blocked',
         'duration_min': '90',
     })
     assert resp.status_code == 402
-    assert resp.get_json().get('paywall_reason') == 'global_cap'
+    assert resp.get_json().get('paywall_reason') == 'daily_cap'
     assert _used(uid_b) == 0
 
 
@@ -11618,15 +11717,24 @@ def test_admin_default_allowlist_includes_sindre(monkeypatch):
 
 def test_admin_kpis_match_fixture_data(monkeypatch):
     """Seed known rows and assert collect_kpis deltas (shared suite DB)."""
-    from models import (db, User, TranscriptionTask, SavedFeed, CreditPurchase)
+    from models import (db, User, TranscriptionTask, SavedFeed, CreditPurchase,
+                        TrialBudgetDay)
     import admin_dashboard as AD
     import uuid as _uuid
 
     monkeypatch.setenv('ADMIN_EMAILS', 'kpi-admin@test.com')
+    monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', 750 * 60)
     prefix = 'kpi-fix-%s' % _uuid.uuid4().hex[:8]
 
     with A.app.app_context():
-        before = AD.collect_kpis(db, A.TRIAL_GLOBAL_SECONDS)
+        before = AD.collect_kpis(db, A.TRIAL_DAILY_SECONDS,
+                                 trial_daily_seconds=A.TRIAL_DAILY_SECONDS)
+        today = A.trial_oslo_day_str()
+        day_row = db.session.get(TrialBudgetDay, today)
+        used_before = int(day_row.seconds_used) if day_row else 0
+        if day_row is None:
+            db.session.add(TrialBudgetDay(day=today, seconds_used=0))
+            db.session.commit()
 
         now = datetime.now(timezone.utc)
         users = []
@@ -11641,6 +11749,11 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
             u.created_at = now - timedelta(hours=1)
             db.session.add(u)
             users.append(u)
+        db.session.commit()
+
+        # Bump today's shared trial budget ledger (what the KPI card reads).
+        day_row = db.session.get(TrialBudgetDay, today)
+        day_row.seconds_used = used_before + 720  # +12 minutes
         db.session.commit()
 
         # User 0: two completed on different days → activated + returning
@@ -11677,7 +11790,8 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
             minutes=300, status='credited'))
         db.session.commit()
 
-        after = AD.collect_kpis(db, A.TRIAL_GLOBAL_SECONDS)
+        after = AD.collect_kpis(db, A.TRIAL_DAILY_SECONDS,
+                                trial_daily_seconds=A.TRIAL_DAILY_SECONDS)
         charts = AD.collect_chart_data(db, days=90)
 
     assert after['total_users'] == before['total_users'] + 3
@@ -11692,9 +11806,9 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
     assert after['purchase_count'] == before['purchase_count'] + 1
     assert after['purchase_revenue_usd'] == pytest.approx(
         before['purchase_revenue_usd'] + 5.0, abs=0.01)
-    assert after['trial_used_minutes'] == pytest.approx(
-        before['trial_used_minutes'] + 12.0, abs=0.1)  # 600+120 seconds
-    assert after['trial_global_minutes'] == A.TRIAL_GLOBAL_SECONDS // 60
+    assert after['trial_daily_used_minutes'] == pytest.approx(
+        before['trial_daily_used_minutes'] + 12.0, abs=0.1)
+    assert after['trial_daily_limit_minutes'] == 750
 
     assert charts['funnel']['values'][0] == after['total_users']
     assert charts['funnel']['values'][1] == after['activated_users']
@@ -11706,6 +11820,8 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
     body = client.get('/admin').data.decode()
     assert 'data-kpi="total_users"' in body
     assert 'data-kpi="activated_users"' in body
+    assert 'data-kpi="trial_daily_used_minutes"' in body
+    assert 'Trial today' in body
     assert 'chartSignups' in body
     # User detail lists tasks / feeds / purchases
     with A.app.app_context():

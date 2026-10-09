@@ -265,11 +265,16 @@ def _minimal_podcast_db(path: Path) -> None:
             status TEXT,
             started_at TEXT,
             completed_at TEXT,
-            heartbeat_at TEXT
+            heartbeat_at TEXT,
+            trial_seconds_charged INTEGER
         );
         CREATE TABLE saved_feeds (
             id INTEGER PRIMARY KEY,
             created_at TEXT
+        );
+        CREATE TABLE trial_budget_days (
+            day TEXT PRIMARY KEY,
+            seconds_used INTEGER NOT NULL DEFAULT 0
         );
         '''
     )
@@ -340,19 +345,22 @@ def test_trial_global_cap_warning_lines_at_thresholds():
     spec.loader.exec_module(mod)
 
     cap = 1800 * 60  # seconds
-    assert mod.trial_global_cap_warning_lines(0, cap) == []
-    assert mod.trial_global_cap_warning_lines(int(cap * 0.69), cap) == []
-    at70 = mod.trial_global_cap_warning_lines(int(cap * 0.70), cap)
+    assert mod.trial_daily_cap_warning_lines(0, cap) == []
+    assert mod.trial_daily_cap_warning_lines(int(cap * 0.69), cap) == []
+    at70 = mod.trial_daily_cap_warning_lines(int(cap * 0.70), cap)
     assert len(at70) == 1
     assert '70%+' in at70[0]
-    at90 = mod.trial_global_cap_warning_lines(int(cap * 0.91), cap)
+    assert 'TRIAL_DAILY_MINUTES' in at70[0]
+    at90 = mod.trial_daily_cap_warning_lines(int(cap * 0.91), cap)
     assert len(at90) == 2  # both 70 and 90
     assert any('90%+' in line for line in at90)
     # Cap disabled → no warnings.
-    assert mod.trial_global_cap_warning_lines(10**9, 0) == []
+    assert mod.trial_daily_cap_warning_lines(10**9, 0) == []
+    # Back-compat alias still works.
+    assert mod.trial_global_cap_warning_lines(int(cap * 0.70), cap) == at70
 
 
-def test_collect_metrics_includes_global_trial_used_vs_cap():
+def test_collect_metrics_includes_daily_trial_used_vs_cap():
     import importlib.util
     path = OPS / 'notion-daily-metrics.py'
     spec = importlib.util.spec_from_file_location('notion_daily_metrics_collect', path)
@@ -367,17 +375,21 @@ def test_collect_metrics_includes_global_trial_used_vs_cap():
         conn.execute(
             "INSERT INTO users (id, created_at, trial_seconds_used, trial_seconds_limit) "
             "VALUES (1, '2026-01-01 00:00:00', ?, 10800)",
-            (1260 * 60,),  # 1260 minutes used
+            (1260 * 60,),  # lifetime personal burn (still reported)
+        )
+        conn.execute(
+            "INSERT INTO trial_budget_days (day, seconds_used) VALUES (?, ?)",
+            ('2026-09-26', 680 * 60),
         )
         conn.commit()
         metrics = mod.collect_metrics(
             conn, date(2026, 9, 26), trial_default_seconds=180 * 60,
-            trial_global_seconds=1800 * 60,
+            trial_daily_seconds=750 * 60,
         )
         conn.close()
 
     assert metrics['Trial minutes used'] == 1260.0
-    assert metrics['Trial global used minutes'] == 1260.0
-    assert metrics['Trial global cap minutes'] == 1800.0
-    assert metrics['_trial_global_used_seconds'] == 1260 * 60
-    assert metrics['_trial_global_cap_seconds'] == 1800 * 60
+    assert metrics['Trial daily used minutes'] == 680.0
+    assert metrics['Trial daily cap minutes'] == 750.0
+    assert metrics['_trial_daily_used_seconds'] == 680 * 60
+    assert metrics['_trial_daily_cap_seconds'] == 750 * 60

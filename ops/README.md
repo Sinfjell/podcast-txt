@@ -334,10 +334,25 @@ Named events:
 | `openai_key_saved` / `openai_key_validation_failed` | server | `status` / `reason` |
 | `transcript_started` / `transcript_completed` | server | `key_source` (trial/user), `source` (web/api) |
 | `transcript_failed` | server | the above + `reason` (`invalid_key`, `no_billing`, `own_key_invalid`, `own_key_no_credit`, `rate_limit`, `network`, `trial_exhausted`, `abandoned`, `stale`, `source_audio_missing`, `source_audio_forbidden`, `other`) |
-| `trial_limit_hit` | server | `scope` (`episode_length`, `user`, `global`), `stage` (`start`, `reconcile`), `source` |
+| `trial_limit_hit` | server | `scope` (`episode_length`, `user`, `daily`, `global`), `stage` (`start`, `reconcile`), `source` |
+| `trial_daily_budget_exhausted` | server | once per Oslo day (uuid dedupe); `day`, `daily_limit_min`, `daily_used_min`, `source` |
 
 `trial_limit_hit` is the buying signal: a trial user wanted more than the free
-allowance gives.
+allowance gives. `trial_daily_budget_exhausted` fires on the first refusal of
+the day when the shared daily budget is empty.
+
+## Free-trial budget env vars
+
+| Var | Default | Notes |
+| --- | --- | --- |
+| `TRIAL_DAILY_MINUTES` | `750` | Shared free-trial budget for one Europe/Oslo calendar day. Resets at Oslo midnight. Reservations count immediately (`trial_budget_days`); refunds / failed-before-Whisper jobs release that day's row. |
+| `TRIAL_GLOBAL_MINUTES` | unset (= off) | Optional lifetime safety ceiling across all accounts. Leave unset in normal operation; set only if you want a hard multi-day stop beyond the daily budget. |
+| `TRIAL_MINUTES` | `180` | Per-account fallback when `users.trial_seconds_limit` is NULL (legacy rows). |
+| `NEW_USER_TRIAL_MINUTES` | `60` | Stamped on `trial_seconds_limit` at registration. |
+| `TRIAL_ENABLED` | on | Kill switch for handing out the platform key. |
+
+`/health` exposes `trial_available` (today's budget still has room) plus
+`trial_daily_used` / `trial_daily_limit` in minutes.
 
 ## Notion daily metrics
 

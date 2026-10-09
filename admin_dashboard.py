@@ -260,12 +260,18 @@ def ensure_admin_indexes(db):
                                          table, column)
 
 
-def collect_kpis(db, trial_global_seconds):
-    """Single-pass KPI dict for the dashboard header cards."""
+def collect_kpis(db, trial_global_seconds, trial_daily_seconds=None):
+    """Single-pass KPI dict for the dashboard header cards.
+
+    ``trial_global_seconds`` is kept for call-site compatibility; the Trial
+    today card uses ``trial_daily_seconds`` (Europe/Oslo day ledger).
+    """
     now_utc = datetime.now(timezone.utc)
     today_start = _naive_utc(_oslo_day_start_utc(0))
     d7 = _naive_utc(now_utc - timedelta(days=7))
     d30 = _naive_utc(now_utc - timedelta(days=30))
+    if trial_daily_seconds is None:
+        trial_daily_seconds = trial_global_seconds
 
     total_users = db.session.execute(text(
         'SELECT COUNT(*) FROM users'
@@ -320,9 +326,11 @@ def collect_kpis(db, trial_global_seconds):
            AND COALESCE(completed_at, started_at) >= :since
     """), {'since': d7}).scalar() or 0.0
 
-    trial_used_seconds = db.session.execute(text(
-        'SELECT COALESCE(SUM(trial_seconds_used), 0) FROM users'
-    )).scalar() or 0
+    # Today's shared free-trial budget (Europe/Oslo), from the admission ledger.
+    today_oslo = datetime.now(ADMIN_TZ).date().isoformat()
+    trial_daily_used_seconds = db.session.execute(text(
+        'SELECT COALESCE(seconds_used, 0) FROM trial_budget_days WHERE day = :day'
+    ), {'day': today_oslo}).scalar() or 0
 
     purchases = db.session.execute(text("""
         SELECT COUNT(*),
@@ -359,8 +367,11 @@ def collect_kpis(db, trial_global_seconds):
         'completed_7d': int(completed_7d),
         'failed_7d': int(failed_7d),
         'minutes_7d': round(float(minutes_7d), 1),
-        'trial_used_minutes': round(int(trial_used_seconds) / 60.0, 1),
-        'trial_global_minutes': int(trial_global_seconds) // 60,
+        'trial_daily_used_minutes': round(int(trial_daily_used_seconds) / 60.0, 1),
+        'trial_daily_limit_minutes': int(trial_daily_seconds or 0) // 60,
+        # Kept for older templates / tests reading the lifetime names.
+        'trial_used_minutes': round(int(trial_daily_used_seconds) / 60.0, 1),
+        'trial_global_minutes': int(trial_daily_seconds or 0) // 60,
         'purchase_count': purchase_count,
         'purchase_revenue_usd': round(purchase_revenue_cents / 100.0, 2),
         'byok_users': int(byok_users),
@@ -1156,11 +1167,11 @@ def _admin_template_globals():
 def dashboard():
     from models import db
     import app as app_module
-    # Live module constants so tests can monkeypatch TRIAL_GLOBAL_SECONDS.
-    trial_global = getattr(app_module, 'TRIAL_GLOBAL_SECONDS', 6000 * 60)
+    # Live module constants so tests can monkeypatch TRIAL_DAILY_SECONDS.
+    trial_daily = getattr(app_module, 'TRIAL_DAILY_SECONDS', 750 * 60)
     trial_default = getattr(app_module, 'TRIAL_DEFAULT_SECONDS', 180 * 60)
 
-    kpis = collect_kpis(db, trial_global)
+    kpis = collect_kpis(db, trial_daily, trial_daily_seconds=trial_daily)
     charts = collect_chart_data(db, days=90)
     users = list_users_page(
         db,
