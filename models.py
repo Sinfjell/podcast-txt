@@ -279,6 +279,21 @@ class SummaryEmailBudgetDay(db.Model):
                              server_default='0')
 
 
+class TrialBudgetDay(db.Model):
+    """Atomic daily free-trial spend counter (Europe/Oslo calendar day).
+
+    Reservations bump ``seconds_used`` in the same transaction as the per-user
+    ``users.trial_seconds_used`` UPDATE so concurrent gunicorn workers cannot
+    overshoot ``TRIAL_DAILY_MINUTES``. Refunds / failed-before-Whisper releases
+    decrement the Oslo day the task was started on.
+    """
+    __tablename__ = 'trial_budget_days'
+
+    day = db.Column(db.String(10), primary_key=True)  # YYYY-MM-DD Europe/Oslo
+    seconds_used = db.Column(db.Integer, nullable=False, default=0,
+                             server_default='0')
+
+
 #: Columns added after the first release, applied via ALTER TABLE on startup.
 #: Keyed by column name so the migration stays declarative as the model grows.
 TASK_COLUMN_MIGRATIONS = {

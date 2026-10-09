@@ -22,6 +22,17 @@
                 {% endif %}
             </p>
             {% else %}
+            {% if trial.daily_exhausted %}
+            <p style="font-size: 15px; margin-bottom: 6px;">
+                Free minutes refill at midnight
+            </p>
+            <p style="color: var(--muted); font-size: 14px; line-height: 1.6; margin-bottom: 12px;">
+                Today's free minutes are used up — they refill at midnight (Norway time).
+                {% if trial.stripe_buy %}
+                Buy {{ credit_pack_minutes }} min for ${{ credit_pack_price_usd }} to continue now.
+                {% endif %}
+            </p>
+            {% else %}
             <p style="font-size: 15px; margin-bottom: 6px;">
                 <strong>{{ trial.total_minutes }}</strong> minutes available
                 <span style="color: var(--muted); font-size: 13px;">
@@ -34,6 +45,7 @@
                 <div style="height: 100%; border-radius: 4px; background: {% if trial.exhausted %}var(--error){% elif trial.low_balance %}var(--warning){% else %}var(--accent-bright){% endif %};
                             width: {{ (100 * trial.used_minutes / trial.limit_minutes) if trial.limit_minutes else 0 }}%;"></div>
             </div>
+            {% endif %}
             {% endif %}
             {% if trial.stripe_buy %}
             <p style="font-size: 14px; margin-bottom: 10px;">
@@ -52,7 +64,11 @@
             </p>
             {% endif %}
             <div class="form-hint" style="margin-top: 12px;">
-                {% if trial.exhausted %}
+                {% if trial.daily_exhausted %}
+                <p style="margin: 0 0 8px;">
+                <a href="#openai">Add your own OpenAI API key</a>
+                — the app is free; OpenAI bills you (about ${{ openai_hourly_cost }} per hour of audio).</p>
+                {% elif trial.exhausted %}
                 <p style="margin: 0 0 8px;">Your trial is used up.
                 <a href="#openai">Add your own OpenAI API key</a>
                 — the app is free; OpenAI bills you (about ${{ openai_hourly_cost }} per hour of audio).</p>
