@@ -240,6 +240,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     var ALL_EPISODES = {{ all_episodes|tojson }};
     var renderedCount = {{ episodes|length }};
+    var PRESELECTED_INDEX = {{ preselected_index|default(none)|tojson }};
     var IS_AUTHENTICATED = {{ 'true' if current_user.is_authenticated else 'false' }};
     var PENDING_URL = '{{ url_for("pending_transcription") }}';
     var TRIAL_REMAINING_MIN = {{ trial_badge_remaining_min|tojson }};
@@ -467,6 +468,14 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     grid.querySelectorAll('.episode-card').forEach(attach);
+
+    if (PRESELECTED_INDEX != null) {
+        var pre = grid.querySelector('.episode-card[data-episode-index="' + PRESELECTED_INDEX + '"]');
+        if (pre) {
+            selectCard(pre);
+            try { pre.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (e) {}
+        }
+    }
 
     function renderEpisode(ep) {
         var card = document.createElement('div');

@@ -1,7 +1,9 @@
 # Podskrift (podcast-txt)
 
 Flask + SQLite podcast transcription service. Production: podskrift.com, on
-Hetzner/Plesk under systemd, `gunicorn --workers 2 --threads 4 --timeout 300`.
+Hetzner/Plesk under systemd,
+`gunicorn -c gunicorn.conf.py --bind 127.0.0.1:5002 app:app`
+(workers 2, threads 4, timeout 300, graceful_timeout 120).
 
 ## Invariants
 

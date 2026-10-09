@@ -133,9 +133,18 @@ def newer_than_baseline(
 
 
 def baseline_from_episodes(episodes: list[dict]) -> tuple[Optional[str], Optional[float]]:
+    """Watermark = newest episode by publish date (not feed order).
+
+    Some feeds list oldest-first; using items[0] then treated every later
+    episode as new and flooded the inbox on the next poll.
+    """
     if not episodes:
         return None, None
-    top = episodes[0]
+    dated = [ep for ep in episodes if ep.get('published_ts') is not None]
+    if dated:
+        top = max(dated, key=lambda ep: (ep['published_ts'], ep.get('index') or 0))
+    else:
+        top = episodes[0]
     return top.get('guid'), top.get('published_ts')
 
 

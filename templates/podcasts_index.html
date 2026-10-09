@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Podcast transcripts — Podskrift{% endblock %}
+{% block meta_description %}Browse popular podcasts and transcribe any episode to text with Podskrift. Search by show, paste a Spotify or Apple link, download .txt and .srt.{% endblock %}
+{% block og_title %}Podcast transcripts — Podskrift{% endblock %}
+{% block og_description %}Transcript pages for popular podcasts. Pick an episode, get text and subtitles.{% endblock %}
+
+{% block content %}
+<style>
+    .shows-index { max-width: 720px; margin: 24px auto; }
+    .shows-index h1 {
+        font-size: clamp(26px, 4vw, 34px);
+        font-weight: 700;
+        letter-spacing: -0.03em;
+        margin-bottom: 8px;
+    }
+    .shows-index .intro {
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1.6;
+        margin-bottom: 28px;
+    }
+    .shows-letters {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 28px;
+    }
+    .shows-letters a {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 32px;
+        height: 32px;
+        padding: 0 8px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 600;
+    }
+    .shows-letters a:hover { color: var(--text); border-color: var(--border-light); }
+    .shows-letters a.is-active {
+        color: var(--accent-bright);
+        border-color: var(--accent-border);
+        background: var(--accent-bg);
+    }
+    .shows-letter-block { margin-bottom: 28px; }
+    .shows-letter-block h2 {
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 10px;
+        padding-bottom: 6px;
+        border-bottom: 1px solid var(--border);
+    }
+    .shows-list { list-style: none; margin: 0; padding: 0; }
+    .shows-list li { margin: 0; }
+    .shows-list a {
+        display: block;
+        padding: 10px 0;
+        color: var(--text);
+        border-bottom: 1px solid var(--border);
+        font-size: 15px;
+        font-weight: 500;
+    }
+    .shows-list a:hover { color: var(--accent-bright); }
+    .shows-list .author {
+        display: block;
+        font-size: 12.5px;
+        font-weight: 400;
+        color: var(--muted);
+        margin-top: 2px;
+    }
+    .shows-cta {
+        margin-top: 32px;
+        padding: 18px 0 0;
+        border-top: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.6;
+    }
+</style>
+
+<div class="shows-index">
+    <h1>Podcast transcripts</h1>
+    <p class="intro">
+        Pick a show, choose a recent episode, and get a private transcript plus
+        timestamped subtitles. {{ show_count }} shows listed
+        {% if community_count %} ({{ curated_count }} popular, {{ community_count }} from real transcriptions){% endif %}.
+        Transcript text is never published on these pages.
+    </p>
+
+    {% if letter_groups %}
+    <nav class="shows-letters" aria-label="Jump by letter">
+        {% for letter, _ in letter_groups %}
+        <a href="#letter-{{ letter }}" {% if loop.first %}class="is-active"{% endif %}>{{ letter }}</a>
+        {% endfor %}
+    </nav>
+
+    {% for letter, shows in letter_groups %}
+    <section class="shows-letter-block" id="letter-{{ letter }}">
+        <h2>{{ letter }}</h2>
+        <ul class="shows-list">
+            {% for show in shows %}
+            <li>
+                <a href="{{ url_for('podcast_show', slug=show.slug) }}">
+                    {{ show.name }}
+                    {% if show.author %}<span class="author">{{ show.author }}</span>{% endif %}
+                </a>
+            </li>
+            {% endfor %}
+        </ul>
+    </section>
+    {% endfor %}
+    {% else %}
+    <p class="intro">No show pages are available yet. Use search on the home page instead.</p>
+    {% endif %}
+
+    <p class="shows-cta">
+        Don’t see your podcast?
+        <a href="{{ url_for('index') }}">Search or paste a Spotify, Apple, or RSS link</a>.
+    </p>
+</div>
+{% endblock %}
