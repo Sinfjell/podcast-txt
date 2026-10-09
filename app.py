@@ -977,6 +977,30 @@ def _claim_task_platform_charges(task_id, expected_trial, expected_paid,
     return result.rowcount == 1
 
 
+def _pro_rata_platform_spend(trial_charged, paid_charged, chunk_total, chunk_index):
+    """Return (spent_trial, spent_paid, refund_trial, refund_paid).
+
+    chunk_index is written immediately BEFORE that chunk is uploaded, so
+    index k means k+1 chunks have been sent and billed to us. Rounding
+    toward charging is deliberate: refunding a chunk that did reach Whisper
+    is exactly how a swept single-chunk episode -- every episode under 24 MB,
+    so the common case -- came out free.
+    """
+    trial_charged = int(trial_charged or 0)
+    paid_charged = int(paid_charged or 0)
+    total = trial_charged + paid_charged
+    if total <= 0:
+        return 0, 0, 0, 0
+    if (chunk_total or 0) > 0 and chunk_index is not None:
+        started = min(int(chunk_total), max(0, int(chunk_index)) + 1)
+        spent = int(total * started / chunk_total)
+    else:
+        spent = 0  # nothing reached Whisper yet
+    spent_trial = min(trial_charged, spent)
+    spent_paid = spent - spent_trial
+    return spent_trial, spent_paid, trial_charged - spent_trial, paid_charged - spent_paid
+
+
 def trial_refund_task(task):
     """Refund the part of a failed task we did not actually spend.
 
@@ -1004,33 +1028,109 @@ def trial_refund_task(task):
     user_id, trial_charged, paid_charged, chunk_total, chunk_index, settled = row
     trial_charged = int(trial_charged or 0)
     paid_charged = int(paid_charged or 0)
-    total_charged = trial_charged + paid_charged
-    if settled or total_charged <= 0:
+    if settled or (trial_charged + paid_charged) <= 0:
         return 0
 
-    if (chunk_total or 0) > 0 and chunk_index is not None:
-        # chunk_index is written immediately BEFORE that chunk is uploaded, so
-        # index k means k+1 chunks have been sent and billed to us. Rounding
-        # toward charging is deliberate: refunding a chunk that did reach
-        # Whisper is exactly how a swept single-chunk episode -- every episode
-        # under 24 MB, so the common case -- came out free.
-        started = min(chunk_total, max(0, chunk_index) + 1)
-        spent = int(total_charged * started / chunk_total)
-    else:
-        spent = 0  # nothing reached Whisper yet
-
-    spent_trial = min(trial_charged, spent)
-    spent_paid = spent - spent_trial
+    spent_trial, spent_paid, refund_trial, refund_paid = _pro_rata_platform_spend(
+        trial_charged, paid_charged, chunk_total, chunk_index)
 
     # Settling is the claim, and it also pins the amounts we read.
     if not _claim_task_platform_charges(
             task.id, trial_charged, paid_charged, spent_trial, spent_paid,
             settle=True):
         return 0
-    refund_trial = trial_charged - spent_trial
-    refund_paid = paid_charged - spent_paid
     platform_release(user_id, refund_trial, refund_paid)
     return refund_trial + refund_paid
+
+
+def fail_task_and_refund(task_id, error_message):
+    """Mark a task failed and settle its reservation before the failure is visible.
+
+    When the task still holds a platform charge, one conditional UPDATE writes
+    ``status='error'``, the settled pro-rata charges, and ``trial_settled=1``
+    together — so a failed task is never observed with minutes still reserved.
+    The user-balance release runs only if that claim wins (same idempotency as
+    ``trial_refund_task``: a later call cannot double-credit).
+
+    If there is nothing to settle, or another worker already settled / terminalised
+    the row, still ensures ``status='error'`` (without clobbering completed /
+    cancelled) and calls ``trial_refund_task`` as a no-op backstop.
+    """
+    row = db.session.execute(text(
+        'SELECT user_id, trial_seconds_charged, paid_seconds_charged, '
+        'chunk_total, chunk_index, trial_settled '
+        'FROM transcription_tasks WHERE id = :tid'
+    ), {'tid': task_id}).first()
+    if row is None:
+        return 0
+    user_id, trial_charged, paid_charged, chunk_total, chunk_index, settled = row
+    trial_charged = int(trial_charged or 0)
+    paid_charged = int(paid_charged or 0)
+    total_charged = trial_charged + paid_charged
+
+    if not settled and total_charged > 0:
+        spent_trial, spent_paid, refund_trial, refund_paid = _pro_rata_platform_spend(
+            trial_charged, paid_charged, chunk_total, chunk_index)
+        now = datetime.now(timezone.utc)
+        # One transaction: task settle+error and user-balance release commit
+        # together, so neither "error with charge" nor "settled task / still
+        # debiting the user" is observable.
+        result = db.session.execute(text("""
+            UPDATE transcription_tasks
+               SET status = 'error', phase = 'error', error_message = :message,
+                   trial_seconds_charged = :new_trial,
+                   paid_seconds_charged = :new_paid,
+                   trial_settled = 1,
+                   heartbeat_at = :now
+             WHERE id = :tid AND trial_settled = 0
+               AND COALESCE(trial_seconds_charged, 0) = :exp_trial
+               AND COALESCE(paid_seconds_charged, 0) = :exp_paid
+               AND status NOT IN ('completed', 'error', 'cancelled')
+        """), {
+            'tid': task_id,
+            'message': error_message,
+            'new_trial': int(spent_trial),
+            'new_paid': int(spent_paid),
+            'exp_trial': trial_charged,
+            'exp_paid': paid_charged,
+            'now': now,
+        })
+        if result.rowcount == 1:
+            if refund_trial:
+                db.session.execute(text("""
+                    UPDATE users
+                       SET trial_seconds_used = MAX(
+                           0, COALESCE(trial_seconds_used, 0) - :n)
+                     WHERE id = :uid
+                """), {'n': int(refund_trial), 'uid': user_id})
+            if refund_paid:
+                db.session.execute(text("""
+                    UPDATE users
+                       SET paid_seconds_balance = COALESCE(
+                           paid_seconds_balance, 0) + :n
+                     WHERE id = :uid
+                """), {'n': int(refund_paid), 'uid': user_id})
+            db.session.commit()
+            return refund_trial + refund_paid
+        db.session.rollback()
+
+    # Nothing charged, already settled/terminal, or lost the joint claim:
+    # settle first (idempotent), then surface error so status='error' is never
+    # committed ahead of the refund on this fall-through path either.
+    task = db.session.get(TranscriptionTask, task_id)
+    refunded = trial_refund_task(task) if task is not None else 0
+    db.session.execute(text("""
+        UPDATE transcription_tasks
+           SET status = 'error', phase = 'error', error_message = :message,
+               heartbeat_at = :now
+         WHERE id = :tid AND status NOT IN ('completed', 'cancelled')
+    """), {
+        'tid': task_id,
+        'message': error_message,
+        'now': datetime.now(timezone.utc),
+    })
+    db.session.commit()
+    return refunded
 
 
 def settle_stranded_charges():
@@ -4280,16 +4380,17 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                                 {**ph_props, 'reason': 'abandoned'},
                             )
                     except Exception as e:
-                        _update_task(
-                            task_id, status='error', phase='error',
-                            error_message=(
-                                describe_openai_error(e, key_source=key_source)
-                                if _is_openai_error(e) else str(e)))
-                        # A job that never produced a transcript must not consume the
-                        # trial allowance it reserved.
+                        # Settle the reservation in the same write as status='error'
+                        # (see fail_task_and_refund) so a failed task is never
+                        # observed with minutes still charged.
+                        error_message = (
+                            describe_openai_error(e, key_source=key_source)
+                            if _is_openai_error(e) else str(e))
+                        fail_task_and_refund(task_id, error_message)
                         failed = db.session.get(TranscriptionTask, task_id)
                         reason = None
                         if failed:
+                            # Idempotent backstop — cannot double-credit once settled.
                             trial_refund_task(failed)
                             if isinstance(e, TrialExhausted):
                                 reason = 'trial_exhausted'
