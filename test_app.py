@@ -7810,7 +7810,10 @@ def test_checkout_session_creation(stripe_on, ph_events):
     assert kw['payment_intent_data']['metadata']['location'] == 'settings'
     assert kw['payment_intent_data']['metadata']['ph_sid'] == 'ph_sess_test_1'
     assert kw['customer_creation'] == 'always'
-    assert kw['billing_address_collection'] == 'required'
+    # auto: minimum address fields for tax; not a full street form every time.
+    assert kw['billing_address_collection'] == 'auto'
+    # Dynamic payment methods (Managed Payments / Dashboard). Do not pin types.
+    assert 'payment_method_types' not in kw
     assert kw['line_items'][0]['price_data']['unit_amount'] == 500
     assert kw['line_items'][0]['price_data']['tax_behavior'] == 'inclusive'
     assert kw['line_items'][0]['price_data']['product_data']['tax_code']
@@ -8671,6 +8674,8 @@ def test_checkout_uses_managed_payments_when_enabled(stripe_on, monkeypatch):
     params = stripe_on['last_create_params']
     assert params['managed_payments'] == {'enabled': True}
     assert 'automatic_tax' not in params
+    assert params['billing_address_collection'] == 'auto'
+    assert 'payment_method_types' not in params
     price_data = params['line_items'][0]['price_data']
     assert price_data['tax_behavior'] == 'inclusive'
     assert price_data['product_data']['tax_code'] == A.STRIPE_TAX_CODE
@@ -8803,6 +8808,16 @@ def test_pricing_page_buy_when_logged_in_with_stripe(stripe_on):
     assert 'billing/checkout' in body
     assert 'csrf_token' in body
     assert 'One-time · 300 min · VAT incl.' in body
+    assert A.CREDIT_PACK_PAYMENT_HINT in body
+
+
+def test_buy_modal_shows_payment_method_hint(stripe_on):
+    """Buy modal lists methods Managed Payments enables dynamically."""
+    uid = _make_user('pmhint@test.com', limit=180 * 60, used=60 * 60)
+    body = _login(uid).get('/').data.decode()
+    assert 'buyModalScrim' in body
+    assert A.CREDIT_PACK_PAYMENT_HINT in body
+    assert 'Card · Apple Pay · Google Pay' in body
 
 
 def test_pricing_hides_buy_for_own_key_user(stripe_on):
@@ -9065,6 +9080,7 @@ def test_episode_selection_trial_exhausted_shows_paywall(
     body = resp.data.decode()
     assert 'Out of free minutes' in body
     assert 'buyFormEpisodeSelection' in body
+    assert A.CREDIT_PACK_PAYMENT_HINT in body
     meta = _episode_card_meta(body)
     assert 'Uses ~30 min' in meta
     assert '$' not in meta
