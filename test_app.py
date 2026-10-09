@@ -6980,8 +6980,8 @@ def test_transcription_page_has_no_billing_retry_ui(stripe_on):
     assert 'retryEpisode' in src
     assert 'transcription_no_billing' in src
     assert 'Your OpenAI account has no credit' in src
-    assert 'remove the key in Settings' in src
-    assert 'free or paid minutes' in src
+    assert 'remove the key in' in src
+    assert 'Settings to use Podskrift free or paid minutes' in src
 
 
 def test_enqueue_stores_source_audio_url_for_retry(monkeypatch, trial_on):
@@ -7067,12 +7067,12 @@ def test_saved_openai_key_never_leaks_into_html_or_analytics(ph_events, monkeypa
 
 def _openai_exc(status_code, code=None, name='OpenAIError'):
     """Build an exception that looks like it came from the OpenAI SDK."""
-    exc = type(name, (Exception,), {
+    cls = type(name, (Exception,), {
         'status_code': status_code,
         'code': code,
-    })(f'{name}:{code or status_code}')
-    exc.__module__ = 'openai'
-    return exc
+    })
+    cls.__module__ = 'openai'
+    return cls(f'{name}:{code or status_code}')
 
 
 def _enqueue_with_openai_boom(monkeypatch, uid, exc):
