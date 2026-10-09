@@ -71,6 +71,7 @@ from site_standards import init_site_standards
 import email_notify
 import mail as mailer
 import summary as summary_mod
+import mcp_server as mcp_server_mod
 from admin_dashboard import admin_bp, ensure_admin_indexes
 
 try:
@@ -192,8 +193,11 @@ def public_url(endpoint, **values):
 
 
 def _canonical_host_exempt(path):
-    """True for Stripe webhooks, /api/*, email unsub, share links, and health probes."""
+    """True for Stripe webhooks, /api/*, MCP, email unsub, share links, health."""
     if path.startswith('/stripe/webhook') or path.startswith('/api/'):
+        return True
+    # Remote MCP (Streamable HTTP) — same host-bounce exemption as /api/*.
+    if path == '/mcp' or path.startswith('/mcp/'):
         return True
     if path.startswith('/email/unsubscribe'):
         return True
@@ -280,6 +284,9 @@ WHISPER_COST_PER_MINUTE = 0.006
 # TL;DR + key points + short quotes — never meters trial/paid minutes.
 SUMMARY_ENABLED = summary_mod.summary_enabled()
 SUMMARY_MODEL = summary_mod.summary_model()
+
+# Remote MCP at /mcp (off until MCP_ENABLED=1). Tools reuse /api/v1 helpers.
+MCP_ENABLED = mcp_server_mod.mcp_enabled()
 
 
 def openai_whisper_cost_usd(minutes):
@@ -8876,6 +8883,9 @@ def load_customer_api_markdown():
     """Source for /docs/api. Public HTML must never ship AGENT_API_KEY copy."""
     with open(CUSTOMER_API_DOC_PATH, encoding='utf-8') as f:
         text = f.read()
+    # MCP connect docs are gated on MCP_ENABLED (default off).
+    text = mcp_server_mod.filter_mcp_docs_section(
+        text, enabled=mcp_server_mod.mcp_enabled())
     # Defence in depth: the public page must not document the host CoS secret,
     # even if someone reintroduces that line in the markdown.
     kept = []
@@ -8977,6 +8987,11 @@ def api_docs():
         body_html=body_html,
         trial_minutes=advertised_trial_minutes(),
     )
+
+
+# Remote MCP (Streamable HTTP). Route always exists; returns 404 when the flag
+# is off so clients and probes get a stable path once MCP_ENABLED is flipped.
+mcp_server_mod.register_mcp(app)
 
 
 init_site_standards(

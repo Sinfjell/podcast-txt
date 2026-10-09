@@ -201,6 +201,9 @@ The app includes a comprehensive help guide for finding RSS feeds from:
 - `AGENT_API_KEY` / `AGENT_API_USER_ID` — internal CoS agent API only.
   See [docs/agent-api.md](docs/agent-api.md). Never commit values. Customers
   use a per-user key from Settings ([docs/customer-api.md](docs/customer-api.md)).
+- `MCP_ENABLED` — remote MCP at `/mcp` for ChatGPT / Claude / Cursor (default
+  off). Same `psk_…` Bearer key as the HTTP API; see the gated MCP section in
+  [docs/customer-api.md](docs/customer-api.md) when the flag is on.
 
 ### Free trial
 

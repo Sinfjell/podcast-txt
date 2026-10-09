@@ -223,3 +223,46 @@ Example response (ready):
 | `403` | No OpenAI key available for the account (trial off and no key in Settings) |
 | `404` | Not found (catalog miss, or another account’s job) |
 | `429` | Too many transcription starts, or too many jobs already in flight |
+
+<!-- mcp-section -->
+## MCP (ChatGPT / Claude / Cursor)
+
+Connect Podskrift as a remote MCP server so an agent can search shows, list
+episodes, and fetch transcripts with the same trial / paid minutes / BYOK rules
+as this HTTP API.
+
+**Endpoint:** `https://podskrift.com/mcp` (Streamable HTTP, JSON-RPC 2.0)
+
+**Auth:** the same Settings API key — `Authorization: Bearer psk_…`
+
+**Tools**
+
+| Tool | What it does |
+| --- | --- |
+| `search_podcasts` | Find shows by name (Apple Podcasts directory) |
+| `list_episodes` | Recent episodes for a show name or feed URL |
+| `get_transcript` | Return text if ready, or start Whisper and return a `job_id` |
+| `get_transcript_status` | Poll a `job_id` until `ready` / `failed` |
+
+`get_transcript` reports `cost_minutes` and remaining balance before/after. If
+the episode is longer than your remaining minutes, it refuses and includes
+`pricing_url` (`/pricing`) instead of starting a job.
+
+**Cursor example** (`~/.cursor/mcp.json` or project config):
+
+```json
+{
+  "mcpServers": {
+    "podskrift": {
+      "url": "https://podskrift.com/mcp",
+      "headers": {
+        "Authorization": "Bearer psk_…"
+      }
+    }
+  }
+}
+```
+
+Replace `psk_…` with your key from Settings. Long episodes can take several
+minutes — poll `get_transcript_status` until `transcript_status` is `ready`.
+<!-- /mcp-section -->
