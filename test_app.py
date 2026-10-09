@@ -453,7 +453,10 @@ class _FakeResponse:
         pass
 
     def raise_for_status(self):
-        pass
+        if 400 <= self.status_code < 600:
+            import requests
+            raise requests.exceptions.HTTPError(
+                f'{self.status_code} Client Error', response=self)
 
     def iter_content(self, chunk_size=8192):
         return iter([b'x' * 100])
@@ -541,6 +544,68 @@ def test_http_error_without_a_response_is_reported_cleanly(tmp_path):
             )
     assert not isinstance(exc.value, AttributeError)
     assert 'HTTP error' in str(exc.value)
+    assert not isinstance(exc.value, A.SourceAudioUnavailable)
+
+
+@pytest.mark.parametrize('status,reason', [
+    (404, 'source_audio_missing'),
+    (410, 'source_audio_missing'),
+    (403, 'source_audio_forbidden'),
+])
+def test_permanent_source_http_errors_raise_source_audio_unavailable(
+        tmp_path, status, reason):
+    """Libsyn-style dead enclosures and host blocks are typed failures."""
+    calls, error = _download_with(lambda url: _FakeResponse(status), tmp_path)
+    assert error is not None
+    assert 'Try another episode' in error
+    assert 'podcast host' in error.lower()
+    # Re-run to assert the exception type (helper only returns the message).
+    from unittest import mock
+    with mock.patch.object(A.requests.Session, 'get',
+                           lambda self, url, **kw: _FakeResponse(status)), \
+            mock.patch.object(A, '_update_task'):
+        with pytest.raises(A.SourceAudioUnavailable) as exc:
+            A.download_audio(
+                'http://example.com/ep.mp3', str(tmp_path / 'b.mp3'), 'task-id')
+    assert exc.value.reason == reason
+    assert exc.value.status_code == status
+    # 403 retries once with a plainer UA before giving up.
+    if status == 403:
+        assert len(calls) == 2
+    else:
+        assert len(calls) == 1
+
+
+def test_download_retries_once_on_5xx_then_succeeds(tmp_path, monkeypatch):
+    monkeypatch.setattr(A.time, 'sleep', lambda *a, **kw: None)
+    hits = {'n': 0}
+
+    def responder(url):
+        hits['n'] += 1
+        if hits['n'] == 1:
+            return _FakeResponse(503)
+        return _FakeResponse(200)
+
+    calls, error = _download_with(responder, tmp_path)
+    assert error is None
+    assert len(calls) == 2
+
+
+def test_download_retries_once_on_timeout_then_fails(tmp_path, monkeypatch):
+    import requests
+    from unittest import mock
+    monkeypatch.setattr(A.time, 'sleep', lambda *a, **kw: None)
+
+    def boom(self, url, **kwargs):
+        raise requests.exceptions.Timeout('read timed out')
+
+    with mock.patch.object(A.requests.Session, 'get', boom), \
+            mock.patch.object(A, '_update_task'):
+        with pytest.raises(Exception) as exc:
+            A.download_audio(
+                'http://example.com/ep.mp3', str(tmp_path / 't.mp3'), 'task-id')
+    assert 'Failed to download audio' in str(exc.value)
+    assert not isinstance(exc.value, A.SourceAudioUnavailable)
 
 
 def test_redirect_loop_is_bounded(tmp_path):
@@ -4937,10 +5002,15 @@ def test_request_bodies_and_pii_are_never_collected(sentry_events):
 
 
 def test_a_failed_transcription_is_reported_and_still_refunded(trial_on, monkeypatch, sentry_events):
-    """The real route and the real worker thread, failing in download."""
+    """The real route and the real worker thread, failing in download.
+
+    Uses a generic download failure (not SourceAudioUnavailable): permanent
+    host refusals are expected user-side outcomes and must not hit Sentry.
+    """
     monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
     monkeypatch.setattr(A, 'download_audio',
-                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('HTTP error 404')))
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            RuntimeError('HTTP error 502')))
     uid = _make_user('sentryfail@test.com', limit=36000)
     A.app.config['TESTING'] = True
     client = A.app.test_client()
@@ -4957,7 +5027,7 @@ def test_a_failed_transcription_is_reported_and_still_refunded(trial_on, monkeyp
             break
         time.sleep(0.05)
     (event,) = sentry_events
-    assert event['exception']['values'][-1]['value'] == 'HTTP error 404'
+    assert event['exception']['values'][-1]['value'] == 'HTTP error 502'
     assert event['tags']['task.key_source'] == 'trial'
     assert event['contexts']['task']['id'] == resp.get_json()['task_id']
     for _ in range(100):
@@ -4975,7 +5045,7 @@ def test_a_broken_reporter_cannot_cost_a_refund(trial_on, monkeypatch, sentry_ev
                         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('sentry down')))
     monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
     monkeypatch.setattr(A, 'download_audio',
-                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('HTTP error 404')))
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('HTTP error 502')))
     uid = _make_user('sentrybroken@test.com', limit=36000)
     A.app.config['TESTING'] = True
     client = A.app.test_client()
@@ -4990,6 +5060,87 @@ def test_a_broken_reporter_cannot_cost_a_refund(trial_on, monkeypatch, sentry_ev
             break
         time.sleep(0.05)
     assert _used(uid) == 0, 'a failing reporter cost the user their refund'
+
+
+def test_missing_source_audio_is_clear_refunded_and_not_sentry(
+        trial_on, monkeypatch, sentry_events, ph_events):
+    """Libsyn 404: specific PostHog reason, clear UI message, full refund, no Sentry."""
+    from models import TranscriptionTask, db
+
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+    monkeypatch.setattr(
+        A, 'download_audio',
+        lambda *a, **kw: (_ for _ in ()).throw(
+            A.SourceAudioUnavailable(
+                A.SourceAudioUnavailable.REASON_MISSING, status_code=404)))
+    uid = _make_user('sourcemiss@test.com', limit=600, used=0)  # 10 min trial
+    _set_paid(uid, 1800)  # 30 min paid — 20 min job mixes both
+    A.app.config['TESTING'] = True
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    # Ask for more than trial alone so the reserve mixes trial + paid.
+    resp = client.post('/start_transcription', data={
+        'audio_url': 'https://traffic.libsyn.com/secure/show/gone.mp3',
+        'episode_title': 'Gone Ep', 'duration_min': '20', 'language': 'no'})
+    assert resp.status_code == 200
+    task_id = resp.get_json()['task_id']
+
+    for _ in range(100):
+        with A.app.app_context():
+            task = db.session.get(TranscriptionTask, task_id)
+            if task and task.status == 'error':
+                break
+        time.sleep(0.05)
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        assert task is not None
+        assert task.status == 'error'
+        assert "no longer serves this episode's audio" in (task.error_message or '')
+        assert 'Try another episode' in (task.error_message or '')
+        assert (task.trial_seconds_charged or 0) == 0
+        assert (task.paid_seconds_charged or 0) == 0
+    assert _used(uid) == 0
+    assert _paid(uid) == 1800
+
+    failed = [e for e in ph_events.events
+              if e['event'] == 'transcript_failed' and e['distinct_id'] == str(uid)]
+    assert len(failed) == 1
+    assert failed[0]['properties']['reason'] == 'source_audio_missing'
+    assert sentry_events == [], 'dead episode links must not fire the Sentry alert'
+
+
+def test_forbidden_source_audio_posts_specific_reason(
+        trial_on, monkeypatch, sentry_events, ph_events):
+    import types
+    uid = _make_user('source403@test.com', limit=3600)
+
+    def boom(*a, **kw):
+        raise A.SourceAudioUnavailable(
+            A.SourceAudioUnavailable.REASON_FORBIDDEN, status_code=403)
+
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: target and target()))
+    monkeypatch.setattr(A, 'download_audio', boom)
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user,
+            {'title': 'Ep', 'audio_url': 'https://example.com/private.mp3',
+             'duration_min': 1},
+        )
+    assert status == 200, payload
+    failed = [e for e in ph_events.events
+              if e['event'] == 'transcript_failed' and e['distinct_id'] == str(uid)]
+    assert len(failed) == 1
+    assert failed[0]['properties']['reason'] == 'source_audio_forbidden'
+    assert sentry_events == []
+    assert _used(uid) == 0
 
 
 def test_a_stale_task_is_reported_once_failed(sentry_events):
@@ -6140,13 +6291,14 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'new-signup-60-min-trial'
-    assert entries[1]['id'] == 'spotify-paste-robustness'
-    assert entries[2]['id'] == 'no-double-charge-restart'
-    assert entries[3]['id'] == 'apple-rss-link-resolve'
-    assert entries[4]['id'] == 'related-episodes-feed-fix'
-    assert entries[5]['id'] == 'stay-logged-in'
-    assert entries[6]['id'] == 'spotify-resolve-clarity'
+    assert entries[0]['id'] == 'clearer-missing-episode-audio'
+    assert entries[1]['id'] == 'new-signup-60-min-trial'
+    assert entries[2]['id'] == 'spotify-paste-robustness'
+    assert entries[3]['id'] == 'no-double-charge-restart'
+    assert entries[4]['id'] == 'apple-rss-link-resolve'
+    assert entries[5]['id'] == 'related-episodes-feed-fix'
+    assert entries[6]['id'] == 'stay-logged-in'
+    assert entries[7]['id'] == 'spotify-resolve-clarity'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
