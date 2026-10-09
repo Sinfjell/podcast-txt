@@ -167,8 +167,14 @@ def reject_cross_site_writes():
 
 
 def _prefers_markdown():
+    """Only an explicit text/markdown entry opts in.
+
+    Werkzeug's accept['text/markdown'] also matches */* and an absent Accept
+    header (quality 1), which would serve Markdown to crawlers and curl.
+    """
     accept = request.accept_mimetypes
-    md = accept['text/markdown']
+    md = max((q for value, q in accept if value.lower() == 'text/markdown'),
+             default=0)
     return md > 0 and md >= accept['text/html']
 
 
@@ -220,6 +226,8 @@ def standard_headers(resp):
     if 300 <= resp.status_code < 400:
         h.setdefault('X-Redirect-By', 'Podskrift')
     # --- Caching ---------------------------------------------------------
+    if request.path in ('/', '/docs/api'):
+        resp.vary.add('Accept')  # HTML or Markdown depending on Accept
     if request.endpoint == 'static':
         if request.args.get('v'):
             h['Cache-Control'] = 'public, max-age=31536000, immutable'
@@ -230,8 +238,6 @@ def standard_headers(resp):
         if request.method in ('GET', 'HEAD'):
             h.setdefault('No-Vary-Search',
                          'params=(' + ' '.join(f'"{p}"' for p in _NO_VARY_PARAMS) + ')')
-        if request.path in ('/', '/docs/api'):
-            resp.vary.add('Accept')
         if (request.method in ('GET', 'HEAD') and resp.status_code == 200
                 and not resp.direct_passthrough and not resp.is_streamed
                 and 'ETag' not in h):
