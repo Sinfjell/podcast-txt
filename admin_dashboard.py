@@ -678,6 +678,8 @@ def format_stripe_money(amount_cents, currency):
         n = int(amount_cents)
     except (TypeError, ValueError):
         return '—'
+    sign = '-' if n < 0 else ''
+    n = abs(n)
     if cur in zero_decimal:
         major = float(n)
         decimals = 0
@@ -690,8 +692,8 @@ def format_stripe_money(amount_cents, currency):
     else:
         body = f'{major:,.{decimals}f}'
     if symbol.endswith(' '):
-        return f'{symbol}{body}'
-    return f'{symbol}{body}'
+        return f'{sign}{symbol}{body}'
+    return f'{sign}{symbol}{body}'
 
 
 def _format_oslo_unix(ts):
