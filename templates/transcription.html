@@ -294,7 +294,8 @@
         var actions = el('partialPreviewActions');
         if (!card || !actions) return;
         el('partialPreviewTitle').textContent =
-            'Free preview: first ' + d.partial_minutes + ' minutes of ' + d.episode_minutes;
+            'Free preview: first ' + d.partial_minutes + ' minutes of '
+            + d.episode_minutes + ' minutes';
         el('partialPreviewNote').textContent =
             'This transcript covers the opening of the episode. Buy minutes to finish the rest on paid credit.';
         while (actions.firstChild) actions.removeChild(actions.firstChild);

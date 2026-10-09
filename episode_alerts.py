@@ -18,8 +18,11 @@ import mail as mailer
 
 logger = logging.getLogger(__name__)
 
-#: Cap matches Spotify resolve — a public feed should not blow worker RAM.
-FEED_MAX_BYTES = 15 * 1024 * 1024
+#: Poller cap — large catalogues (e.g. The Daily ~20 MB) must still alert.
+#: Spotify resolve keeps its own lower public-route cap in app.py.
+FEED_MAX_BYTES = 40 * 1024 * 1024
+#: Stop reading once this many item/entry closes are seen (newest-first feeds).
+FEED_EARLY_STOP_ITEMS = 40
 #: Soft cap on episodes listed in one digest email.
 MAX_EPISODES_PER_DIGEST = 20
 
@@ -158,6 +161,13 @@ def set_feed_watermark(feed, episodes: list[dict], *, initialized: bool = True) 
         feed.last_seen_published_ts = ts
     if initialized:
         feed.alerts_initialized = True
+
+
+def reset_feed_alert_baseline(feed) -> None:
+    """Clear watermark so the next poll re-baselines (no backlog flood)."""
+    feed.alerts_initialized = False
+    feed.last_seen_episode_guid = None
+    feed.last_seen_published_ts = None
 
 
 def run_new_episode_poll(

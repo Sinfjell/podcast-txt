@@ -2,6 +2,18 @@
   "version": 1,
   "entries": [
     {
+      "id": "unsubscribe-confirm-click",
+      "date": "2026-10-09",
+      "title": "Unsubscribe asks for a confirmation click",
+      "summary": "Opening an unsubscribe link now shows a short confirm page before anything changes, so link scanners cannot opt you out. One-click unsubscribe from your mail app still works as before."
+    },
+    {
+      "id": "partial-preview-minutes-wording",
+      "date": "2026-10-09",
+      "title": "Clearer free-preview length wording",
+      "summary": "Partial previews now say “first 10 minutes of 29 minutes” so the episode length is obvious on the result page, downloads, and copy."
+    },
+    {
       "id": "email-alerts-coming-soon",
       "date": "2026-10-09",
       "hidden": true,

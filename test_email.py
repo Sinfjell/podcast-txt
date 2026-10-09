@@ -136,8 +136,50 @@ def test_mail_retries_5xx_then_succeeds(monkeypatch):
             assert mailer.send_email(
                 to='a@b.com', subject='Hi', text='x', kind='t',
                 max_attempts=3,
+                idempotency_key='stable-key-1',
             ) is True
     assert post.call_count == 2
+    msg_ids = [
+        dict(c.kwargs['data']).get('h:Message-Id') for c in post.call_args_list
+    ]
+    assert msg_ids[0] and msg_ids[0] == msg_ids[1]
+
+
+def test_mail_does_not_retry_ambiguous_transport_errors(monkeypatch):
+    _enable_mail(monkeypatch)
+    with mock.patch.object(
+        mailer.requests, 'post',
+        side_effect=mailer.requests.Timeout('slow'),
+    ) as post:
+        with mock.patch.object(mailer.time, 'sleep') as sleep:
+            assert mailer.send_email(
+                to='a@b.com', subject='Hi', text='x', kind='t',
+                max_attempts=3,
+            ) is False
+    assert post.call_count == 1
+    sleep.assert_not_called()
+
+
+def test_mail_4xx_warning_no_pii_sentry_once(monkeypatch, sentry_events, caplog):
+    _enable_mail(monkeypatch)
+    bad = mock.Mock(status_code=400, text='to address "secret@pii.example" is invalid')
+    import logging
+    with caplog.at_level(logging.WARNING, logger='mail'):
+        with mock.patch.object(mailer.requests, 'post', return_value=bad):
+            assert mailer.send_email(
+                to='secret@pii.example', subject='Hi', text='x', kind='t',
+            ) is False
+            assert mailer.send_email(
+                to='other@pii.example', subject='Hi', text='x', kind='t',
+            ) is False
+    joined = ' '.join(r.getMessage() for r in caplog.records)
+    assert 'secret@pii.example' not in joined
+    assert 'other@pii.example' not in joined
+    assert 'HTTP 400' in joined
+    # Warning only — logging integration must not invent ERROR events.
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records if r.name == 'mail')
+    kinds = [e.get('tags', {}).get('mail.kind') for e in sentry_events]
+    assert kinds.count('http_400') == 1
 
 
 def test_mail_sentry_once_per_kind(monkeypatch, sentry_events):
@@ -189,11 +231,27 @@ def test_unsubscribe_token_roundtrip():
     assert email_notify.parse_unsubscribe_token('other', token) is None
 
 
-def test_unsubscribe_route_works_without_login():
+def test_unsubscribe_get_shows_confirm_without_unsubscribing():
     uid = _make_user('unsub@test.com')
     token = email_notify.make_unsubscribe_token(A.app.secret_key, uid)
     client = A.app.test_client()
     resp = client.get(f'/email/unsubscribe/{token}')
+    assert resp.status_code == 200
+    body = resp.data.lower()
+    assert b'yes, unsubscribe me' in body
+    assert b'confirm' in resp.data  # hidden confirm field
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        assert user.email_unsubscribed_at is None
+        assert user.email_transcript_ready is not False
+
+
+def test_unsubscribe_confirm_post_works_without_login():
+    uid = _make_user('unsub-confirm@test.com')
+    token = email_notify.make_unsubscribe_token(A.app.secret_key, uid)
+    client = A.app.test_client()
+    resp = client.post(
+        f'/email/unsubscribe/{token}', data={'confirm': '1'})
     assert resp.status_code == 200
     assert b'unsubscribed' in resp.data.lower()
     with A.app.app_context():
@@ -202,11 +260,18 @@ def test_unsubscribe_route_works_without_login():
         assert user.email_transcript_ready is False
 
 
-def test_unsubscribe_post_one_click():
+def test_unsubscribe_post_one_click_rfc8058():
     uid = _make_user('unsub2@test.com')
     token = email_notify.make_unsubscribe_token(A.app.secret_key, uid)
-    resp = A.app.test_client().post(f'/email/unsubscribe/{token}')
+    resp = A.app.test_client().post(
+        f'/email/unsubscribe/{token}',
+        data={'List-Unsubscribe': 'One-Click'},
+    )
     assert resp.status_code == 200
+    assert resp.data == b''
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        assert user.email_unsubscribed_at is not None
 
 
 def test_should_send_transcript_ready_rules():
@@ -730,7 +795,140 @@ def test_partial_preview_email_wording(monkeypatch):
         assert 'Your transcript of' not in pairs['text']
 
 
-def test_changelog_hides_email_keeps_partial_preview_first():
+def test_changelog_hides_email_keeps_user_visible_first():
     entries = A.load_changelog_entries()
-    assert entries[0]['id'] == 'partial-trial-preview'
-    assert 'email-alerts-coming-soon' not in {e['id'] for e in entries}
+    ids = [e['id'] for e in entries]
+    assert ids[0] == 'unsubscribe-confirm-click'
+    assert 'partial-preview-minutes-wording' in ids
+    assert 'partial-trial-preview' in ids
+    assert 'email-alerts-coming-soon' not in set(ids)
+
+
+def test_reenable_feed_alerts_resets_baseline():
+    uid = _make_user('reenable@test.com')
+    with A.app.app_context():
+        feed = A.SavedFeed(
+            user_id=uid, name='Demo', rss_url='https://feeds.example.com/re.xml',
+            email_new_episodes=False, alerts_initialized=True,
+            last_seen_episode_guid='guid-old',
+            last_seen_published_ts=123.0,
+        )
+        A.db.session.add(feed)
+        A.db.session.commit()
+        feed_id = feed.id
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    resp = client.post(
+        f'/feeds/{feed_id}/email-alerts',
+        data={'email_new_episodes': '1'},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (302, 303)
+    with A.app.app_context():
+        feed = A.db.session.get(A.SavedFeed, feed_id)
+        assert feed.email_new_episodes is True
+        assert feed.alerts_initialized is False
+        assert feed.last_seen_episode_guid is None
+        assert feed.last_seen_published_ts is None
+
+
+def test_alert_poller_feed_cap_is_40mb():
+    assert episode_alerts.FEED_MAX_BYTES == 40 * 1024 * 1024
+    assert episode_alerts.FEED_EARLY_STOP_ITEMS >= episode_alerts.MAX_EPISODES_PER_DIGEST
+
+
+def test_fetch_feed_for_alerts_early_stops(monkeypatch):
+    """Streaming reader stops after enough </item> closes (newest-first)."""
+    items = []
+    for i in range(80):
+        items.append(
+            f'<item><title>Ep {i}</title><guid>g-{i}</guid>'
+            f'<enclosure url="https://cdn.example.com/{i}.mp3" '
+            f'type="audio/mpeg"/></item>'
+        )
+    body = (
+        b'<?xml version="1.0"?><rss version="2.0"><channel><title>Big</title>'
+        + ''.join(items).encode()
+        + b'</channel></rss>'
+    )
+    # Deliver in small chunks so early-stop can fire mid-stream.
+    chunk_size = 512
+
+    class FakeResp:
+        status_code = 200
+        is_redirect = False
+        is_permanent_redirect = False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, size):
+            for i in range(0, len(body), chunk_size):
+                yield body[i:i + chunk_size]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class FakeSession:
+        def get(self, *a, **kw):
+            return FakeResp()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(A.requests, 'Session', FakeSession)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    got = A.fetch_feed_for_alerts('https://feeds.example.com/big.xml')
+    assert got is not None
+    n_items = got.count(b'</item>')
+    assert n_items >= episode_alerts.FEED_EARLY_STOP_ITEMS
+    # Chunk boundary may include a few extras; must not pull all 80.
+    assert n_items < 80
+    assert len(got) < len(body)
+
+
+def test_transcript_ready_scheduled_off_worker_path(monkeypatch):
+    """Worker must not block on Mailgun; notify runs on a background thread."""
+    uid = _make_user('sched@test.com')
+    started = []
+
+    class FakeThread:
+        def __init__(self, target=None, daemon=None, name=None):
+            self.target = target
+            self.daemon = daemon
+            self.name = name
+
+        def start(self):
+            started.append(self.name)
+            # Run inline so the suite can assert the send happened.
+            if self.target:
+                self.target()
+
+    _enable_mail(monkeypatch)
+    monkeypatch.setattr(A.threading, 'Thread', FakeThread)
+    fake = mock.Mock(status_code=200, text='ok')
+    with mock.patch.object(mailer.requests, 'post', return_value=fake) as post:
+        A._schedule_transcript_ready_email('missing-task', uid)
+        # Missing task → no send.
+        assert post.call_count == 0
+
+        with A.app.app_context():
+            task = A.TranscriptionTask(
+                id='sched-task', user_id=uid, episode_title='Ep',
+                status='completed',
+                started_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+                completed_at=datetime.now(timezone.utc),
+            )
+            A.db.session.add(task)
+            A.db.session.commit()
+        A._schedule_transcript_ready_email('sched-task', uid)
+        assert post.call_count == 1
+    assert any(n and n.startswith('transcript-ready-') for n in started)
