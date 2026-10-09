@@ -6519,18 +6519,19 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'share-listen-links'
-    assert entries[1]['id'] == 'keyboard-and-faster-loading'
-    assert entries[2]['id'] == 'show-landing-pages'
-    assert entries[3]['id'] == 'public-share-links'
-    assert entries[4]['id'] == 'unsubscribe-confirm-click'
-    assert entries[5]['id'] == 'partial-preview-minutes-wording'
-    assert entries[6]['id'] == 'partial-trial-preview'
-    assert entries[7]['id'] == 'own-key-billing-clarity'
-    assert entries[8]['id'] == 'clearer-missing-episode-audio'
-    assert entries[9]['id'] == 'new-signup-60-min-trial'
-    assert entries[10]['id'] == 'spotify-paste-robustness'
-    assert entries[11]['id'] == 'no-double-charge-restart'
+    assert entries[0]['id'] == 'new-look'
+    assert entries[1]['id'] == 'share-listen-links'
+    assert entries[2]['id'] == 'keyboard-and-faster-loading'
+    assert entries[3]['id'] == 'show-landing-pages'
+    assert entries[4]['id'] == 'public-share-links'
+    assert entries[5]['id'] == 'unsubscribe-confirm-click'
+    assert entries[6]['id'] == 'partial-preview-minutes-wording'
+    assert entries[7]['id'] == 'partial-trial-preview'
+    assert entries[8]['id'] == 'own-key-billing-clarity'
+    assert entries[9]['id'] == 'clearer-missing-episode-audio'
+    assert entries[10]['id'] == 'new-signup-60-min-trial'
+    assert entries[11]['id'] == 'spotify-paste-robustness'
+    assert entries[12]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -10781,7 +10782,7 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
-    assert entries[0]['id'] == 'share-listen-links'
+    assert entries[1]['id'] == 'share-listen-links'
 
 
 # --------------------------------------------------------------------------

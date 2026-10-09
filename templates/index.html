@@ -321,10 +321,11 @@
             <div class="hp-plan-label">Credit pack</div>
             <div class="hp-plan-figure">{{ credit_pack_minutes }} minutes for ${{ credit_pack_price_usd }}</div>
             <p>One-time purchase, VAT included. Nothing to set up at OpenAI.</p>
-            {% if current_user.is_authenticated and trial and not trial.on_own_key %}
+            {% if current_user.is_authenticated and trial and not trial.on_own_key and not first_run %}
             <form method="POST" action="{{ url_for('billing_checkout') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="source" value="home_pricing">
+                <input type="hidden" name="cancel_url" value="{{ url_for('index') }}">
                 <input type="hidden" name="ph_sid" value="">
                 <button type="submit" class="btn btn-secondary">{{ credit_pack_label }}</button>
             </form>

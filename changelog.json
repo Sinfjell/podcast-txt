@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "new-look",
+      "date": "2026-10-09",
+      "title": "A new look, in light and dark",
+      "summary": "Podskrift has a new design: a light page that is easier to read, a dark version that follows your device setting, and transcripts set in a reading typeface."
+    },
+    {
       "id": "share-listen-links",
       "date": "2026-10-09",
       "title": "Listen to the episode from a shared transcript",

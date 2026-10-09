@@ -177,7 +177,7 @@
         </summary>
         <div class="card-body" style="padding-top: 0;">
             <p id="summaryTldr" style="margin: 0 0 12px; font-size: 15px; line-height: 1.55;"></p>
-            <ul id="summaryKeyPoints" style="font-size: 15px;="margin: 0 0 12px; padding-left: 1.2em; line-height: 1.5;"></ul>
+            <ul id="summaryKeyPoints" style="font-size: 15px; margin: 0 0 12px; padding-left: 1.2em; line-height: 1.5;"></ul>
             <div id="summaryQuotes" class="text-sm text-muted" style="display: flex; flex-direction: column; gap: 6px;"></div>
         </div>
     </details>
@@ -333,6 +333,11 @@
         });
     }
 
+    // Partial text is audio the user has already been charged for: never hide it.
+    function hideTranscriptIfEmpty() {
+        var pane = el('transcriptPane');
+        if (!pane || !pane.textContent.trim()) show(el('transcriptCard'), false);
+    }
     function show(node, visible) {
         node.classList.toggle('hidden', !visible);
         node.style.display = visible ? '' : 'none';
@@ -691,7 +696,7 @@
         if (d.status === 'error') {
             show(el('progressCard'), false);
             show(el('errorContainer'), true);
-            show(el('transcriptCard'), false);
+            hideTranscriptIfEmpty();
             if (d.no_billing) {
                 el('errorMessage').textContent =
                     'Your OpenAI account has no credit, so transcription cannot start. '
@@ -810,7 +815,7 @@
                 if (d.error && !d.status) {
                     show(el('progressCard'), false);
                     show(el('errorContainer'), true);
-            show(el('transcriptCard'), false);
+            hideTranscriptIfEmpty();
                     el('errorMessage').textContent = d.error;
                     fireResultViewed(false);
                     return;
@@ -828,7 +833,7 @@
                 } else {
                     show(el('progressCard'), false);
                     show(el('errorContainer'), true);
-            show(el('transcriptCard'), false);
+            hideTranscriptIfEmpty();
                     el('errorMessage').textContent = 'Lost connection. Refresh to check status.';
                     fireResultViewed(false);
                 }
