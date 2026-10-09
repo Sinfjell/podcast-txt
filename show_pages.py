@@ -27,6 +27,16 @@ SHOW_FEED_CACHE_DIR = Path(
 SHOW_FEED_CACHE_TTL = int(os.getenv('SHOW_FEED_CACHE_TTL', str(6 * 3600)))
 SHOW_FEED_FETCH_TIMEOUT = float(os.getenv('SHOW_FEED_FETCH_TIMEOUT', '6'))
 SHOW_EPISODE_LIMIT = 10
+#: Failed/empty fetches are retried after this long, not after the full TTL.
+SHOW_FEED_ERROR_TTL = int(os.getenv('SHOW_FEED_ERROR_TTL', '900'))
+#: At most this many live feed fetches at once across all request threads, so
+#: a crawler sweeping 150 cold pages cannot tie up the gunicorn thread pool.
+SHOW_FEED_MAX_CONCURRENT = int(os.getenv('SHOW_FEED_MAX_CONCURRENT', '2'))
+#: Community shows (names + feed URLs taken from users' completed jobs) are
+#: OFF unless explicitly enabled: a private/premium feed URL carries an auth
+#: token, and with few users the list reveals what individuals transcribed.
+SHOW_PAGES_COMMUNITY = os.getenv('SHOW_PAGES_COMMUNITY', '').strip().lower() in (
+    '1', 'true', 'yes')
 SHOW_PAGES_PER_LETTER_PAGE = 40
 
 _curated_lock = threading.Lock()
@@ -37,6 +47,10 @@ _curated_list: list[dict] = []
 _mem_cache_lock = threading.Lock()
 # slug -> {'fetched_at': float, 'episodes': list, 'error': str|None}
 _mem_feed_cache: dict[str, dict] = {}
+
+_fetch_slots = threading.BoundedSemaphore(max(1, SHOW_FEED_MAX_CONCURRENT))
+_inflight_lock = threading.Lock()
+_inflight: set[str] = set()
 
 
 def slugify_show_name(name: str) -> str:
@@ -196,7 +210,8 @@ def all_shows(db_session=None, TranscriptionTask=None) -> list[dict]:
     reserved = {s['slug'] for s in curated}
     curated_names = {s['name'] for s in curated}
     community = []
-    if db_session is not None and TranscriptionTask is not None:
+    if (SHOW_PAGES_COMMUNITY and db_session is not None
+            and TranscriptionTask is not None):
         community = community_shows_from_db(
             db_session, TranscriptionTask,
             reserved_slugs=reserved,
@@ -209,7 +224,8 @@ def find_show(slug: str, db_session=None, TranscriptionTask=None) -> dict | None
     show = curated_show(slug)
     if show:
         return show
-    if db_session is None or TranscriptionTask is None:
+    if (not SHOW_PAGES_COMMUNITY or db_session is None
+            or TranscriptionTask is None):
         return None
     curated = load_curated_shows()
     for candidate in community_shows_from_db(
@@ -263,52 +279,36 @@ def _public_episode(ep: dict) -> dict:
     }
 
 
-def fetch_show_episodes(show: dict, *, get_episodes_from_rss, is_fetchable_url,
-                        force_refresh=False):
-    """Return (episodes, meta) where meta has cache/freshness flags.
+def _entry_ttl(entry: dict) -> int:
+    return SHOW_FEED_CACHE_TTL if entry.get('episodes') else min(
+        SHOW_FEED_ERROR_TTL, SHOW_FEED_CACHE_TTL)
 
-    Never raises. On feed failure, returns last-good episodes or [].
-    """
+
+def _cached_entry(slug: str) -> dict | None:
+    """Newest cache entry for slug (memory first, then disk), or None."""
+    with _mem_cache_lock:
+        mem = _mem_feed_cache.get(slug)
+    if mem is not None:
+        return mem
+    disk = _read_disk_cache(slug)
+    if disk and isinstance(disk.get('episodes'), list):
+        entry = {
+            'fetched_at': float(disk.get('fetched_at') or 0),
+            'episodes': disk['episodes'],
+            'error': disk.get('error'),
+        }
+        with _mem_cache_lock:
+            _mem_feed_cache.setdefault(slug, entry)
+        return entry
+    return None
+
+
+def _do_fetch(show: dict, get_episodes_from_rss, is_fetchable_url) -> dict:
+    """One live fetch; stores the result. Caller holds a fetch slot."""
     slug = show['slug']
     feed_url = show['feed_url']
     now = time.time()
-
-    with _mem_cache_lock:
-        mem = _mem_feed_cache.get(slug)
-        if (
-            not force_refresh
-            and mem
-            and (now - mem.get('fetched_at', 0)) < SHOW_FEED_CACHE_TTL
-            and mem.get('episodes') is not None
-        ):
-            return list(mem['episodes']), {
-                'from_cache': True,
-                'stale': False,
-                'error': mem.get('error'),
-            }
-
-    disk = _read_disk_cache(slug)
-    if (
-        not force_refresh
-        and disk
-        and (now - float(disk.get('fetched_at') or 0)) < SHOW_FEED_CACHE_TTL
-        and isinstance(disk.get('episodes'), list)
-    ):
-        episodes = disk['episodes']
-        with _mem_cache_lock:
-            _mem_feed_cache[slug] = {
-                'fetched_at': float(disk['fetched_at']),
-                'episodes': episodes,
-                'error': disk.get('error'),
-            }
-        return list(episodes), {
-            'from_cache': True,
-            'stale': False,
-            'error': disk.get('error'),
-        }
-
-    episodes = []
-    error = None
+    episodes, error = [], None
     if not is_fetchable_url(feed_url):
         error = 'feed_blocked'
     else:
@@ -324,50 +324,105 @@ def fetch_show_episodes(show: dict, *, get_episodes_from_rss, is_fetchable_url,
             logger.info('show page feed fetch failed for %s: %s', slug, exc)
 
     if episodes:
-        payload = {
-            'fetched_at': now,
-            'episodes': episodes,
-            'error': None,
-            'feed_url': feed_url,
-        }
+        payload = {'fetched_at': now, 'episodes': episodes, 'error': None,
+                   'feed_url': feed_url}
         with _mem_cache_lock:
             _mem_feed_cache[slug] = payload
         _write_disk_cache(slug, payload)
-        return list(episodes), {
-            'from_cache': False,
-            'stale': False,
-            'error': None,
-        }
+        return payload
 
-    # Fallback: last-good from memory or disk.
-    fallback = None
+    # Failure: keep last-good episodes (re-stamped so we back off for
+    # SHOW_FEED_ERROR_TTL instead of refetching on every hit).
+    prev = _cached_entry(slug)
+    keep = list(prev['episodes']) if prev and prev.get('episodes') else []
+    payload = {'fetched_at': now, 'episodes': keep, 'error': error,
+               'feed_url': feed_url, 'stale': bool(keep)}
     with _mem_cache_lock:
-        if mem and mem.get('episodes'):
-            fallback = list(mem['episodes'])
-    if fallback is None and disk and isinstance(disk.get('episodes'), list):
-        fallback = list(disk['episodes'])
+        _mem_feed_cache[slug] = payload
+    return payload
 
-    if fallback is not None:
-        return fallback, {
+
+def _claim(slug: str) -> bool:
+    with _inflight_lock:
+        if slug in _inflight:
+            return False
+        _inflight.add(slug)
+        return True
+
+
+def _release(slug: str) -> None:
+    with _inflight_lock:
+        _inflight.discard(slug)
+
+
+def _refresh_in_background(show, get_episodes_from_rss, is_fetchable_url):
+    """Single-flight background refresh; bounded by the global fetch slots."""
+    slug = show['slug']
+    if not _claim(slug):
+        return
+
+    def _run():
+        try:
+            if not _fetch_slots.acquire(timeout=60):
+                return
+            try:
+                _do_fetch(show, get_episodes_from_rss, is_fetchable_url)
+            finally:
+                _fetch_slots.release()
+        except Exception:  # noqa: BLE001
+            logger.exception('background show feed refresh failed for %s', slug)
+        finally:
+            _release(slug)
+
+    threading.Thread(target=_run, daemon=True,
+                     name=f'show-feed-{slug[:24]}').start()
+
+
+def fetch_show_episodes(show: dict, *, get_episodes_from_rss, is_fetchable_url,
+                        force_refresh=False):
+    """Return (episodes, meta) where meta has cache/freshness flags.
+
+    Never raises and never makes a request wait on a feed it does not have to:
+    - fresh cache: served directly;
+    - stale cache: served immediately, refreshed once in the background;
+    - cold: fetched inline only if this request wins the per-slug claim and a
+      global fetch slot is free; otherwise the page renders without episodes
+      and a background refresh warms the cache.
+    """
+    slug = show['slug']
+    now = time.time()
+    entry = None if force_refresh else _cached_entry(slug)
+
+    if entry is not None:
+        age = now - float(entry.get('fetched_at') or 0)
+        fresh = age < _entry_ttl(entry)
+        if not fresh:
+            _refresh_in_background(show, get_episodes_from_rss, is_fetchable_url)
+        return list(entry.get('episodes') or []), {
             'from_cache': True,
-            'stale': True,
-            'error': error,
+            # Only flag 'stale' when the last live fetch FAILED and we are
+            # showing last-good; a normal TTL refresh is invisible to users.
+            'stale': bool(entry.get('stale')),
+            'error': entry.get('error'),
         }
 
-    # Nothing cached — empty list, page still 200.
-    empty_payload = {
-        'fetched_at': now,
-        'episodes': [],
-        'error': error,
-        'feed_url': feed_url,
-    }
-    with _mem_cache_lock:
-        _mem_feed_cache[slug] = empty_payload
-    return [], {
-        'from_cache': False,
-        'stale': False,
-        'error': error,
-    }
+    if _claim(slug):
+        got_slot = _fetch_slots.acquire(blocking=False)
+        if got_slot:
+            try:
+                payload = _do_fetch(show, get_episodes_from_rss, is_fetchable_url)
+            finally:
+                _fetch_slots.release()
+                _release(slug)
+            return list(payload['episodes']), {
+                'from_cache': False,
+                'stale': bool(payload.get('stale')),
+                'error': payload.get('error'),
+            }
+        _release(slug)
+
+    _refresh_in_background(show, get_episodes_from_rss, is_fetchable_url)
+    return [], {'from_cache': False, 'stale': False, 'error': 'warming'}
 
 
 def group_shows_by_letter(shows: list[dict]) -> list[tuple[str, list[dict]]]:

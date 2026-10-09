@@ -379,16 +379,24 @@ document.addEventListener('DOMContentLoaded', function() {
         while (startError.firstChild) startError.removeChild(startError.firstChild);
     }
 
+    var TRIAL_PARTIAL_MIN = 5;
     function episodeNeedsOwnKey(durationMin) {
         if (TRIAL_REMAINING_MIN === null || durationMin == null) return false;
         var estimateSec = Math.max(60, Math.floor(Number(durationMin) * 60));
         if (!(estimateSec > 0)) return false;
         var paidSec = Math.max(0, Number(PAID_REMAINING_MIN) || 0) * 60;
         var freeSec = Math.max(0, Number(TRIAL_REMAINING_MIN) || 0) * 60;
+        var partialOk = (
+            paidSec <= 0
+            && freeSec >= TRIAL_PARTIAL_MIN * 60
+            && estimateSec > freeSec
+        );
         if (TRIAL_MAX_EPISODE_MIN && estimateSec > TRIAL_MAX_EPISODE_MIN * 60) {
-            return estimateSec > paidSec;
+            if (estimateSec <= paidSec) return false;
+            return !partialOk;
         }
-        return estimateSec > freeSec + paidSec;
+        if (estimateSec <= freeSec + paidSec) return false;
+        return !partialOk;
     }
 
     function updateSticky(card) {

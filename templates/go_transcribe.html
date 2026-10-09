@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Transcribe — {{ episode_title }} — Podskrift{% endblock %}
+
+{% block content %}
+<div style="max-width: 520px; margin: 32px auto;">
+    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 8px;">
+        Transcribe this episode
+    </h1>
+    {% if podcast_name %}
+    <p style="color: var(--muted); font-size: 14px; margin-bottom: 8px;">{{ podcast_name }}</p>
+    {% endif %}
+    <p style="font-size: 17px; margin-bottom: 24px;">{{ episode_title }}</p>
+
+    <form method="POST" action="{{ url_for('start_transcription') }}" id="goTranscribeForm">
+        <input type="hidden" name="audio_url" value="{{ audio_url }}">
+        {% if rss_url %}<input type="hidden" name="rss_url" value="{{ rss_url }}">{% endif %}
+        <input type="hidden" name="episode_title" value="{{ episode_title }}">
+        {% if podcast_name %}<input type="hidden" name="podcast_name" value="{{ podcast_name }}">{% endif %}
+        <div class="form-group">
+            <label class="form-label" for="language">Language</label>
+            <select class="form-input" name="language" id="language">
+                {% for code, label in languages %}
+                <option value="{{ code }}">{{ label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <button type="submit" class="btn btn-primary" id="goTranscribeBtn">Transcribe</button>
+    </form>
+</div>
+<script>
+(function() {
+    var form = document.getElementById('goTranscribeForm');
+    var btn = document.getElementById('goTranscribeBtn');
+    if (!form || !btn) return;
+    form.addEventListener('submit', function(ev) {
+        ev.preventDefault();
+        btn.disabled = true;
+        btn.textContent = 'Starting…';
+        var body = new FormData(form);
+        fetch(form.action, { method: 'POST', body: body })
+            .then(function(r) { return r.json().then(function(data) {
+                return { status: r.status, data: data };
+            }); })
+            .then(function(res) {
+                if (res.data && res.data.task_id) {
+                    window.location.href = '/transcription/' + res.data.task_id;
+                    return;
+                }
+                btn.disabled = false;
+                btn.textContent = 'Transcribe';
+                alert((res.data && res.data.error) || 'Could not start transcription.');
+            })
+            .catch(function() {
+                btn.disabled = false;
+                btn.textContent = 'Transcribe';
+                alert('Could not start transcription.');
+            });
+    });
+})();
+</script>
+{% endblock %}

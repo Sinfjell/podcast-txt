@@ -1671,9 +1671,10 @@ def test_reconcile_tops_up_an_underestimate(trial_on):
     assert _used(uid) == 900
 
 
-def test_reconcile_refuses_an_episode_that_does_not_fit(trial_on):
-    """The feed said 10 minutes, the file is 40. Refusing here is free;
-    refusing after the first chunk is not."""
+def test_reconcile_trims_when_episode_does_not_fit_trial(trial_on):
+    """The feed said 10 minutes, the file is 40. Trial-only overruns return
+    'trim' so the worker shortens the file to the reservation instead of
+    failing (and never call Whisper on the unreserved remainder)."""
     from models import db, TranscriptionTask
     uid = _make_user('recon3@test.com', limit=900)
     with A.app.app_context():
@@ -1682,14 +1683,16 @@ def test_reconcile_refuses_an_episode_that_does_not_fit(trial_on):
                                          episode_title='x', status='transcribing',
                                          trial_seconds_charged=600))
         db.session.commit()
-        with pytest.raises(A.TrialExhausted):
-            A.trial_reconcile_task('trial-recon-3', 2400)
+        assert A.trial_reconcile_task('trial-recon-3', 2400) == 'trim'
+        task = db.session.get(TranscriptionTask, 'trial-recon-3')
         # Still holding only the original reservation, nothing extra taken.
-        assert db.session.get(TranscriptionTask, 'trial-recon-3').trial_seconds_charged == 600
+        assert task.trial_seconds_charged == 600
+        assert A.task_is_partial(task)
     assert _used(uid) == 600
 
 
-def test_reconcile_refuses_an_over_long_episode(trial_on, monkeypatch):
+def test_reconcile_trims_an_over_long_episode_without_paid(trial_on, monkeypatch):
+    """Real audio over the free per-episode max, no paid cover → trim preview."""
     from models import db, TranscriptionTask
     monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 1800)
     uid = _make_user('recon4@test.com', limit=10 ** 6)
@@ -1699,8 +1702,10 @@ def test_reconcile_refuses_an_over_long_episode(trial_on, monkeypatch):
                                          episode_title='x', status='transcribing',
                                          trial_seconds_charged=600))
         db.session.commit()
-        with pytest.raises(A.TrialExhausted):
-            A.trial_reconcile_task('trial-recon-4', 3600)
+        assert A.trial_reconcile_task('trial-recon-4', 3600) == 'trim'
+        task = db.session.get(TranscriptionTask, 'trial-recon-4')
+        assert task.trial_seconds_charged == 600
+        assert A.task_is_partial(task)
 
 
 def test_own_key_task_is_never_metered(trial_on):
@@ -1716,13 +1721,12 @@ def test_own_key_task_is_never_metered(trial_on):
     assert _used(uid) == 0
 
 
-def test_billing_ignores_the_duration_the_client_claimed(trial_on, monkeypatch, tmp_path):
-    """The hole the first cut of this feature shipped with.
+def test_billing_trims_when_client_under_claims_duration(trial_on, monkeypatch, tmp_path):
+    """Client-claimed short duration must not let Whisper see the full file.
 
-    Both the reservation and task.audio_duration came from duration_min, a
-    form field on the direct path and itunes:duration on the RSS path -- both
-    client-supplied. Reconcile therefore compared a number to itself and was a
-    guaranteed no-op: claim one minute, transcribe four hours on our key.
+    Both the reservation and task.audio_duration came from duration_min — both
+    attacker-controlled. We now trim to the reservation (and mark a partial
+    preview) instead of failing, so claim-one-minute cannot bill four hours.
     """
     from models import db, TranscriptionTask
 
@@ -1730,8 +1734,20 @@ def test_billing_ignores_the_duration_the_client_claimed(trial_on, monkeypatch, 
     audio = tmp_path / 'ep.mp3'
     audio.write_bytes(b'\0' * 1024)
     calls = []
-    # The file really is four hours long; the client said one minute.
-    monkeypatch.setattr(A, 'probe_audio_duration', lambda f: 14400.0)
+    probes = {'n': 0}
+    trimmed = []
+
+    def probe(f):
+        probes['n'] += 1
+        # First probe sees the real length; after trim, the reserved length.
+        return 14400.0 if probes['n'] == 1 else 60.0
+
+    def fake_trim(path, seconds):
+        trimmed.append(seconds)
+        return path
+
+    monkeypatch.setattr(A, 'probe_audio_duration', probe)
+    monkeypatch.setattr(A, 'trim_audio_file', fake_trim)
     monkeypatch.setattr(A, 'prepare_audio_for_whisper', lambda f, **kw: [str(audio)])
     monkeypatch.setattr(A, '_transcribe_chunks',
                         lambda *a, **kw: calls.append(a) or ('text', []))
@@ -1742,10 +1758,15 @@ def test_billing_ignores_the_duration_the_client_claimed(trial_on, monkeypatch, 
             id='trial-liar', user_id=uid, episode_title='x', status='downloading',
             audio_duration=60.0, trial_seconds_charged=60))
         db.session.commit()
-        with pytest.raises(A.TrialExhausted):
-            A.transcribe_audio(str(audio), 'trial-liar', object(), language='no')
+        A.transcribe_audio(str(audio), 'trial-liar', object(), language='no')
+        task = db.session.get(TranscriptionTask, 'trial-liar')
+        assert task.status == 'completed'
+        assert A.task_is_partial(task)
+        assert task.trial_seconds_charged == 60
 
-    assert calls == [], 'four hours of audio was billed as one claimed minute'
+    assert trimmed == [60], 'audio must be cut to the reserved minute'
+    assert len(calls) == 1, 'Whisper still runs on the trimmed minute'
+    assert _used(uid) == 60
 
 
 def test_billing_uses_the_size_estimate_when_ffprobe_fails(trial_on, monkeypatch, tmp_path):
@@ -3490,7 +3511,7 @@ def test_robots_txt_keeps_crawlers_out_of_session_only_pages(trial_on):
     personal -- a transcript is the user's, not the index's."""
     body = A.app.test_client().get('/robots.txt').data.decode()
     for path in ('/settings', '/history', '/transcription/', '/download/',
-                 '/api/', '/active-jobs', '/cancel/'):
+                 '/api/', '/active-jobs', '/cancel/', '/t/'):
         assert f'Disallow: {path}' in body, f'{path} is crawlable'
 
 
@@ -4075,7 +4096,8 @@ def test_a_dead_feed_still_falls_through_to_the_episode_search(monkeypatch):
 def test_an_oversized_feed_is_not_read_into_memory(monkeypatch):
     _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW],
               feed=_rss('Essentials: Genes &amp; Memory'), episodes=[])
-    monkeypatch.setattr(A._fetch_feed_capped, '__defaults__', (100,))
+    # (max_bytes, early_stop_items) — tiny cap, no early-stop (Spotify path).
+    monkeypatch.setattr(A._fetch_feed_capped, '__defaults__', (100, None, 15))
     out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
     # The feed would have matched; being over the cap it is skipped, not parsed.
     assert [r['type'] for r in out['results']] == ['show']
@@ -6390,15 +6412,15 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
     assert entries[0]['id'] == 'show-landing-pages'
-    assert entries[1]['id'] == 'own-key-billing-clarity'
-    assert entries[2]['id'] == 'clearer-missing-episode-audio'
-    assert entries[3]['id'] == 'new-signup-60-min-trial'
-    assert entries[4]['id'] == 'spotify-paste-robustness'
-    assert entries[5]['id'] == 'no-double-charge-restart'
-    assert entries[6]['id'] == 'apple-rss-link-resolve'
-    assert entries[7]['id'] == 'related-episodes-feed-fix'
-    assert entries[8]['id'] == 'stay-logged-in'
-    assert entries[9]['id'] == 'spotify-resolve-clarity'
+    assert entries[1]['id'] == 'public-share-links'
+    assert entries[2]['id'] == 'unsubscribe-confirm-click'
+    assert entries[3]['id'] == 'partial-preview-minutes-wording'
+    assert entries[4]['id'] == 'partial-trial-preview'
+    assert entries[5]['id'] == 'own-key-billing-clarity'
+    assert entries[6]['id'] == 'clearer-missing-episode-audio'
+    assert entries[7]['id'] == 'new-signup-60-min-trial'
+    assert entries[8]['id'] == 'spotify-paste-robustness'
+    assert entries[9]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -6529,15 +6551,19 @@ def test_reconcile_names_the_cap_that_refused(trial_on, monkeypatch):
                                          episode_title='x', status='transcribing',
                                          trial_seconds_charged=600))
         db.session.commit()
-        with pytest.raises(A.TrialExhausted) as short:
-            A.trial_reconcile_task('trial-recon-scope', 2400)
-        assert short.value.scope == 'user'
+        # Under the free per-episode max: trim to reservation (partial preview).
+        assert A.trial_reconcile_task('trial-recon-scope', 2400) == 'trim'
+        assert A.task_is_partial(db.session.get(TranscriptionTask, 'trial-recon-scope'))
+
+        # Clear partial marker so the over-max path is exercised alone.
+        task = db.session.get(TranscriptionTask, 'trial-recon-scope')
+        task.partial_meta = None
+        db.session.commit()
 
         monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 1800)
-        with pytest.raises(A.TrialExhausted) as too_long:
-            A.trial_reconcile_task('trial-recon-scope', 3600)
-        assert too_long.value.scope == 'episode_length'
-    assert _used(uid) == 600  # neither refusal took anything extra
+        assert A.trial_reconcile_task('trial-recon-scope', 3600) == 'trim'
+        assert A.task_is_partial(db.session.get(TranscriptionTask, 'trial-recon-scope'))
+    assert _used(uid) == 600  # neither path took anything extra
 
 
 def test_worker_reports_trial_exhausted_at_reconcile(ph_events, monkeypatch, trial_on):
@@ -6617,8 +6643,8 @@ def test_search_emits_podcast_searched_with_query_and_input_type(monkeypatch):
         assert f"'{kind}'" in body
 
 
-def test_reconcile_names_the_global_cap(trial_on, monkeypatch):
-    """The account has room; the service does not."""
+def test_reconcile_trims_when_global_cap_blocks_top_up(trial_on, monkeypatch):
+    """The account has room; the service does not — keep the reservation and trim."""
     from models import db, TranscriptionTask
     uid = _make_user('phrecon-global@test.com', limit=10 ** 6)
     with A.app.app_context():
@@ -6628,9 +6654,10 @@ def test_reconcile_names_the_global_cap(trial_on, monkeypatch):
                                          trial_seconds_charged=600))
         db.session.commit()
         monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', A.trial_global_used_seconds())
-        with pytest.raises(A.TrialExhausted) as refused:
-            A.trial_reconcile_task('trial-recon-global', 1200)
-        assert refused.value.scope == 'global'
+        assert A.trial_reconcile_task('trial-recon-global', 1200) == 'trim'
+        task = db.session.get(TranscriptionTask, 'trial-recon-global')
+        assert task.trial_seconds_charged == 600
+        assert A.task_is_partial(task)
     assert _used(uid) == 600
 
 
@@ -6667,8 +6694,14 @@ def test_episode_needs_own_key_badge_logic(trial_on):
     assert A.episode_needs_own_key(None, 60) is False
     assert A.episode_needs_own_key(95, None) is False
     assert A.episode_needs_own_key(45, 60) is False
-    assert A.episode_needs_own_key(95, 60) is True
+    # Longer than remaining free trial with no paid → free preview, not a badge.
+    assert A.episode_needs_own_key(95, 60) is False
+    # Over free per-episode max with plenty of remaining trial → still needs pack/key.
     assert A.episode_needs_own_key(200, 300) is True
+    # Tiny remainder cannot start a useful preview.
+    assert A.episode_needs_own_key(95, 3) is True
+    # Paid balance that does not cover the episode still needs a pack/key.
+    assert A.episode_needs_own_key(95, 60, paid_minutes=10) is True
 
 
 def test_anonymous_pending_transcription_goes_to_register(monkeypatch, trial_on):
@@ -7434,23 +7467,31 @@ def test_health_reports_trial_available_without_numbers(trial_on, monkeypatch):
     assert A.trial_global_pool_available() is False
 
 
-def test_new_user_long_episode_hits_remaining_paywall_not_max_cap(
+def test_new_user_long_episode_starts_partial_preview_not_max_cap(
         monkeypatch, trial_on):
     """A 90-min episode for a 60-min new user is under TRIAL_MAX_EPISODE (180)
-    but over remaining trial — start returns the buy/paywall path (402)."""
+    but over remaining trial — start a partial preview of the first 60 min."""
+    from models import db, TranscriptionTask
     monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
     monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 10 ** 7)
-    uid = _make_user('sixty-paywall@test.com', limit=60 * 60, used=0)
+    uid = _make_user('sixty-partial@test.com', limit=60 * 60, used=0)
     resp = _post_start(monkeypatch, uid, {
         'audio_url': 'https://example.com/ep.mp3',
         'episode_title': 'Long one',
         'duration_min': '90',
     })
-    assert resp.status_code == 402
+    assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
-    assert 'free minutes you have left' in body['error']
-    assert 'too long for the free trial' not in body['error']
-    assert body.get('paywall_reason') in ('low_balance', 'trial_exhausted')
+    assert 'task_id' in body
+    assert _used(uid) == 60 * 60
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, body['task_id'])
+        assert A.task_is_partial(task)
+        assert task.trial_seconds_charged == 60 * 60
+        assert (task.paid_seconds_charged or 0) == 0
+        meta = A.task_partial_meta(task)
+        assert meta['partial_seconds'] == 60 * 60
+        assert meta['episode_seconds'] == 90 * 60
 
 
 # --------------------------------------------------------------------------
@@ -9588,32 +9629,35 @@ def test_login_wall_shown_emits_next_type(ph_events):
     assert 'email' not in walls[0]['properties']
 
 
-def test_get_episodes_from_rss_timeout_uses_requests(monkeypatch):
-    """Timed path fetches via requests so a hung host cannot block forever."""
-    class FakeResp:
-        content = b"""<?xml version="1.0"?>
+def test_get_episodes_from_rss_timeout_uses_capped_fetch(monkeypatch):
+    """Timed path goes through the SSRF-safe, byte-capped, early-stop fetch."""
+    body = b"""<?xml version="1.0"?>
         <rss><channel><title>Show</title>
         <item><title>Ep</title>
         <enclosure url="https://cdn.example.com/a.mp3" type="audio/mpeg"/>
         </item></channel></rss>"""
-        def raise_for_status(self):
-            return None
-
     called = {}
 
-    def fake_get(url, timeout=None, headers=None):
-        called['url'] = url
-        called['timeout'] = timeout
-        return FakeResp()
+    def fake_capped(url, max_bytes=None, early_stop_items=None, timeout=None):
+        called.update(url=url, timeout=timeout, max_bytes=max_bytes,
+                      early_stop_items=early_stop_items)
+        return body
 
-    monkeypatch.setattr(A.requests, 'get', fake_get)
+    monkeypatch.setattr(A, '_fetch_feed_capped', fake_capped)
     monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
     episodes, err = A.get_episodes_from_rss(
         'https://feeds.example.com/x.xml', timeout=8)
     assert err is None
     assert called['timeout'] == 8
+    assert called['max_bytes'] == A.SHOW_FEED_MAX_BYTES
+    assert called['early_stop_items'] == A.SHOW_FEED_EARLY_STOP_ITEMS
     assert len(episodes) == 1
     assert episodes[0]['title'] == 'Ep'
+
+    monkeypatch.setattr(A, '_fetch_feed_capped', lambda *a, **k: None)
+    episodes, err = A.get_episodes_from_rss(
+        'https://feeds.example.com/x.xml', timeout=8)
+    assert episodes is None and err
 
 
 # --------------------------------------------------------------------------
@@ -10057,9 +10101,29 @@ def test_show_page_never_leaks_transcript_text(
     assert 'TOP SECRET' not in body
 
 
+def test_community_shows_off_by_default(show_pages_fixture, monkeypatch, trial_on):
+    """User-derived shows (feed URLs may carry private tokens) need opt-in."""
+    uid = _make_user('community-off@test.com')
+    with A.app.app_context():
+        A.db.session.add(A.TranscriptionTask(
+            id='community-off-task', user_id=uid, episode_title='Ep',
+            podcast_name='Private Premium Feed Show',
+            rss_url='https://feeds.example.com/private.xml?token=SECRET123',
+            status='completed', transcript_text='x', progress=100,
+        ))
+        A.db.session.commit()
+    monkeypatch.setattr(show_pages_fixture, 'SHOW_PAGES_COMMUNITY', False)
+    index = A.app.test_client().get('/podcasts').data.decode()
+    assert 'Private Premium Feed Show' not in index
+    assert 'SECRET123' not in index
+    assert A.app.test_client().get(
+        '/podcasts/private-premium-feed-show').status_code == 404
+
+
 def test_community_show_appears_when_completed_with_feed(
         show_pages_fixture, monkeypatch, trial_on):
     uid = _make_user('community-show@test.com')
+    monkeypatch.setattr(show_pages_fixture, 'SHOW_PAGES_COMMUNITY', True)
     with A.app.app_context():
         A.db.session.add(A.TranscriptionTask(
             id='community-show-task',
@@ -10122,3 +10186,713 @@ def test_show_page_transcribe_posts_rss_with_episode_index(
     # Preselected index is wired into the picker JS.
     assert 'PRESELECTED_INDEX' in body
     assert '0' in body
+    assert 'name="episode_audio_url"' in page
+    # A new release shifted indexes since the page was cached: the audio URL
+    # still preselects the right episode, not whatever is now at index 0.
+    resp = client.post('/parse_rss', data={
+        'rss_url': 'https://feeds.example.com/fixture.xml',
+        'episode_index': '0',
+        'episode_audio_url': 'https://cdn.example.com/ep2.mp3',
+    }, follow_redirects=True)
+    assert 'var PRESELECTED_INDEX = 1;' in resp.data.decode()
+
+
+# --------------------------------------------------------------------------
+# Public share links
+# --------------------------------------------------------------------------
+
+def _share_task(user_id, task_id='share-ep-1', **extra):
+    """Completed transcript fixture for share-link tests (distinct from
+    the result-page `_completed_task` helper above)."""
+    from models import db, TranscriptionTask, TranscriptShare
+    defaults = dict(
+        id=task_id,
+        user_id=user_id,
+        episode_title='Morning briefing',
+        podcast_name='Forklaringssaften',
+        artwork_url='https://example.com/art.jpg',
+        episode_published='2026-10-01',
+        status='completed',
+        progress=100,
+        transcript_text='Hello from the shared transcript.',
+        segments_json='[{"start": 1.5, "end": 4.0, "text": " Hello from the shared transcript."}]',
+        language='en',
+        audio_duration=120.0,
+        completed_at=datetime.now(timezone.utc),
+    )
+    defaults.update(extra)
+    with A.app.app_context():
+        old_share = TranscriptShare.query.filter_by(task_id=task_id).first()
+        if old_share:
+            db.session.delete(old_share)
+            db.session.commit()
+        old = db.session.get(TranscriptionTask, task_id)
+        if old:
+            db.session.delete(old)
+            db.session.commit()
+        db.session.add(TranscriptionTask(**defaults))
+        db.session.commit()
+    return task_id
+
+
+def test_share_default_is_not_shared(trial_on):
+    uid = _make_user('share-default@test.com')
+    tid = _share_task(uid, 'share-default')
+    client = _login(uid)
+    resp = client.get(f'/transcription/{tid}/share')
+    assert resp.status_code == 200
+    assert resp.get_json() == {'shared': False, 'url': None, 'token': None}
+
+
+def test_share_create_revoke_view_and_404(ph_events, trial_on, monkeypatch):
+    uid = _make_user('share-owner@test.com')
+    other = _make_user('share-other@test.com')
+    tid = _share_task(uid, 'share-full')
+
+    owner = _login(uid)
+    other_client = _login(other)
+    assert other_client.post(f'/transcription/{tid}/share').status_code == 404
+
+    created = owner.post(f'/transcription/{tid}/share')
+    assert created.status_code == 200
+    body = created.get_json()
+    assert body['shared'] is True
+    token = body['token']
+    assert token and len(token) >= 22
+    assert body['url'].endswith(f'/t/{token}')
+    import math
+    assert len(token) * math.log2(64) >= 128
+
+    create_events = [e for e in ph_events.events if e['event'] == 'share_link_created']
+    assert len(create_events) == 1
+    assert create_events[0]['distinct_id'] == str(uid)
+
+    again = owner.post(f'/transcription/{tid}/share').get_json()
+    assert again['token'] == token
+    assert len([e for e in ph_events.events if e['event'] == 'share_link_created']) == 1
+
+    anon = A.app.test_client()
+    view = anon.get(f'/t/{token}')
+    assert view.status_code == 200
+    html = view.data.decode()
+    assert 'Morning briefing' in html
+    assert 'Forklaringssaften' in html
+    assert 'Hello from the shared transcript.' in html
+    assert 'name="robots" content="noindex"' in html
+    assert view.headers.get('X-Robots-Tag') == 'noindex'
+    assert view.headers.get('Referrer-Policy') == 'no-referrer'
+    assert 'no-store' in view.headers.get('Cache-Control', '')
+    assert 'rel="canonical"' in html
+    assert f'/t/{token}' in html
+    assert 'property="og:title"' in html
+    assert 'og:description' in html
+    assert 'twitter:title' in html
+    assert 'utm_source=share' in html
+    assert 'Transcribe any podcast episode free' in html
+    assert 'share-owner@test.com' not in html
+    # (No bare str(uid) check: a 1-digit id collides with token/CSS digits.)
+    assert 'share-other@test.com' not in html
+    viewed = [e for e in ph_events.events if e['event'] == 'shared_transcript_viewed']
+    assert len(viewed) == 1
+    assert viewed[0]['distinct_id'].startswith('anon:')
+    assert viewed[0]['properties'].get('$process_person_profile') is False
+
+    txt = anon.get(f'/t/{token}/download/txt')
+    assert txt.status_code == 200
+    assert b'Hello from the shared transcript.' in txt.data
+    assert txt.headers.get('X-Robots-Tag') == 'noindex'
+    srt = anon.get(f'/t/{token}/download/srt')
+    assert srt.status_code == 200
+
+    sitemap = anon.get('/sitemap.xml').data.decode()
+    assert '/t/' not in sitemap
+    assert token not in sitemap
+
+    revoked = owner.post(f'/transcription/{tid}/share/revoke')
+    assert revoked.status_code == 200
+    assert revoked.get_json()['shared'] is False
+    assert anon.get(f'/t/{token}').status_code == 404
+    assert anon.get(f'/t/{token}/download/txt').status_code == 404
+    assert any(e['event'] == 'share_link_revoked' for e in ph_events.events)
+
+    tid2 = _share_task(uid, 'share-other-task')
+    owner.post(f'/transcription/{tid2}/share')
+    assert other_client.post(
+        f'/transcription/{tid2}/share/revoke').status_code == 404
+
+
+def test_share_marks_partial_preview_when_metadata_present(trial_on):
+    uid = _make_user('share-partial@test.com')
+    tid = _share_task(
+        uid, 'share-partial',
+        partial_meta='{"partial_seconds": 600, "episode_seconds": 3600}',
+    )
+    client = _login(uid)
+    token = client.post(f'/transcription/{tid}/share').get_json()['token']
+    html = A.app.test_client().get(f'/t/{token}').data.decode()
+    assert 'Free preview' in html
+    assert 'first 10 minutes' in html
+    assert 'of about 60' in html
+    txt = A.app.test_client().get(f'/t/{token}/download/txt').data.decode()
+    assert txt.startswith('Free preview: first 10 minutes of 60 minutes.')
+
+
+def test_share_create_rate_limited_per_user(trial_on, monkeypatch):
+    monkeypatch.setattr(A, 'SHARE_CREATE_MAX_PER_USER', 2)
+    A._share_create_attempts.clear()
+    uid = _make_user('share-rl@test.com')
+    client = _login(uid)
+    for i in range(2):
+        tid = _share_task(uid, f'share-rl-{i}')
+        assert client.post(f'/transcription/{tid}/share').status_code == 200
+    tid3 = _share_task(uid, 'share-rl-2')
+    resp = client.post(f'/transcription/{tid3}/share')
+    assert resp.status_code == 429
+
+
+def test_share_incomplete_task_cannot_be_shared(trial_on):
+    from models import db, TranscriptionTask
+    uid = _make_user('share-incomplete@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='share-running', user_id=uid, episode_title='x',
+            status='transcribing', transcript_text='partial',
+        ))
+        db.session.commit()
+    client = _login(uid)
+    assert client.post('/transcription/share-running/share').status_code == 400
+    assert A.app.test_client().get('/t/no-such-token').status_code == 404
+
+
+def test_share_path_exempt_from_canonical_host_redirect(monkeypatch, trial_on):
+    uid = _make_user('share-host@test.com')
+    tid = _share_task(uid, 'share-host')
+    token = _login(uid).post(f'/transcription/{tid}/share').get_json()['token']
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    client = A.app.test_client()
+    resp = client.get(f'/t/{token}', headers={'Host': 'www.podskrift.com'})
+    assert resp.status_code == 200
+    assert b'Morning briefing' in resp.data
+    # A non-exempt path still redirects off the non-canonical host.
+    bounced = client.get('/pricing', headers={'Host': 'www.podskrift.com'})
+    assert bounced.status_code == 301
+    assert bounced.headers['Location'].startswith('https://podskrift.com/')
+
+
+def test_signup_from_share_attributes_utm_source(ph_events, trial_on):
+    A._register_attempts.clear()
+    client = A.app.test_client()
+    client.get('/register?utm_source=share')
+    resp = client.post('/register', data={
+        'email': 'fromshare@example.com',
+        'password': 'password123',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    events = [e for e in ph_events.events if e['event'] == 'user_signed_up']
+    assert len(events) == 1
+    assert events[0]['properties'].get('utm_source') == 'share'
+
+
+def test_mint_share_token_is_unguessable():
+    a, b = A.mint_share_token(), A.mint_share_token()
+    assert a != b
+    assert len(a) >= 22
+    assert re.fullmatch(r'[A-Za-z0-9_-]+', a)
+
+
+def test_transcript_shares_migration_on_production_schema_and_fresh(trial_on):
+    """Additive migration: current prod schema (no share table) and a fresh DB.
+
+    Indexes that mention a column are created only after that column exists —
+    the regression that crashed boot when an index preceded its ALTER.
+    """
+    with A.app.app_context():
+        # --- Current production schema: everything except transcript_shares ---
+        A.db.session.execute(A.text('DROP TABLE IF EXISTS transcript_shares'))
+        A.db.session.commit()
+        A.db.session.remove()
+        A.db.engine.dispose()
+
+        tables = {r[0] for r in A.db.session.execute(A.text(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )).fetchall()}
+        assert 'transcript_shares' not in tables
+        assert 'transcription_tasks' in tables
+        assert 'users' in tables
+
+        A.ensure_transcript_shares_table()
+        A.ensure_transcript_shares_table()  # idempotent
+
+        cols = A._live_columns('transcript_shares')
+        for required in ('id', 'token', 'task_id', 'user_id', 'created_at',
+                         'revoked_at'):
+            assert required in cols, required
+        idx = {r[0] for r in A.db.session.execute(A.text(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND tbl_name='transcript_shares'"
+        )).fetchall()}
+        assert 'ix_transcript_shares_token' in idx or any(
+            'token' in n for n in idx)
+        assert 'ix_transcript_shares_user_id' in idx
+
+        # Legacy table missing revoked_at: ALTER then index (never index first).
+        A.db.session.execute(A.text('DROP TABLE IF EXISTS transcript_shares'))
+        A.db.session.execute(A.text("""
+            CREATE TABLE transcript_shares (
+                id INTEGER NOT NULL PRIMARY KEY,
+                token VARCHAR(64) NOT NULL UNIQUE,
+                task_id VARCHAR(36) NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                created_at DATETIME
+            )
+        """))
+        A.db.session.commit()
+        A.db.session.remove()
+        A.db.engine.dispose()
+        assert 'revoked_at' not in A._live_columns('transcript_shares')
+        A.ensure_transcript_shares_table()
+        assert 'revoked_at' in A._live_columns('transcript_shares')
+
+        # --- Fresh DB path: create_all + ensure ---
+        A.db.session.execute(A.text('DROP TABLE IF EXISTS transcript_shares'))
+        A.db.session.commit()
+        A.db.session.remove()
+        A.db.engine.dispose()
+        A.db.create_all()
+        A.ensure_transcript_shares_table()
+        assert 'token' in A._live_columns('transcript_shares')
+        assert 'revoked_at' in A._live_columns('transcript_shares')
+
+
+def test_result_page_exposes_share_controls(trial_on):
+    uid = _make_user('share-ui@test.com')
+    tid = _share_task(uid, 'share-ui')
+    body = _login(uid).get(f'/transcription/{tid}').data.decode()
+    assert 'id="shareBtn"' in body
+    assert '/share' in body
+    assert 'shareRevokeBtn' in body
+
+
+# --------------------------------------------------------------------------
+# Partial free-trial preview (long episode → first N minutes)
+# --------------------------------------------------------------------------
+
+def test_partial_preview_trims_and_charges_remaining_trial(
+        monkeypatch, trial_on, tmp_path, ph_events):
+    """Enqueue reserves N, worker trims to N, Whisper sees only the preview."""
+    import shutil
+    import subprocess
+    import types
+    from models import db, TranscriptionTask
+
+    uid = _make_user('partial-trim@test.com', limit=60 * 60, used=0)
+    audio = tmp_path / 'long.mp3'
+    subprocess.run(
+        ['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=f=440:d=3',
+         '-ac', '1', str(audio)],
+        check=True, capture_output=True)
+
+    probes = {'n': 0}
+    trimmed = []
+
+    def probe(f):
+        probes['n'] += 1
+        return 90 * 60.0 if probes['n'] == 1 else 60 * 60.0
+
+    def fake_trim(path, seconds):
+        trimmed.append(int(seconds))
+        return path
+
+    def fake_download(url, path, task_id):
+        shutil.copy(str(audio), path)
+
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
+    monkeypatch.setattr(A, 'probe_audio_duration', probe)
+    monkeypatch.setattr(A, 'trim_audio_file', fake_trim)
+    monkeypatch.setattr(A, 'prepare_audio_for_whisper',
+                        lambda f, **kw: [str(audio)])
+    monkeypatch.setattr(A, '_transcribe_chunks',
+                        lambda *a, **kw: ('preview text', []))
+    monkeypatch.setattr(A, 'download_audio', fake_download)
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: target and target()))
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+
+    with A.app.app_context():
+        user = db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user,
+            {'title': 'Long', 'audio_url': 'https://example.com/long.mp3',
+             'duration_min': 90},
+            source='web')
+    assert status == 200, payload
+    assert _used(uid) == 60 * 60
+    assert trimmed == [60 * 60]
+
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, payload['task_id'])
+        assert task.status == 'completed', task.error_message
+        assert A.task_is_partial(task)
+        assert task.transcript_text == 'preview text'
+        assert task.trial_seconds_charged == 60 * 60
+
+    started = [e for e in ph_events.events if e['event'] == 'transcript_started']
+    done = [e for e in ph_events.events if e['event'] == 'transcript_completed']
+    assert started and started[0]['properties'].get('partial') is True
+    assert started[0]['properties']['partial_minutes'] == 60
+    assert started[0]['properties']['episode_minutes'] == 90
+    assert done and done[0]['properties'].get('partial') is True
+
+
+def test_partial_preview_not_used_when_paid_covers_full(monkeypatch, trial_on):
+    uid = _make_user('partial-paid@test.com', limit=60 * 60, used=0)
+    _set_paid(uid, 90 * 60)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/paid-full.mp3',
+        'episode_title': 'Covered',
+        'duration_min': '90',
+    })
+    assert resp.status_code == 200, resp.get_json()
+    from models import db, TranscriptionTask
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, resp.get_json()['task_id'])
+        assert not A.task_is_partial(task)
+        # Trial first, then paid for the remainder.
+        assert task.trial_seconds_charged == 60 * 60
+        assert task.paid_seconds_charged == 30 * 60
+
+
+def test_partial_preview_not_used_for_own_key(monkeypatch, trial_on):
+    uid = _make_user('partial-byok@test.com', key='sk-' + 'e' * 40, limit=60 * 60)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/byok.mp3',
+        'episode_title': 'Own key',
+        'duration_min': '90',
+    })
+    assert resp.status_code == 200, resp.get_json()
+    from models import db, TranscriptionTask
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, resp.get_json()['task_id'])
+        assert not A.task_is_partial(task)
+        assert task.trial_seconds_charged is None
+    assert _used(uid) == 0
+
+
+def test_partial_preview_respects_global_pool(monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
+    # Seal the global pool at whatever the shared test DB has already used.
+    with A.app.app_context():
+        monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', A.trial_global_used_seconds())
+    uid_b = _make_user('partial-global-b@test.com', limit=60 * 60, used=0)
+    resp = _post_start(monkeypatch, uid_b, {
+        'audio_url': 'https://example.com/global-block.mp3',
+        'episode_title': 'Blocked',
+        'duration_min': '90',
+    })
+    assert resp.status_code == 402
+    assert resp.get_json().get('paywall_reason') == 'global_cap'
+    assert _used(uid_b) == 0
+
+
+def test_completed_partial_allows_full_rerun_after_purchase(monkeypatch, trial_on):
+    """Duplicate guard must not block upgrading a completed partial to full."""
+    import threading as _t
+    from models import db, TranscriptionTask
+
+    monkeypatch.setattr(A, 'MAX_CONCURRENT_TRANSCRIPTIONS', 2)
+    monkeypatch.setattr(A, '_transcription_slots', _t.BoundedSemaphore(2))
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
+
+    uid = _make_user('partial-upgrade@test.com', limit=60 * 60, used=0)
+    audio = 'https://example.com/upgrade-ep.mp3'
+    first = _post_start(monkeypatch, uid, {
+        'audio_url': audio,
+        'episode_title': 'Preview',
+        'duration_min': '90',
+    })
+    assert first.status_code == 200, first.get_json()
+    partial_id = first.get_json()['task_id']
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, partial_id)
+        task.status = 'completed'
+        task.phase = 'completed'
+        task.transcript_text = 'preview'
+        task.trial_settled = True
+        db.session.commit()
+        assert A.task_is_partial(task)
+
+    _set_paid(uid, 90 * 60)
+    second = _post_start(monkeypatch, uid, {
+        'audio_url': audio,
+        'episode_title': 'Full',
+        'duration_min': '90',
+    })
+    assert second.status_code == 200, second.get_json()
+    body = second.get_json()
+    assert body.get('existing') is not True
+    assert body['task_id'] != partial_id
+    with A.app.app_context():
+        full = db.session.get(TranscriptionTask, body['task_id'])
+        assert not A.task_is_partial(full)
+        # Trial already spent on the preview; full run uses paid.
+        assert (full.trial_seconds_charged or 0) == 0
+        assert full.paid_seconds_charged == 90 * 60
+
+
+def test_partial_download_and_status_include_preview_note(monkeypatch, trial_on):
+    from models import db, TranscriptionTask
+
+    uid = _make_user('partial-dl@test.com', limit=60 * 60)
+    with A.app.app_context():
+        task = TranscriptionTask(
+            id='partial-dl-1',
+            user_id=uid,
+            episode_title='Preview Ep',
+            status='completed',
+            phase='completed',
+            transcript_text='Hello world',
+            segments_json='[{"start":0,"end":1,"text":"Hello world"}]',
+            source_audio_url='https://example.com/p.mp3',
+            trial_seconds_charged=60 * 60,
+            partial_meta=A.encode_partial_task_meta(60 * 60, 90 * 60),
+        )
+        db.session.add(task)
+        db.session.commit()
+
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+
+    status = client.get('/status/partial-dl-1').get_json()
+    assert status['partial'] is True
+    assert status['partial_minutes'] == 60
+    assert status['episode_minutes'] == 90
+    assert 'first 60 minutes of 90 minutes' in status['partial_note']
+    assert status['finish']['audio_url'] == 'https://example.com/p.mp3'
+    assert 'error' not in status
+    assert status.get('error_message') is None
+
+    txt = client.get('/download/partial-dl-1/txt')
+    assert txt.status_code == 200
+    body = txt.data.decode()
+    assert body.startswith('Free preview: first 60 minutes of 90 minutes.')
+    assert 'Hello world' in body
+
+    srt = client.get('/download/partial-dl-1/srt')
+    assert srt.status_code == 200
+    assert 'Free preview: first 60 minutes of 90 minutes.' in srt.data.decode()
+
+
+def test_partial_preview_refund_on_failure_settles_once(
+        monkeypatch, trial_on, ph_events):
+    """Failed partials go through fail_task_and_refund; reservation settles once."""
+    import types
+    from models import db, TranscriptionTask
+
+    uid = _make_user('partial-refund@test.com', limit=60 * 60, used=0)
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
+    monkeypatch.setattr(A, 'download_audio', lambda *a, **kw: None)
+
+    def boom(*a, **kw):
+        raise RuntimeError('whisper down')
+
+    monkeypatch.setattr(A, 'transcribe_audio', boom)
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: target and target()))
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+
+    with A.app.app_context():
+        user = db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user,
+            {'title': 'Fail', 'audio_url': 'https://example.com/fail.mp3',
+             'duration_min': 90},
+            source='web')
+    assert status == 200, payload
+    assert _used(uid) == 0  # full refund: nothing reached Whisper
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, payload['task_id'])
+        assert task.status == 'error'
+        assert task.trial_settled in (True, 1)
+        assert A.task_is_partial(task)  # meta survives on the dedicated column
+        assert task.error_message == 'whisper down'
+        # Second settle is a no-op (exactly once).
+        assert A.fail_task_and_refund(task.id, 'again') == 0
+        assert A.trial_refund_task(task) == 0
+    assert _used(uid) == 0
+    failed = [e for e in ph_events.events if e['event'] == 'transcript_failed']
+    assert len(failed) == 1
+    assert failed[0]['properties']['reason'] == 'other'
+
+
+def test_homepage_mentions_long_episode_preview(trial_on):
+    home = A.app.test_client().get('/').data.decode()
+    assert 'longer episodes' in home.lower() or 'free preview' in home.lower()
+    answers = dict(A.faq_entries())
+    free = answers['Is it free?']
+    assert 'preview' in free.lower()
+    pricing = A.app.test_client().get('/pricing').data.decode()
+    assert 'preview' in pricing.lower()
+
+
+def test_partial_meta_column_has_guarded_migration():
+    """partial_meta is additive TEXT via TASK_COLUMN_MIGRATIONS (no index)."""
+    from models import TASK_COLUMN_MIGRATIONS, TranscriptionTask
+    assert 'partial_meta' in TASK_COLUMN_MIGRATIONS
+    assert TASK_COLUMN_MIGRATIONS['partial_meta'] == 'TEXT'
+    assert hasattr(TranscriptionTask, 'partial_meta')
+
+
+def test_partial_meta_migration_on_production_shaped_schema(tmp_path):
+    """ALTER ADD COLUMN works on a DB that looks like current production schema."""
+    import sqlite3
+    from sqlalchemy import create_engine, text as sa_text
+    from sqlalchemy.exc import OperationalError
+    from models import TASK_COLUMN_MIGRATIONS
+
+    db_path = tmp_path / 'prod-shaped.db'
+    conn = sqlite3.connect(str(db_path))
+    # Minimal pre-partial_meta transcription_tasks shape (columns that exist
+    # in production before this PR — no partial_meta).
+    conn.execute('''
+        CREATE TABLE transcription_tasks (
+            id VARCHAR(36) PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            episode_title VARCHAR(512) NOT NULL,
+            rss_url VARCHAR(1024),
+            status VARCHAR(20) NOT NULL,
+            progress INTEGER NOT NULL DEFAULT 0,
+            download_progress INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            transcript_text TEXT,
+            segments_json TEXT,
+            language VARCHAR(10),
+            audio_duration FLOAT,
+            transcription_time FLOAT,
+            started_at DATETIME,
+            completed_at DATETIME,
+            podcast_name VARCHAR(512),
+            artwork_url VARCHAR(1024),
+            episode_published VARCHAR(128),
+            source_audio_url VARCHAR(1024),
+            phase VARCHAR(20),
+            phase_started_at DATETIME,
+            chunk_index INTEGER,
+            chunk_total INTEGER,
+            bytes_downloaded BIGINT,
+            bytes_total BIGINT,
+            heartbeat_at DATETIME,
+            trial_seconds_charged INTEGER,
+            paid_seconds_charged INTEGER,
+            trial_settled BOOLEAN NOT NULL DEFAULT 0
+        )
+    ''')
+    conn.commit()
+    cols_before = {row[1] for row in conn.execute('PRAGMA table_info(transcription_tasks)')}
+    assert 'partial_meta' not in cols_before
+    conn.close()
+
+    uri = f'sqlite:///{db_path}'
+    engine = create_engine(uri)
+    with engine.begin() as bind:
+        existing = {row[1] for row in bind.execute(
+            sa_text('PRAGMA table_info(transcription_tasks)')).fetchall()}
+        assert 'partial_meta' not in existing
+        for column, ddl_type in TASK_COLUMN_MIGRATIONS.items():
+            if column in existing:
+                continue
+            bind.execute(sa_text(
+                f'ALTER TABLE transcription_tasks ADD COLUMN {column} {ddl_type}'
+            ))
+        cols_after = {row[1] for row in bind.execute(
+            sa_text('PRAGMA table_info(transcription_tasks)')).fetchall()}
+    assert 'partial_meta' in cols_after
+
+    # Re-running ADD must be tolerated (duplicate column) — same as
+    # apply_column_migrations' guarded race handling.
+    with engine.begin() as bind:
+        try:
+            bind.execute(sa_text(
+                'ALTER TABLE transcription_tasks ADD COLUMN partial_meta TEXT'))
+            raised = False
+        except OperationalError as exc:
+            raised = True
+            assert 'duplicate column name' in str(exc).lower()
+    engine.dispose()
+    assert raised is True
+
+
+def test_completed_partial_not_shown_or_counted_as_failure(
+        monkeypatch, trial_on, ph_events):
+    """History, API, status, and metrics treat a completed partial as success."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('partial-not-fail@test.com', limit=60 * 60)
+    with A.app.app_context():
+        task = TranscriptionTask(
+            id='partial-ok-1',
+            user_id=uid,
+            episode_title='Preview Not Error',
+            status='completed',
+            phase='completed',
+            transcript_text='preview body',
+            completed_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc),
+            audio_duration=60 * 60,
+            trial_seconds_charged=60 * 60,
+            trial_settled=False,
+            partial_meta=A.encode_partial_task_meta(60 * 60, 120 * 60),
+            error_message=None,
+            source_audio_url='https://example.com/ok.mp3',
+        )
+        db.session.add(task)
+        db.session.commit()
+
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+
+    # History lists completed only — partial appears as a normal transcript.
+    hist = client.get('/history').data.decode()
+    assert 'Preview Not Error' in hist
+    assert 'error' not in hist.lower() or 'No transcriptions' not in hist
+
+    status = client.get('/status/partial-ok-1').get_json()
+    assert status['status'] == 'completed'
+    assert 'error' not in status
+    assert status.get('partial') is True
+
+    # Agent/API payload exposes error_message only when status == 'error'.
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'partial-ok-1')
+        payload = A._agent_episode_payload(task)
+        assert payload['transcript_status'] == 'ready'
+        assert payload['error_message'] is None
+        assert payload['task_status'] == 'completed'
+
+    # Ops metrics SQL counts failures by status, not by partial_meta / error_message.
+    import sqlite3
+    uri = A.app.config['SQLALCHEMY_DATABASE_URI']
+    assert uri.startswith('sqlite:///')
+    db_file = uri.replace('sqlite:///', '', 1)
+    conn = sqlite3.connect(db_file)
+    errors = conn.execute(
+        "SELECT COUNT(*) FROM transcription_tasks "
+        "WHERE status IN ('error', 'failed') AND id = 'partial-ok-1'"
+    ).fetchone()[0]
+    completed = conn.execute(
+        "SELECT COUNT(*) FROM transcription_tasks "
+        "WHERE status = 'completed' AND id = 'partial-ok-1'"
+    ).fetchone()[0]
+    conn.close()
+    assert errors == 0
+    assert completed == 1
+
+    # No transcript_failed analytics for a successful partial.
+    assert not any(e['event'] == 'transcript_failed' for e in ph_events.events)

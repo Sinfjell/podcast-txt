@@ -9,9 +9,13 @@
         <h5>Add Feed</h5>
     </div>
     <div class="card-body">
-        <form method="POST" action="{{ url_for('add_feed') }}" style="display: flex; gap: 8px; flex-wrap: wrap;">
+        <form method="POST" action="{{ url_for('add_feed') }}" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
             <input type="text" class="form-input" name="name" placeholder="Name" required style="flex: 1; min-width: 120px;">
             <input type="url" class="form-input" name="rss_url" placeholder="RSS feed URL" required style="flex: 2; min-width: 200px;">
+            <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); white-space: nowrap;">
+                <input type="checkbox" name="email_new_episodes" value="1" checked>
+                Email me when new episodes come out
+            </label>
             <button type="submit" class="btn btn-primary">Save</button>
         </form>
     </div>
@@ -28,6 +32,15 @@
             <div class="list-item-text">
                 <div class="list-item-title">{{ feed.name }}</div>
                 <div class="list-item-sub">{{ feed.rss_url }}</div>
+                <form method="POST" action="{{ url_for('toggle_feed_email_alerts', feed_id=feed.id) }}"
+                      style="margin-top: 8px;">
+                    <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted);">
+                        <input type="checkbox" name="email_new_episodes" value="1"
+                               {% if feed.email_new_episodes %}checked{% endif %}
+                               onchange="this.form.submit()">
+                        Email me when new episodes come out
+                    </label>
+                </form>
             </div>
             <div class="list-item-actions">
                 <a href="{{ url_for('use_feed', feed_id=feed.id) }}" class="btn btn-sm btn-accent">Use</a>
