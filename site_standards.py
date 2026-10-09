@@ -96,14 +96,21 @@ def _posthog_origins():
 
 def sentry_security_endpoint(dsn=None):
     """Sentry's CSP/Reporting endpoint for the configured DSN, or ''."""
+    from runtime_env import is_production, resolve_environment
+    explicit = dsn is not None
     dsn = (dsn if dsn is not None else os.getenv('SENTRY_DSN', '')).strip()
     if not dsn:
+        return ''
+    # Env-configured DSN only reports from production; explicit dsn= keeps
+    # unit tests and local probes working.
+    if not explicit and not is_production():
         return ''
     parsed = urlparse(dsn)
     project = parsed.path.strip('/').split('/')[-1] if parsed.path else ''
     if not (parsed.scheme and parsed.hostname and parsed.username and project):
         return ''
-    env = os.getenv('SENTRY_ENVIRONMENT', 'production')
+    env = (os.getenv('SENTRY_ENVIRONMENT', '').strip() or resolve_environment()
+           or 'production')
     host = parsed.hostname + (f':{parsed.port}' if parsed.port else '')
     return (f'{parsed.scheme}://{host}/api/{project}/security/'
             f'?sentry_key={parsed.username}&sentry_environment={env}')

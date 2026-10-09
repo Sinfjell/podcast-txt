@@ -1,6 +1,6 @@
 """Error reporting to Sentry -- light coverage, not APM.
 
-Off unless SENTRY_DSN is set, and it is only set on the production server.
+On only in production when SENTRY_DSN is set (see runtime_env.is_production).
 What gets reported:
 
 - uncaught exceptions in requests (the Flask integration),
@@ -18,6 +18,8 @@ in an event passes through the redactor before it is sent.
 import logging
 import os
 import re
+
+from runtime_env import is_production, release_sha, resolve_environment
 
 # The documented deploy is `git pull && systemctl restart`, with no pip step.
 # A hard import would turn that deploy into an outage the first time, so a
@@ -86,11 +88,17 @@ def scrub_breadcrumb(crumb, hint):
 
 
 def init_sentry(**overrides):
-    """Start the SDK if SENTRY_DSN is set. Returns whether it is on.
+    """Start the SDK if production and SENTRY_DSN is set. Returns whether on.
 
     `overrides` exists for the test suite, which swaps in a capturing transport.
+    An explicit ``dsn`` in overrides still initialises (scrubbing tests) even
+    outside production — those transports never hit the network.
     """
-    dsn = overrides.pop('dsn', None) or os.getenv('SENTRY_DSN', '').strip()
+    explicit_dsn = overrides.pop('dsn', None)
+    if not is_production() and explicit_dsn is None:
+        return False
+    dsn = (explicit_dsn if explicit_dsn is not None
+           else os.getenv('SENTRY_DSN', '').strip())
     if not dsn:
         return False
     if sentry_sdk is None:
@@ -98,9 +106,14 @@ def init_sentry(**overrides):
             'SENTRY_DSN is set but sentry-sdk is not installed; errors are not '
             'being reported. Run pip install -r requirements.txt.')
         return False
+    environment = (
+        os.getenv('SENTRY_ENVIRONMENT', '').strip()
+        or resolve_environment()
+    )
+    release = os.getenv('SENTRY_RELEASE', '').strip() or release_sha() or None
     options = dict(
         dsn=dsn,
-        environment=os.getenv('SENTRY_ENVIRONMENT', 'production'),
+        environment=environment,
         integrations=[FlaskIntegration()],
         # Errors only. Performance tracing is out of scope and costs quota.
         traces_sample_rate=0.0,
@@ -113,6 +126,8 @@ def init_sentry(**overrides):
         before_send=scrub_event,
         before_breadcrumb=scrub_breadcrumb,
     )
+    if release:
+        options['release'] = release
     options.update(overrides)
     sentry_sdk.init(**options)
     return True

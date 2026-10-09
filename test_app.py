@@ -5034,6 +5034,16 @@ def test_reporting_is_off_without_a_dsn(monkeypatch):
     assert observability.init_sentry() is False
 
 
+def test_sentry_stays_uninitialised_outside_production_even_with_dsn(monkeypatch):
+    import observability
+    import runtime_env
+
+    monkeypatch.delenv('PODSKRIFT_ENV', raising=False)
+    monkeypatch.setenv('SENTRY_DSN', 'https://public@sentry.invalid/99')
+    assert runtime_env.is_production() is False
+    assert observability.init_sentry() is False
+
+
 def test_an_openai_error_never_ships_the_key_it_echoed(sentry_events):
     """A password pasted into the key field matches no key pattern, and the
     401 wording is OpenAI's to change -- so the message itself has to go."""
@@ -6413,7 +6423,96 @@ def test_posthog_stays_off_without_a_key():
     assert 'phc_' not in body
 
 
+def test_pytest_never_initialises_posthog_or_sentry_against_live_projects(
+        monkeypatch):
+    """Regression: sandboxes/CI with a copied .env must not hit prod PH/Sentry."""
+    import analytics
+    import observability
+    import runtime_env
+
+    monkeypatch.delenv('PODSKRIFT_ENV', raising=False)
+    monkeypatch.setenv('POSTHOG_KEY', 'phc_would_have_hit_production')
+    monkeypatch.setenv('SENTRY_DSN', 'https://public@sentry.invalid/1')
+    analytics._client = None
+
+    assert runtime_env.is_production() is False
+    assert analytics.init_posthog() is False
+    assert analytics.get_client() is None
+    assert analytics.posthog_key() == ''
+    analytics.capture('transcript_failed', 1, {'reason': 'network'})
+    assert analytics._client is False
+
+    assert observability.init_sentry() is False
+    body = A.app.test_client().get('/').data.decode()
+    assert 'posthog.init' not in body
+    assert 'phc_would_have_hit_production' not in body
+
+
+def test_production_markers_match_live_host_layout(monkeypatch):
+    """Prod needs no new .env key: path + PUBLIC_BASE_URL already identify it."""
+    import runtime_env
+
+    monkeypatch.delenv('PODSKRIFT_ENV', raising=False)
+    for key in ('CI', 'GITHUB_ACTIONS', 'CURSOR_AGENT', 'CURSOR_CLOUD_AGENT',
+                'PYTEST_CURRENT_TEST', 'AGENT_TRANSCRIPTS',
+                'CURSOR_CONVERSATION_ID', 'CURSOR_TRACE_ID', 'CURSOR_REQUEST_ID'):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv(
+        'DATABASE_URL',
+        'sqlite:////var/www/vhosts/podskrift.nettsmed.dev/app/data/podcast.db',
+    )
+    monkeypatch.setenv('PUBLIC_BASE_URL', 'https://podskrift.com')
+    assert runtime_env._production_markers() is True
+    assert runtime_env.is_production() is True
+    assert runtime_env.resolve_environment() == 'production'
+
+
+def test_podskrift_env_override_wins(monkeypatch):
+    import runtime_env
+
+    monkeypatch.setenv('PODSKRIFT_ENV', 'production')
+    monkeypatch.setenv('CI', 'true')
+    monkeypatch.setenv(
+        'DATABASE_URL',
+        'sqlite:////tmp/not-prod.db',
+    )
+    assert runtime_env.is_production() is True
+
+    monkeypatch.setenv('PODSKRIFT_ENV', 'dev')
+    monkeypatch.setenv(
+        'DATABASE_URL',
+        'sqlite:////var/www/vhosts/podskrift.nettsmed.dev/app/data/podcast.db',
+    )
+    monkeypatch.setenv('PUBLIC_BASE_URL', 'https://podskrift.com')
+    assert runtime_env.is_production() is False
+    assert runtime_env.resolve_environment() == 'dev'
+
+
+def test_production_capture_tags_environment_and_release(monkeypatch):
+    import analytics
+    import runtime_env
+
+    monkeypatch.setenv('PODSKRIFT_ENV', 'production')
+    monkeypatch.setenv('PODSKRIFT_RELEASE', 'deadbeef')
+    runtime_env.clear_release_cache()
+    fake = _FakePosthog()
+    monkeypatch.setattr(analytics, '_client', fake)
+    analytics.capture('user_signed_up', 42)
+    assert fake.events == [{
+        'event': 'user_signed_up',
+        'distinct_id': '42',
+        'properties': {
+            'app': 'podskrift',
+            'environment': 'production',
+            'release': 'deadbeef',
+        },
+        'uuid': None,
+    }]
+    runtime_env.clear_release_cache()
+
+
 def test_posthog_snippet_renders_when_key_is_set(monkeypatch):
+    monkeypatch.setenv('PODSKRIFT_ENV', 'production')
     monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
     monkeypatch.setenv('POSTHOG_HOST', 'https://eu.i.posthog.com')
     body = A.app.test_client().get('/').data.decode()
@@ -6456,6 +6555,7 @@ def test_posthog_snippet_renders_when_key_is_set(monkeypatch):
 
 def test_cookie_consent_banner_mentions_cookieless_on_decline(monkeypatch):
     """Decline copy must not imply zero analytics — cookieless stats remain."""
+    monkeypatch.setenv('PODSKRIFT_ENV', 'production')
     monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
     body = A.app.test_client().get('/').data.decode()
     assert 'cookie-free usage statistics' in body
@@ -6485,6 +6585,7 @@ def test_cookie_consent_js_is_served_from_static():
 
 def test_cookie_consent_absent_on_admin_even_with_posthog(monkeypatch):
     """Admin pages keep PostHog off; no consent banner either."""
+    monkeypatch.setenv('PODSKRIFT_ENV', 'production')
     monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
     monkeypatch.setenv('ADMIN_EMAILS', 'admin-consent@test.com')
     client, _uid = _admin_login('admin-consent@test.com')
@@ -7124,6 +7225,7 @@ def test_api_transcriptions_are_labelled_api(ph_events, agent_write):
 
 
 def test_search_emits_podcast_searched_with_query_and_input_type(monkeypatch):
+    monkeypatch.setenv('PODSKRIFT_ENV', 'production')
     monkeypatch.setenv('POSTHOG_KEY', 'phc_test_not_real')
     body = A.app.test_client().get('/').data.decode()
     assert "capture('podcast_searched'" in body
@@ -9213,6 +9315,7 @@ def test_nav_shows_minutes_pill_and_buy_when_stripe_on(stripe_on):
 
 def test_buy_modal_tracks_open_and_close_not_header_pill_click(stripe_on, monkeypatch):
     """Opening the modal is buy_modal_opened; buy_clicked is form-submit only."""
+    monkeypatch.setenv('PODSKRIFT_ENV', 'production')
     monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
     uid = _make_user('buymodaltrack@test.com', limit=180 * 60, used=60 * 60)
     body = _login(uid).get('/').data.decode()
@@ -13083,6 +13186,7 @@ def test_deploy_docs_do_not_reference_new_episode_poller():
 
 def test_cookie_banner_copy_is_generic_and_privacy_names_processor(monkeypatch):
     import re as _re
+    monkeypatch.setenv('PODSKRIFT_ENV', 'production')
     monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
     body = A.app.test_client().get('/', headers={'Accept': 'text/html'}).data.decode()
     m = _re.search(r'id="cookieConsentDesc">(.*?)</p>', body, _re.S)

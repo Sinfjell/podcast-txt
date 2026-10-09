@@ -69,6 +69,7 @@ def test_sentry_security_endpoint_from_dsn(monkeypatch):
 
 
 def test_report_only_policy_reports_to_sentry_when_configured(client, monkeypatch):
+    monkeypatch.setenv('PODSKRIFT_ENV', 'production')
     monkeypatch.setenv('SENTRY_DSN', 'https://k@o1.ingest.de.sentry.io/42')
     h = client.get('/').headers
     assert 'report-uri https://o1.ingest.de.sentry.io/api/42/security/' in h['Content-Security-Policy-Report-Only']

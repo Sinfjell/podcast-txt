@@ -1,7 +1,8 @@
 """Product analytics via PostHog — funnel events; session replay is client-side.
 
-Off unless POSTHOG_KEY is set. Soft-imports the SDK so a deploy that skips
-`pip install` degrades rather than dies, matching observability.py.
+On only in production when POSTHOG_KEY is set (see runtime_env.is_production).
+Soft-imports the SDK so a deploy that skips `pip install` degrades rather
+than dies, matching observability.py.
 
 Never put email addresses, OpenAI API keys, passwords, or transcript text in
 event properties. distinct_id is the internal user id as a string.
@@ -22,6 +23,8 @@ without a prior consented checkout.
 import logging
 import os
 
+from runtime_env import is_production, release_sha, resolve_environment
+
 try:
     from posthog import Posthog
 except ImportError:  # pragma: no cover - exercised only on a stale venv
@@ -34,6 +37,13 @@ _client = None
 
 
 def posthog_key():
+    """Public project key for the browser snippet, or '' when analytics are off.
+
+    Empty outside production so templates never load the client SDK against
+    the live project from CI, pytest or sandboxes — even if POSTHOG_KEY is set.
+    """
+    if not is_production():
+        return ''
     return os.getenv('POSTHOG_KEY', '').strip()
 
 
@@ -42,12 +52,17 @@ def posthog_host():
 
 
 def init_posthog(**overrides):
-    """Start the SDK if POSTHOG_KEY is set. Returns whether it is on.
+    """Start the SDK if production and POSTHOG_KEY is set. Returns whether on.
 
     `overrides` exists for the test suite (swap in a fake client / force a key).
+    A forced ``project_api_key`` still requires production — tests inject a
+    fake via ``_client`` instead of talking to the network.
     """
     global _client
-    key = overrides.pop('project_api_key', None) or posthog_key()
+    if not is_production():
+        _client = False
+        return False
+    key = overrides.pop('project_api_key', None) or os.getenv('POSTHOG_KEY', '').strip()
     if not key:
         _client = False
         return False
@@ -74,6 +89,15 @@ def init_posthog(**overrides):
 def get_client():
     """Return the live client, initialising lazily, or None when disabled."""
     global _client
+    if not is_production():
+        # Refuse a leftover real SDK instance; test doubles on `_client` still work.
+        if _client is False or _client is None:
+            _client = False
+            return None
+        if Posthog is not None and isinstance(_client, Posthog):
+            _client = False
+            return None
+        return _client
     if _client is None:
         init_posthog()
     return None if _client is False else _client
@@ -84,7 +108,7 @@ def capture(event, distinct_id, properties=None, uuid=None):
 
     Callers must not pass email, keys, passwords, or transcript text.
     Optional `uuid` is passed through for idempotent dedupe when the SDK
-    supports it.
+    supports it. Production events carry ``environment`` and ``release``.
     """
     if not distinct_id:
         return
@@ -94,6 +118,11 @@ def capture(event, distinct_id, properties=None, uuid=None):
             return
         props = dict(properties or {})
         props['app'] = 'podskrift'
+        if is_production():
+            props.setdefault('environment', resolve_environment())
+            release = release_sha()
+            if release:
+                props.setdefault('release', release)
         kwargs = {
             'distinct_id': str(distinct_id),
             'properties': props,
