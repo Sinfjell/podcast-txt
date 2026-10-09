@@ -47,7 +47,7 @@ NOTION_VERSION = '2022-06-28'
 # Matches app.py TRIAL_MINUTES default when users.trial_seconds_limit is NULL.
 DEFAULT_TRIAL_MINUTES = 180
 # Matches app.py TRIAL_GLOBAL_MINUTES — lifetime ceiling across all accounts.
-DEFAULT_TRIAL_GLOBAL_MINUTES = 1800
+DEFAULT_TRIAL_GLOBAL_MINUTES = 6000
 # Warn (Notes + Sentry) when lifetime global trial usage crosses these ratios.
 TRIAL_GLOBAL_WARN_THRESHOLDS = (0.70, 0.90)
 

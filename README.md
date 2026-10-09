@@ -212,8 +212,9 @@ claims, which a caller controls.
 | Variable | Default | What it bounds |
 | --- | --- | --- |
 | `TRIAL_ENABLED` | `1` | Kill switch. `0` stops handing out the key. |
-| `TRIAL_MINUTES` | `180` | Free audio minutes per account (~$1.08 at Whisper rates). |
-| `TRIAL_GLOBAL_MINUTES` | `1800` | **Lifetime** minutes across all accounts (~$10.80). |
+| `NEW_USER_TRIAL_MINUTES` | `60` | Free minutes stamped on `trial_seconds_limit` at signup (~$0.36). |
+| `TRIAL_MINUTES` | `180` | Fallback when `trial_seconds_limit` is NULL (legacy accounts). |
+| `TRIAL_GLOBAL_MINUTES` | `6000` | **Lifetime** minutes across all accounts (~$36.00). |
 | `TRIAL_MAX_EPISODE_MINUTES` | same as `TRIAL_MINUTES` | Longest single episode the trial accepts. |
 | `TRIAL_UNKNOWN_ESTIMATE_MINUTES` | `30` | Reserved when a feed states no duration. |
 
@@ -223,13 +224,14 @@ before transcribing gives its reservation back, so the ceiling tracks the bill
 rather than the attempts. That is deliberate — the failure mode is "the trial
 stops working", never "the bill kept growing". When it is hit, trial users see
 that Podskrift has handed out all budgeted free minutes and are told to add
-their own OpenAI key; users with their own key are unaffected. At the defaults
-(~10 full 180-minute grants), raising the env var re-opens it.
+their own OpenAI key; users with their own key are unaffected. Raising the
+env var (or the code default) re-opens it. `GET /health` exposes a boolean
+`trial_available` (pool not exhausted) with no numbers.
 
-`TRIAL_MINUTES` is the default only. A per-account override lives in
-`users.trial_seconds_limit`; `NULL` means "use the default", so raising the env
-var lifts everyone who has no individual grant. There is no UI for it — set it
-with SQL:
+`NEW_USER_TRIAL_MINUTES` is applied only at registration. Existing rows keep
+their stored `trial_seconds_limit`; `NULL` means "use `TRIAL_MINUTES`", so
+raising that env var still lifts legacy accounts without an individual grant.
+There is no UI for per-account overrides — set them with SQL:
 
 ```sql
 UPDATE users SET trial_seconds_limit = 7200 WHERE email = 'someone@example.com';
@@ -286,9 +288,10 @@ OpenAI account as well — that one still holds if this code has a bug.
 ### Discoverability
 
 `/robots.txt`, `/llms.txt` and `/sitemap.xml` are generated, not static files.
-The trial length and the hourly rate in them come from `TRIAL_MINUTES` and the
-Whisper price constant, and the copy switches off with `trial_available()` — so
-the site never advertises a grant the app would refuse.
+The trial length advertised to new signups and the hourly rate in them come
+from `NEW_USER_TRIAL_MINUTES` and the Whisper price constant, and the copy
+switches off with `trial_available()` — so the site never advertises a grant
+the app would refuse.
 
 `robots.txt` names the assistants that actually send traffic (GPTBot,
 ChatGPT-User, ClaudeBot, PerplexityBot and friends). Each named group repeats

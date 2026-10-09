@@ -20,7 +20,9 @@ before merging, regardless of how many files the diff has.
   `threading.Lock` guards nothing. `trial_reserve()` is one conditional UPDATE
   and must stay one statement.
 - **Both caps hold:** per-account (`users.trial_seconds_limit`) and the global
-  lifetime ceiling (`TRIAL_GLOBAL_MINUTES`).
+  lifetime ceiling (`TRIAL_GLOBAL_MINUTES`, code default 6000). New signups get
+  `NEW_USER_TRIAL_MINUTES` (default 60) stamped on `trial_seconds_limit` at
+  registration; NULL limits still mean `TRIAL_MINUTES` (180).
 - **Refunds return only what was not spent.** Chunks already sent to Whisper are
   billed to us whatever happens next; `trial_refund_task()` is pro-rata on chunk
   progress and idempotent via a conditional UPDATE on the task.

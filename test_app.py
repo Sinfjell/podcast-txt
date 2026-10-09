@@ -3444,10 +3444,11 @@ def test_llms_txt_states_what_the_tool_is_for(trial_on):
     # in this file too, so a hardcoded figure in the prose above hid behind the
     # generated one in the FAQ. Every figure in the file has to agree.
     import re as _re
+    granted = A.NEW_USER_TRIAL_SECONDS // 60
     figures = {int(n) for n in _re.findall(r'(\d+) minutes of audio free', body)}
-    assert figures == {A.TRIAL_DEFAULT_SECONDS // 60}, (
+    assert figures == {granted}, (
         f'llms.txt quotes {sorted(figures)} free minutes; the configured grant is '
-        f'{A.TRIAL_DEFAULT_SECONDS // 60}'
+        f'{granted}'
     )
 
 
@@ -3623,7 +3624,7 @@ def test_no_page_quotes_a_trial_length_the_code_does_not_grant(trial_on):
     hardcoded "First 60 minutes free" in the hero."""
     import re as _re
     client = A.app.test_client()
-    granted = A.TRIAL_DEFAULT_SECONDS // 60
+    granted = A.NEW_USER_TRIAL_SECONDS // 60
     for path in ('/', '/llms.txt', '/docs/api'):
         text = client.get(path).data.decode()
         figures = {int(n) for n in _re.findall(r'(\d+)\s+(?:trial\s+)?minutes', text)}
@@ -3651,7 +3652,11 @@ def test_the_copy_does_not_promise_a_trial_that_is_switched_off(trial_on, monkey
     assert 'free trial' not in answers['Do I need an OpenAI API key?'].lower()
     assert 'free trial' not in answers['Is there an HTTP API?'].lower()
     docs = client.get('/docs/api').data.decode()
-    assert f'{A.TRIAL_DEFAULT_SECONDS // 60} minutes' not in docs
+    # Changelog toast may mention historical grant lengths; marketing must not.
+    grant = A.NEW_USER_TRIAL_SECONDS // 60
+    assert f'Free {grant}-minute trial' not in docs
+    assert f'<strong>{grant} minutes</strong>' not in docs
+    assert 'of audio on signup' not in docs
 
 
 def test_structured_data_cannot_break_out_of_its_script_tag(trial_on, monkeypatch):
@@ -5488,8 +5493,8 @@ def test_public_api_docs_page_renders_customer_markdown(trial_on):
         '<h2>POST /api/v1/transcriptions</h2>')
     assert body.index('<h2>POST /api/v1/transcriptions</h2>') < body.index(
         '<h2>GET /api/v1/episodes</h2>')
-    # Same trial length the UI grants — not a hardcoded figure that can drift.
-    assert f'{A.TRIAL_DEFAULT_SECONDS // 60} minutes' in body
+    # Same trial length new signups get — not a hardcoded figure that can drift.
+    assert f'{A.NEW_USER_TRIAL_SECONDS // 60} minutes' in body
     # Host CoS secret must never appear on the public page.
     assert 'AGENT_API_KEY' not in body
     assert 'MCP' not in body
@@ -5499,11 +5504,12 @@ def test_public_api_docs_page_renders_customer_markdown(trial_on):
 def test_public_api_docs_seo_metadata_and_intro(trial_on):
     """Growth-approved title/meta/OG/intro so transcript-API searches find /docs/api."""
     body = A.app.test_client().get('/docs/api').data.decode()
+    grant = A.NEW_USER_TRIAL_SECONDS // 60
     assert '<title>Podcast Transcript API — Get Transcript via HTTP | Podskrift</title>' in body
     assert (
         'content="Podcast transcription API for agents and scripts. '
         'Resolve by show and date, start Whisper, fetch the transcript via HTTP. '
-        'Free 180-minute trial. API key in Settings."'
+        f'Free {grant}-minute trial. API key in Settings."'
     ) in body
     assert 'content="Podcast Transcript API — Podskrift"' in body
     assert (
@@ -5515,7 +5521,7 @@ def test_public_api_docs_seo_metadata_and_intro(trial_on):
         'Podskrift’s podcast transcription API lets agents and scripts get a transcript '
         'over HTTP — the same path as the web UI. Resolve an episode by publisher/show '
         'and date (or URL), start Whisper, poll until ready, then fetch the plain-text '
-        'transcript. New accounts get 180 free trial minutes on our OpenAI key; after that, '
+        f'transcript. New accounts get {grant} free trial minutes on our OpenAI key; after that, '
         'add your own. Create a <code>psk_…</code> key in Settings.'
     )
     assert intro in body
@@ -5960,11 +5966,12 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'no-double-charge-restart'
-    assert entries[1]['id'] == 'apple-rss-link-resolve'
-    assert entries[2]['id'] == 'related-episodes-feed-fix'
-    assert entries[3]['id'] == 'stay-logged-in'
-    assert entries[4]['id'] == 'spotify-resolve-clarity'
+    assert entries[0]['id'] == 'new-signup-60-min-trial'
+    assert entries[1]['id'] == 'no-double-charge-restart'
+    assert entries[2]['id'] == 'apple-rss-link-resolve'
+    assert entries[3]['id'] == 'related-episodes-feed-fix'
+    assert entries[4]['id'] == 'stay-logged-in'
+    assert entries[5]['id'] == 'spotify-resolve-clarity'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -6271,7 +6278,7 @@ def test_register_rejects_off_site_next_and_keeps_flash(monkeypatch, trial_on):
     )
     body = resp.data.decode()
     assert 'Account created' in body
-    assert f'{A.TRIAL_DEFAULT_SECONDS // 60} free minutes' in body
+    assert f'{A.NEW_USER_TRIAL_SECONDS // 60} free minutes' in body
     assert 'evil.example' not in resp.request.url
     assert resp.request.path == '/'
     _purge([email])
@@ -6369,7 +6376,7 @@ def test_homepage_copy_leads_with_spotify(trial_on):
 
 def test_register_helper_text_mentions_free_minutes(trial_on):
     body = A.app.test_client().get('/register').data.decode()
-    assert f'{A.TRIAL_DEFAULT_SECONDS // 60} free minutes' in body
+    assert f'{A.NEW_USER_TRIAL_SECONDS // 60} free minutes' in body
     assert 'No card, no OpenAI key' in body
     assert 'password2' not in body
     assert 'Confirm password' not in body
@@ -6397,7 +6404,7 @@ def test_register_with_pending_episode_shows_episode_card(monkeypatch, trial_on)
     assert 'Hard Fork Special' in body
     assert 'Hard Fork' in body
     assert '48 min' in body
-    assert f'of your {A.TRIAL_DEFAULT_SECONDS // 60} free' in body
+    assert f'of your {A.NEW_USER_TRIAL_SECONDS // 60} free' in body
     assert 'Create account &amp; start transcript' in body or 'Create account & start transcript' in body
     assert 'Confirm password' not in body
 
@@ -6731,15 +6738,17 @@ def test_own_key_user_gets_null_trial_badge(trial_on):
 
 def test_anon_homepage_exposes_new_account_trial_badge(trial_on):
     body = A.app.test_client().get('/').data.decode()
-    assert f'var TRIAL_REMAINING_MIN = {A.TRIAL_DEFAULT_SECONDS // 60};' in body
+    assert f'var TRIAL_REMAINING_MIN = {A.NEW_USER_TRIAL_SECONDS // 60};' in body
 
 
-def test_default_trial_grant_is_three_hours():
-    """New-account allowance is 180 minutes; the per-episode cap stays in lockstep.
-    Global lifetime ceiling is 1800 minutes (~10 full grants)."""
+def test_default_trial_grants_and_global_ceiling():
+    """New signups get 60 minutes; NULL-limit legacy rows use 180; global is 6000.
+    Per-episode max still tracks TRIAL_MINUTES so a 60-min user over remaining
+    balance hits the paywall, not the hard episode-length refusal."""
+    assert A.NEW_USER_TRIAL_SECONDS == 60 * 60
     assert A.TRIAL_DEFAULT_SECONDS == 180 * 60
     assert A.TRIAL_MAX_EPISODE_SECONDS == A.TRIAL_DEFAULT_SECONDS
-    assert A.TRIAL_GLOBAL_SECONDS == 1800 * 60
+    assert A.TRIAL_GLOBAL_SECONDS == 6000 * 60
 
 
 def test_null_limit_accounts_pick_up_the_raised_default(monkeypatch, trial_on):
@@ -6752,6 +6761,82 @@ def test_null_limit_accounts_pick_up_the_raised_default(monkeypatch, trial_on):
     assert limit == 180 * 60
     assert used == 600
     assert remaining == 180 * 60 - 600
+
+
+def test_register_stamps_new_user_trial_limit(trial_on):
+    """Registration sets trial_seconds_limit to NEW_USER_TRIAL_MINUTES (60)."""
+    email = 'newgrant@example.com'
+    _purge([email])
+    A._register_attempts.clear()
+    client = A.app.test_client()
+    resp = client.post('/register', data={
+        'email': email,
+        'password': 'password123',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    with A.app.app_context():
+        u = A.User.query.filter_by(email=email).first()
+        assert u is not None
+        assert u.trial_seconds_limit == A.NEW_USER_TRIAL_SECONDS
+        assert u.trial_seconds_limit == 60 * 60
+        limit, used, remaining = A.trial_status(u)
+        assert limit == 60 * 60
+        assert used == 0
+        assert remaining == 60 * 60
+    _purge([email])
+
+
+def test_existing_null_limit_user_still_gets_trial_minutes_default(trial_on):
+    """Legacy NULL trial_seconds_limit continues to use TRIAL_DEFAULT_SECONDS."""
+    uid = _make_user('legacy-null@test.com', limit=None, used=0)
+    with A.app.app_context():
+        u = A.db.session.get(A.User, uid)
+        assert u.trial_seconds_limit is None
+        limit, _, remaining = A.trial_status(u)
+        # Under trial_on the default is patched to 600s; production default
+        # of 180 minutes is asserted in test_default_trial_grants_and_global_ceiling.
+        assert limit == A.TRIAL_DEFAULT_SECONDS
+        assert remaining == A.TRIAL_DEFAULT_SECONDS
+        assert limit != A.NEW_USER_TRIAL_SECONDS
+
+
+def test_health_reports_trial_available_without_numbers(trial_on, monkeypatch):
+    """GET /health exposes a boolean for the global pool; never used/limit."""
+    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 6000 * 60)
+    monkeypatch.setattr(A, 'trial_global_used_seconds', lambda: 100)
+    resp = A.app.test_client().get('/health')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['ok'] is True
+    assert data['trial_available'] is True
+    blob = resp.data.decode()
+    assert '6000' not in blob
+    assert '100' not in blob
+    assert 'seconds' not in blob
+
+    monkeypatch.setattr(A, 'trial_global_used_seconds', lambda: 6000 * 60)
+    exhausted = A.app.test_client().get('/health').get_json()
+    assert exhausted['trial_available'] is False
+    assert A.trial_global_pool_available() is False
+
+
+def test_new_user_long_episode_hits_remaining_paywall_not_max_cap(
+        monkeypatch, trial_on):
+    """A 90-min episode for a 60-min new user is under TRIAL_MAX_EPISODE (180)
+    but over remaining trial — start returns the buy/paywall path (402)."""
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
+    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 10 ** 7)
+    uid = _make_user('sixty-paywall@test.com', limit=60 * 60, used=0)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Long one',
+        'duration_min': '90',
+    })
+    assert resp.status_code == 402
+    body = resp.get_json()
+    assert 'free minutes you have left' in body['error']
+    assert 'too long for the free trial' not in body['error']
+    assert body.get('paywall_reason') in ('low_balance', 'trial_exhausted')
 
 
 # --------------------------------------------------------------------------

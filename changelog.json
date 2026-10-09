@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "new-signup-60-min-trial",
+      "date": "2026-10-09",
+      "title": "New accounts get 60 free minutes",
+      "summary": "Sign up and you get 60 minutes of free transcription on our key. Longer episodes still prompt you to buy more minutes or add your own OpenAI key when your free balance isn’t enough."
+    },
+    {
       "id": "no-double-charge-restart",
       "date": "2026-10-08",
       "title": "Restarting an episode won’t use free minutes twice",

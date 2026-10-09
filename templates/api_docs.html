@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Podcast Transcript API — Get Transcript via HTTP | Podskrift{% endblock %}
-{% block meta_description %}Podcast transcription API for agents and scripts. Resolve by show and date, start Whisper, fetch the transcript via HTTP. Free 180-minute trial. API key in Settings.{% endblock %}
+{% block meta_description %}Podcast transcription API for agents and scripts. Resolve by show and date, start Whisper, fetch the transcript via HTTP.{% if trial_minutes %} Free {{ trial_minutes }}-minute trial.{% endif %} API key in Settings.{% endblock %}
 {% block og_title %}Podcast Transcript API — Podskrift{% endblock %}
 {% block og_description %}HTTP endpoints to resolve a podcast episode, transcribe with Whisper, and get the transcript. Same free trial as the web UI.{% endblock %}
 
