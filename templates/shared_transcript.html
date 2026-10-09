@@ -23,11 +23,11 @@
     }
     .share-hero img {
         width: 88px; height: 88px; border-radius: 10px; object-fit: cover;
-        flex-shrink: 0; background: var(--border);
+        flex-shrink: 0; background: var(--line);
     }
     .share-hero-art {
         width: 88px; height: 88px; border-radius: 10px; flex-shrink: 0;
-        background: var(--accent-bg); border: 1px solid var(--accent-border);
+        background: var(--accent-tint);
     }
     .share-podcast {
         color: var(--muted); font-size: 13px; font-weight: 600;
@@ -40,8 +40,8 @@
     .share-meta { color: var(--muted); font-size: 13px; margin-top: 6px; }
     .share-partial {
         margin: 0 0 14px; padding: 10px 12px;
-        border: 1px solid var(--warning); border-radius: var(--radius-sm);
-        background: var(--warning-bg); color: var(--warning);
+        border-radius: var(--radius);
+        background: var(--warning-tint); color: var(--on-warning-tint);
         font-size: 13.5px; line-height: 1.45;
     }
     .share-actions {
@@ -53,7 +53,7 @@
     }
     .share-seg {
         display: grid; grid-template-columns: 72px 1fr; gap: 12px;
-        padding: 6px 0; border-bottom: 1px solid var(--border);
+        padding: 6px 0; border-bottom: 1px solid var(--line);
     }
     .share-seg:last-child { border-bottom: none; }
     .share-seg-ts {
@@ -63,11 +63,11 @@
     .share-seg-text { font-size: 15px; line-height: 1.55; }
     .share-cta {
         margin-top: 28px; padding: 18px 16px;
-        border: 1px solid var(--accent-border); border-radius: var(--radius);
-        background: var(--accent-bg); text-align: center;
+        border-radius: var(--radius);
+        background: var(--accent-tint); text-align: center;
     }
     .share-cta p {
-        margin: 0 0 12px; color: var(--text); font-size: 15px; line-height: 1.45;
+        margin: 0 0 12px; color: var(--ink); font-size: 15px; line-height: 1.45;
     }
     @media (max-width: 560px) {
         .share-hero img, .share-hero-art { width: 72px; height: 72px; }

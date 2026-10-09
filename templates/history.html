@@ -37,8 +37,8 @@
             {% if m.snippet %}
             <p class="text-sm" style="margin: 6px 0 0; color: var(--muted); line-height: 1.6;">
                 {# No whitespace around <mark>: the snippet parts carry their own. #}
-                {{ m.snippet[0] }}<mark style="background: var(--accent-bg); color: var(--accent-bright);
-                    padding: 0 2px; border-radius: 3px;">{{ m.snippet[1] }}</mark>{{ m.snippet[2] }}
+                {{ m.snippet[0] }}<mark style="background: var(--accent-tint); color: var(--on-accent-tint);
+                    padding: 0 2px; border-radius: var(--radius-sm);">{{ m.snippet[1] }}</mark>{{ m.snippet[2] }}
             </p>
             {% endif %}
         </div>

@@ -30,8 +30,8 @@
                 </span>
             </p>
             {% if trial.limit_minutes %}
-            <div style="height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; margin-bottom: 12px;">
-                <div style="height: 100%; border-radius: 4px; background: {% if trial.exhausted %}var(--error){% elif trial.low_balance %}var(--warning){% else %}var(--accent-bright){% endif %};
+            <div style="height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin-bottom: 12px;">
+                <div style="height: 100%; border-radius: 4px; background: {% if trial.exhausted %}var(--danger){% elif trial.low_balance %}var(--on-warning-tint){% else %}var(--accent){% endif %};
                             width: {{ (100 * trial.used_minutes / trial.limit_minutes) if trial.limit_minutes else 0 }}%;"></div>
             </div>
             {% endif %}
@@ -141,7 +141,7 @@
                         Leave blank to keep it; paste a new key to replace it.
                         You're on your own key; nothing is metered against the trial.
                         {% else %}
-                        <br><span style="color: var(--warning);">
+                        <br><span style="color: var(--on-warning-tint);">
                             {% if trial %}Needed only after the free trial.
                             {% else %}No key saved — add one to start transcribing.
                             {% endif %}
@@ -153,7 +153,7 @@
                 <button type="submit" class="btn btn-primary">Save</button>
             </form>
             {% if no_billing_warning and stripe_buy_enabled %}
-            <div id="openai-no-billing" style="margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px;">
+            <div id="openai-no-billing" style="margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 8px;">
                 <p style="font-size: 14px; margin: 0 0 8px; line-height: 1.5;">
                     Your OpenAI account still needs credit. Add it at
                     <a href="https://platform.openai.com/account/billing" target="_blank" rel="noopener">OpenAI billing</a>,
@@ -201,7 +201,7 @@
                            autocomplete="off" data-ph-no-capture>
                     <button type="button" class="btn btn-ghost" id="copy_api_key">Copy</button>
                 </div>
-                <p class="form-hint" style="color: var(--warning); margin-top: 8px;">
+                <p class="form-hint" style="color: var(--on-warning-tint); margin-top: 8px;">
                     This is the only time the full key is shown.
                 </p>
             </div>

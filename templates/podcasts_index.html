@@ -32,17 +32,17 @@
         min-width: 32px;
         height: 32px;
         padding: 0 8px;
-        border: 1px solid var(--border);
+        border: 1px solid var(--line);
         border-radius: var(--radius-sm);
         color: var(--muted);
         font-size: 13px;
         font-weight: 600;
     }
-    .shows-letters a:hover { color: var(--text); border-color: var(--border-light); }
+    .shows-letters a:hover { color: var(--ink); border-color: var(--line-strong); }
     .shows-letters a.is-active {
-        color: var(--accent-bright);
-        border-color: var(--accent-border);
-        background: var(--accent-bg);
+        color: var(--on-accent-tint);
+        border-color: var(--accent);
+        background: var(--accent-tint);
     }
     .shows-letter-block { margin-bottom: 28px; }
     .shows-letter-block h2 {
@@ -53,19 +53,19 @@
         color: var(--muted);
         margin-bottom: 10px;
         padding-bottom: 6px;
-        border-bottom: 1px solid var(--border);
+        border-bottom: 1px solid var(--line);
     }
     .shows-list { list-style: none; margin: 0; padding: 0; }
     .shows-list li { margin: 0; }
     .shows-list a {
         display: block;
         padding: 10px 0;
-        color: var(--text);
-        border-bottom: 1px solid var(--border);
+        color: var(--ink);
+        border-bottom: 1px solid var(--line);
         font-size: 15px;
         font-weight: 500;
     }
-    .shows-list a:hover { color: var(--accent-bright); }
+    .shows-list a:hover { color: var(--accent-hover); }
     .shows-list .author {
         display: block;
         font-size: 12.5px;
@@ -76,7 +76,7 @@
     .shows-cta {
         margin-top: 32px;
         padding: 18px 0 0;
-        border-top: 1px solid var(--border);
+        border-top: 1px solid var(--line);
         color: var(--muted);
         font-size: 14px;
         line-height: 1.6;

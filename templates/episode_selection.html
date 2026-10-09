@@ -9,19 +9,17 @@
     .ep-sticky {
         position: sticky; bottom: 0; z-index: 50;
         margin: 20px -4px 0; padding: 12px 14px;
-        background: rgba(17, 17, 17, 0.94);
-        backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-        border: 1px solid var(--border); border-radius: var(--radius) var(--radius) 0 0;
+        background: var(--paper);
+        border: 1px solid var(--line); border-radius: var(--radius) var(--radius) 0 0;
         display: flex; align-items: center; gap: 12px;
-        box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.45);
     }
     .ep-sticky-art {
         width: 40px; height: 40px; border-radius: 6px; object-fit: cover;
-        flex-shrink: 0; background: var(--border);
+        flex-shrink: 0; background: var(--line);
     }
     .ep-sticky-art-ph {
         width: 40px; height: 40px; border-radius: 6px; flex-shrink: 0;
-        background: var(--accent-bg); border: 1px solid var(--accent-border);
+        background: var(--accent-tint);
     }
     .ep-sticky-info { flex: 1; min-width: 0; }
     .ep-sticky-title {
@@ -120,7 +118,7 @@
     </div>
 
     {% if needs_api_key %}
-    <div class="card mt-2" style="border-color: var(--accent-border);">
+    <div class="card mt-2" style="border-color: var(--accent);">
         <div class="card-body text-center">
             <p style="font-weight: 600; font-size: 14px;">Out of free minutes</p>
             <p class="form-hint">

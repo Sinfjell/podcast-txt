@@ -4,17 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<meta name="color-scheme" content="dark">
+<meta name="color-scheme" content="light dark">
 <title>Something went wrong — Podskrift</title>
 <link rel="icon" href="/favicon.ico" sizes="32x32">
 <style>
+  /* Standalone page (no base.html): its own minimal copy of the design tokens. */
+  :root { --paper: #FFFFFF; --ink: #0E1512; --muted: #56635D; --accent: #0A7A55; --accent-hover: #075C40; }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #0A0F0D; --ink: #EEF2F0; --muted: #9AA8A1; --accent: #34D399; --accent-hover: #6EE7B7; }
+  }
+  html { color-scheme: light dark; }
   body { margin: 0; min-height: 100vh; display: grid; place-items: center;
-         background: #080808; color: #f0f0f0; font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+         background: var(--paper); color: var(--ink);
+         font: 17px/1.55 'Schibsted Grotesk', system-ui, sans-serif; }
   main { max-width: 480px; padding: 24px; text-align: center; }
-  h1 { font-size: 26px; margin: 0 0 12px; }
-  p { color: #a3a3a3; margin: 0 0 20px; }
-  a { color: #10b981; }
-  a:focus-visible { outline: 2px solid #10b981; outline-offset: 2px; }
+  h1 { font-size: 28px; font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; margin: 0 0 12px; }
+  p { color: var(--muted); margin: 0 0 20px; }
+  a { color: var(--accent); }
+  a:hover { color: var(--accent-hover); }
+  a:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 </style>
 </head>
 <body>

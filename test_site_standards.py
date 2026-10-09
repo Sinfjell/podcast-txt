@@ -159,7 +159,7 @@ def test_favicons_and_manifest(client):
 
 def test_head_has_icons_theme_and_og_image(client):
     body = client.get('/').get_data(as_text=True)
-    assert '<meta name="color-scheme" content="dark">' in body
+    assert '<meta name="color-scheme" content="light dark">' in body
     assert '<meta name="theme-color"' in body
     assert 'rel="apple-touch-icon"' in body and 'rel="manifest"' in body
     assert re.search(r'property="og:image" content="[^"]+og-image\.png\?v=', body)
