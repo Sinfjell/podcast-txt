@@ -20,7 +20,11 @@ while true; do
     echo "drain: could not reach in-flight endpoint; proceeding"
     exit 0
   fi
-  count="$(python3 -c 'import json,sys; print(int(json.load(sys.stdin).get("in_flight",0)))' <<<"${body}")"
+  count="$(python3 -c 'import json,sys; print(int(json.load(sys.stdin)["in_flight"]))' <<<"${body}" 2>/dev/null || true)"
+  if ! [[ "${count}" =~ ^[0-9]+$ ]]; then
+    echo "drain: unexpected in-flight response; proceeding"
+    exit 0
+  fi
   if [[ "${count}" -eq 0 ]]; then
     echo "drain: no in-flight transcriptions"
     exit 0

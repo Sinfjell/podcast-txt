@@ -11,6 +11,18 @@ timeout = 300
 graceful_timeout = 120
 
 
+def on_starting(server):
+    """Stamp this server generation's start time in the arbiter, pre-fork.
+
+    Workers inherit it; app.resume_interrupted_tasks treats only jobs whose
+    heartbeat predates it as orphaned. Without it (bare CLI, scripts), boot
+    resume is skipped and only the threshold-based stale sweep runs.
+    """
+    import os
+    import time
+    os.environ['PODSKRIFT_SERVER_STARTED_AT'] = repr(time.time())
+
+
 def post_worker_init(worker):
     """After gunicorn installs its signals, chain our shutdown flag."""
     try:

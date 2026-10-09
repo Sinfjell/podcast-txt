@@ -49,6 +49,8 @@ class User(UserMixin, db.Model):
     tasks = db.relationship('TranscriptionTask', backref='user', lazy=True, cascade='all, delete-orphan')
     credit_purchases = db.relationship('CreditPurchase', backref='user', lazy=True,
                                        cascade='all, delete-orphan')
+    transcript_shares = db.relationship('TranscriptShare', backref='user', lazy=True,
+                                        cascade='all, delete-orphan')
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -143,6 +145,31 @@ class TranscriptionTask(db.Model):
     # death. 0 = never resumed; 1 = resumed once (second failure is terminal).
     resume_attempts = db.Column(db.Integer, nullable=False, default=0,
                                 server_default='0')
+
+
+class TranscriptShare(db.Model):
+    """Opt-in public share link for a completed transcript.
+
+    Default is not shared: a row exists only after the owner creates a link.
+    Revoking sets revoked_at; the token then 404s. Tokens are unguessable
+    (>=128-bit url-safe random). Never expose owner email or user id on the
+    public page.
+    """
+    __tablename__ = 'transcript_shares'
+
+    id = db.Column(db.Integer, primary_key=True)
+    # secrets.token_urlsafe(22) is ~30 chars; 64 leaves headroom for rotation.
+    token = db.Column(db.String(64), unique=True, nullable=False)
+    task_id = db.Column(db.String(36), db.ForeignKey('transcription_tasks.id'),
+                        nullable=False, unique=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    revoked_at = db.Column(db.DateTime, nullable=True)
+
+    task = db.relationship(
+        'TranscriptionTask',
+        backref=db.backref('share', uselist=False),
+    )
 
 
 class CreditPurchase(db.Model):
@@ -244,4 +271,11 @@ CREDIT_PURCHASE_COLUMN_MIGRATIONS = {
     'seconds_clawed_back': 'INTEGER NOT NULL DEFAULT 0',
     'amount_refunded_cents': 'INTEGER NOT NULL DEFAULT 0',
     'refunded_at': 'DATETIME',
+}
+
+#: Additive columns for transcript_shares. Applied by
+#: ensure_transcript_shares_table AFTER the table exists; indexes that mention
+#: a column are created only after that column is present.
+TRANSCRIPT_SHARE_COLUMN_MIGRATIONS = {
+    'revoked_at': 'DATETIME',
 }
