@@ -6413,17 +6413,18 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'keyboard-and-faster-loading'
-    assert entries[1]['id'] == 'show-landing-pages'
-    assert entries[2]['id'] == 'public-share-links'
-    assert entries[3]['id'] == 'unsubscribe-confirm-click'
-    assert entries[4]['id'] == 'partial-preview-minutes-wording'
-    assert entries[5]['id'] == 'partial-trial-preview'
-    assert entries[6]['id'] == 'own-key-billing-clarity'
-    assert entries[7]['id'] == 'clearer-missing-episode-audio'
-    assert entries[8]['id'] == 'new-signup-60-min-trial'
-    assert entries[9]['id'] == 'spotify-paste-robustness'
-    assert entries[10]['id'] == 'no-double-charge-restart'
+    assert entries[0]['id'] == 'share-listen-links'
+    assert entries[1]['id'] == 'keyboard-and-faster-loading'
+    assert entries[2]['id'] == 'show-landing-pages'
+    assert entries[3]['id'] == 'public-share-links'
+    assert entries[4]['id'] == 'unsubscribe-confirm-click'
+    assert entries[5]['id'] == 'partial-preview-minutes-wording'
+    assert entries[6]['id'] == 'partial-trial-preview'
+    assert entries[7]['id'] == 'own-key-billing-clarity'
+    assert entries[8]['id'] == 'clearer-missing-episode-audio'
+    assert entries[9]['id'] == 'new-signup-60-min-trial'
+    assert entries[10]['id'] == 'spotify-paste-robustness'
+    assert entries[11]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -10476,6 +10477,203 @@ def test_result_page_exposes_share_controls(trial_on):
     assert 'id="shareBtn"' in body
     assert '/share' in body
     assert 'shareRevokeBtn' in body
+
+
+# --------------------------------------------------------------------------
+# Listen links on share + result pages
+# --------------------------------------------------------------------------
+
+def test_safe_public_http_url_rejects_non_http_schemes():
+    assert A.safe_public_http_url('https://example.com/ep') == 'https://example.com/ep'
+    assert A.safe_public_http_url('http://example.com/a') == 'http://example.com/a'
+    assert A.safe_public_http_url('javascript:alert(1)') is None
+    assert A.safe_public_http_url('data:text/html,hi') is None
+    assert A.safe_public_http_url('//evil.example/x') is None
+    assert A.safe_public_http_url('https://user:pass@example.com/x') is None
+    assert A.safe_public_http_url('') is None
+    assert A.safe_public_http_url(None) is None
+
+
+def test_listen_links_from_fields_orders_platforms_and_skips_bad_urls():
+    links = A.listen_links_from_fields(
+        spotify_url=f'https://open.spotify.com/episode/{_SPOTIFY_EP}',
+        apple_url='javascript:alert(1)',
+        website_url='https://show.example/ep-1',
+        audio_url='https://cdn.example/ep.mp3',
+    )
+    platforms = [L['platform'] for L in links]
+    assert platforms == ['spotify', 'website', 'audio']
+    assert links[0]['url'].startswith('https://open.spotify.com/episode/')
+    assert links[-1]['is_audio'] is True
+
+
+def test_share_page_shows_listen_section_for_spotify_sourced(trial_on, monkeypatch):
+    monkeypatch.setattr(A, 'apple_url_for_feed', lambda *a, **k: None)
+    uid = _make_user('listen-spotify@test.com')
+    spotify = f'https://open.spotify.com/episode/{_SPOTIFY_EP}'
+    tid = _share_task(
+        uid, 'listen-spotify',
+        source_spotify_url=spotify,
+        source_audio_url='https://cdn.example.com/ep.mp3',
+        source_website_url='https://show.example/episode-1',
+    )
+    token = _login(uid).post(f'/transcription/{tid}/share').get_json()['token']
+    html = A.app.test_client().get(f'/t/{token}').data.decode()
+    assert 'Listen to this episode' in html
+    assert 'Listen on Spotify' in html
+    assert spotify in html
+    assert 'podcast&#39;s website' in html or "podcast's website" in html
+    assert 'https://show.example/episode-1' in html
+    assert 'Play audio' in html
+    assert 'rel="noopener nofollow"' in html
+    assert 'target="_blank"' in html
+    assert 'shared_listen_clicked' in html
+    assert 'preload="none"' in html
+    assert 'javascript:' not in html
+
+
+def test_share_page_shows_apple_and_website_for_rss_sourced(trial_on, monkeypatch):
+    apple = 'https://podcasts.apple.com/us/podcast/id1234567890'
+    monkeypatch.setattr(A, 'apple_url_for_feed', lambda *a, **k: apple)
+    uid = _make_user('listen-rss@test.com')
+    tid = _share_task(
+        uid, 'listen-rss',
+        rss_url='https://feeds.example.com/show.xml',
+        podcast_name='Example Show',
+        source_website_url='https://example.com/episodes/one',
+        source_audio_url='https://cdn.example.com/one.mp3',
+    )
+    token = _login(uid).post(f'/transcription/{tid}/share').get_json()['token']
+    html = A.app.test_client().get(f'/t/{token}').data.decode()
+    assert 'Listen on Apple Podcasts' in html
+    assert apple in html
+    assert 'podcast&#39;s website' in html or "podcast's website" in html
+    assert 'https://example.com/episodes/one' in html
+    assert 'data-listen-platform="spotify"' not in html
+    assert 'data-listen-platform="apple"' in html
+    with A.app.app_context():
+        task = A.db.session.get(A.TranscriptionTask, tid)
+        assert task.source_apple_url == apple
+
+
+def test_share_page_omits_listen_section_without_resolvable_links(trial_on, monkeypatch):
+    monkeypatch.setattr(A, 'apple_url_for_feed', lambda *a, **k: None)
+    uid = _make_user('listen-none@test.com')
+    tid = _share_task(uid, 'listen-none', source_audio_url=None, rss_url=None)
+    token = _login(uid).post(f'/transcription/{tid}/share').get_json()['token']
+    html = A.app.test_client().get(f'/t/{token}').data.decode()
+    assert 'Listen to this episode' not in html
+
+
+def test_enqueue_stores_listen_urls(monkeypatch, trial_on):
+    import types
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: None))
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *_a, **_k: 10 ** 12)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    uid = _make_user('listen-enqueue@test.com')
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user,
+            {
+                'title': 'Ep',
+                'audio_url': 'https://cdn.example.com/ep.mp3',
+                'podcast_name': 'Show',
+                'duration_min': 5,
+                'input_origin': 'spotify',
+                'spotify_url': (
+                    f'https://open.spotify.com/episode/{_SPOTIFY_EP}?si=x'),
+                'apple_url': 'https://podcasts.apple.com/us/podcast/x/id99?i=42',
+                'episode_link': 'https://show.example/ep',
+            },
+            rss_url='https://feeds.example.com/show.xml',
+        )
+        assert status == 200, payload
+        task = A.db.session.get(A.TranscriptionTask, payload['task_id'])
+        assert task.source_spotify_url == (
+            f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+        assert 'podcasts.apple.com' in (task.source_apple_url or '')
+        assert task.source_website_url == 'https://show.example/ep'
+        assert task.source_audio_url == 'https://cdn.example.com/ep.mp3'
+
+
+def test_rss_episodes_include_episode_and_show_links(tmp_path):
+    feed = tmp_path / 'feed.xml'
+    feed.write_text("""<?xml version="1.0"?>
+    <rss version="2.0"><channel>
+      <title>Show</title>
+      <link>https://show.example/</link>
+      <item>
+        <title>Ep One</title>
+        <link>https://show.example/ep-one</link>
+        <enclosure url="https://cdn.example.com/one.mp3" type="audio/mpeg" length="1"/>
+      </item>
+    </channel></rss>
+    """, encoding='utf-8')
+    # feedparser accepts a file path / URL; use the path as a local parse.
+    episodes, err = A.get_episodes_from_rss(str(feed))
+    assert err is None
+    assert episodes[0]['episode_link'] == 'https://show.example/ep-one'
+    assert episodes[0]['show_link'] == 'https://show.example/'
+
+
+def test_apple_url_for_feed_caches_and_matches_feed(monkeypatch):
+    A._apple_feed_url_cache.clear()
+    calls = {'n': 0}
+
+    class FakeResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                'results': [{
+                    'feedUrl': 'https://feeds.example.com/show.xml',
+                    'collectionViewUrl': 'https://podcasts.apple.com/us/podcast/id1',
+                    'collectionId': 1,
+                    'collectionName': 'Example Show',
+                }]
+            }
+
+    def fake_get(url, timeout=None, params=None):
+        calls['n'] += 1
+        return FakeResp()
+
+    monkeypatch.setattr(A.requests, 'get', fake_get)
+    a = A.apple_url_for_feed(
+        'https://feeds.example.com/show.xml', 'Example Show', timeout=1)
+    b = A.apple_url_for_feed(
+        'https://feeds.example.com/show.xml', 'Example Show', timeout=1)
+    assert a == 'https://podcasts.apple.com/us/podcast/id1'
+    assert b == a
+    assert calls['n'] == 1
+
+
+def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
+    monkeypatch.setattr(A, 'apple_url_for_feed', lambda *a, **k: None)
+    uid = _make_user('listen-result@test.com')
+    tid = _share_task(
+        uid, 'listen-result',
+        source_spotify_url=f'https://open.spotify.com/episode/{_SPOTIFY_EP}',
+        source_audio_url='https://cdn.example.com/ep.mp3',
+    )
+    client = _login(uid)
+    page = client.get(f'/transcription/{tid}').data.decode()
+    assert 'Listen to this episode' in page
+    assert 'id="listenLinksMount"' in page
+    assert 'result_listen_clicked' in page
+    status = client.get(f'/status/{tid}').get_json()
+    platforms = [L['platform'] for L in status['listen_links']]
+    assert 'spotify' in platforms
+    assert 'audio' in platforms
+
+
+def test_changelog_has_share_listen_links_entry():
+    entries = A.load_changelog_entries()
+    assert entries[0]['id'] == 'share-listen-links'
 
 
 # --------------------------------------------------------------------------

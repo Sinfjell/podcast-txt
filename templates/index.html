@@ -507,6 +507,11 @@
             if (item.feed_url) fields.rss_url = item.feed_url;
             if (item.duration_min) fields.duration_min = item.duration_min;
             if (item.origin) fields.input_origin = item.origin;
+            if (item.spotify_url) fields.spotify_url = item.spotify_url;
+            if (item.apple_url) fields.apple_url = item.apple_url;
+            if (item.episode_link) fields.episode_link = item.episode_link;
+            if (item.show_link) fields.show_link = item.show_link;
+            if (item.website_url) fields.website_url = item.website_url;
 
             if (!IS_AUTHENTICATED) {
                 // Stash the episode, then /register?next=/resume-transcription.
@@ -756,6 +761,18 @@
             });
             return;
         }
+        // Stamp the pasted Spotify/Apple URL onto episode hits when the
+        // resolver did not already include it (needed for share listen links).
+        var inputType = detectInputType(url);
+        results.forEach(function (item) {
+            if (item.type !== 'episode') return;
+            if (inputType === 'spotify_link' && !item.spotify_url) {
+                item.spotify_url = url;
+            }
+            if (inputType === 'apple_link' && !item.apple_url) {
+                item.apple_url = url;
+            }
+        });
         resultsDiv.style.padding = data.error ? '12px 0 0' : '0';
         if (data.error) {
             showSearchNotice(data.error);

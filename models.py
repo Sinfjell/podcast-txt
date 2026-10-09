@@ -112,6 +112,12 @@ class TranscriptionTask(db.Model):
     episode_published = db.Column(db.String(128), nullable=True)
     # Source audio URL so a failed job can be retried without re-searching.
     source_audio_url = db.Column(db.String(1024), nullable=True)
+    # Optional listen destinations for share / result pages (http(s) only).
+    # Populated at enqueue when known; Apple may be filled later via iTunes
+    # lookup by feed URL (cached; never blocks a slow page render).
+    source_spotify_url = db.Column(db.String(1024), nullable=True)
+    source_apple_url = db.Column(db.String(1024), nullable=True)
+    source_website_url = db.Column(db.String(1024), nullable=True)
 
     # Fine-grained progress state, read by /status to interpolate between checkpoints
     phase = db.Column(db.String(20), nullable=True)
@@ -281,6 +287,9 @@ TASK_COLUMN_MIGRATIONS = {
     'artwork_url': 'VARCHAR(1024)',
     'episode_published': 'VARCHAR(128)',
     'source_audio_url': 'VARCHAR(1024)',
+    'source_spotify_url': 'VARCHAR(1024)',
+    'source_apple_url': 'VARCHAR(1024)',
+    'source_website_url': 'VARCHAR(1024)',
     'phase': 'VARCHAR(20)',
     'phase_started_at': 'DATETIME',
     'chunk_index': 'INTEGER',
