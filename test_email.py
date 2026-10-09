@@ -459,7 +459,10 @@ SAMPLE_FEED_V2 = b"""<?xml version="1.0"?>
 def _isolate_alert_feeds():
     """Turn off other tests' feeds so poller counters stay local."""
     with A.app.app_context():
-        A.SavedFeed.query.update({'email_new_episodes': False})
+        A.SavedFeed.query.update({
+            'email_new_episodes': False,
+            'email_summaries': False,
+        })
         A.db.session.commit()
 
 
@@ -800,7 +803,8 @@ def test_partial_preview_email_wording(monkeypatch):
 def test_changelog_hides_email_keeps_user_visible_first():
     entries = A.load_changelog_entries()
     ids = [e['id'] for e in entries]
-    assert 'resume-after-deploy' in ids  # order is owned by test_whats_new_page_renders_changelog_entries
+    # Infra/plumbing (deploy drain, restarts) never goes in What's new.
+    assert 'resume-after-deploy' not in ids
     assert 'partial-preview-minutes-wording' in ids
     assert 'partial-trial-preview' in ids
     assert 'email-alerts-coming-soon' not in set(ids)

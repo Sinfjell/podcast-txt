@@ -619,6 +619,15 @@ def _admin_gate():
         abort(404)
 
 
+@admin_bp.after_request
+def _admin_response_headers(resp):
+    """Admin pages (and their 404s) are never indexed, cached or referred."""
+    resp.headers['X-Robots-Tag'] = 'noindex, nofollow'
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    return resp
+
+
 @admin_bp.context_processor
 def _admin_template_globals():
     return {

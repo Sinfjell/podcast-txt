@@ -325,7 +325,8 @@
 </div>
 
 <script type="application/json" id="adminChartData">{{ charts | tojson }}</script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+{# Self-hosted (CSP script-src 'self'); Chart.js 4.4.7, MIT, see static/vendor/chart.js-LICENSE.md #}
+<script src="{{ url_for('static', filename='vendor/chart-4.4.7.umd.min.js') }}"></script>
 <script>
 (function () {
     var dataEl = document.getElementById('adminChartData');

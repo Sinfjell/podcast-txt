@@ -18,13 +18,13 @@
     @keyframes loginSpin { to { transform: rotate(360deg); } }
 </style>
 <div style="max-width: 400px; margin: 40px auto;">
-    <h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">
+    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">
         {% if login_for_transcript %}
         Log in to open your saved transcript
         {% else %}
         Log in
         {% endif %}
-    </h2>
+    </h1>
     <div class="card">
         <div class="card-body">
             <form method="POST" action="{{ url_for('login', next=next) if next else url_for('login') }}"

@@ -207,7 +207,8 @@
                     <input type="hidden" name="rss_url" value="{{ show.feed_url }}">
                     <input type="hidden" name="episode_index" value="{{ ep.index }}">
                     <input type="hidden" name="episode_audio_url" value="{{ ep.audio_url }}">
-                    <button type="submit" class="btn btn-accent btn-sm">Transcribe this episode</button>
+                    <button type="submit" class="btn btn-accent btn-sm"
+                            aria-label="Transcribe this episode: {{ ep.title }}">Transcribe this episode</button>
                 </form>
             </div>
         </div>
@@ -241,7 +242,7 @@
     <section class="show-section show-faq">
         <h2>FAQ</h2>
         {% for question, answer in faq %}
-        <details{% if loop.first %} open{% endif %}>
+        <details{% if loop.first %} open{% endif %}{% if text_lang(question) %} lang="{{ text_lang(question) }}"{% endif %}>
             <summary>{{ question }}</summary>
             <p>{{ answer }}</p>
         </details>

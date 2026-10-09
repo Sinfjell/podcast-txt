@@ -1203,7 +1203,7 @@ def test_unverified_key_flashes_as_a_warning_not_success(monkeypatch):
     # Match the rendered flash div, not the stylesheet -- base.html inlines
     # `.alert-warning { ... }`, so a bare substring check passes on every page.
     import re as _re
-    flashes = _re.findall(r'<div class="alert alert-(\w+)">', body)
+    flashes = _re.findall(r'<div class="alert alert-(\w+)"', body)
     assert flashes, 'no flash rendered'
     assert 'warning' in flashes, f'flash categories were {flashes}, expected a warning'
     assert 'success' not in flashes
@@ -3636,7 +3636,7 @@ def test_the_page_says_what_it_is_before_asking_for_anything(trial_on):
     )
     assert 'meta name="description"' in body
     assert 'og:title' in body
-    assert '<main id="content">' in body, 'no main landmark for anything to orient on'
+    assert '<main id="content"' in body, 'no main landmark for anything to orient on'
 
 def test_every_named_crawler_group_repeats_the_rules(trial_on):
     """RFC 9309: a crawler obeys ONLY its most specific matching group and
@@ -6413,8 +6413,8 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'show-landing-pages'
-    assert entries[1]['id'] == 'resume-after-deploy'
+    assert entries[0]['id'] == 'keyboard-and-faster-loading'
+    assert entries[1]['id'] == 'show-landing-pages'
     assert entries[2]['id'] == 'public-share-links'
     assert entries[3]['id'] == 'unsubscribe-confirm-click'
     assert entries[4]['id'] == 'partial-preview-minutes-wording'
@@ -9984,6 +9984,8 @@ def test_show_page_renders_from_fixture_data(show_pages_fixture, monkeypatch, tr
     assert 'application/ld+json' in body
     assert 'PodcastSeries' in body
     assert 'FAQPage' in body
+    assert 'BreadcrumbList' in body
+    assert 'aria-label="Transcribe this episode: Episode One: Hello"' in body
     assert 'rel="canonical"' in body or 'rel=canonical' in body.lower() or 'canonical' in body
     # Analytics
     views = [e for e in ph_events.events if e['event'] == 'show_page_viewed']
@@ -11425,3 +11427,41 @@ def test_admin_is_admin_user_case_insensitive(monkeypatch):
         from models import db, User
         u = db.session.get(User, uid)
         assert AD.is_admin_user(u) is True
+
+
+def test_admin_headers_robots_and_self_hosted_chartjs(monkeypatch):
+    monkeypatch.setenv('ADMIN_EMAILS', 'hdr-admin@example.com')
+    anon = A.app.test_client().get('/admin')
+    assert anon.status_code == 404
+    assert 'noindex' in anon.headers.get('X-Robots-Tag', '')
+    assert anon.headers.get('Cache-Control') == 'no-store'
+    robots = A.app.test_client().get('/robots.txt').data.decode()
+    assert 'Disallow: /admin' in robots
+    client, _uid = _admin_login('hdr-admin@example.com')
+    resp = client.get('/admin')
+    assert resp.status_code == 200
+    assert 'noindex' in resp.headers.get('X-Robots-Tag', '')
+    assert resp.headers.get('Cache-Control') == 'no-store'
+    body = resp.data.decode()
+    # CSP script-src is 'self' (+PostHog): no third-party CDN scripts.
+    assert 'cdn.jsdelivr.net' not in body
+    assert '/static/vendor/chart-4.4.7.umd.min.js' in body
+    js = A.app.test_client().get('/static/vendor/chart-4.4.7.umd.min.js')
+    assert js.status_code == 200 and b'Chart.js v4.4.7' in js.data[:200]
+
+
+def test_admin_never_renders_byok_key(monkeypatch):
+    from models import db, User
+    monkeypatch.setenv('ADMIN_EMAILS', 'key-admin@example.com')
+    uid = _make_user('byok-victim@example.com')
+    secret = 'sk-test-SHOULD-NEVER-RENDER-123456'
+    with A.app.app_context():
+        u = db.session.get(User, uid)
+        u.openai_api_key = secret
+        db.session.commit()
+    client, _ = _admin_login('key-admin@example.com')
+    for path in ('/admin', f'/admin/users/{uid}', '/admin?q=byok-victim'):
+        r = client.get(path)
+        assert r.status_code == 200
+        assert secret not in r.data.decode()
+        assert 'SHOULD-NEVER' not in r.data.decode()
