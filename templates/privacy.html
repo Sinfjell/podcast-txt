@@ -1,33 +1,81 @@
 {% extends "base.html" %}
 {% block title %}Privacy — Podskrift{% endblock %}
-{% block meta_description %}How Podskrift handles accounts, transcripts, and analytics.{% endblock %}
+{% block meta_description %}How Podskrift handles accounts, transcripts, cookies, analytics, and the services it uses.{% endblock %}
 
 {% block content %}
-<div style="max-width: 560px; margin: 24px auto;">
-    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 16px;">Privacy</h1>
-    <p style="color: var(--muted); font-size: 14px; line-height: 1.7; margin-bottom: 14px;">
-        Podskrift stores your account email, password hash, optional OpenAI API key,
-        and transcripts you create. Your OpenAI key is used only to call OpenAI on
-        your behalf; we never send it to analytics.
+<style>
+    .privacy { max-width: 600px; margin: 24px auto; }
+    .privacy h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 16px; }
+    .privacy h2 { font-size: 16px; font-weight: 600; margin: 24px 0 8px; }
+    .privacy p, .privacy li { color: var(--muted); font-size: 14px; line-height: 1.7; }
+    .privacy p { margin-bottom: 12px; }
+    .privacy ul { padding-left: 20px; margin-bottom: 12px; }
+</style>
+<div class="privacy">
+    <h1>Privacy</h1>
+    <p>
+        Podskrift is made by Nettsmed (Fjellestad AS), Kristiansand, Norway, which
+        is responsible for the personal data described here.
     </p>
-    <p style="color: var(--muted); font-size: 14px; line-height: 1.7; margin-bottom: 14px;">
-        We use <a href="https://posthog.com" target="_blank" rel="noopener">PostHog</a>
-        (EU Cloud) for product analytics and session replay so we can see where
-        signup-to-first-transcript drops off. Replays mask form inputs (including
-        email, password, and API key fields). We identify you only by an internal
-        user id — not by email or name — and we do not send API keys, passwords,
-        emails, or transcript text as event properties.
+
+    <h2>What we store</h2>
+    <p>
+        Your account email, a password hash, your optional OpenAI API key, the
+        podcasts you follow, and the transcripts you create. Your OpenAI key is
+        used only to call OpenAI on your behalf; we never send it to analytics.
     </p>
-    <p style="color: var(--muted); font-size: 14px; line-height: 1.7; margin-bottom: 14px;">
-        Card payments for optional transcription credit packs are processed by
-        <a href="https://stripe.com" target="_blank" rel="noopener">Stripe</a>.
-        Stripe receives the payment details you enter on their Checkout page; we
-        store only a purchase record (Stripe session id, amount, and minutes
-        credited) — never your full card number.
+
+    <h2>Services that process data for us</h2>
+    <ul>
+        <li><strong>OpenAI</strong>: episode audio is sent to OpenAI's
+            Whisper API to produce the transcript.</li>
+        <li><strong>PostHog</strong> (EU Cloud): product analytics and
+            session replay, so we can see where signup-to-first-transcript
+            drops off. Replays mask form inputs (including email, password and
+            API key fields) and transcript text. We identify you only by an
+            internal user id, not by email or name, and we do not send API
+            keys, passwords, emails or transcript text as event properties.</li>
+        <li><strong>Stripe</strong>: card payments for optional credit packs.
+            Stripe receives the payment details you enter on their Checkout
+            page; we store only a purchase record (Stripe session id, amount and
+            minutes credited), never your card number.</li>
+        <li><strong>Mailgun</strong> (EU region): sends
+            transcript-ready emails and the new-episode alerts you switch on.
+            Every alert email has an unsubscribe link.</li>
+        <li><strong>Sentry</strong>: error reports, with cookies, headers,
+            IP addresses and form bodies stripped before they are sent.</li>
+        <li><strong>Hetzner</strong>: hosting, in the EU.</li>
+    </ul>
+    <p>Fonts are served from podskrift.com itself, not from Google.</p>
+
+    <h2>Cookies and local storage</h2>
+    <ul>
+        <li><strong>session</strong> and <strong>remember_token</strong>: keep
+            you logged in. Necessary for the site to work.</li>
+        <li>PostHog's <strong>ph_…</strong> cookie and local storage: an
+            anonymous analytics id.</li>
+        <li>Local storage for small preferences, such as your last spoken
+            language and which What's new items you have seen.</li>
+    </ul>
+
+    <h2>Shared transcripts</h2>
+    <p>
+        If you share a transcript, anyone with the link can read it until you
+        turn sharing off. Share links are kept out of search engines.
     </p>
-    <p style="color: var(--muted); font-size: 14px; line-height: 1.7;">
-        Questions:
-        <a href="https://productivitytech.io/contact/" target="_blank" rel="noopener">Contact</a>.
+
+    <h2>Your rights</h2>
+    <p>
+        You can ask for a copy of your data, have it corrected, or have your
+        account and transcripts deleted. Contact us below. If you think we
+        handle your data wrongly, you can also complain to the Norwegian Data
+        Protection Authority (<a href="https://www.datatilsynet.no/en/" target="_blank" rel="noopener">Datatilsynet</a>).
+    </p>
+
+    <h2>Contact</h2>
+    <p>
+        <a href="https://productivitytech.io/contact/" target="_blank" rel="noopener">Contact form</a>.
+        Security issues: see <a href="/.well-known/security.txt">security.txt</a>.
     </p>
 </div>
 {% endblock %}

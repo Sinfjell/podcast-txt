@@ -3,12 +3,12 @@
 
 {% block content %}
 <div style="max-width: 500px; margin: 24px auto;">
-    <h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">Settings</h2>
+    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">Settings</h1>
 
     {% if trial %}
     <div class="card" id="credits">
         <div class="card-header">
-            <h5>Minutes{% if trial.paid_minutes or trial.stripe_buy %} &amp; credits{% endif %}</h5>
+            <h2>Minutes{% if trial.paid_minutes or trial.stripe_buy %} &amp; credits{% endif %}</h2>
         </div>
         <div class="card-body">
             {% if trial.on_own_key %}
@@ -70,7 +70,7 @@
     </div>
     {% elif stripe_buy_enabled and current_user.is_authenticated and not current_user.openai_api_key %}
     <div class="card" id="credits">
-        <div class="card-header"><h5>Paid minutes</h5></div>
+        <div class="card-header"><h2>Paid minutes</h2></div>
         <div class="card-body">
             <p style="font-size: 14px; margin-bottom: 10px;">
                 ${{ credit_pack_price_usd }} · {{ credit_pack_minutes }} minutes · one-time · VAT included
@@ -91,7 +91,7 @@
     {% endif %}
 
     <div class="card" style="margin-top: 16px;" id="email">
-        <div class="card-header"><h5>Email</h5></div>
+        <div class="card-header"><h2>Email</h2></div>
         <div class="card-body">
             <div class="form-group">
                 <label class="form-label">Address</label>
@@ -181,7 +181,7 @@
     {% if new_api_key or current_user.has_api_key %}
     <div class="card" style="margin-top: 16px;">
         <div class="card-header">
-            <h5>Podskrift API key (developers only)</h5>
+            <h2>Podskrift API key (developers only)</h2>
             <a href="{{ url_for('api_docs') }}" class="btn btn-sm btn-ghost">Docs</a>
         </div>
         <div class="card-body">
@@ -231,7 +231,7 @@
     {% else %}
     <details class="card" style="margin-top: 16px; padding: 0;">
         <summary class="card-header" style="cursor: pointer; list-style-position: inside;">
-            <h5 style="display: inline;">Podskrift API key (developers only)</h5>
+            <h2 style="display: inline;">Podskrift API key (developers only)</h2>
         </summary>
         <div class="card-body">
             <p style="color: var(--muted); font-size: 14px; line-height: 1.6; margin-bottom: 12px;">
@@ -249,7 +249,7 @@
 
     <div class="card" style="margin-top: 16px;">
         <div class="card-header">
-            <h5>Feedback / feature ideas</h5>
+            <h2>Feedback / feature ideas</h2>
         </div>
         <div class="card-body">
             <p style="color: var(--muted); font-size: 14px; line-height: 1.6;">

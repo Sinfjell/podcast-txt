@@ -43,9 +43,9 @@
     <div class="episode-hero">
         {% if artwork %}<img src="{{ artwork }}" alt="" style="width: 64px; height: 64px;">{% endif %}
         <div class="episode-hero-info">
-            <h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em;">
+            <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em;">
                 Select Episode
-            </h2>
+            </h1>
             <p class="text-muted text-sm mt-1">{{ feed_name or podcast_name }}</p>
         </div>
     </div>
@@ -92,6 +92,7 @@
     <div class="grid grid-2">
         {% for episode in episodes %}
         <div class="episode-card" data-episode-index="{{ episode.index }}" data-listener-attached="true"
+             tabindex="0" role="button" aria-pressed="false" data-kbd-click
              data-episode-title="{{ episode.title|e }}"
              {% if episode.duration_min is not none %}data-duration-min="{{ episode.duration_min }}"{% endif %}>
             <input type="radio" name="episode" value="{{ episode.index }}" id="ep_{{ episode.index }}" style="display: none;">
@@ -197,8 +198,8 @@
     <div class="card" style="width: 400px; max-width: 90vw;">
         <form method="POST" action="{{ url_for('add_feed') }}">
             <div class="card-header">
-                <h5>Save this feed</h5>
-                <button type="button" class="alert-close" id="closeSaveDialog">&times;</button>
+                <h2>Save this feed</h2>
+                <button type="button" class="alert-close" id="closeSaveDialog" aria-label="Close">&times;</button>
             </div>
             <div class="card-body">
                 <input type="hidden" name="rss_url" value="{{ rss_url }}">
@@ -442,8 +443,12 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     function selectCard(card) {
-        grid.querySelectorAll('.episode-card').forEach(function(c) { c.classList.remove('selected'); });
+        grid.querySelectorAll('.episode-card').forEach(function(c) {
+            c.classList.remove('selected');
+            c.setAttribute('aria-pressed', 'false');
+        });
         card.classList.add('selected');
+        card.setAttribute('aria-pressed', 'true');
         card.querySelector('input[type="radio"]').checked = true;
         transcribeBtn.disabled = false;
         episodeIndexInput.value = card.dataset.episodeIndex;
@@ -466,6 +471,10 @@ document.addEventListener('DOMContentLoaded', function() {
     function renderEpisode(ep) {
         var card = document.createElement('div');
         card.className = 'episode-card';
+        card.tabIndex = 0;
+        card.setAttribute('role', 'button');
+        card.setAttribute('aria-pressed', 'false');
+        card.setAttribute('data-kbd-click', '');
         card.dataset.episodeIndex = ep.index;
         card.dataset.episodeTitle = ep.title || '';
         if (ep.duration_min != null) card.dataset.durationMin = ep.duration_min;
@@ -536,6 +545,7 @@ document.addEventListener('DOMContentLoaded', function() {
             } else if (card.classList.contains('selected')) {
                 // Otherwise a filtered-away card stays selected and submittable
                 card.classList.remove('selected');
+                card.setAttribute('aria-pressed', 'false');
                 card.querySelector('input[type="radio"]').checked = false;
                 episodeIndexInput.value = '';
                 episodeTitleInput.value = '';

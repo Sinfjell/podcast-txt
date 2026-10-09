@@ -62,6 +62,7 @@ from models import (db, User, SavedFeed, TranscriptionTask, CreditPurchase,
                     TRANSCRIPT_SHARE_COLUMN_MIGRATIONS)
 from observability import init_sentry, report_stale_task, report_task_failure
 import analytics as product_analytics
+from site_standards import init_site_standards
 import email_notify
 import mail as mailer
 import episode_alerts
@@ -7191,6 +7192,9 @@ def _structured_data():
             .replace('<', '\\u003c').replace('>', '\\u003e'))
 
 
+CONTENT_SIGNAL = 'Content-Signal: search=yes, ai-input=yes, ai-train=yes'
+
+
 @app.route('/robots.txt')
 def robots_txt():
     """Explicit crawler policy.
@@ -7210,7 +7214,11 @@ def robots_txt():
         '',
         'User-agent: *',
         'Allow: /',
-        '',
+        # Content Signals (contentsignals.org): the explicit statement of what
+        # the Allow lines already imply -- search, AI answers and AI training
+        # are all welcome on the public pages.
+        CONTENT_SIGNAL,
+        # No blank lines inside a group: some parsers end the group there.
         '# Nothing here is useful without a session, and some of it is personal.',
     ] + disallow + [
         '',
@@ -7224,7 +7232,7 @@ def robots_txt():
         # `Allow: /` therefore told exactly the bots this file exists for that
         # /history and /download/ were fair game -- strictly worse than not
         # naming them. Every group repeats the rules.
-        lines += [f'User-agent: {agent}', 'Allow: /'] + disallow + ['']
+        lines += [f'User-agent: {agent}', 'Allow: /', CONTENT_SIGNAL] + disallow + ['']
     lines.append(f'Sitemap: {public_url('sitemap_xml')}')
     return Response('\n'.join(lines) + '\n', mimetype='text/plain')
 
@@ -7486,7 +7494,7 @@ def markdown_to_safe_html(source):
             header = cells(data_rows[0])
             parts.append('<table><thead><tr>')
             for cell in header:
-                parts.append(f'<th>{_md_inline(cell)}</th>')
+                parts.append(f'<th scope="col">{_md_inline(cell)}</th>')
             parts.append('</tr></thead><tbody>')
             for row in data_rows[1:]:
                 parts.append('<tr>')
@@ -7523,6 +7531,15 @@ def api_docs():
         body_html=body_html,
         trial_minutes=advertised_trial_minutes(),
     )
+
+
+init_site_standards(
+    app,
+    public_base_url=PUBLIC_BASE_URL,
+    changelog_loader=load_changelog_entries,
+    api_markdown_loader=load_customer_api_markdown,
+    posthog_host=product_analytics.posthog_host,
+)
 
 
 @app.route('/health')

@@ -1201,7 +1201,7 @@ def test_unverified_key_flashes_as_a_warning_not_success(monkeypatch):
     # Match the rendered flash div, not the stylesheet -- base.html inlines
     # `.alert-warning { ... }`, so a bare substring check passes on every page.
     import re as _re
-    flashes = _re.findall(r'<div class="alert alert-(\w+)">', body)
+    flashes = _re.findall(r'<div class="alert alert-(\w+)"', body)
     assert flashes, 'no flash rendered'
     assert 'warning' in flashes, f'flash categories were {flashes}, expected a warning'
     assert 'success' not in flashes
@@ -3634,7 +3634,7 @@ def test_the_page_says_what_it_is_before_asking_for_anything(trial_on):
     )
     assert 'meta name="description"' in body
     assert 'og:title' in body
-    assert '<main id="content">' in body, 'no main landmark for anything to orient on'
+    assert '<main id="content"' in body, 'no main landmark for anything to orient on'
 
 def test_every_named_crawler_group_repeats_the_rules(trial_on):
     """RFC 9309: a crawler obeys ONLY its most specific matching group and
