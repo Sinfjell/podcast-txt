@@ -4,11 +4,10 @@
  * Choice is stored in localStorage and a same-site cookie (12 months). That
  * cookie is necessary to remember Accept/Decline — not for tracking.
  *
- * PostHog itself is initialised from base.html. Before Accept it uses
- * persistence 'memory' + opt_out_capturing_by_default so it sets no cookies
- * and captures nothing (including no session recording). We do not use
- * cookieless aggregate pageviews without consent: PostHog still processes IP
- * / UA as personal data under GDPR, and Decline must mean no analytics.
+ * PostHog is initialised from base.html with cookieless_mode: 'on_reject'.
+ * Before Accept (and after Decline) it captures anonymous pageviews/events
+ * with no cookies or local/session storage; Accept opts into normal
+ * persistence, session recording, and identify().
  */
 (function (global) {
     'use strict';

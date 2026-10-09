@@ -284,14 +284,19 @@ Users are identified by internal user id only (never email/name as person
 properties). Event properties never include API keys, emails, or transcript
 text. See `/privacy`.
 
-Cookie consent: the browser snippet initialises with `persistence: 'memory'`
-and `opt_out_capturing_by_default` until the visitor Accepts (banner + footer
-Cookie settings). No PostHog cookies, localStorage ids, or session recording
-before Accept; Decline keeps capturing off. Choice is stored 12 months in the
-first-party `podskrift_cookie_consent` cookie/localStorage. Server-side
-`analytics.capture()` keys on the internal user id and never reads tracking
-cookies; checkout only forwards `ph_sid` → `$session_id` when that consent
-cookie is `accepted`.
+Cookie consent: the browser snippet uses PostHog `cookieless_mode: 'on_reject'`.
+Before Accept and after Decline, the client calls `opt_out_capturing()` so
+PostHog may count anonymous pageviews/events with no cookies or
+local/session storage and no session recording (server-side daily-rotating
+hash). Accept calls `opt_in_capturing()`, enables session recording, and may
+`identify()` by internal user id. Choice is stored 12 months in the
+first-party `podskrift_cookie_consent` cookie/localStorage (banner + footer
+Cookie settings). Project must have **Cookieless server hash mode** enabled
+under Project Settings → Web analytics, or cookieless events are discarded.
+Recommend also enabling **Discard client IP data** so IPs are not stored.
+Server-side `analytics.capture()` keys on the internal user id and never
+reads tracking cookies; checkout only forwards `ph_sid` → `$session_id` when
+that consent cookie is `accepted`.
 
 ```bash
 # once, as root, from the app directory

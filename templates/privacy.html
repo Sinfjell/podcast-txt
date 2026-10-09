@@ -35,12 +35,26 @@
             Whisper API to produce the transcript.</li>
         <li><strong>PostHog</strong> (EU Cloud): product analytics and
             session replay, so we can see where signup-to-first-transcript
-            drops off — only after you Accept cookies. Replays mask form
-            inputs (including email, password and API key fields) and
-            transcript text. We identify you only by an internal user id, not
-            by email or name, and we do not send API keys, passwords, emails or
-            transcript text as event properties. If you Decline, we do not load
-            analytics cookies or record sessions.</li>
+            drops off.
+            <ul>
+                <li><strong>Anonymous usage statistics</strong> (before you
+                    choose, and if you Decline): cookieless pageviews and
+                    events based on our legitimate interest in understanding
+                    how the product is used (GDPR art. 6(1)(f)). No cookies,
+                    no local or session storage, no session recording, and no
+                    lasting user id. PostHog counts visitors with a
+                    privacy-preserving hash that rotates daily, so the same
+                    person is not tracked across days. We do not create person
+                    profiles for these visitors.</li>
+                <li><strong>Full analytics and session replay</strong> only
+                    after you Accept: cookies and similar storage, session
+                    replay, and (when you are logged in) identify by an
+                    internal user id — never email or name. Replays mask form
+                    inputs (including email, password and API key fields) and
+                    transcript text. We do not send API keys, passwords,
+                    emails or transcript text as event properties.</li>
+            </ul>
+        </li>
         <li><strong>Stripe</strong>: card payments for optional credit packs.
             Stripe receives the payment details you enter on their Checkout
             page; we store only a purchase record (Stripe session id, amount and
@@ -61,11 +75,11 @@
             storage, kept for 12 months): remembers whether you Accepted or
             Declined analytics. Necessary to honour your choice. Change it any
             time via Cookie settings in the footer.</li>
-        <li>PostHog's <strong>ph_…</strong> cookie and local storage: an
-            anonymous analytics id and session replay state. Set only after
-            you Accept. Before that (and if you Decline), PostHog runs in
-            memory-only mode with capturing off — no analytics cookies and no
-            session recording.</li>
+        <li>PostHog's <strong>ph_…</strong> cookie and local/session storage:
+            an analytics id and session replay state. Set only after you
+            Accept. Before that (and if you Decline), PostHog runs in
+            cookieless mode — anonymous usage statistics with no analytics
+            cookies or browser storage, and no session recording.</li>
         <li>Local storage for small preferences, such as your last spoken
             language and which What's new items you have seen.</li>
     </ul>

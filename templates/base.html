@@ -1235,8 +1235,9 @@
         <div class="cookie-consent-inner">
             <p class="cookie-consent-copy" id="cookieConsentDesc">
                 <span id="cookieConsentTitle" class="sr-only">Cookie settings</span>
-                We use cookies and similar storage for product analytics and session
-                replay (PostHog EU) if you accept.
+                Accept enables full product analytics and session replay
+                (PostHog EU), including cookies. Decline still allows
+                anonymous, cookie-free usage statistics.
                 <a href="{{ url_for('privacy') }}">Privacy</a>
             </p>
             <div class="cookie-consent-actions">
@@ -1268,7 +1269,8 @@
 
     {% if posthog_key and not is_admin_page %}
     {# External helper (script-src 'self'); sync so getChoice() is ready before
-       the SDK loader runs. The PostHog SDK is only injected after Accept. #}
+       the SDK loader runs. PostHog loads immediately in cookieless_mode
+       'on_reject'; Accept opts into cookies + replay + identify. #}
     <script src="{{ asset_url('cookie-consent.js') }}"></script>
     <script>
     (function () {
@@ -1310,45 +1312,6 @@
             } catch (e) { /* ignore */ }
         }
 
-        // The PostHog SDK is not loaded at all until the visitor Accepts:
-        // no window.posthog, no requests to PostHog, no cookies/localStorage.
-        // Every capture site in the templates is guarded by window.posthog.
-        var _sdkLoaded = false;
-        function loadPosthogSdk() {
-            if (_sdkLoaded) return;
-            _sdkLoaded = true;
-            !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host.replace(".i.posthog.com","-assets.i.posthog.com")+"/static/array.js",r=t.getElementsByTagName("script")[0],r.parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagResult isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey getNextSurveyStep identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty createPersonProfile opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
-            posthog.init({{ posthog_key | tojson }}, {
-                api_host: {{ posthog_host | tojson }},
-                person_profiles: 'identified_only',
-                capture_exceptions: true,
-                persistence: 'localStorage+cookie',
-                session_recording: REPLAY,
-                loaded: function (ph) {
-                    // A Decline earlier may have stored an opt-out flag.
-                    try {
-                        if (ph.has_opted_out_capturing()) ph.opt_in_capturing();
-                    } catch (e) { /* ignore */ }
-                }
-            });
-            posthog.register({app: 'podskrift'});
-            identifyIfAllowed();
-        }
-
-        function enableAnalytics() {
-            if (!_sdkLoaded) {
-                loadPosthogSdk();
-                return;
-            }
-            try {
-                posthog.opt_in_capturing();
-                if (typeof posthog.startSessionRecording === 'function') {
-                    posthog.startSessionRecording();
-                }
-            } catch (e) { /* ignore */ }
-            identifyIfAllowed();
-        }
-
         function clearPosthogStorage() {
             try {
                 (document.cookie || '').split(';').forEach(function (c) {
@@ -1358,35 +1321,84 @@
                         document.cookie = name + '=; Path=/; Max-Age=0; SameSite=Lax; Domain=.' + location.hostname.replace(/^www\./, '');
                     }
                 });
-                for (var k = localStorage.length - 1; k >= 0; k--) {
-                    var key = localStorage.key(k);
-                    if (key && (key.indexOf('ph_') === 0 || key.indexOf('__ph_') === 0)) {
-                        localStorage.removeItem(key);
+                ['localStorage', 'sessionStorage'].forEach(function (storeName) {
+                    var store = window[storeName];
+                    if (!store) return;
+                    for (var k = store.length - 1; k >= 0; k--) {
+                        var key = store.key(k);
+                        if (key && (key.indexOf('ph_') === 0 || key.indexOf('__ph_') === 0)) {
+                            store.removeItem(key);
+                        }
                     }
+                });
+            } catch (e) { /* ignore */ }
+        }
+
+        // Apply Accept vs cookieless (pending / Decline). With on_reject,
+        // capture stays paused until opt_in or opt_out — so pending visitors
+        // get cookieless counting via opt_out. opt_out may briefly write
+        // __ph_opt_in_out_*; we sweep ph_/__ph_ storage afterward (we remember
+        // the choice ourselves in podskrift_cookie_consent).
+        function applyConsentToPosthog() {
+            if (!window.posthog) return;
+            try {
+                if (choice() === 'accepted') {
+                    posthog.opt_in_capturing();
+                    posthog.set_config({disable_session_recording: false});
+                    if (typeof posthog.startSessionRecording === 'function') {
+                        posthog.startSessionRecording();
+                    }
+                    identifyIfAllowed();
+                } else {
+                    if (typeof posthog.stopSessionRecording === 'function') {
+                        posthog.stopSessionRecording();
+                    }
+                    posthog.set_config({disable_session_recording: true});
+                    posthog.opt_out_capturing();
+                    clearPosthogStorage();
+                    setTimeout(clearPosthogStorage, 0);
+                    setTimeout(clearPosthogStorage, 250);
                 }
             } catch (e) { /* ignore */ }
         }
 
+        // Always load the SDK when PostHog is configured (non-admin).
+        // cookieless_mode 'on_reject' + opt_out = anonymous hash counting;
+        // opt_in = cookies, replay, identify. See PostHog cookieless-tracking.
+        var _sdkLoaded = false;
+        function loadPosthogSdk() {
+            if (_sdkLoaded) return;
+            _sdkLoaded = true;
+            !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host.replace(".i.posthog.com","-assets.i.posthog.com")+"/static/array.js",r=t.getElementsByTagName("script")[0],r.parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagResult isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey getNextSurveyStep identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty createPersonProfile opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
+            posthog.init({{ posthog_key | tojson }}, {
+                api_host: {{ posthog_host | tojson }},
+                cookieless_mode: 'on_reject',
+                person_profiles: 'identified_only',
+                capture_exceptions: true,
+                disable_session_recording: true,
+                session_recording: REPLAY,
+                loaded: function () {
+                    applyConsentToPosthog();
+                }
+            });
+            posthog.register({app: 'podskrift'});
+        }
+
+        function enableAnalytics() {
+            if (!_sdkLoaded) loadPosthogSdk();
+            applyConsentToPosthog();
+        }
+
         function disableAnalytics() {
-            if (window.posthog && _sdkLoaded) {
-                try {
-                    if (typeof posthog.stopSessionRecording === 'function') {
-                        posthog.stopSessionRecording();
-                    }
-                    posthog.opt_out_capturing();
-                    posthog.reset();
-                    posthog.set_config({persistence: 'memory',
-                                        disable_session_recording: true});
-                } catch (e) { /* ignore */ }
-            }
+            if (!_sdkLoaded) loadPosthogSdk();
+            applyConsentToPosthog();
+            // Decline after Accept: sweep any leftover ph_* cookies/storage.
             clearPosthogStorage();
             setTimeout(clearPosthogStorage, 500);
         }
 
-        if (choice() === 'accepted') {
-            loadPosthogSdk();
-        } else if (choice() === 'declined') {
-            // Leftovers from an earlier Accept: the SDK is not loaded now.
+        loadPosthogSdk();
+        if (choice() === 'declined') {
             clearPosthogStorage();
         }
 
@@ -1414,11 +1426,11 @@
         } catch (e) { /* ignore */ }
 
         // Once-per page+location paywall / offer dual-fire.
+        // Allowed in cookieless mode (anonymous); identify/replay stay Accept-only.
         var _paywallSeen = window.__podskriftPaywallSeen || (window.__podskriftPaywallSeen = new Set());
         window.podskriftPaywallShown = function (location, reason, props) {
             try {
                 if (!window.posthog || !location) return;
-                if (choice() !== 'accepted') return;
                 var key = String(location);
                 if (_paywallSeen.has(key)) return;
                 _paywallSeen.add(key);
@@ -1434,7 +1446,8 @@
             } catch (e) { /* ignore */ }
         };
 
-        // Buy form submit: stamp ph_sid + buy_clicked only after Accept.
+        // Buy form: stamp ph_sid only after Accept (cookie session id).
+        // buy_clicked itself may fire anonymously in cookieless mode.
         document.addEventListener('submit', function (ev) {
             try {
                 var form = ev.target;
@@ -1453,7 +1466,7 @@
                     form.appendChild(ph);
                 }
                 ph.value = sid;
-                if (choice() !== 'accepted') return;
+                if (!window.posthog) return;
                 var sourceEl = form.querySelector('input[name="source"]');
                 var loc = sourceEl ? sourceEl.value : '';
                 var opts = {};
