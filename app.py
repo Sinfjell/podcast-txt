@@ -54,7 +54,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError as SaIntegrityError
 
 from models import (db, User, SavedFeed, TranscriptionTask, CreditPurchase,
-                    EmailSentLog,
+                    EmailSentLog, SummaryEmailJob, SummaryEmailBudgetDay,
                     TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS,
                     CREDIT_PURCHASE_COLUMN_MIGRATIONS,
                     SAVED_FEED_COLUMN_MIGRATIONS)
@@ -63,6 +63,8 @@ import analytics as product_analytics
 import email_notify
 import mail as mailer
 import episode_alerts
+import summary as summary_mod
+import summary_email as summary_email_mod
 
 try:
     import stripe
@@ -227,6 +229,13 @@ def free_disk_bytes(path='.'):
 # trial-limit / settings copy. OpenAI's published rate; keep every "$0.36/hr"
 # style figure derived from this constant so they cannot drift.
 WHISPER_COST_PER_MINUTE = 0.006
+
+# Post-transcript AI summaries (off until SUMMARY_ENABLED=1). Chat model for
+# TL;DR + key points + short quotes — never meters trial/paid minutes.
+SUMMARY_ENABLED = summary_mod.summary_enabled()
+SUMMARY_MODEL = summary_mod.summary_model()
+# Follow-show summary emails (off until SUMMARY_EMAIL_ENABLED=1).
+SUMMARY_EMAIL_ENABLED = summary_email_mod.summary_email_enabled()
 
 
 def openai_whisper_cost_usd(minutes):
@@ -4077,12 +4086,52 @@ def _schedule_transcript_ready_email(task_id, user_id):
     ).start()
 
 
+def _openai_key_for_task_owner(user_id):
+    """Same key that funded transcription: BYOK wins, else platform key."""
+    owner = db.session.get(User, user_id)
+    key, _source = resolve_openai_key(owner)
+    if key:
+        return key
+    return GLOBAL_OPENAI_KEY
+
+
+def _schedule_transcript_summary(task_id, user_id):
+    """Fire-and-forget AI summary after completion. Never fails the transcript."""
+    if not summary_mod.summary_enabled():
+        return
+
+    def _run():
+        with app.app_context():
+            try:
+                task = db.session.get(TranscriptionTask, task_id)
+                if task is None or task.status != 'completed':
+                    return
+                key = _openai_key_for_task_owner(user_id)
+                client = build_openai_client(key)
+                summary_mod.summarize_task(
+                    db=db,
+                    task=task,
+                    openai_client=client,
+                    user_id=user_id,
+                    retry=True,
+                )
+            except Exception:  # noqa: BLE001
+                app.logger.exception(
+                    'scheduled summary failed for %s', task_id)
+
+    threading.Thread(
+        target=_run, daemon=True, name=f'summary-{task_id[:8]}',
+    ).start()
+
+
 def _finalize_global_unsubscribe(user):
     """Stamp unsub, disable transcript + per-feed alerts. Idempotent."""
     _apply_global_unsubscribe(user)
-    # Also opt out of per-feed alerts so digests stop without a second click.
+    # Also opt out of per-feed alerts + summary emails so digests stop
+    # without a second click.
     SavedFeed.query.filter_by(user_id=user.id).update(
-        {'email_new_episodes': False}, synchronize_session=False)
+        {'email_new_episodes': False, 'email_summaries': False},
+        synchronize_session=False)
     db.session.commit()
 
 
@@ -4206,6 +4255,7 @@ def add_feed():
     # Checkbox is shown checked by default; an unchecked box is omitted from
     # the POST, which we treat as opt-out.
     email_new = request.form.get('email_new_episodes') == '1'
+    email_sum = request.form.get('email_summaries') == '1'
 
     if not name or not rss_url:
         flash('Name and RSS URL are required.', 'error')
@@ -4216,10 +4266,22 @@ def add_feed():
         flash('This feed is already saved.', 'info')
         return redirect(url_for('feeds'))
 
+    if email_sum and not summary_email_mod.can_opt_in_summary_email(
+            db, SavedFeed, current_user.id):
+        flash(
+            'Free summary email is limited to one show. Turn it off on your '
+            'other follow first, or buy minutes later to keep more.',
+            'error',
+        )
+        email_sum = False
+
     feed = SavedFeed(
         user_id=current_user.id, name=name, rss_url=rss_url,
         email_new_episodes=email_new,
+        email_summaries=email_sum,
     )
+    if email_sum:
+        summary_email_mod.stamp_summary_trial_start(feed)
     db.session.add(feed)
     db.session.commit()
     product_analytics.capture(
@@ -4227,6 +4289,11 @@ def add_feed():
         current_user.id,
         {'channel': 'new_episodes', 'source': 'feeds_add'},
     )
+    if email_sum:
+        product_analytics.capture(
+            'summary_email_opt_in', current_user.id,
+            {'source': 'feeds_add', 'feed_id': feed.id},
+        )
     flash(f'Feed "{name}" saved.', 'success')
     return redirect(url_for('feeds'))
 
@@ -4249,6 +4316,44 @@ def toggle_feed_email_alerts(feed_id):
         {'channel': 'new_episodes', 'source': 'feeds_toggle'},
     )
     flash('Feed email alert preference saved.', 'success')
+    return redirect(url_for('feeds'))
+
+
+@app.route('/feeds/<int:feed_id>/email-summaries', methods=['POST'])
+@login_required
+def toggle_feed_email_summaries(feed_id):
+    """Per-feed opt-in/out for summary-by-email (separate from plain alerts)."""
+    feed = SavedFeed.query.filter_by(id=feed_id, user_id=current_user.id).first_or_404()
+    want = request.form.get('email_summaries') == '1'
+    was_on = bool(feed.email_summaries)
+    if want and not was_on:
+        if not summary_email_mod.can_opt_in_summary_email(
+                db, SavedFeed, current_user.id, exclude_feed_id=feed.id):
+            flash(
+                'Free summary email is limited to one show at a time.',
+                'error',
+            )
+            return redirect(url_for('feeds'))
+        feed.email_summaries = True
+        summary_email_mod.stamp_summary_trial_start(feed)
+        # Re-baseline so enabling does not flood a backlog of old episodes.
+        episode_alerts.reset_feed_alert_baseline(feed)
+        db.session.commit()
+        product_analytics.capture(
+            'summary_email_opt_in', current_user.id,
+            {'source': 'feeds_toggle', 'feed_id': feed.id},
+        )
+    elif not want and was_on:
+        feed.email_summaries = False
+        db.session.commit()
+        product_analytics.capture(
+            'summary_email_opt_out', current_user.id,
+            {'source': 'feeds_toggle', 'feed_id': feed.id},
+        )
+    else:
+        feed.email_summaries = want
+        db.session.commit()
+    flash('Summary email preference saved.', 'success')
     return redirect(url_for('feeds'))
 
 
@@ -4921,6 +5026,8 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                             if finished is not None:
                                 _schedule_transcript_ready_email(
                                     task_id, user_id)
+                                # Optional AI summary — never fails the transcript.
+                                _schedule_transcript_summary(task_id, user_id)
                         except Exception:  # noqa: BLE001
                             app.logger.exception(
                                 'transcript_completed analytics failed for %s',
@@ -5321,6 +5428,13 @@ def get_status(task_id):
         if task.language:
             # Display name for UI; old rows with names still look fine.
             result['language'] = display_language(task.language)
+        # Optional AI summary (flagged; status may still be pending).
+        result['summary_status'] = getattr(task, 'summary_status', None)
+        if getattr(task, 'summary_status', None) == 'ready':
+            parsed = summary_mod.parse_summary_json(
+                getattr(task, 'summary_json', None))
+            if parsed:
+                result['summary'] = parsed
         partial = task_partial_meta(task)
         if partial:
             n_min, m_min = partial_minutes_pair(partial)
@@ -5470,6 +5584,13 @@ def download_file(task_id, file_type):
         body = task.transcript_text or ''
         if note:
             body = f'{note}\n\n{body}' if body else note
+        # Optional Summary section at the top when ready (srt stays unchanged).
+        if getattr(task, 'summary_status', None) == 'ready':
+            parsed = summary_mod.parse_summary_json(
+                getattr(task, 'summary_json', None))
+            if parsed and (parsed.get('tldr') or parsed.get('key_points')):
+                section = summary_mod.format_summary_for_txt(parsed)
+                body = f'{section}\n{body}' if body else section
         content = body.encode('utf-8')
         return send_file(
             BytesIO(content),
@@ -5647,6 +5768,7 @@ def follow_task_podcast(task_id):
         return jsonify({
             'following': True, 'already': True, 'feed_id': existing.id,
             'email_new_episodes': bool(existing.email_new_episodes),
+            'email_summaries': bool(getattr(existing, 'email_summaries', False)),
         })
 
     # Default ON; JSON body or form can pass email_new_episodes=0/false.
@@ -5658,10 +5780,22 @@ def follow_task_podcast(task_id):
     else:
         email_new = str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
 
+    raw_sum = request.form.get('email_summaries')
+    if raw_sum is None and request.is_json:
+        raw_sum = (request.get_json(silent=True) or {}).get('email_summaries')
+    # Default OFF — explicit opt-in for summary emails.
+    email_sum = str(raw_sum or '').strip().lower() in ('1', 'true', 'yes', 'on')
+    if email_sum and not summary_email_mod.can_opt_in_summary_email(
+            db, SavedFeed, current_user.id):
+        email_sum = False
+
     feed = SavedFeed(
         user_id=current_user.id, name=name, rss_url=rss_url,
         email_new_episodes=email_new,
+        email_summaries=email_sum,
     )
+    if email_sum:
+        summary_email_mod.stamp_summary_trial_start(feed)
     db.session.add(feed)
     db.session.commit()
     product_analytics.capture(
@@ -5669,9 +5803,15 @@ def follow_task_podcast(task_id):
         current_user.id,
         {'channel': 'new_episodes', 'source': 'follow'},
     )
+    if email_sum:
+        product_analytics.capture(
+            'summary_email_opt_in', current_user.id,
+            {'source': 'follow', 'feed_id': feed.id},
+        )
     return jsonify({
         'following': True, 'already': False, 'feed_id': feed.id,
         'email_new_episodes': email_new,
+        'email_summaries': email_sum,
     })
 
 
@@ -8214,6 +8354,199 @@ def ensure_email_sent_log_table():
         app.logger.exception('Could not create ix_email_sent_log_user_id')
 
 
+def ensure_summary_email_tables():
+    """Create summary-email job + budget tables. Index only after columns exist."""
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        db.session.execute(text("""
+            CREATE TABLE IF NOT EXISTS summary_email_jobs (
+                id INTEGER NOT NULL PRIMARY KEY,
+                idempotency_key VARCHAR(255) NOT NULL UNIQUE,
+                rss_url VARCHAR(1024) NOT NULL,
+                audio_url VARCHAR(1024) NOT NULL,
+                episode_guid VARCHAR(1024) NOT NULL,
+                episode_title VARCHAR(512),
+                podcast_name VARCHAR(512),
+                duration_seconds FLOAT,
+                status VARCHAR(32) NOT NULL DEFAULT 'queued',
+                task_id VARCHAR(36),
+                skip_reason VARCHAR(128),
+                error_message TEXT,
+                budget_seconds INTEGER,
+                budget_day VARCHAR(10),
+                created_at DATETIME,
+                updated_at DATETIME
+            )
+        """))
+        db.session.execute(text("""
+            CREATE TABLE IF NOT EXISTS summary_email_budget_days (
+                day VARCHAR(10) NOT NULL PRIMARY KEY,
+                seconds_used INTEGER NOT NULL DEFAULT 0
+            )
+        """))
+        db.session.commit()
+    except OperationalError as exc:
+        db.session.rollback()
+        msg = str(exc).lower()
+        if 'already exists' not in msg:
+            raise
+        app.logger.info(
+            'summary_email tables created by another worker; continuing')
+
+    for table, index_sql in (
+        ('summary_email_jobs',
+         'CREATE INDEX IF NOT EXISTS ix_summary_email_jobs_status '
+         'ON summary_email_jobs (status)'),
+        ('summary_email_jobs',
+         'CREATE INDEX IF NOT EXISTS ix_summary_email_jobs_audio_url '
+         'ON summary_email_jobs (audio_url)'),
+    ):
+        existing = _live_columns(table)
+        if not existing:
+            continue
+        try:
+            db.session.execute(text(index_sql))
+            db.session.commit()
+        except OperationalError:
+            db.session.rollback()
+            app.logger.exception('Could not create summary_email index')
+
+
+def start_shared_transcription_for_summary_email(job, *, owner_user_id):
+    """Start one platform-funded transcription for a summary-email job.
+
+    No trial/paid metering (trial_seconds_charged stays NULL). Uses the
+    platform OpenAI key. Returns task_id or None.
+    """
+    if not GLOBAL_OPENAI_KEY:
+        return None
+    audio_url = (job.audio_url or '').strip()
+    if not audio_url or not _is_fetchable_url(audio_url):
+        return None
+
+    # Reuse an in-flight or completed non-partial task for this audio.
+    cached = summary_email_mod.find_cached_completed_task(
+        db, TranscriptionTask, audio_url)
+    if cached is not None:
+        return cached.id
+    live = (
+        TranscriptionTask.query
+        .filter(
+            TranscriptionTask.source_audio_url == audio_url,
+            ~TranscriptionTask.status.in_(['completed', *TERMINAL_STATUSES]),
+        )
+        .order_by(TranscriptionTask.started_at.desc())
+        .first()
+    )
+    if live is not None:
+        return live.id
+
+    free_bytes = free_disk_bytes(os.path.dirname(os.path.abspath(__file__)))
+    if free_bytes is not None and free_bytes < MIN_FREE_DISK_BYTES:
+        app.logger.error(
+            'summary-email refuse: only %.1f GB free', free_bytes / (1024 ** 3))
+        return None
+    if not _transcription_slots.acquire(blocking=False):
+        app.logger.warning('summary-email refuse: at transcription slot cap')
+        return None
+    slot_held = True
+    task_id = str(uuid.uuid4())
+    try:
+        task = TranscriptionTask(
+            id=task_id,
+            user_id=owner_user_id,
+            episode_title=(job.episode_title or 'Episode')[:512],
+            rss_url=job.rss_url,
+            status='downloading',
+            phase='downloading',
+            phase_started_at=datetime.now(timezone.utc),
+            podcast_name=job.podcast_name,
+            source_audio_url=audio_url,
+            audio_duration=job.duration_seconds,
+            # Platform-funded summary-email job: never meter the owner.
+            trial_seconds_charged=None,
+            paid_seconds_charged=None,
+        )
+        db.session.add(task)
+        db.session.commit()
+
+        openai_client = build_openai_client(GLOBAL_OPENAI_KEY)
+        parsed_url = urlparse(audio_url)
+        audio_filename = (
+            f"temp_audio_{task_id}"
+            + (os.path.splitext(parsed_url.path)[1] or '.mp3')
+        )
+        source_url = audio_url
+        ph_props = {
+            'key_source': 'trial',
+            'source': 'summary_email',
+            'duration_min': (
+                round(job.duration_seconds / 60.0, 2)
+                if job.duration_seconds else None
+            ),
+        }
+
+        def transcribe_thread():
+            try:
+                with app.app_context():
+                    try:
+                        download_audio(source_url, audio_filename, task_id)
+                        transcribe_audio(
+                            audio_filename, task_id, openai_client, language=None)
+                    except TaskAbandoned:
+                        abandoned = db.session.get(TranscriptionTask, task_id)
+                        if abandoned:
+                            trial_refund_task(abandoned)
+                    except Exception as e:
+                        error_message = (
+                            describe_openai_error(e, key_source='trial')
+                            if _is_openai_error(e) else str(e))
+                        fail_task_and_refund(task_id, error_message)
+                        report_task_failure(
+                            e, task_id=task_id, key_source='trial')
+                    else:
+                        try:
+                            finished = db.session.get(TranscriptionTask, task_id)
+                            if finished is not None:
+                                product_analytics.capture(
+                                    'transcript_completed',
+                                    owner_user_id,
+                                    {**ph_props, 'nth_transcript': None},
+                                )
+                                _schedule_transcript_summary(
+                                    task_id, owner_user_id)
+                        except Exception:  # noqa: BLE001
+                            app.logger.exception(
+                                'summary-email completion hook failed for %s',
+                                task_id)
+                    finally:
+                        if os.path.exists(audio_filename):
+                            try:
+                                os.remove(audio_filename)
+                            except OSError:
+                                pass
+            except Exception:
+                app.logger.exception(
+                    'summary-email worker for %s died before start', task_id)
+            finally:
+                _transcription_slots.release()
+
+        threading.Thread(
+            target=transcribe_thread, daemon=True,
+            name=f'summary-email-{task_id[:8]}',
+        ).start()
+        slot_held = False
+        return task_id
+    except Exception:
+        db.session.rollback()
+        app.logger.exception('start_shared_transcription_for_summary_email failed')
+        return None
+    finally:
+        if slot_held:
+            _transcription_slots.release()
+
+
 def fetch_feed_for_alerts(feed_url):
     """SSRF-safe capped feed fetch for the new-episode poller.
 
@@ -8230,8 +8563,12 @@ def fetch_feed_for_alerts(feed_url):
 
 
 def run_new_episode_alerts_poll():
-    """CLI / systemd entry: poll followed feeds and send digests."""
-    return episode_alerts.run_new_episode_poll(
+    """CLI / systemd entry: poll followed feeds and send digests.
+
+    Also enqueues/processes summary-email jobs when SUMMARY_EMAIL_ENABLED
+    (additive; plain alert path unchanged when the flag is off).
+    """
+    stats = episode_alerts.run_new_episode_poll(
         app=app,
         db=db,
         User=User,
@@ -8240,7 +8577,27 @@ def run_new_episode_alerts_poll():
         fetch_feed=fetch_feed_for_alerts,
         public_base_url=PUBLIC_BASE_URL,
         secret_key=app.secret_key,
+        SummaryEmailJob=SummaryEmailJob,
+        enqueue_summary_jobs=summary_email_mod.enqueue_from_episodes,
     )
+    if summary_email_mod.summary_email_enabled():
+        se_stats = summary_email_mod.process_queued_jobs(
+            app=app,
+            db=db,
+            User=User,
+            SavedFeed=SavedFeed,
+            TranscriptionTask=TranscriptionTask,
+            EmailSentLog=EmailSentLog,
+            SummaryEmailJob=SummaryEmailJob,
+            SummaryEmailBudgetDay=SummaryEmailBudgetDay,
+            build_openai_client=build_openai_client,
+            platform_api_key=GLOBAL_OPENAI_KEY or '',
+            start_shared_transcription=start_shared_transcription_for_summary_email,
+            public_base_url=PUBLIC_BASE_URL,
+            secret_key=app.secret_key,
+        )
+        stats['summary_email'] = se_stats
+    return stats
 
 
 with app.app_context():
@@ -8262,6 +8619,7 @@ with app.app_context():
         )
     ensure_credit_purchases_table()
     ensure_email_sent_log_table()
+    ensure_summary_email_tables()
 
     apply_column_migrations()
     if STRIPE_MANAGED_PAYMENTS and STRIPE_AUTOMATIC_TAX:

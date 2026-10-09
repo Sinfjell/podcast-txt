@@ -79,6 +79,10 @@ class SavedFeed(db.Model):
                                    server_default='0')
     last_seen_episode_guid = db.Column(db.String(1024), nullable=True)
     last_seen_published_ts = db.Column(db.Float, nullable=True)
+    # Summary-by-email for followed shows (opt-in, default off; separate from alerts).
+    email_summaries = db.Column(db.Boolean, nullable=False, default=False,
+                                server_default='0')
+    summary_email_trial_started_at = db.Column(db.DateTime, nullable=True)
 
 
 class TranscriptionTask(db.Model):
@@ -140,6 +144,19 @@ class TranscriptionTask(db.Model):
     # stays reserved for real failures / cancel).
     partial_meta = db.Column(db.Text, nullable=True)
 
+    # Optional post-transcript AI summary (feature-flagged; never blocks completion).
+    # summary_json shape: {tldr, key_points[], quotes[], is_partial, language}.
+    summary_json = db.Column(db.Text, nullable=True)
+    # null / pending / ready / error / skipped
+    summary_status = db.Column(db.String(20), nullable=True)
+    summary_model = db.Column(db.String(64), nullable=True)
+    summary_prompt_tokens = db.Column(db.Integer, nullable=True)
+    summary_completion_tokens = db.Column(db.Integer, nullable=True)
+    summary_cost_usd_est = db.Column(db.Float, nullable=True)
+    # When this row is a read-only copy for a summary-email subscriber, points at
+    # the shared source task (same audio transcribed once).
+    summary_source_task_id = db.Column(db.String(36), nullable=True)
+
 
 class CreditPurchase(db.Model):
     """One Stripe Checkout payment that credited paid minutes (or needs review).
@@ -185,6 +202,46 @@ class EmailSentLog(db.Model):
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class SummaryEmailJob(db.Model):
+    """Queue for follow-show summary emails: one transcription per episode.
+
+    Survives restarts (poller re-queues / continues). Funded by the platform
+    key under SUMMARY_EMAIL_DAILY_MINUTES — never against user trial/paid.
+    """
+    __tablename__ = 'summary_email_jobs'
+
+    id = db.Column(db.Integer, primary_key=True)
+    # Stable dedupe key: sha256(rss_url)|sha256(episode_guid) truncated.
+    idempotency_key = db.Column(db.String(255), unique=True, nullable=False)
+    rss_url = db.Column(db.String(1024), nullable=False)
+    audio_url = db.Column(db.String(1024), nullable=False)
+    episode_guid = db.Column(db.String(1024), nullable=False)
+    episode_title = db.Column(db.String(512), nullable=True)
+    podcast_name = db.Column(db.String(512), nullable=True)
+    duration_seconds = db.Column(db.Float, nullable=True)
+    # queued | reserved | transcribing | summarizing | notifying | done | failed | skipped
+    status = db.Column(db.String(32), nullable=False, default='queued',
+                       server_default='queued')
+    task_id = db.Column(db.String(36), nullable=True)
+    skip_reason = db.Column(db.String(128), nullable=True)
+    error_message = db.Column(db.Text, nullable=True)
+    # Seconds reserved against the global daily summary-email budget.
+    budget_seconds = db.Column(db.Integer, nullable=True)
+    budget_day = db.Column(db.String(10), nullable=True)  # YYYY-MM-DD UTC
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc),
+                           onupdate=lambda: datetime.now(timezone.utc))
+
+
+class SummaryEmailBudgetDay(db.Model):
+    """Atomic daily spend counter for summary-email transcriptions (UTC day)."""
+    __tablename__ = 'summary_email_budget_days'
+
+    day = db.Column(db.String(10), primary_key=True)  # YYYY-MM-DD UTC
+    seconds_used = db.Column(db.Integer, nullable=False, default=0,
+                             server_default='0')
+
+
 #: Columns added after the first release, applied via ALTER TABLE on startup.
 #: Keyed by column name so the migration stays declarative as the model grows.
 TASK_COLUMN_MIGRATIONS = {
@@ -205,6 +262,13 @@ TASK_COLUMN_MIGRATIONS = {
     'paid_seconds_charged': 'INTEGER',
     'trial_settled': 'BOOLEAN NOT NULL DEFAULT 0',
     'partial_meta': 'TEXT',
+    'summary_json': 'TEXT',
+    'summary_status': 'VARCHAR(20)',
+    'summary_model': 'VARCHAR(64)',
+    'summary_prompt_tokens': 'INTEGER',
+    'summary_completion_tokens': 'INTEGER',
+    'summary_cost_usd_est': 'FLOAT',
+    'summary_source_task_id': 'VARCHAR(36)',
 }
 
 #: Same, for the users table.
@@ -219,12 +283,16 @@ USER_COLUMN_MIGRATIONS = {
     'email_unsubscribed_at': 'DATETIME',
 }
 
-#: Additive columns for saved_feeds (new-episode email alerts).
+#: Additive columns for saved_feeds (new-episode email alerts + summary email).
 SAVED_FEED_COLUMN_MIGRATIONS = {
     'email_new_episodes': 'BOOLEAN NOT NULL DEFAULT 1',
     'alerts_initialized': 'BOOLEAN NOT NULL DEFAULT 0',
     'last_seen_episode_guid': 'VARCHAR(1024)',
     'last_seen_published_ts': 'FLOAT',
+    # Opt-in: email a TL;DR summary of each new episode (separate from alerts).
+    'email_summaries': 'BOOLEAN NOT NULL DEFAULT 0',
+    # UTC timestamp when summary-email trial started for this follow (14-day free).
+    'summary_email_trial_started_at': 'DATETIME',
 }
 
 #: Additive columns for credit_purchases (Stripe hardening). Applied by

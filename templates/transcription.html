@@ -114,9 +114,15 @@
                 <button type="button" class="btn btn-sm btn-ghost hidden" id="followBtn"
                         aria-live="polite">Follow this podcast</button>
                 <label id="followEmailLabel" class="hidden text-sm text-muted"
-                       style="display: none; align-items: center; gap: 6px; margin: 0;">
-                    <input type="checkbox" id="followEmailNew" value="1" checked>
-                    Email me when new episodes come out
+                       style="display: none; align-items: center; gap: 6px; margin: 0; flex-wrap: wrap;">
+                    <span style="display: inline-flex; align-items: center; gap: 6px;">
+                        <input type="checkbox" id="followEmailNew" value="1" checked>
+                        Email me when new episodes come out
+                    </span>
+                    <span style="display: inline-flex; align-items: center; gap: 6px;">
+                        <input type="checkbox" id="followEmailSummary" value="1">
+                        Email me a summary of each new episode
+                    </span>
                 </label>
                 <a href="{{ url_for('history') }}" class="btn btn-sm btn-ghost" id="historyLink">History</a>
             </div>
@@ -167,6 +173,21 @@
     <div class="text-center mt-2">
         <a href="{{ url_for('index') }}" class="btn btn-ghost">Start over</a>
     </div>
+</div>
+
+<!-- Optional AI summary (collapsible; only when ready) -->
+<div class="card hidden mb-2" id="summaryCard" style="margin-top: 16px;">
+    <details id="summaryDetails" open>
+        <summary class="card-header" style="cursor: pointer; list-style-position: inside; gap: 8px;">
+            <h5 style="display: inline; margin: 0;">Summary</h5>
+            <span class="badge hidden" id="summaryPartialBadge" style="margin-left: 8px;">Preview</span>
+        </summary>
+        <div class="card-body" style="padding-top: 0;">
+            <p class="text-sm" id="summaryTldr" style="margin: 0 0 12px; line-height: 1.55;"></p>
+            <ul id="summaryKeyPoints" class="text-sm" style="margin: 0 0 12px; padding-left: 1.2em; line-height: 1.5;"></ul>
+            <div id="summaryQuotes" class="text-sm text-muted" style="display: flex; flex-direction: column; gap: 6px;"></div>
+        </div>
+    </details>
 </div>
 
 <!-- Transcript, filling in live -->
@@ -523,6 +544,42 @@
         return status === 'completed' || status === 'error' || status === 'cancelled';
     }
 
+    function renderSummary(d) {
+        var card = el('summaryCard');
+        if (!card) return;
+        var s = d && d.summary;
+        if (!s || d.summary_status !== 'ready') {
+            show(card, false);
+            return;
+        }
+        var tldr = el('summaryTldr');
+        var points = el('summaryKeyPoints');
+        var quotes = el('summaryQuotes');
+        var badge = el('summaryPartialBadge');
+        if (tldr) tldr.textContent = s.tldr || '';
+        if (points) {
+            points.innerHTML = '';
+            (s.key_points || []).forEach(function(p) {
+                var li = document.createElement('li');
+                li.textContent = p;
+                points.appendChild(li);
+            });
+        }
+        if (quotes) {
+            quotes.innerHTML = '';
+            (s.quotes || []).forEach(function(q) {
+                var qel = document.createElement('blockquote');
+                qel.style.margin = '0';
+                qel.style.paddingLeft = '10px';
+                qel.style.borderLeft = '2px solid var(--border)';
+                qel.textContent = '“' + q + '”';
+                quotes.appendChild(qel);
+            });
+        }
+        if (badge) show(badge, !!s.is_partial);
+        show(card, true);
+    }
+
     function updateUI(d) {
         renderHeader(d);
         if (d.has_rss != null) taskHasRss = !!d.has_rss;
@@ -583,6 +640,7 @@
                 el('completionTitle').textContent = 'Transcription complete';
                 show(el('partialPreviewCard'), false);
             }
+            renderSummary(d);
             if (d.download_txt) {
                 el('downloadTxt').href = d.download_txt;
                 show(el('downloadTxt'), true);
@@ -887,7 +945,9 @@
         btn.innerHTML = '<span class="btn-spinner" aria-hidden="true"></span>Saving…';
         var body = new FormData();
         var emailBox = el('followEmailNew');
+        var summaryBox = el('followEmailSummary');
         body.append('email_new_episodes', (emailBox && emailBox.checked) ? '1' : '0');
+        body.append('email_summaries', (summaryBox && summaryBox.checked) ? '1' : '0');
         fetch(FOLLOW_URL, { method: 'POST', body: body })
             .then(function(r) { return r.json().then(function(data) { return { ok: r.ok, data: data }; }); })
             .then(function(res) {

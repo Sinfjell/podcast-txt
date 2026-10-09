@@ -2,6 +2,13 @@
   "version": 1,
   "entries": [
     {
+      "id": "auto-summary-and-summary-email",
+      "date": "2026-10-09",
+      "hidden": true,
+      "title": "Episode summaries (coming soon)",
+      "summary": "Finished transcripts will get a short TL;DR, key points, and a few verbatim quotes at the top of the result page and in the .txt download. You can also opt in to email summaries for one followed show. Not switched on yet."
+    },
+    {
       "id": "unsubscribe-confirm-click",
       "date": "2026-10-09",
       "title": "Unsubscribe asks for a confirmation click",
