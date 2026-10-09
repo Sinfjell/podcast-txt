@@ -305,6 +305,15 @@ Users are identified by internal user id only (never email/name as person
 properties). Event properties never include API keys, emails, or transcript
 text. See `/privacy`.
 
+Cookie consent: the browser snippet initialises with `persistence: 'memory'`
+and `opt_out_capturing_by_default` until the visitor Accepts (banner + footer
+Cookie settings). No PostHog cookies, localStorage ids, or session recording
+before Accept; Decline keeps capturing off. Choice is stored 12 months in the
+first-party `podskrift_cookie_consent` cookie/localStorage. Server-side
+`analytics.capture()` keys on the internal user id and never reads tracking
+cookies; checkout only forwards `ph_sid` → `$session_id` when that consent
+cookie is `accepted`.
+
 ```bash
 # once, as root, from the app directory
 .venv/bin/pip install -r requirements.txt

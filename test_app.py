@@ -6062,6 +6062,100 @@ def test_posthog_snippet_renders_when_key_is_set(monkeypatch):
     assert "posthog.register({app: 'podskrift'})" in body
     assert 'podskriftPaywallShown' in body
     assert 'buy_clicked' in body
+    # GDPR: memory + opted out until Accept; no recording before consent.
+    assert "persistence: accepted ? 'localStorage+cookie' : 'memory'" in body
+    assert 'opt_out_capturing_by_default: !accepted' in body
+    assert 'disable_session_recording: !accepted' in body
+    assert 'cookie-consent.js' in body
+    assert 'id="cookieConsent"' in body
+    assert 'id="cookieConsentAccept"' in body
+    assert 'id="cookieConsentDecline"' in body
+    assert 'id="cookieSettingsLink"' in body
+    assert 'href="/privacy"' in body or "url_for('privacy')" in body
+    # identify only after Accept (helper gates on choice()).
+    assert 'function identifyIfAllowed' in body
+    assert "choice() !== 'accepted'" in body
+
+
+def test_cookie_consent_banner_absent_without_posthog_key():
+    body = A.app.test_client().get('/').data.decode()
+    assert 'id="cookieConsent"' not in body
+    assert 'cookieSettingsLink' not in body
+    assert 'cookie-consent.js' not in body
+
+
+def test_cookie_consent_js_is_served_from_static():
+    resp = A.app.test_client().get('/static/cookie-consent.js')
+    assert resp.status_code == 200
+    text = resp.data.decode()
+    assert 'podskrift_cookie_consent' in text
+    assert 'PodskriftConsent' in text
+    assert 'Max-Age' in text
+    assert 'localStorage' in text
+
+
+def test_cookie_consent_absent_on_admin_even_with_posthog(monkeypatch):
+    """Admin pages keep PostHog off; no consent banner either."""
+    monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
+    monkeypatch.setenv('ADMIN_EMAILS', 'admin-consent@test.com')
+    client, _uid = _admin_login('admin-consent@test.com')
+    resp = client.get('/admin')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'posthog.init' not in body
+    assert 'id="cookieConsent"' not in body
+    assert 'cookieSettingsLink' not in body
+
+
+def test_consented_posthog_session_id_requires_consent_cookie():
+    """Server must not attach cookie-derived session ids without Accept."""
+    with A.app.test_request_context('/', method='POST'):
+        assert A._consented_posthog_session_id('ph_sess_abc') == ''
+    with A.app.test_request_context(
+            '/', method='POST',
+            headers={'Cookie': f'{A.COOKIE_CONSENT_NAME}=accepted'}):
+        assert A._consented_posthog_session_id('ph_sess_abc') == 'ph_sess_abc'
+        assert A._consented_posthog_session_id('  x  ') == 'x'
+    with A.app.test_request_context(
+            '/', method='POST',
+            headers={'Cookie': f'{A.COOKIE_CONSENT_NAME}=declined'}):
+        assert A._consented_posthog_session_id('ph_sess_abc') == ''
+
+
+def test_checkout_drops_ph_sid_without_consent(stripe_on, ph_events):
+    """ph_sid on the checkout form is ignored unless consent cookie is Accept."""
+    uid = _make_user('phsid-consent@test.com', limit=600, used=0)
+    client = _login(uid)
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token,
+        'source': 'settings',
+        'ph_sid': 'ph_should_drop',
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    kw = stripe_on['last_create_params']
+    assert 'ph_sid' not in (kw.get('metadata') or {})
+    assert 'ph_sid' not in ((kw.get('payment_intent_data') or {}).get('metadata') or {})
+    started = [e for e in ph_events.events if e['event'] == 'checkout_started']
+    assert started
+    assert '$session_id' not in started[-1]['properties']
+
+    client.set_cookie(A.COOKIE_CONSENT_NAME, 'accepted')
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token,
+        'source': 'settings',
+        'ph_sid': 'ph_keep_me',
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    kw = stripe_on['last_create_params']
+    assert kw['metadata']['ph_sid'] == 'ph_keep_me'
+    assert kw['payment_intent_data']['metadata']['ph_sid'] == 'ph_keep_me'
 
 
 def test_openai_key_field_is_marked_for_replay_masking():
@@ -6406,6 +6500,11 @@ def test_privacy_page_mentions_posthog():
     assert 'PostHog' in body
     assert 'EU' in body
     assert 'session replay' in body.lower()
+    assert 'podskrift_cookie_consent' in body
+    assert 'Cookie settings' in body
+    assert 'Accept' in body
+    assert 'Decline' in body
+    assert 'memory-only' in body or 'memory' in body.lower()
 
 
 def test_whats_new_page_renders_changelog_entries(trial_on):
@@ -7683,6 +7782,8 @@ def test_checkout_session_creation(stripe_on, ph_events):
     with client.session_transaction() as sess:
         token = sess.get('_csrf_token')
     assert token
+    # ph_sid is only forwarded when analytics consent is accepted.
+    client.set_cookie(A.COOKIE_CONSENT_NAME, 'accepted')
     resp = client.post('/billing/checkout', data={
         'csrf_token': token,
         'source': 'settings',

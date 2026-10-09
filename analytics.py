@@ -5,6 +5,18 @@ Off unless POSTHOG_KEY is set. Soft-imports the SDK so a deploy that skips
 
 Never put email addresses, OpenAI API keys, passwords, or transcript text in
 event properties. distinct_id is the internal user id as a string.
+
+Consent (browser): the client SDK starts with persistence 'memory' and
+opt_out_capturing_by_default until the visitor Accepts
+(podskrift_cookie_consent). Session recording and identify() run only after
+Accept. Decline keeps capturing off. See static/cookie-consent.js and
+templates/base.html.
+
+Server-side capture() never reads browser cookies. It keys events on the
+authenticated internal user id. Optional $session_id is only attached when
+checkout stamps ph_sid — and app.py ignores ph_sid unless the consent cookie
+is 'accepted'. Stripe webhook metadata therefore cannot invent a cookie id
+without a prior consented checkout.
 """
 
 import logging
