@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Podskrift transcription</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700;800&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap">
+<style>
+body{margin:0}
+.pk{--paper:#FFFFFF;--surface:#F4F6F5;--line:#DCE2DF;--line-strong:#0E1512;--ink:#0E1512;--muted:#56635D;--accent:#0A7A55;--accent-hover:#075C40;--on-accent:#FFFFFF;--danger:#B42318}
+.pk[data-theme="dark"]{--paper:#0A0F0D;--surface:#121916;--line:#24302B;--line-strong:#5C6F66;--ink:#EEF2F0;--muted:#9AA8A1;--accent:#34D399;--accent-hover:#6EE7B7;--on-accent:#06241A;--danger:#F87171}
+.pk a{color:var(--accent)}.pk a:hover{color:var(--accent-hover)}
+.pk a.primary{color:var(--on-accent)}.pk a.primary:hover{color:var(--on-accent);background:var(--accent-hover)}
+.pk a.plain{color:var(--ink)}.pk a.plain:hover{color:var(--accent)}
+.pk :focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+</style>
+</helmet>
+<div class="pk" data-theme="{{theme}}" style="min-height: 100vh; background: var(--paper); color: var(--ink); font-family: 'Schibsted Grotesk', system-ui, sans-serif; font-size: 17px; line-height: 1.55">
+
+<header style="border-bottom: 1px solid var(--line)">
+<nav aria-label="Main" style="max-width: 1120px; margin: 0 auto; padding: 12px 24px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 28px">
+<a class="plain" href="Forside.dc.html" style="display: flex; align-items: center; gap: 10px; min-height: 44px; text-decoration: none; font-size: 22px; font-weight: 800; letter-spacing: -0.035em"><svg width="30" height="28" viewBox="0 0 30 28" aria-hidden="true"><g fill="var(--ink)"><rect x="2" y="9" width="3" height="10" rx="1.5"/><rect x="8" y="4" width="3" height="20" rx="1.5"/><rect x="14" y="8" width="3" height="12" rx="1.5"/></g><g fill="var(--accent)"><rect x="20" y="7" width="8" height="3" rx="1.5"/><rect x="20" y="12.5" width="8" height="3" rx="1.5"/><rect x="20" y="18" width="5" height="3" rx="1.5"/></g></svg>podskrift</a>
+<div style="flex-grow: 1"></div>
+<a class="plain" href="#" style="display: flex; align-items: center; min-height: 44px; text-decoration: none; font-size: 15px; font-weight: 500">Feeds</a>
+<a class="plain" href="#" style="display: flex; align-items: center; min-height: 44px; text-decoration: none; font-size: 15px; font-weight: 500">History</a>
+<a class="plain" href="#" style="display: flex; align-items: center; min-height: 44px; text-decoration: none; font-size: 15px; font-weight: 500">Settings</a>
+</nav>
+</header>
+
+<main style="max-width: 760px; margin: 0 auto; padding: 32px 24px 96px; display: flex; flex-direction: column; gap: 28px">
+<a href="Episoder.dc.html" style="display: flex; align-items: center; gap: 6px; min-height: 44px; align-self: flex-start; font-size: 15px; font-weight: 700; text-decoration: none"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 4l-6 6 6 6"/></svg>The Long Listen</a>
+
+<div style="display: flex; flex-direction: column; gap: 6px">
+<h1 style="margin: 0; font-size: clamp(30px, 5vw, 44px); font-weight: 800; letter-spacing: -0.03em; line-height: 1.05">Why we still take notes</h1>
+<div style="font-size: 16px; color: var(--muted); font-variant-numeric: tabular-nums">2 Oct 2026 · 48 min · Auto-detect</div>
+</div>
+
+<sc-if value="{{running}}" hint-placeholder-val="{{true}}">
+<div style="display: flex; flex-direction: column; gap: 18px; padding: 24px; background: var(--surface); border-radius: 8px">
+<svg viewBox="0 0 520 48" role="img" aria-label="Sound wave turning into lines of text" style="width: 100%; max-width: 520px; height: auto"><g fill="var(--ink)"><rect x="0" y="20" width="4" height="8" rx="2"/><rect x="10" y="17" width="4" height="14" rx="2"/><rect x="20" y="13" width="4" height="22" rx="2"/><rect x="30" y="7" width="4" height="34" rx="2"/><rect x="40" y="15" width="4" height="18" rx="2"/><rect x="50" y="10" width="4" height="28" rx="2"/><rect x="60" y="4" width="4" height="40" rx="2"/><rect x="70" y="12" width="4" height="24" rx="2"/><rect x="80" y="18" width="4" height="12" rx="2"/><rect x="90" y="9" width="4" height="30" rx="2"/><rect x="100" y="2" width="4" height="44" rx="2"/><rect x="110" y="11" width="4" height="26" rx="2"/><rect x="120" y="16" width="4" height="16" rx="2"/><rect x="130" y="6" width="4" height="36" rx="2"/><rect x="140" y="13" width="4" height="22" rx="2"/><rect x="150" y="19" width="4" height="10" rx="2"/><rect x="160" y="10" width="4" height="28" rx="2"/><rect x="170" y="5" width="4" height="38" rx="2"/><rect x="180" y="14" width="4" height="20" rx="2"/><rect x="190" y="17" width="4" height="14" rx="2"/><rect x="200" y="12" width="4" height="24" rx="2"/><rect x="210" y="18" width="4" height="12" rx="2"/><rect x="220" y="20" width="4" height="8" rx="2"/><rect x="230" y="21" width="4" height="6" rx="2"/></g><g fill="var(--accent)"><rect x="256" y="8" width="264" height="4" rx="2"/><rect x="256" y="22" width="264" height="4" rx="2"/><rect x="256" y="36" width="168" height="4" rx="2"/></g></svg>
+<div aria-live="polite" style="font-size: 20px; font-weight: 700">{{statusText}}</div>
+<div role="progressbar" aria-valuenow="{{pctNum}}" aria-valuemin="0" aria-valuemax="100" aria-label="Transcription progress" style="height: 8px; border-radius: 4px; background: var(--line)"><div style="width: {{pct}}; height: 8px; border-radius: 4px; background: var(--accent); transition: width 0.4s ease"></div></div>
+<div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 16px"><div style="font-size: 15px; color: var(--muted)">It keeps going if you close the page.</div><button type="button" onClick="{{cancel}}" style="height: 44px; padding: 0 16px; font-family: inherit; font-size: 15px; font-weight: 700; color: var(--danger); background: none; border: 1px solid var(--danger); border-radius: 8px">Cancel</button></div>
+</div>
+</sc-if>
+
+<sc-if value="{{cancelled}}" hint-placeholder-val="{{false}}">
+<div style="display: flex; flex-direction: column; gap: 14px; padding: 24px; background: var(--surface); border-radius: 8px">
+<div style="font-size: 20px; font-weight: 700">Transcription cancelled</div>
+<div style="font-size: 15px; color: var(--muted)">Unused trial minutes are returned to your account.</div>
+<button type="button" onClick="{{restart}}" style="align-self: flex-start; height: 44px; padding: 0 18px; font-family: inherit; font-size: 15px; font-weight: 700; color: var(--ink); background: var(--paper); border: 1px solid var(--line-strong); border-radius: 8px">Start again</button>
+</div>
+</sc-if>
+
+<sc-if value="{{done}}" hint-placeholder-val="{{false}}">
+<div style="display: flex; flex-direction: column; gap: 24px">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-bottom: 16px; border-bottom: 1px solid var(--line)">
+<button type="button" onClick="{{copy}}" style="height: 48px; padding: 0 22px; font-family: inherit; font-size: 16px; font-weight: 700; color: var(--on-accent); background: var(--accent); border: none; border-radius: 8px">{{copyLabel}}</button>
+<button type="button" style="height: 48px; padding: 0 18px; font-family: inherit; font-size: 16px; font-weight: 700; color: var(--ink); background: var(--paper); border: 1px solid var(--line-strong); border-radius: 8px">Download .txt</button>
+<button type="button" style="height: 48px; padding: 0 18px; font-family: inherit; font-size: 16px; font-weight: 700; color: var(--ink); background: var(--paper); border: 1px solid var(--line-strong); border-radius: 8px">Download .srt</button>
+</div>
+<div style="display: flex; flex-direction: column; gap: 18px">
+<div style="display: flex; gap: 18px"><div style="flex: none; width: 48px; padding-top: 5px; font-size: 13px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums">00:14</div><div style="font-family: 'Newsreader', Georgia, serif; font-size: 20px; line-height: 1.55">Welcome back. Today we are talking about why a written version of a conversation is often more useful than the recording.</div></div>
+<div style="display: flex; gap: 18px"><div style="flex: none; width: 48px; padding-top: 5px; font-size: 13px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums">00:31</div><div style="font-family: 'Newsreader', Georgia, serif; font-size: 20px; line-height: 1.55">You can search it, quote it and skim it. None of that works with audio.</div></div>
+<div style="display: flex; gap: 18px"><div style="flex: none; width: 48px; padding-top: 5px; font-size: 13px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums">00:52</div><div style="font-family: 'Newsreader', Georgia, serif; font-size: 20px; line-height: 1.55">I started keeping notes on every episode I listened to about three years ago. At first it was a line or two. Then I noticed I only ever went back to the ones where I had written down what was actually said.</div></div>
+<div style="display: flex; gap: 18px"><div style="flex: none; width: 48px; padding-top: 5px; font-size: 13px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums">01:27</div><div style="font-family: 'Newsreader', Georgia, serif; font-size: 20px; line-height: 1.55">So the summary was never the useful part. The exact words were.</div></div>
+<div style="display: flex; gap: 18px"><div style="flex: none; width: 48px; padding-top: 5px; font-size: 13px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums">01:41</div><div style="font-family: 'Newsreader', Georgia, serif; font-size: 20px; line-height: 1.55">Right. And that is a different habit from note-taking. It is closer to keeping an archive you can search later, when you finally know what you are looking for.</div></div>
+</div>
+</div>
+</sc-if>
+</main>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"dark":{"editor":"boolean","default":false},"finished":{"editor":"boolean","default":false},"$preview":{"width":1280,"height":1300}}'>
+class Component extends DCLogic {
+constructor(props) {
+super(props);
+this.state = { part: 1, cancelled: false, copied: false };
+}
+componentDidMount() {
+this.timer = setInterval(() => {
+if (this.state.cancelled || this.state.part > 5) return;
+this.setState({ part: this.state.part + 1 });
+}, 1400);
+}
+componentWillUnmount() {
+clearInterval(this.timer);
+}
+renderVals() {
+const done = !!this.props.finished || this.state.part > 5;
+const cancelled = !done && this.state.cancelled;
+const part = Math.min(this.state.part, 5);
+const pctNum = Math.round(((part - 1) / 5) * 100 + 10);
+return {
+theme: this.props.dark ? 'dark' : 'light',
+done: done,
+cancelled: cancelled,
+running: !done && !cancelled,
+statusText: 'Transcribing part ' + part + ' of 5',
+pctNum: pctNum,
+pct: pctNum + '%',
+copyLabel: this.state.copied ? 'Copied' : 'Copy text',
+cancel: () => this.setState({ cancelled: true }),
+restart: () => this.setState({ cancelled: false, part: 1 }),
+copy: () => this.setState({ copied: true })
+};
+}
+}
+</script>
+</body>
+</html>
