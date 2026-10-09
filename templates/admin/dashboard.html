@@ -160,6 +160,39 @@
     .status-pill.failed, .status-pill.canceled {
         background: var(--danger-tint); color: var(--on-danger-tint);
     }
+    .costs-note {
+        font-size: 13px; color: var(--muted); margin: -4px 0 14px; max-width: 62ch;
+    }
+    .costs-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 10px; margin-bottom: 16px;
+    }
+    @media (max-width: 900px) {
+        .costs-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 520px) {
+        .costs-grid { grid-template-columns: 1fr; }
+    }
+    .cost-card {
+        background: var(--surface); border: 1px solid var(--line);
+        border-radius: var(--radius); padding: 12px 14px;
+    }
+    .cost-card h3 {
+        font-size: 12px; font-weight: 700; color: var(--muted);
+        margin-bottom: 8px;
+    }
+    .cost-card .est-badge {
+        font-size: 11px; font-weight: 700; color: var(--on-warning-tint);
+        background: var(--warning-tint); padding: 1px 6px;
+        border-radius: var(--radius-sm); margin-left: 6px;
+        vertical-align: middle;
+    }
+    .cost-metrics {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+        gap: 10px; margin-bottom: 16px;
+    }
 </style>
 
 <div class="admin-wrap ph-no-capture">
@@ -320,6 +353,67 @@
         {% endif %}
     </section>
 
+    <section class="admin-section" id="adminCosts" data-costs="section">
+        <h2>Costs <span class="est-badge" style="font-size: 12px; font-weight: 700; color: var(--on-warning-tint); background: var(--warning-tint); padding: 2px 8px; border-radius: var(--radius-sm); vertical-align: middle;">estimate</span></h2>
+        {% if costs.error %}
+        <div class="stripe-error" role="alert">{{ costs.error }}</div>
+        {% else %}
+        <p class="costs-note" data-costs="note">
+            {{ costs.note }}
+            {% if costs.fixed_monthly_usd %}
+            Fixed opex ${{ '%.2f'|format(costs.fixed_monthly_usd) }}/mo
+            (~${{ '%.2f'|format(costs.fixed_daily_usd) }}/day)
+            {% if costs.fixed_breakdown %}
+            —
+            {% for item in costs.fixed_breakdown %}
+            {{ item.name }} ${{ '%.2f'|format(item.usd) }}{% if not loop.last %}, {% endif %}
+            {% endfor %}
+            {% endif %}
+            ·
+            {% endif %}
+            As of {{ costs.as_of_oslo }} ({{ admin_tz_name }}).
+        </p>
+
+        <div class="costs-grid" data-costs="windows">
+            {% for key, title in [('today', 'Today'), ('7d', 'Last 7 days'), ('30d', 'Last 30 days'), ('all', 'All time')] %}
+            {% set w = costs.windows[key] %}
+            <div class="cost-card" data-costs-window="{{ key }}">
+                <h3>{{ title }}</h3>
+                <div class="money-row"><span class="label">Est. OpenAI (trial)</span><span>${{ '%.2f'|format(w.openai_trial_usd) }}</span></div>
+                <div class="money-row"><span class="label">Est. OpenAI (paid)</span><span>${{ '%.2f'|format(w.openai_paid_usd) }}</span></div>
+                <div class="money-row"><span class="label">Est. summaries</span><span>${{ '%.2f'|format(w.openai_summary_usd) }}</span></div>
+                <div class="money-row"><span class="label">Fixed (prorated)</span><span>${{ '%.2f'|format(w.fixed_usd) }}</span></div>
+                <div class="money-row net"><span class="label">Est. total cost</span><span>${{ '%.2f'|format(w.total_usd) }}</span></div>
+                <div class="money-row"><span class="label">Revenue (credits)</span><span>${{ '%.2f'|format(w.revenue_usd) }}</span></div>
+                <div class="money-row"><span class="label">Gross margin</span>
+                    <span>
+                        ${{ '%.2f'|format(w.gross_margin_usd) }}
+                        {% if w.gross_margin_pct is not none %}
+                        ({{ '%.1f'|format(w.gross_margin_pct) }}%)
+                        {% endif %}
+                    </span>
+                </div>
+                <div class="money-row" style="margin-top: 6px;"><span class="label">Trial minutes</span><span>{{ w.platform_trial_minutes }}</span></div>
+                <div class="money-row"><span class="label">Paid minutes</span><span>{{ w.platform_paid_minutes }}</span></div>
+                <div class="money-row"><span class="label">BYOK minutes (excl.)</span><span>{{ w.byok_minutes }}</span></div>
+                <div class="money-row"><span class="label">Failed w/ OpenAI hit</span><span>{{ w.failed_with_openai_count }}</span></div>
+                <div class="money-row"><span class="label">Cost / active user</span>
+                    <span>{% if w.cost_per_active_user_usd is not none %}${{ '%.2f'|format(w.cost_per_active_user_usd) }}{% else %}—{% endif %}</span>
+                </div>
+                <div class="money-row"><span class="label">Cost / paid user</span>
+                    <span>{% if w.cost_per_paid_user_usd is not none %}${{ '%.2f'|format(w.cost_per_paid_user_usd) }}{% else %}—{% endif %}</span>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div class="chart-card" data-costs="daily-chart">
+            <h3>Estimated cost per day (30d)</h3>
+            <canvas id="chartCostsDaily" height="180"></canvas>
+        </div>
+        {% endif %}
+    </section>
+
     <section class="admin-section">
         <div class="flex-between" style="align-items: center; margin-bottom: 4px;">
             <h2 style="margin: 0;">Charts</h2>
@@ -465,6 +559,9 @@
 {% if stripe_revenue.ok %}
 <script type="application/json" id="adminStripeWeekly">{{ stripe_revenue.weekly_net | tojson }}</script>
 {% endif %}
+{% if costs and not costs.error %}
+<script type="application/json" id="adminCostsChart">{{ costs.chart | tojson }}</script>
+{% endif %}
 {# Self-hosted (CSP script-src 'self'); Chart.js 4.4.7, MIT, see static/vendor/chart.js-LICENSE.md #}
 <script src="{{ url_for('static', filename='vendor/chart-4.4.7.umd.min.js') }}"></script>
 <script>
@@ -519,7 +616,69 @@
         fill: token('--accent-tint'),
         fail: token('--danger'),
         funnel: [token('--accent'), token('--accent-hover'), token('--muted')],
+        cost: token('--ink'),
+        costFixed: token('--muted'),
     };
+
+    var costsEl = document.getElementById('adminCostsChart');
+    if (costsEl) {
+        try {
+            var costsChart = JSON.parse(costsEl.textContent);
+            var cctx = document.getElementById('chartCostsDaily');
+            if (cctx) {
+                new Chart(cctx, {
+                    type: 'line',
+                    data: {
+                        labels: costsChart.labels,
+                        datasets: [
+                            {
+                                label: 'OpenAI (est.)',
+                                data: costsChart.openai_usd,
+                                borderColor: palette.line,
+                                backgroundColor: palette.fill,
+                                fill: true,
+                                tension: 0.25,
+                                pointRadius: 0,
+                                borderWidth: 2,
+                            },
+                            {
+                                label: 'Fixed (prorated)',
+                                data: costsChart.fixed_usd,
+                                borderColor: palette.costFixed,
+                                backgroundColor: 'transparent',
+                                fill: false,
+                                tension: 0,
+                                pointRadius: 0,
+                                borderWidth: 1.5,
+                                borderDash: [4, 3],
+                            },
+                        ],
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                display: true,
+                                labels: { color: palette.text, boxWidth: 12, font: { size: 11 } },
+                            },
+                        },
+                        scales: {
+                            x: {
+                                ticks: { color: palette.text, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 12 } },
+                                grid: { color: palette.grid },
+                            },
+                            y: {
+                                beginAtZero: true,
+                                ticks: { color: palette.text, font: { size: 12 } },
+                                grid: { color: palette.grid },
+                            },
+                        },
+                    },
+                });
+            }
+        } catch (e) { /* ignore chart parse errors */ }
+    }
 
     function baseOpts() {
         return {
