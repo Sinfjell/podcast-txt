@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "keyboard-and-faster-loading",
+      "date": "2026-10-09",
+      "title": "Use Podskrift with just a keyboard",
+      "summary": "Search results and episode cards now work with Tab and Enter, every page has a skip link and a visible focus ring, and fonts load from podskrift.com itself for a faster first paint with no request to Google."
+    },
+    {
       "id": "show-landing-pages",
       "date": "2026-10-09",
       "title": "Transcript pages for popular podcasts",
