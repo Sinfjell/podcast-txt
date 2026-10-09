@@ -352,7 +352,7 @@ def trial_badge_remaining_minutes():
             return trial_status(current_user)[2] // 60
         return 0
     if trial_available():
-        return TRIAL_DEFAULT_SECONDS // 60
+        return NEW_USER_TRIAL_SECONDS // 60
     return None
 
 
@@ -614,19 +614,25 @@ def _env_minutes(name, default):
         return int(default)
 
 
-#: Free audio minutes granted to an account with no key of its own.
+#: Free audio minutes for accounts with NULL trial_seconds_limit (legacy /
+#: pre-NEW_USER_TRIAL_MINUTES rows). Raising this lifts every NULL-limit user.
 TRIAL_DEFAULT_SECONDS = _env_minutes('TRIAL_MINUTES', 180) * 60
+#: Minutes stamped onto users.trial_seconds_limit at registration. Existing
+#: rows keep their stored limit (or NULL → TRIAL_MINUTES); only new signups
+#: get this grant. No DB migration — set at create time only.
+NEW_USER_TRIAL_SECONDS = _env_minutes('NEW_USER_TRIAL_MINUTES', 60) * 60
 #: Hard ceiling on trial minutes across ALL accounts. Without this, the per-user
 #: cap bounds nothing -- signups are free, so N accounts cost N x the grant.
 #: Lifetime (not daily/monthly): nothing resets it on a schedule. Counts minutes
 #: actually spent; a refused/failed-before-Whisper job releases its reservation.
-TRIAL_GLOBAL_SECONDS = _env_minutes('TRIAL_GLOBAL_MINUTES', 1800) * 60
+TRIAL_GLOBAL_SECONDS = _env_minutes('TRIAL_GLOBAL_MINUTES', 6000) * 60
 #: What to reserve when the feed publishes no itunes:duration. Reconciled
 #: against the real duration after download, before a single Whisper call.
 TRIAL_UNKNOWN_ESTIMATE_SECONDS = _env_minutes('TRIAL_UNKNOWN_ESTIMATE_MINUTES', 30) * 60
 #: Longest single episode the trial will take on. Default tracks TRIAL_MINUTES
-#: so a new account's grant can cover one max-length episode; set the env var
-#: explicitly if you want them different.
+#: (legacy grant), not NEW_USER_TRIAL_MINUTES: a 60-minute new account that
+#: picks a longer episode hits the remaining-balance paywall, not this cap.
+#: Set the env var explicitly if you want them different.
 TRIAL_MAX_EPISODE_SECONDS = _env_minutes(
     'TRIAL_MAX_EPISODE_MINUTES', TRIAL_DEFAULT_SECONDS // 60) * 60
 #: Kill switch. Set TRIAL_ENABLED=0 to stop handing out our key entirely.
@@ -715,6 +721,27 @@ class TaskAbandoned(Exception):
 def trial_available():
     """Is there a trial to hand out at all?"""
     return bool(TRIAL_ENABLED and GLOBAL_OPENAI_KEY and TRIAL_DEFAULT_SECONDS > 0)
+
+
+def advertised_trial_minutes():
+    """Minutes promised to new signups on marketing surfaces, or None when off.
+
+    Distinct from TRIAL_DEFAULT_SECONDS (NULL-limit fallback for existing rows).
+    """
+    if not trial_available() or NEW_USER_TRIAL_SECONDS <= 0:
+        return None
+    return NEW_USER_TRIAL_SECONDS // 60
+
+
+def trial_global_pool_available():
+    """True when the lifetime global free-trial pool still has room.
+
+    Non-sensitive: used by /health so deploy checks can confirm the ceiling
+    re-opened without exposing used/limit numbers.
+    """
+    if TRIAL_GLOBAL_SECONDS <= 0:
+        return False
+    return trial_global_used_seconds() < TRIAL_GLOBAL_SECONDS
 
 
 def trial_status(user):
@@ -2289,7 +2316,7 @@ def _register_template(**extra):
     return render_template(
         'register.html',
         next=_auth_next_arg(),
-        trial_minutes=(TRIAL_DEFAULT_SECONDS // 60 if trial_available() else None),
+        trial_minutes=advertised_trial_minutes(),
         pending=pending,
         **extra,
     )
@@ -2363,7 +2390,7 @@ def register():
             ), 'error')
             return _register_template()
 
-        user = User(email=email)
+        user = User(email=email, trial_seconds_limit=NEW_USER_TRIAL_SECONDS)
         user.set_password(password)
         db.session.add(user)
         db.session.commit()
@@ -2374,7 +2401,7 @@ def register():
         if session.get(PENDING_TRANSCRIPTION_KEY):
             flash('Account created — starting your transcript.', 'success')
         else:
-            minutes = TRIAL_DEFAULT_SECONDS // 60
+            minutes = NEW_USER_TRIAL_SECONDS // 60
             flash(
                 f'Account created — you have {minutes} free minutes. '
                 'Paste your link again to start.',
@@ -3833,8 +3860,7 @@ def index():
                            trial=_trial_context(),
                            first_run=first_run,
                            faq=faq_entries(),
-                           trial_minutes=(TRIAL_DEFAULT_SECONDS // 60
-                                          if trial_available() else None),
+                           trial_minutes=advertised_trial_minutes(),
                            structured_data=_structured_data())
 
 
@@ -5833,16 +5859,17 @@ def faq_entries():
     -- "hvordan transkribere en podcast" is the query, not "what is Podskrift".
 
     Built at call time, not as a constant, so the trial length always matches
-    TRIAL_DEFAULT_SECONDS. A first version hardcoded 60 minutes and would have
-    kept saying so after the grant changed.
+    NEW_USER_TRIAL_SECONDS (what new accounts get). Existing NULL-limit
+    accounts still use TRIAL_MINUTES via trial_status(); marketing copy
+    advertises the new-signup grant.
     """
-    minutes = TRIAL_DEFAULT_SECONDS // 60
+    minutes = advertised_trial_minutes() or 0
     hourly = f'${openai_whisper_cost_usd(60):.2f}'
     cost_90 = f'${openai_whisper_cost_usd(90):.2f}'
     # trial_available() is the predicate the code actually enforces. Copy that
     # promises free minutes while the kill switch is on is a promise the app
     # then refuses at /start_transcription.
-    if trial_available():
+    if trial_available() and minutes > 0:
         hours_bit = (f' (about {minutes // 60} hours)' if minutes >= 120 else '')
         pack_bit = (
             f' Or buy a one-time pack: ${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for '
@@ -5850,7 +5877,7 @@ def faq_entries():
             f'VAT included, paid via Stripe — no subscription.'
             if stripe_checkout_enabled() else ''
         )
-        free = (f'The free trial covers {minutes} minutes of audio in total'
+        free = (f'New accounts get {minutes} minutes of audio free'
                 f'{hours_bit}. For longer episodes, or once the '
                 f'trial is used up, add your own OpenAI API key: a 90-minute '
                 f'episode costs about {cost_90} at OpenAI\'s rate.{pack_bit}')
@@ -5894,7 +5921,7 @@ def faq_entries():
          'Yes. Create a key in Settings (psk_…) and call the API to resolve an episode, '
          'start a transcription, then fetch the transcript — Bearer or X-Api-Key. '
          + (f'Same {minutes} minutes free trial as the web UI. '
-            if trial_available() else '')
+            if minutes else '')
          + 'Curl examples and status codes: /docs/api.'),
     ]
 
@@ -6008,8 +6035,8 @@ def _structured_data():
                     'price': '0',
                     'priceCurrency': 'USD',
                     'description': (
-                        (f'{TRIAL_DEFAULT_SECONDS // 60} minutes of audio free on signup. '
-                         'After that, ' if trial_available() else '')
+                        (f'{advertised_trial_minutes()} minutes of audio free on signup. '
+                         'After that, ' if advertised_trial_minutes() else '')
                         + (
                             f'buy a one-time pack (${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for '
                             f'{CREDIT_PACK_MINUTES} minutes, VAT included) via Stripe, or '
@@ -6098,11 +6125,12 @@ def llms_txt():
         if LANGUAGE_ENGLISH_NAMES.get(code, native) != native else native
         for code, native in SUPPORTED_LANGUAGES if code)
     faq = '\n\n'.join(f'**{q}**\n\n{a}' for q, a in faq_entries())
-    signup_blurb = (f'free account, {TRIAL_DEFAULT_SECONDS // 60} trial minutes'
-                    if trial_available() else 'free account, bring your own OpenAI key')
-    cost = (f'New accounts get {TRIAL_DEFAULT_SECONDS // 60} minutes of audio free on '
+    grant = advertised_trial_minutes()
+    signup_blurb = (f'free account, {grant} trial minutes'
+                    if grant else 'free account, bring your own OpenAI key')
+    cost = (f'New accounts get {grant} minutes of audio free on '
             "Podskrift's own OpenAI key.\nAfter that you"
-            if trial_available() else 'You')
+            if grant else 'You')
     pack = (
         f'\nOr buy a one-time pack: ${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for '
         f'{CREDIT_PACK_MINUTES} minutes ({CREDIT_PACK_MINUTES // 60} hours), VAT '
@@ -6189,7 +6217,7 @@ def pricing():
         current_user.is_authenticated and current_user.openai_api_key)
     return render_template(
         'pricing.html',
-        trial_minutes=(TRIAL_DEFAULT_SECONDS // 60 if trial_available() else None),
+        trial_minutes=advertised_trial_minutes(),
         stripe_configured=stripe_checkout_enabled(),
         has_own_key=has_own_key,
     )
@@ -6371,8 +6399,21 @@ def api_docs():
     return render_template(
         'api_docs.html',
         body_html=body_html,
-        trial_minutes=(TRIAL_DEFAULT_SECONDS // 60 if trial_available() else None),
+        trial_minutes=advertised_trial_minutes(),
     )
+
+
+@app.route('/health')
+def health():
+    """Liveness probe JSON. Includes a non-sensitive trial pool flag.
+
+    `trial_available` is True when the lifetime global free-trial pool still
+    has room — no used/limit numbers, so it is safe for public probes.
+    """
+    return jsonify({
+        'ok': True,
+        'trial_available': trial_global_pool_available(),
+    })
 
 
 @app.route('/convert-apple-url', methods=['POST'])
@@ -7400,7 +7441,8 @@ if __name__ == '__main__':
     print("=" * 50)
     print(f"OpenAI API Key (global): {'Yes' if GLOBAL_OPENAI_KEY else 'No'}")
     if trial_available():
-        print(f"Trial: {TRIAL_DEFAULT_SECONDS // 60} min/account, "
+        print(f"Trial: {NEW_USER_TRIAL_SECONDS // 60} min/new account "
+              f"(NULL limit → {TRIAL_DEFAULT_SECONDS // 60}), "
               f"{TRIAL_GLOBAL_SECONDS // 60} min total ceiling "
               f"(~${TRIAL_GLOBAL_SECONDS / 60 * WHISPER_COST_PER_MINUTE:.2f} max spend)")
     else:
