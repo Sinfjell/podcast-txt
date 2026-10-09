@@ -7971,9 +7971,11 @@ def resolve_catalog_episode(publisher=None, target_date=None, url=None):
         kind, spotify_id = parse_spotify_url(url)
         if kind:
             try:
-                results, err = resolve_spotify_url(url)
+                outcome = resolve_spotify_url(url)
             except requests.RequestException:
                 return None, "Couldn't reach the podcast directory. Try again in a moment."
+            results = outcome.get('results') or []
+            err = outcome.get('error')
             if err and not results:
                 return None, err
             if not results:

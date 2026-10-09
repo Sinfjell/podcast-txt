@@ -27,6 +27,7 @@ import analytics as product_analytics
 
 # Protocol versions we accept on initialize (echo the client's when supported).
 _SUPPORTED_PROTOCOL_VERSIONS = (
+    '2025-06-18',
     '2025-03-26',
     '2024-11-05',
     '2024-10-07',
@@ -256,7 +257,8 @@ def _tool_defs() -> list[dict]:
             'description': (
                 'List recent episodes for a podcast. Pass a show name, RSS feed URL, '
                 'or Apple/Spotify show link. Each episode includes id, title, date, '
-                'and duration_min for get_transcript.'
+                'publisher, duration_min and rss_url; pass id as get_transcript '
+                'episode and the other fields alongside it.'
             ),
             'inputSchema': {
                 'type': 'object',
@@ -295,6 +297,26 @@ def _tool_defs() -> list[dict]:
                     'language': {
                         'type': 'string',
                         'description': 'Optional Whisper language code (e.g. no, en).',
+                    },
+                    'title': {
+                        'type': 'string',
+                        'description': 'Optional episode title from list_episodes.',
+                    },
+                    'publisher': {
+                        'type': 'string',
+                        'description': 'Optional show name (publisher) from list_episodes.',
+                    },
+                    'date': {
+                        'type': 'string',
+                        'description': 'Optional episode date YYYY-MM-DD from list_episodes.',
+                    },
+                    'duration_min': {
+                        'type': 'number',
+                        'description': 'Optional duration_min from list_episodes.',
+                    },
+                    'rss_url': {
+                        'type': 'string',
+                        'description': 'Optional rss_url from list_episodes.',
                     },
                 },
                 'required': ['episode'],
@@ -353,15 +375,17 @@ def _resolve_podcast_feed(podcast: str) -> tuple[str | None, str | None, str | N
 
     # Direct feed URL
     if podcast.startswith('http://') or podcast.startswith('https://'):
-        lower = podcast.lower()
-        if 'podcasts.apple.com' in lower or '/id' in lower:
+        host = (urlparse(podcast).hostname or '').lower()
+        if host == 'apple.com' or host.endswith('.apple.com'):
             rss, err = A.convert_apple_podcasts_url_to_rss(podcast)
             if not rss:
                 return None, None, err or 'Could not resolve Apple Podcasts URL.'
             return rss, None, None
         kind, _sid = A.parse_spotify_url(podcast)
         if kind == 'show':
-            results, err = A.resolve_spotify_url(podcast)
+            outcome = A.resolve_spotify_url(podcast)
+            results = outcome.get('results') or []
+            err = outcome.get('error')
             if err and not results:
                 return None, None, err
             if not results:
@@ -556,11 +580,28 @@ def _catalog_from_parsed(parsed: dict) -> tuple[dict | None, str | None]:
     )
 
 
-def tool_get_transcript(user, episode: str, language: str = '') -> dict:
+_EPISODE_META_ARGS = (
+    ('title', 'title'),
+    ('publisher', 'publisher'),
+    ('date', 'published_at'),
+    ('duration_min', 'duration_min'),
+    ('rss_url', 'rss_url'),
+)
+
+
+def tool_get_transcript(user, episode: str, language: str = '',
+                        meta: dict | None = None) -> dict:
     A = _app()
     parsed = _parse_episode_arg(episode)
     if parsed.get('error'):
         return parsed
+    # Optional list_episodes fields: keep title/show on the task and use the
+    # feed duration for the up-front estimate (billing still uses measured audio).
+    if parsed.get('audio_url') and meta:
+        for arg, key in _EPISODE_META_ARGS:
+            val = meta.get(arg)
+            if val not in (None, '') and not parsed.get(key):
+                parsed[key] = val
 
     # Existing job for this account
     task_id = parsed.get('task_id')
@@ -606,7 +647,11 @@ def tool_get_transcript(user, episode: str, language: str = '') -> dict:
     if resolve_err or not catalog:
         return {'error': resolve_err or 'Episode not found'}
 
-    existing = A._find_existing_agent_task(user.id, catalog)
+    # Same audio already queued, running or done for this account → reuse it.
+    # list_episodes ids are audio URLs, which _find_existing_agent_task cannot
+    # match (it keys on show+date / show+title), so check source_audio_url too.
+    existing = (A._find_existing_web_task(user.id, catalog.get('audio_url'))
+                or A._find_existing_agent_task(user.id, catalog))
     if existing is not None:
         status = A.agent_transcript_status(existing)
         bal = _balance_snapshot(user)
@@ -743,7 +788,8 @@ def _run_tool(name: str, arguments: dict, user) -> dict:
             return _tool_text(out, is_error=not ok)
         if name == 'get_transcript':
             out = tool_get_transcript(
-                user, args.get('episode') or '', args.get('language') or '')
+                user, args.get('episode') or '', args.get('language') or '',
+                meta=args)
             ok = out.get('error') is None and out.get('transcript_status') != 'failed'
             # insufficient_balance is a clean refusal, not a tool crash
             if out.get('error') == 'insufficient_balance':
@@ -797,8 +843,14 @@ def _dispatch_rpc(message: dict, user) -> dict | None:
 
     method = message.get('method')
     req_id = message.get('id', None)
-    params = message.get('params') or {}
+    params = message.get('params')
     is_notification = 'id' not in message
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        if is_notification:
+            return None
+        return _jsonrpc_error(req_id, _INVALID_PARAMS, 'params must be an object')
 
     if not method or not isinstance(method, str):
         if is_notification:
@@ -818,7 +870,8 @@ def _dispatch_rpc(message: dict, user) -> dict | None:
         return _jsonrpc_result(req_id, {'tools': _tool_defs()})
 
     if method == 'tools/call':
-        name = (params.get('name') or '').strip()
+        name = params.get('name')
+        name = name.strip() if isinstance(name, str) else ''
         if not name:
             return _jsonrpc_error(req_id, _INVALID_PARAMS, 'tools/call requires name')
         arguments = params.get('arguments') or {}
@@ -865,7 +918,6 @@ def _cors_headers(resp: Response) -> Response:
     if origin:
         resp.headers['Access-Control-Allow-Origin'] = origin
         resp.headers['Vary'] = 'Origin'
-        resp.headers['Access-Control-Allow-Credentials'] = 'true'
     else:
         resp.headers['Access-Control-Allow-Origin'] = '*'
     resp.headers['Access-Control-Allow-Headers'] = (
@@ -904,6 +956,8 @@ def create_mcp_view(app_flask):
         if auth_err is not None:
             resp, code = auth_err
             resp.status_code = code
+            if code == 401:
+                resp.headers['WWW-Authenticate'] = 'Bearer realm="podskrift"'
             return _cors_headers(resp)
 
         bucket = f'mcp:{getattr(g, "api_auth_kind", "?")}:{getattr(g, "api_user_id", "?")}'
@@ -925,11 +979,25 @@ def create_mcp_view(app_flask):
             return _cors_headers(resp)
 
         if isinstance(payload, list):
+            if not payload:
+                resp = jsonify(_jsonrpc_error(None, _INVALID_REQUEST, 'Empty batch'))
+                resp.status_code = 400
+                return _cors_headers(resp)
             responses = []
-            for item in payload:
+            for i, item in enumerate(payload):
+                # Each batch entry beyond the first costs a rate-limit slot, so
+                # one POST cannot fan out unlimited tool calls.
+                if i > 0 and not _rate_limit_ok(bucket):
+                    item_id = item.get('id') if isinstance(item, dict) else None
+                    if not (isinstance(item, dict) and 'id' not in item):
+                        responses.append(_jsonrpc_error(
+                            item_id, _RATE_LIMITED, 'Too many requests'))
+                    continue
                 out = _dispatch_rpc(item, user)
                 if out is not None:
                     responses.append(out)
+            if not responses:
+                return _cors_headers(Response(status=202))
             body = responses
         else:
             body = _dispatch_rpc(payload, user)

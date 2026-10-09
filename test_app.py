@@ -6282,6 +6282,73 @@ def test_mcp_cannot_read_other_users_job(mcp_on):
     assert payload['error'] == 'Job not found'
 
 
+def test_mcp_get_transcript_by_list_id_does_not_charge_twice(mcp_on):
+    """list_episodes id is the audio URL; a repeat call must reuse the job."""
+    listed, _ = _mcp_tool(mcp_on['key_a'], 'list_episodes', {
+        'podcast': 'Spårtsklubben',
+    })
+    ep = listed['episodes'][0]
+    args = {
+        'episode': ep['id'], 'title': ep['title'], 'publisher': ep['publisher'],
+        'date': ep['date'], 'duration_min': ep['duration_min'],
+        'rss_url': ep['rss_url'],
+    }
+    first, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript', args)
+    assert first['reused'] is False
+    assert first['title'] == ep['title']
+    assert first['cost_minutes'] == 42
+    second, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript', {'episode': ep['id']})
+    assert second['job_id'] == first['job_id']
+    assert second['reused'] is True
+    assert (second['balance']['remaining_minutes']
+            == first['balance_after']['remaining_minutes'])
+
+
+def test_mcp_list_episodes_spotify_show(mcp_on, monkeypatch):
+    monkeypatch.setattr(A, 'resolve_spotify_url', lambda raw: {
+        'results': [{'type': 'show', 'name': 'Spårtsklubben',
+                     'artist': 'Spårtsklubben',
+                     'feed_url': 'https://feeds.example.com/spart.xml'}],
+        'error': None, 'error_kind': None, 'show_name': 'Spårtsklubben',
+        'error_detail': '',
+    })
+    payload, result = _mcp_tool(mcp_on['key_a'], 'list_episodes', {
+        'podcast': 'https://open.spotify.com/show/2MAi0BvDc6GTFvKFPXnkCL',
+    })
+    assert result.get('isError') is False, payload
+    assert payload['count'] >= 1
+
+
+def test_mcp_jsonrpc_edge_cases(mcp_on):
+    key = mcp_on['key_a']
+    headers = {'Authorization': f'Bearer {key}'}
+    c = A.app.test_client()
+    r = c.post('/mcp', json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                             'params': [1]}, headers=headers)
+    assert r.status_code == 200
+    assert r.get_json()['error']['code'] == -32602
+    r = c.post('/mcp', json=[{'jsonrpc': '2.0', 'method': 'notifications/initialized'}],
+               headers=headers)
+    assert r.status_code == 202
+    r = c.post('/mcp', json=[], headers=headers)
+    assert r.status_code == 400
+    r = c.post('/mcp', json={'jsonrpc': '2.0', 'id': 1, 'method': 'initialize'})
+    assert r.status_code == 401
+    assert r.headers.get('WWW-Authenticate', '').startswith('Bearer')
+
+
+def test_mcp_batch_consumes_rate_limit(mcp_on, monkeypatch):
+    monkeypatch.setattr(MCP, 'MCP_MAX_PER_WINDOW', 3)
+    batch = [{'jsonrpc': '2.0', 'id': i, 'method': 'ping'} for i in range(10)]
+    r = A.app.test_client().post(
+        '/mcp', json=batch,
+        headers={'Authorization': f'Bearer {mcp_on["key_a"]}'})
+    out = r.get_json()
+    assert len(out) == 10
+    assert sum(1 for m in out if 'result' in m) == 3
+    assert all(m['error']['code'] == -32002 for m in out if 'error' in m)
+
+
 def test_mcp_docs_section_only_when_flag_on(trial_on, monkeypatch):
     monkeypatch.setenv('MCP_ENABLED', '0')
     off = A.app.test_client().get('/docs/api').data.decode()
