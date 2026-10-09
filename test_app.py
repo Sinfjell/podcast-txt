@@ -12744,3 +12744,16 @@ def test_deploy_docs_do_not_reference_new_episode_poller():
     assert not os.path.exists('ops/poll-new-episodes.py')
     assert not os.path.exists('ops/podskrift-new-episodes.service')
     assert not os.path.exists('ops/podskrift-new-episodes.timer')
+
+
+def test_cookie_banner_copy_is_generic_and_privacy_names_processor(monkeypatch):
+    import re as _re
+    monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
+    body = A.app.test_client().get('/', headers={'Accept': 'text/html'}).data.decode()
+    m = _re.search(r'id="cookieConsentDesc">(.*?)</p>', body, _re.S)
+    assert m, 'banner renders when PostHog is configured'
+    banner = m.group(1)
+    assert 'PostHog' not in banner
+    assert 'anonymous, cookie-free usage statistics' in ' '.join(banner.split())
+    priv = A.app.test_client().get('/privacy').data.decode()
+    assert 'PostHog' in priv
