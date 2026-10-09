@@ -15,7 +15,9 @@
     <p style="color: var(--muted); font-size: 16px; margin-top: 10px; max-width: 520px; line-height: 1.6;">
         Paste a Spotify episode link, or search by podcast name. You get the full text and an .srt file in a few minutes.
     </p>
-    {% if trial_minutes %}
+    {# Signup-trial marketing — anonymous only. Logged-in users have their own
+       grant (often 180 for legacy accounts) and a balance banner below. #}
+    {% if trial_minutes and not current_user.is_authenticated %}
     <p style="color: var(--muted); font-size: 14px; margin-top: 6px; max-width: 520px; line-height: 1.5; opacity: 0.85;">
         First {{ trial_minutes }} minutes of audio free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} — no card, no OpenAI key needed to start.
     </p>
@@ -141,7 +143,22 @@
             </select>
         </div>
         <div id="searchResults"></div>
-        {% if trial_minutes %}
+        {# Anonymous: advertised new-signup grant. Logged-in trial users: their
+           own limit (+ remaining) so a 180-min legacy account is never told
+           "60 in total" next to a correct balance banner. Own-key users: hide. #}
+        {% if current_user.is_authenticated and trial and not trial.on_own_key %}
+        <p class="form-hint" style="margin-top: 12px;">
+            The free trial covers {{ trial.limit_minutes }} minutes of audio in total{% if trial.limit_minutes >= 120 %} (about {{ trial.limit_minutes // 60 }} hours){% endif %}{% if not trial.exhausted %} — {{ trial.remaining_minutes }} left{% endif %}.
+            {% if stripe_buy_enabled %}
+            After that, buy a one-time pack (${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min, VAT included),
+            or add your own OpenAI API key — a 90-minute episode costs about ${{ openai_90min_cost }} at OpenAI's rate.
+            {% else %}
+            For longer episodes, or once the trial is used up, add your own OpenAI API key:
+            a 90-minute episode costs about ${{ openai_90min_cost }} at OpenAI's rate.
+            {% endif %}
+            <a href="{{ url_for('pricing') }}">See pricing</a>.
+        </p>
+        {% elif trial_minutes and not current_user.is_authenticated %}
         <p class="form-hint" style="margin-top: 12px;">
             The free trial covers {{ trial_minutes }} minutes of audio in total{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.
             {% if stripe_buy_enabled %}
