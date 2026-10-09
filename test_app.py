@@ -9,6 +9,7 @@ Run: pytest test_app.py
 
 import os
 import re
+import secrets
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -6519,18 +6520,19 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'share-listen-links'
-    assert entries[1]['id'] == 'keyboard-and-faster-loading'
-    assert entries[2]['id'] == 'show-landing-pages'
-    assert entries[3]['id'] == 'public-share-links'
-    assert entries[4]['id'] == 'unsubscribe-confirm-click'
-    assert entries[5]['id'] == 'partial-preview-minutes-wording'
-    assert entries[6]['id'] == 'partial-trial-preview'
-    assert entries[7]['id'] == 'own-key-billing-clarity'
-    assert entries[8]['id'] == 'clearer-missing-episode-audio'
-    assert entries[9]['id'] == 'new-signup-60-min-trial'
-    assert entries[10]['id'] == 'spotify-paste-robustness'
-    assert entries[11]['id'] == 'no-double-charge-restart'
+    assert entries[0]['id'] == 'forgot-password'
+    assert entries[1]['id'] == 'share-listen-links'
+    assert entries[2]['id'] == 'keyboard-and-faster-loading'
+    assert entries[3]['id'] == 'show-landing-pages'
+    assert entries[4]['id'] == 'public-share-links'
+    assert entries[5]['id'] == 'unsubscribe-confirm-click'
+    assert entries[6]['id'] == 'partial-preview-minutes-wording'
+    assert entries[7]['id'] == 'partial-trial-preview'
+    assert entries[8]['id'] == 'own-key-billing-clarity'
+    assert entries[9]['id'] == 'clearer-missing-episode-audio'
+    assert entries[10]['id'] == 'new-signup-60-min-trial'
+    assert entries[11]['id'] == 'spotify-paste-robustness'
+    assert entries[12]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -10781,7 +10783,8 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
-    assert entries[0]['id'] == 'share-listen-links'
+    assert any(e['id'] == 'share-listen-links' for e in entries)
+    assert entries[0]['id'] == 'forgot-password'
 
 
 # --------------------------------------------------------------------------
@@ -11910,3 +11913,347 @@ def test_server_side_signup_event_ignores_cookie_consent(ph_events):
         uid = User.query.filter_by(email='declined-signup@example.com').first().id
     events = [e for e in ph_events.events if e['event'] == 'user_signed_up']
     assert events and events[-1]['distinct_id'] == str(uid)
+
+
+# --------------------------------------------------------------------------
+# Forgot / reset password
+# --------------------------------------------------------------------------
+
+def _enable_password_reset_mail(monkeypatch):
+    """Turn Mailgun on without setting PUBLIC_BASE_URL (that 301s off localhost)."""
+    monkeypatch.setenv('EMAIL_ENABLED', '1')
+    monkeypatch.setenv('MAILGUN_API_KEY', 'key-test')
+    monkeypatch.setenv('MAILGUN_DOMAIN', 'podskrift.com')
+    monkeypatch.setenv('MAILGUN_BASE_URL', 'https://api.eu.mailgun.net')
+
+
+def _csrf_client():
+    A.app.config['TESTING'] = True
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        token = secrets.token_hex(32)
+        sess['_csrf_token'] = token
+    return client, token
+
+
+def _request_reset(client, csrf, email, **extra):
+    data = {'csrf_token': csrf, 'email': email}
+    data.update(extra)
+    return client.post('/forgot-password', data=data, follow_redirects=True)
+
+
+def _patch_reset_mail(monkeypatch):
+    """Capture reset URLs; confirm-changed sends are counted separately."""
+    import email_notify
+    import mail as mailer
+
+    state = {'reset_urls': [], 'changed': 0}
+
+    def fake_reset(*, to, reset_url, user_id):
+        state['reset_urls'].append(reset_url)
+        return mailer.SEND_SENT
+
+    def fake_changed(*, to, user_id):
+        state['changed'] += 1
+        return mailer.SEND_SENT
+
+    monkeypatch.setattr(email_notify, 'send_password_reset_email', fake_reset)
+    monkeypatch.setattr(email_notify, 'send_password_changed_email', fake_changed)
+    return state
+
+
+@pytest.fixture(autouse=False)
+def _clear_password_reset_limits():
+    A._password_reset_attempts.clear()
+    yield
+    A._password_reset_attempts.clear()
+
+
+def test_login_links_to_forgot_password():
+    body = A.app.test_client().get('/login').data.decode()
+    assert '/forgot-password' in body
+    assert 'Forgot password?' in body
+
+
+def test_forgot_password_mail_not_ready_shows_contact(monkeypatch):
+    monkeypatch.setenv('EMAIL_ENABLED', '0')
+    monkeypatch.delenv('MAILGUN_API_KEY', raising=False)
+    resp = A.app.test_client().get('/forgot-password')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'hello@podskrift.com' in body
+    assert 'not available' in body.lower() or 'email' in body.lower()
+    assert 'name="email"' not in body
+    assert resp.headers.get('X-Robots-Tag') == 'noindex'
+
+
+def test_forgot_password_enumeration_safe(monkeypatch, _clear_password_reset_limits):
+    """Known and unknown addresses get the same neutral success copy."""
+    _enable_password_reset_mail(monkeypatch)
+    state = _patch_reset_mail(monkeypatch)
+    _make_user('reset-known@example.com')
+    client, csrf = _csrf_client()
+    known = _request_reset(client, csrf, 'reset-known@example.com')
+    unknown = _request_reset(client, csrf, 'reset-nobody@example.com')
+    assert known.status_code == 200 and unknown.status_code == 200
+    import html as _html
+    known_body = _html.unescape(known.data.decode())
+    unknown_body = _html.unescape(unknown.data.decode())
+    assert A.PASSWORD_RESET_NEUTRAL_MSG in known_body
+    assert A.PASSWORD_RESET_NEUTRAL_MSG in unknown_body
+    # One send for the real account only — but the UI must not reveal that.
+    assert len(state['reset_urls']) == 1
+
+
+def test_password_reset_happy_path_updates_password_and_logs_in(
+        monkeypatch, ph_events, _clear_password_reset_limits):
+    import html as _html
+    from models import db, User, PasswordResetToken
+
+    _enable_password_reset_mail(monkeypatch)
+    state = _patch_reset_mail(monkeypatch)
+    uid = _make_user('reset-ok@example.com')
+
+    client, csrf = _csrf_client()
+    resp = _request_reset(client, csrf, 'reset-ok@example.com')
+    assert A.PASSWORD_RESET_NEUTRAL_MSG in _html.unescape(resp.data.decode())
+    assert any(e['event'] == 'password_reset_requested'
+               and e['distinct_id'] == str(uid) for e in ph_events.events)
+
+    assert len(state['reset_urls']) == 1
+    raw_token = state['reset_urls'][0].rstrip('/').rsplit('/', 1)[-1]
+    with A.app.app_context():
+        row = PasswordResetToken.query.filter_by(
+            token_hash=A._hash_password_reset_token(raw_token)).first()
+        assert row is not None and row.used_at is None
+        assert row.user_id == uid
+
+    # GET shows the form only (link-scanner safe).
+    view = client.get(f'/reset-password/{raw_token}')
+    assert view.status_code == 200
+    assert b'name="password"' in view.data
+    assert b'name="password2"' in view.data
+    assert view.headers.get('X-Robots-Tag') == 'noindex'
+    assert view.headers.get('Referrer-Policy') == 'no-referrer'
+    assert '<meta name="robots" content="noindex">' in view.data.decode()
+
+    with client.session_transaction() as sess:
+        csrf2 = sess.get('_csrf_token')
+    done = client.post(
+        f'/reset-password/{raw_token}',
+        data={
+            'csrf_token': csrf2,
+            'password': 'newpass99',
+            'password2': 'newpass99',
+        },
+        follow_redirects=False,
+    )
+    assert done.status_code in (302, 303)
+    assert any(e['event'] == 'password_reset_completed'
+               and e['distinct_id'] == str(uid) for e in ph_events.events)
+
+    with A.app.app_context():
+        user = db.session.get(User, uid)
+        assert user.check_password('newpass99')
+        assert not user.check_password('password123')
+        assert int(user.session_version) == 1
+        row = PasswordResetToken.query.filter_by(
+            token_hash=A._hash_password_reset_token(raw_token)).first()
+        assert row.used_at is not None
+
+    # Logged in after reset.
+    home = client.get('/')
+    assert b'data-authenticated="1"' in home.data
+    assert state['changed'] == 1
+
+
+def test_password_reset_token_single_use(monkeypatch, _clear_password_reset_limits):
+    from models import PasswordResetToken
+
+    _enable_password_reset_mail(monkeypatch)
+    state = _patch_reset_mail(monkeypatch)
+    uid = _make_user('reset-once@example.com')
+
+    client, csrf = _csrf_client()
+    _request_reset(client, csrf, 'reset-once@example.com')
+    raw = state['reset_urls'][0].rstrip('/').rsplit('/', 1)[-1]
+
+    with client.session_transaction() as sess:
+        csrf2 = sess['_csrf_token']
+    assert client.post(f'/reset-password/{raw}', data={
+        'csrf_token': csrf2, 'password': 'abcdefgh1', 'password2': 'abcdefgh1',
+    }).status_code in (302, 303)
+
+    # Second use is a 404 invalid page; GET also fails.
+    again = client.get(f'/reset-password/{raw}')
+    assert again.status_code == 404
+    assert b'not valid' in again.data.lower() or b'invalid' in again.data.lower()
+    with A.app.app_context():
+        assert PasswordResetToken.query.filter_by(user_id=uid).count() >= 1
+
+
+def test_password_reset_expired_token(monkeypatch, _clear_password_reset_limits):
+    from models import db, PasswordResetToken
+
+    uid = _make_user('reset-exp@example.com')
+    raw = 'expired-token-value-aaaaaaaa'
+    with A.app.app_context():
+        db.session.add(PasswordResetToken(
+            user_id=uid,
+            token_hash=A._hash_password_reset_token(raw),
+            expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        ))
+        db.session.commit()
+    resp = A.app.test_client().get(f'/reset-password/{raw}')
+    assert resp.status_code == 410
+    assert b'expired' in resp.data.lower()
+
+
+def test_password_reset_wrong_token_is_404():
+    resp = A.app.test_client().get('/reset-password/not-a-real-token-zzzz')
+    assert resp.status_code == 404
+    assert resp.headers.get('X-Robots-Tag') == 'noindex'
+    assert resp.headers.get('Referrer-Policy') == 'no-referrer'
+
+
+def test_password_reset_new_request_invalidates_older(
+        monkeypatch, _clear_password_reset_limits):
+    _enable_password_reset_mail(monkeypatch)
+    state = _patch_reset_mail(monkeypatch)
+    _make_user('reset-supersede@example.com')
+
+    client, csrf = _csrf_client()
+    _request_reset(client, csrf, 'reset-supersede@example.com')
+    _request_reset(client, csrf, 'reset-supersede@example.com')
+    assert len(state['reset_urls']) == 2
+    old = state['reset_urls'][0].rstrip('/').rsplit('/', 1)[-1]
+    new = state['reset_urls'][1].rstrip('/').rsplit('/', 1)[-1]
+    assert A.app.test_client().get(f'/reset-password/{old}').status_code == 404
+    assert A.app.test_client().get(f'/reset-password/{new}').status_code == 200
+
+
+def test_password_reset_rate_limited(monkeypatch, _clear_password_reset_limits):
+    _enable_password_reset_mail(monkeypatch)
+    state = _patch_reset_mail(monkeypatch)
+    _make_user('reset-rl@example.com')
+    import html as _html
+    client, csrf = _csrf_client()
+    for _ in range(A.PASSWORD_RESET_MAX_PER_KEY):
+        resp = _request_reset(client, csrf, 'reset-rl@example.com')
+        assert A.PASSWORD_RESET_NEUTRAL_MSG in _html.unescape(resp.data.decode())
+    limited = _request_reset(client, csrf, 'reset-rl@example.com')
+    assert b'Too many reset requests' in limited.data
+    assert len(state['reset_urls']) == A.PASSWORD_RESET_MAX_PER_KEY
+
+
+def test_password_reset_invalidates_other_sessions(
+        monkeypatch, _clear_password_reset_limits):
+    from models import db, User
+
+    _enable_password_reset_mail(monkeypatch)
+    state = _patch_reset_mail(monkeypatch)
+    uid = _make_user('reset-sess@example.com')
+
+    # Two independent logged-in browsers.
+    a = A.app.test_client()
+    b = A.app.test_client()
+    for c in (a, b):
+        c.post('/login', data={
+            'email': 'reset-sess@example.com', 'password': 'password123',
+        })
+        assert b'data-authenticated="1"' in c.get('/').data
+
+    reset_client, csrf = _csrf_client()
+    _request_reset(reset_client, csrf, 'reset-sess@example.com')
+    raw = state['reset_urls'][0].rstrip('/').rsplit('/', 1)[-1]
+    with reset_client.session_transaction() as sess:
+        csrf2 = sess['_csrf_token']
+    assert reset_client.post(f'/reset-password/{raw}', data={
+        'csrf_token': csrf2, 'password': 'brandnew1', 'password2': 'brandnew1',
+    }).status_code in (302, 303)
+
+    # Prior sessions are dead; the reset session is logged in.
+    assert b'data-authenticated="1"' not in a.get('/').data
+    assert b'data-authenticated="1"' not in b.get('/').data
+    assert b'data-authenticated="1"' in reset_client.get('/').data
+    with A.app.app_context():
+        assert db.session.get(User, uid).check_password('brandnew1')
+
+
+def test_password_reset_get_does_not_change_password(monkeypatch):
+    """Link scanners hit GET; only POST may mutate the password."""
+    from models import db, User, PasswordResetToken
+
+    uid = _make_user('reset-get@example.com')
+    raw = 'scanner-safe-token-bbbbbbbb'
+    with A.app.app_context():
+        db.session.add(PasswordResetToken(
+            user_id=uid,
+            token_hash=A._hash_password_reset_token(raw),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        ))
+        db.session.commit()
+    resp = A.app.test_client().get(f'/reset-password/{raw}')
+    assert resp.status_code == 200
+    assert b'Update password' in resp.data
+    with A.app.app_context():
+        user = db.session.get(User, uid)
+        assert user.check_password('password123')
+        row = PasswordResetToken.query.filter_by(
+            token_hash=A._hash_password_reset_token(raw)).first()
+        assert row.used_at is None
+
+
+def test_password_reset_excluded_from_sitemap_and_llms():
+    sitemap = A.app.test_client().get('/sitemap.xml').data.decode()
+    llms = A.app.test_client().get('/llms.txt').data.decode()
+    assert 'forgot-password' not in sitemap
+    assert 'reset-password' not in sitemap
+    assert 'forgot-password' not in llms
+    assert 'reset-password' not in llms
+
+
+def test_password_reset_rejects_short_password(monkeypatch, _clear_password_reset_limits):
+    from models import db, PasswordResetToken
+
+    uid = _make_user('reset-short@example.com')
+    raw = 'short-pw-token-cccccccc'
+    with A.app.app_context():
+        db.session.add(PasswordResetToken(
+            user_id=uid,
+            token_hash=A._hash_password_reset_token(raw),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        ))
+        db.session.commit()
+    client = A.app.test_client()
+    client.get(f'/reset-password/{raw}')
+    with client.session_transaction() as sess:
+        csrf = sess['_csrf_token']
+    resp = client.post(f'/reset-password/{raw}', data={
+        'csrf_token': csrf, 'password': 'short', 'password2': 'short',
+    }, follow_redirects=True)
+    assert b'at least 8 characters' in resp.data.lower()
+    with A.app.app_context():
+        from models import User
+        assert db.session.get(User, uid).check_password('password123')
+
+
+def test_emails_are_redacted_in_sentry(sentry_events):
+    _raise_and_report(RuntimeError('failed for user@example.com somehow'))
+    (event,) = sentry_events
+    assert 'user@example.com' not in repr(event)
+    assert '[redacted]' in event['exception']['values'][-1]['value']
+
+
+def test_ensure_password_reset_tokens_table_indexes_after_columns():
+    """Indexes that mention columns are created only after columns exist."""
+    from sqlalchemy import inspect as sa_inspect
+    with A.app.app_context():
+        A.ensure_password_reset_tokens_table()
+        cols = {c['name'] for c in sa_inspect(A.db.engine).get_columns(
+            'password_reset_tokens')}
+        assert {'user_id', 'token_hash', 'expires_at', 'used_at'} <= cols
+        idx = {i['name'] for i in sa_inspect(A.db.engine).get_indexes(
+            'password_reset_tokens')}
+        assert 'ix_password_reset_tokens_token_hash' in idx
+        assert 'ix_password_reset_tokens_user_id' in idx
