@@ -4096,7 +4096,8 @@ def test_a_dead_feed_still_falls_through_to_the_episode_search(monkeypatch):
 def test_an_oversized_feed_is_not_read_into_memory(monkeypatch):
     _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW],
               feed=_rss('Essentials: Genes &amp; Memory'), episodes=[])
-    monkeypatch.setattr(A._fetch_feed_capped, '__defaults__', (100,))
+    # (max_bytes, early_stop_items) — tiny cap, no early-stop (Spotify path).
+    monkeypatch.setattr(A._fetch_feed_capped, '__defaults__', (100, None))
     out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
     # The feed would have matched; being over the cap it is skipped, not parsed.
     assert [r['type'] for r in out['results']] == ['show']

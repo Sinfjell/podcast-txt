@@ -11,7 +11,7 @@
       "id": "partial-preview-minutes-wording",
       "date": "2026-10-09",
       "title": "Clearer free-preview length wording",
-      "summary": "Partial previews now say “first 10 minutes of 29 minutes” so the episode length is obvious on the result page, downloads, and copy."
+      "summary": "Partial previews now spell out the episode length in minutes (not a bare number) on the result page, downloads, and copy."
     },
     {
       "id": "email-alerts-coming-soon",
