@@ -1183,9 +1183,10 @@
     });
     </script>
     {# Prefetch public pages on hover. Whitelist only: no GET with side effects
-       (logout, cancel, downloads) and no page that logs a server-side event. #}
+       (logout, cancel, downloads) and no page that logs a server-side event
+       (/podcasts/<slug> captures show_page_viewed, so it is left out). #}
     <script type="speculationrules">
-    {"prefetch": [{"where": {"href_matches": ["/", "/pricing", "/whats-new", "/docs/api", "/rss-help", "/privacy", "/terms", "/podcasts", "/podcasts/*"]}, "eagerness": "moderate"}]}
+    {"prefetch": [{"where": {"href_matches": ["/", "/pricing", "/whats-new", "/docs/api", "/rss-help", "/privacy", "/terms", "/podcasts"]}, "eagerness": "moderate"}]}
     </script>
     {% block scripts %}{% endblock %}
     <script>

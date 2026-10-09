@@ -281,3 +281,18 @@ def test_home_inputs_are_labelled(client):
 def test_norwegian_faq_entry_is_marked(client):
     assert S.text_lang('Hvordan transkriberer jeg en norsk podcast til tekst?') == 'nb'
     assert S.text_lang('How do I transcribe a podcast episode to text?') == ''
+
+
+def test_llms_txt_points_agents_at_machine_readable_surfaces(client):
+    body = client.get('/llms.txt').get_data(as_text=True)
+    assert '## For agents' in body
+    for frag in ('/docs/api.md', '/.well-known/agent-skills/index.json',
+                 '/.well-known/api-catalog', '/whats-new/feed.xml'):
+        assert frag in body
+
+
+def test_episode_selection_is_noindex():
+    """POST-only result page (canonical would be /parse_rss): keep it out."""
+    src = open(os.path.join(os.path.dirname(__file__), 'templates',
+                            'episode_selection.html'), encoding='utf-8').read()
+    assert '{% block robots_meta %}<meta name="robots" content="noindex">{% endblock %}' in src

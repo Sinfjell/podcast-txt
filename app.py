@@ -7722,8 +7722,23 @@ def _show_page_structured_data(show, faq, page_url):
         graph[0]['author'] = {'@type': 'Person', 'name': show['author']}
     if show.get('artwork'):
         graph[0]['image'] = show['artwork']
-    if show.get('language'):
-        graph[0]['inLanguage'] = show['language']
+    # The seed's `language` is often the Apple storefront ('us'), which is not
+    # a language. Only emit codes the app itself knows as languages.
+    lang = (show.get('language') or '').strip()
+    if lang and lang.split('-')[0].lower() in LANGUAGE_ENGLISH_NAMES:
+        graph[0]['inLanguage'] = lang
+    graph.append({
+        '@type': 'BreadcrumbList',
+        '@id': page_url + '#breadcrumb',
+        'itemListElement': [
+            {'@type': 'ListItem', 'position': 1, 'name': 'Podskrift',
+             'item': public_url('index')},
+            {'@type': 'ListItem', 'position': 2, 'name': 'Podcasts',
+             'item': public_url('podcasts_index')},
+            {'@type': 'ListItem', 'position': 3, 'name': show['name'],
+             'item': page_url},
+        ],
+    })
     data = {'@context': 'https://schema.org', '@graph': graph}
     return (_json.dumps(data, ensure_ascii=False, indent=2)
             .replace('<', '\\u003c').replace('>', '\\u003e'))
@@ -7912,6 +7927,12 @@ USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscripti
 - [API docs]({public_url('api_docs')}): customer HTTP API (resolve → transcribe → transcript)
 - [How to find an RSS feed]({public_url('rss_help')}): for podcasts outside the search index
 - [Sign up]({public_url('register')}): {signup_blurb}
+
+## For agents
+- [API docs as Markdown]({public_url('site_standards.api_docs_markdown')}): the same reference, no HTML (or send `Accept: text/markdown` to /docs/api; on / it returns this file)
+- [Agent skill index]({public_url('site_standards.agent_skills_index')}): a SKILL.md for getting transcripts through the API
+- [API catalog]({public_url('site_standards.api_catalog')}): RFC 9727 linkset
+- [What's new feed]({public_url('site_standards.whats_new_feed')}): RSS of new features
 
 ## Frequently asked
 

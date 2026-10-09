@@ -6413,17 +6413,18 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'show-landing-pages'
-    assert entries[1]['id'] == 'resume-after-deploy'
-    assert entries[2]['id'] == 'public-share-links'
-    assert entries[3]['id'] == 'unsubscribe-confirm-click'
-    assert entries[4]['id'] == 'partial-preview-minutes-wording'
-    assert entries[5]['id'] == 'partial-trial-preview'
-    assert entries[6]['id'] == 'own-key-billing-clarity'
-    assert entries[7]['id'] == 'clearer-missing-episode-audio'
-    assert entries[8]['id'] == 'new-signup-60-min-trial'
-    assert entries[9]['id'] == 'spotify-paste-robustness'
-    assert entries[10]['id'] == 'no-double-charge-restart'
+    assert entries[0]['id'] == 'keyboard-and-faster-loading'
+    assert entries[1]['id'] == 'show-landing-pages'
+    assert entries[2]['id'] == 'resume-after-deploy'
+    assert entries[3]['id'] == 'public-share-links'
+    assert entries[4]['id'] == 'unsubscribe-confirm-click'
+    assert entries[5]['id'] == 'partial-preview-minutes-wording'
+    assert entries[6]['id'] == 'partial-trial-preview'
+    assert entries[7]['id'] == 'own-key-billing-clarity'
+    assert entries[8]['id'] == 'clearer-missing-episode-audio'
+    assert entries[9]['id'] == 'new-signup-60-min-trial'
+    assert entries[10]['id'] == 'spotify-paste-robustness'
+    assert entries[11]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -9984,6 +9985,8 @@ def test_show_page_renders_from_fixture_data(show_pages_fixture, monkeypatch, tr
     assert 'application/ld+json' in body
     assert 'PodcastSeries' in body
     assert 'FAQPage' in body
+    assert 'BreadcrumbList' in body
+    assert 'aria-label="Transcribe this episode: Episode One: Hello"' in body
     assert 'rel="canonical"' in body or 'rel=canonical' in body.lower() or 'canonical' in body
     # Analytics
     views = [e for e in ph_events.events if e['event'] == 'show_page_viewed']
