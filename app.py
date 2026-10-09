@@ -55,12 +55,16 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError as SaIntegrityError
 
 from models import (db, User, SavedFeed, TranscriptionTask, CreditPurchase,
-                    TranscriptShare,
+                    TranscriptShare, EmailSentLog,
                     TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS,
                     CREDIT_PURCHASE_COLUMN_MIGRATIONS,
+                    SAVED_FEED_COLUMN_MIGRATIONS,
                     TRANSCRIPT_SHARE_COLUMN_MIGRATIONS)
 from observability import init_sentry, report_stale_task, report_task_failure
 import analytics as product_analytics
+import email_notify
+import mail as mailer
+import episode_alerts
 
 try:
     import stripe
@@ -156,8 +160,10 @@ def public_url(endpoint, **values):
 
 
 def _canonical_host_exempt(path):
-    """True for Stripe webhooks, /api/*, share links, and common health probes."""
+    """True for Stripe webhooks, /api/*, email unsub, share links, and health probes."""
     if path.startswith('/stripe/webhook') or path.startswith('/api/'):
+        return True
+    if path.startswith('/email/unsubscribe'):
         return True
     # Public share links must resolve on whichever host they were opened
     # (www / bare / staging), not bounce through a host redirect that can
@@ -320,12 +326,66 @@ def trial_estimate_seconds(duration_min):
     return max(60, int((duration_min or 0) * 60) or TRIAL_UNKNOWN_ESTIMATE_SECONDS)
 
 
+def encode_partial_task_meta(partial_seconds, episode_seconds):
+    """Serialize partial-preview metadata for the partial_meta column."""
+    import json as _json
+    return _json.dumps({
+        'partial_seconds': int(partial_seconds),
+        'episode_seconds': int(max(partial_seconds, episode_seconds)),
+    }, separators=(',', ':'))
+
+
+def task_partial_meta(task):
+    """Return {partial_seconds, episode_seconds} for a partial preview, or None."""
+    import json as _json
+    if task is None:
+        return None
+    raw = getattr(task, 'partial_meta', None) or ''
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        data = _json.loads(raw)
+        partial_seconds = int(data['partial_seconds'])
+        episode_seconds = int(data['episode_seconds'])
+    except (TypeError, ValueError, KeyError, _json.JSONDecodeError):
+        return None
+    if partial_seconds <= 0 or episode_seconds <= 0:
+        return None
+    return {
+        'partial_seconds': partial_seconds,
+        'episode_seconds': max(partial_seconds, episode_seconds),
+    }
+
+
+def task_is_partial(task):
+    return task_partial_meta(task) is not None
+
+
+def set_task_partial_meta(task, partial_seconds, episode_seconds):
+    """Write partial-preview metadata onto `task` (caller commits)."""
+    task.partial_meta = encode_partial_task_meta(partial_seconds, episode_seconds)
+
+
+def partial_minutes_pair(meta):
+    """(partial_minutes, episode_minutes) display ints from partial meta."""
+    n = max(1, int(math.ceil(meta['partial_seconds'] / 60.0)))
+    m = max(n, int(math.ceil(meta['episode_seconds'] / 60.0)))
+    return n, m
+
+
+def partial_transcript_note(meta):
+    """Short plain-text note for copy/download of a partial preview."""
+    n, m = partial_minutes_pair(meta)
+    return f'Free preview: first {n} minutes of {m} minutes.'
+
+
 def episode_needs_own_key(duration_min, remaining_minutes, paid_minutes=0):
-    """True when a platform user cannot cover this episode on free+paid minutes.
+    """True when a platform user cannot start this episode without buying/BYOK.
 
     No estimate → no badge. Own-key users pass remaining_minutes=None.
-    Episodes over the free per-episode cap need paid minutes (or BYOK) covering
-    the full length — free trial alone cannot take them.
+    When free trial alone cannot cover the full length but enough remains for a
+    partial preview (and there is no paid balance), returns False — the start
+    path will enqueue a free preview instead of a paywall.
     """
     if duration_min is None or remaining_minutes is None:
         return False
@@ -339,8 +399,17 @@ def episode_needs_own_key(duration_min, remaining_minutes, paid_minutes=0):
     paid_sec = max(0, int(paid_minutes or 0)) * 60
     free_sec = max(0, int(remaining_minutes)) * 60
     if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
-        return estimate > paid_sec
-    return estimate > free_sec + paid_sec
+        if estimate <= paid_sec:
+            return False
+        # Over the free per-episode cap: partial preview only when the episode
+        # is also longer than remaining free trial (same gate as enqueue).
+        if (paid_sec <= 0 and free_sec >= TRIAL_PARTIAL_MIN_SECONDS
+                and estimate > free_sec):
+            return False
+        return True
+    if estimate <= free_sec + paid_sec:
+        return False
+    return not (paid_sec <= 0 and free_sec >= TRIAL_PARTIAL_MIN_SECONDS)
 
 
 def trial_badge_remaining_minutes():
@@ -644,12 +713,17 @@ TRIAL_GLOBAL_SECONDS = _env_minutes('TRIAL_GLOBAL_MINUTES', 6000) * 60
 #: What to reserve when the feed publishes no itunes:duration. Reconciled
 #: against the real duration after download, before a single Whisper call.
 TRIAL_UNKNOWN_ESTIMATE_SECONDS = _env_minutes('TRIAL_UNKNOWN_ESTIMATE_MINUTES', 30) * 60
-#: Longest single episode the trial will take on. Default tracks TRIAL_MINUTES
-#: (legacy grant), not NEW_USER_TRIAL_MINUTES: a 60-minute new account that
-#: picks a longer episode hits the remaining-balance paywall, not this cap.
+#: Longest single episode the trial will take on as a *full* free job. Default
+#: tracks TRIAL_MINUTES (legacy grant), not NEW_USER_TRIAL_MINUTES. A shorter
+#: remaining balance on a longer episode can still start a partial preview
+#: (see TRIAL_PARTIAL_MIN_SECONDS) instead of this hard refusal.
 #: Set the env var explicitly if you want them different.
 TRIAL_MAX_EPISODE_SECONDS = _env_minutes(
     'TRIAL_MAX_EPISODE_MINUTES', TRIAL_DEFAULT_SECONDS // 60) * 60
+#: Minimum remaining free trial required to start a partial preview when the
+#: episode is longer than the balance. Below this, show the paywall instead of
+#: a tiny stub transcript.
+TRIAL_PARTIAL_MIN_SECONDS = _env_minutes('TRIAL_PARTIAL_MIN_MINUTES', 5) * 60
 #: Kill switch. Set TRIAL_ENABLED=0 to stop handing out our key entirely.
 TRIAL_ENABLED = os.getenv('TRIAL_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 
@@ -1172,7 +1246,9 @@ def trial_reconcile_task(task_id, actual_seconds):
 
     Runs after the download but BEFORE the first Whisper call, so an episode
     that turns out longer than the feed claimed costs us bandwidth, never API
-    spend. Raises TrialExhausted when the real length will not fit.
+    spend. Raises TrialExhausted when the real length will not fit — except for
+    partial-preview jobs (and trial-only unknown-duration overruns), which
+    return ``'trim'`` so the caller shortens the file to the reservation.
 
     Charge order: free trial first, then paid. Episodes over the free
     per-episode cap must be covered by paid minutes (or BYOK) — they do not
@@ -1180,25 +1256,28 @@ def trial_reconcile_task(task_id, actual_seconds):
     """
     task = db.session.get(TranscriptionTask, task_id)
     if not task or task.trial_settled:
-        return
+        return None
     trial_reserved = int(task.trial_seconds_charged or 0)
     paid_reserved = int(task.paid_seconds_charged or 0)
     if trial_reserved <= 0 and paid_reserved <= 0:
         # NULL/0 on both is an own-key task, nothing metered. Settled means the
         # sweeper got here first -- re-opening the charge would bill the user
         # for an episode that goes on to send nothing.
-        return
+        return None
     total_reserved = trial_reserved + paid_reserved
     actual = int(math.ceil(max(0.0, actual_seconds or 0.0)))
     user_id = task.user_id
     over_free_cap = bool(
         TRIAL_MAX_EPISODE_SECONDS and actual > TRIAL_MAX_EPISODE_SECONDS)
+    is_partial = task_is_partial(task)
 
     if over_free_cap and paid_reserved <= 0 and trial_reserved > 0:
+        # Partial previews intentionally reserve only N minutes of a longer
+        # episode — do not try to switch the whole thing onto paid credits.
+        if is_partial:
+            return 'trim'
         # Started as a free-trial job; real audio exceeds the free per-episode
-        # cap. Paid credits can still save it if they cover the full length;
-        # otherwise refuse without mutating the reservation — the worker's
-        # refund settles, matching the pre-credits behaviour.
+        # cap. Paid credits can still save it if they cover the full length.
         #
         # Critical order: debit paid WHILE still holding the trial reservation.
         # Releasing trial first, then failing the paid debit, then re-reserving
@@ -1215,30 +1294,42 @@ def trial_reconcile_task(task_id, actual_seconds):
             f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
             f'or add your own OpenAI API key (about ${cost} at OpenAI\'s rate).'
         )
-        if paid_balance_seconds(owner) < actual:
-            raise TrialExhausted(refuse_msg, scope='episode_length')
-        before_trial, before_paid = _platform_remaining_seconds(user_id)
-        if not paid_reserve(user_id, actual):
-            # Race: paid balance moved after the read. Keep the trial charge.
-            raise TrialExhausted(refuse_msg, scope='episode_length')
-        if not _claim_task_platform_charges(
-                task_id, trial_reserved, 0, 0, actual):
-            # Someone else settled (or the charge moved). Hand the paid debit
-            # back; the trial reservation on the user balance is still intact
-            # and still matches trial_seconds_charged on the row.
-            paid_release(user_id, actual)
-            raise TrialExhausted(refuse_msg, scope='episode_length')
-        # Paid is now on the task; only now release the free-trial reservation.
-        trial_release(user_id, trial_reserved)
-        _capture_minutes_exhausted_if_depleted(
-            user_id, 'reconcile', before_trial, before_paid)
-        return
+        if paid_balance_seconds(owner) >= actual:
+            before_trial, before_paid = _platform_remaining_seconds(user_id)
+            if not paid_reserve(user_id, actual):
+                # Race: paid balance moved after the read. Keep the trial charge.
+                raise TrialExhausted(refuse_msg, scope='episode_length')
+            if not _claim_task_platform_charges(
+                    task_id, trial_reserved, 0, 0, actual):
+                # Someone else settled (or the charge moved). Hand the paid debit
+                # back; the trial reservation on the user balance is still intact
+                # and still matches trial_seconds_charged on the row.
+                paid_release(user_id, actual)
+                raise TrialExhausted(refuse_msg, scope='episode_length')
+            # Paid is now on the task; only now release the free-trial reservation.
+            trial_release(user_id, trial_reserved)
+            _capture_minutes_exhausted_if_depleted(
+                user_id, 'reconcile', before_trial, before_paid)
+            return None
+        # No paid cover: trim to the reservation (unknown / under-claimed
+        # duration) rather than failing after the download already happened.
+        set_task_partial_meta(task, total_reserved, actual)
+        db.session.commit()
+        return 'trim'
 
     if actual > total_reserved:
         extra = actual - total_reserved
         before_trial, before_paid = _platform_remaining_seconds(user_id)
         split = platform_reserve(user_id, extra, paid_only=over_free_cap)
         if split is None:
+            # Partial job, or trial-only unknown-duration overrun: keep the
+            # reservation and let the worker trim audio to it.
+            if is_partial or (paid_reserved <= 0 and trial_reserved > 0
+                              and not over_free_cap):
+                if not is_partial:
+                    set_task_partial_meta(task, total_reserved, actual)
+                    db.session.commit()
+                return 'trim'
             owner = db.session.get(User, user_id)
             estimate_min = actual // 60
             _, _, remaining = trial_status(owner) if owner else (0, 0, 0)
@@ -1270,7 +1361,8 @@ def trial_reconcile_task(task_id, actual_seconds):
         else:
             _capture_minutes_exhausted_if_depleted(
                 user_id, 'reconcile', before_trial, before_paid)
-    elif actual < total_reserved:
+        return None
+    if actual < total_reserved:
         # Shrink paid first (LIFO), then trial — reverse of charge order.
         shrink = total_reserved - actual
         new_paid = max(0, paid_reserved - shrink)
@@ -1280,6 +1372,14 @@ def trial_reconcile_task(task_id, actual_seconds):
         if _claim_task_platform_charges(
                 task_id, trial_reserved, paid_reserved, new_trial, new_paid):
             platform_release(user_id, shrink_trial, shrink_paid)
+        # Keep partial meta in sync with the shorter reservation.
+        if is_partial:
+            meta = task_partial_meta(task)
+            if meta:
+                set_task_partial_meta(
+                    task, new_trial + new_paid, meta['episode_seconds'])
+                db.session.commit()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1880,6 +1980,71 @@ def _ffmpeg_error(message, stderr=b''):
     return RuntimeError(message)
 
 
+def trim_audio_file(audio_file, max_seconds):
+    """Rewrite `audio_file` to the first `max_seconds` of audio via ffmpeg.
+
+    Used for partial trial previews (and unknown-duration overruns) so Whisper
+    never sees more audio than we reserved. Prefers stream-copy; falls back to
+    a light re-encode when the container rejects copy. The later
+    prepare_audio_for_whisper() pass still re-encodes for Whisper either way.
+    """
+    max_seconds = max(1, int(math.ceil(float(max_seconds))))
+    if shutil.which('ffmpeg') is None:
+        raise _ffmpeg_error(
+            'Audio processing is unavailable on the server right now. '
+            'Please try again later, or contact support if it persists.')
+
+    tmp_path = f'{audio_file}.trimtmp.mp3'
+
+    def _run(cmd):
+        try:
+            return subprocess.run(
+                cmd, capture_output=True, timeout=FFMPEG_TIMEOUT_SECONDS)
+        except FileNotFoundError:
+            raise _ffmpeg_error(
+                'Audio processing is unavailable on the server right now. '
+                'Please try again later, or contact support if it persists.')
+        except subprocess.TimeoutExpired:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise _ffmpeg_error(
+                'This episode took too long to process. Please try a shorter one.')
+
+    copy = _run([
+        'nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y',
+        '-i', audio_file, '-t', str(max_seconds),
+        '-c', 'copy', '-vn', tmp_path,
+    ])
+    if copy.returncode != 0 or not os.path.exists(tmp_path) or os.path.getsize(tmp_path) < MIN_PART_BYTES:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        encoded = _run([
+            'nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y',
+            '-i', audio_file, '-t', str(max_seconds),
+            '-vn', '-ac', '1', '-ar', str(WHISPER_SAMPLE_RATE),
+            '-b:a', f'{WHISPER_AUDIO_BITRATE_KBPS}k', '-threads', '1',
+            tmp_path,
+        ])
+        if encoded.returncode != 0 or not os.path.exists(tmp_path):
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise _ffmpeg_error(
+                'This audio file could not be processed. It may be corrupt or in an '
+                'unsupported format.', encoded.stderr if encoded.returncode else copy.stderr)
+
+    os.replace(tmp_path, audio_file)
+    return audio_file
+
+
 def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
     """Re-encode to 16 kHz mono MP3, split into hour-long parts if still large.
 
@@ -2009,10 +2174,58 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
     measured_duration = probe_audio_duration(audio_file)
     billable_duration = (measured_duration if measured_duration is not None
                          else estimate_audio_duration(audio_file))
+    full_episode_seconds = billable_duration
+
+    task_row = db.session.get(TranscriptionTask, task_id)
+    partial_info = task_partial_meta(task_row) if task_row else None
+    reserved_seconds = 0
+    if task_row is not None:
+        reserved_seconds = (
+            int(task_row.trial_seconds_charged or 0)
+            + int(task_row.paid_seconds_charged or 0)
+        )
+
+    # Partial preview: never send more audio than we reserved. Trim before
+    # reconcile so billing matches the file Whisper will see.
+    if partial_info and reserved_seconds > 0 and billable_duration > reserved_seconds:
+        # Remember the real length for the result-page "first N of M" copy.
+        set_task_partial_meta(
+            task_row, reserved_seconds,
+            max(full_episode_seconds, partial_info['episode_seconds']))
+        db.session.commit()
+        trim_audio_file(audio_file, reserved_seconds)
+        measured_duration = probe_audio_duration(audio_file)
+        billable_duration = (
+            measured_duration if measured_duration is not None
+            else float(reserved_seconds)
+        )
 
     # Last point at which refusing is still free: everything below this line
-    # bills OpenAI.
-    trial_reconcile_task(task_id, billable_duration)
+    # bills OpenAI. May return 'trim' for unknown-duration overruns that we
+    # promote to a partial preview instead of failing.
+    reconcile_action = trial_reconcile_task(task_id, billable_duration)
+    if reconcile_action == 'trim':
+        task_row = db.session.get(TranscriptionTask, task_id)
+        reserved_seconds = 0
+        if task_row is not None:
+            reserved_seconds = (
+                int(task_row.trial_seconds_charged or 0)
+                + int(task_row.paid_seconds_charged or 0)
+            )
+            meta = task_partial_meta(task_row)
+            if meta is None and reserved_seconds > 0:
+                set_task_partial_meta(
+                    task_row, reserved_seconds, full_episode_seconds)
+                db.session.commit()
+        if reserved_seconds > 0 and billable_duration > reserved_seconds:
+            trim_audio_file(audio_file, reserved_seconds)
+            measured_duration = probe_audio_duration(audio_file)
+            billable_duration = (
+                measured_duration if measured_duration is not None
+                else float(reserved_seconds)
+            )
+            # Shrink the charge to the trimmed length (idempotent if already matched).
+            trial_reconcile_task(task_id, billable_duration)
 
     if not _update_task(
         task_id,
@@ -3438,6 +3651,23 @@ def handle_dispute(dispute_dict, event_type, event_id=None):
 @login_required
 def settings():
     if request.method == 'POST':
+        # Email preference toggle (separate from the OpenAI key field).
+        if request.form.get('form') == 'email_prefs':
+            want = request.form.get('email_transcript_ready') == '1'
+            current_user.email_transcript_ready = want
+            if want and current_user.email_unsubscribed_at is not None:
+                # Re-enabling transcript-ready clears a prior global unsub so
+                # new-episode alerts can work again if the feed opt-in is on.
+                current_user.email_unsubscribed_at = None
+            db.session.commit()
+            product_analytics.capture(
+                'alert_opt_in' if want else 'alert_opt_out',
+                current_user.id,
+                {'channel': 'transcript_ready'},
+            )
+            flash('Email preferences saved.', 'success')
+            return redirect(url_for('settings') + '#email')
+
         api_key = request.form.get('openai_api_key', '').strip()
 
         # Empty field means "leave the saved key alone". Clearing used to be the
@@ -3856,6 +4086,150 @@ def settings_revoke_api_key():
     return redirect(url_for('settings'))
 
 
+def _apply_global_unsubscribe(user):
+    """Stamp global unsub + turn off transcript-ready. Idempotent."""
+    user.email_unsubscribed_at = user.email_unsubscribed_at or datetime.now(timezone.utc)
+    user.email_transcript_ready = False
+    db.session.commit()
+    product_analytics.capture('unsubscribe', user.id, {'channel': 'all'})
+
+
+def _schedule_transcript_ready_email(task_id, user_id):
+    """Fire-and-forget transcript-ready mail; never blocks the worker thread."""
+    def _run():
+        with app.app_context():
+            try:
+                owner = db.session.get(User, user_id)
+                task = db.session.get(TranscriptionTask, task_id)
+                if owner is None or task is None:
+                    return
+                email_notify.notify_transcript_ready(
+                    db=db,
+                    user=owner,
+                    task=task,
+                    EmailSentLog=EmailSentLog,
+                    public_base_url=PUBLIC_BASE_URL,
+                    secret_key=app.secret_key,
+                )
+            except Exception:  # noqa: BLE001
+                app.logger.exception(
+                    'scheduled transcript-ready email failed for %s', task_id)
+
+    threading.Thread(
+        target=_run, daemon=True, name=f'transcript-ready-{task_id[:8]}',
+    ).start()
+
+
+def _finalize_global_unsubscribe(user):
+    """Stamp unsub, disable transcript + per-feed alerts. Idempotent."""
+    _apply_global_unsubscribe(user)
+    # Also opt out of per-feed alerts so digests stop without a second click.
+    SavedFeed.query.filter_by(user_id=user.id).update(
+        {'email_new_episodes': False}, synchronize_session=False)
+    db.session.commit()
+
+
+def _is_rfc8058_one_click_unsubscribe() -> bool:
+    """True for List-Unsubscribe-Post bodies (RFC 8058), not the confirm form."""
+    return (request.form.get('List-Unsubscribe') or '').strip() == 'One-Click'
+
+
+@app.route('/email/unsubscribe/<token>', methods=['GET', 'POST'])
+def email_unsubscribe(token):
+    """Logged-out unsubscribe: GET confirms; POST applies (RFC 8058 or form).
+
+    Link scanners must not unsubscribe on GET. Mail clients that honour
+    List-Unsubscribe-Post send ``List-Unsubscribe=One-Click`` and skip the
+    confirm page — that path still works without a second click.
+    """
+    user_id = email_notify.parse_unsubscribe_token(app.secret_key, token)
+    if user_id is None:
+        return render_template(
+            'email_unsubscribed.html',
+            ok=False,
+            message='That unsubscribe link is invalid or expired.',
+        ), 400
+    user = db.session.get(User, user_id)
+    if user is None:
+        return render_template(
+            'email_unsubscribed.html',
+            ok=False,
+            message='That account is no longer here.',
+        ), 404
+
+    if request.method == 'GET':
+        return render_template(
+            'email_unsubscribe_confirm.html',
+            token=token,
+        )
+
+    # POST: RFC 8058 one-click, or the confirm-page button.
+    if _is_rfc8058_one_click_unsubscribe() or request.form.get('confirm') == '1':
+        _finalize_global_unsubscribe(user)
+        if _is_rfc8058_one_click_unsubscribe():
+            return ('', 200)
+        return render_template(
+            'email_unsubscribed.html',
+            ok=True,
+            message='You are unsubscribed from Podskrift emails.',
+        )
+
+    # Bare POST without One-Click / confirm — show confirm (do not unsub).
+    return render_template(
+        'email_unsubscribe_confirm.html',
+        token=token,
+    ), 400
+
+
+@app.route('/go/transcribe')
+@login_required
+def go_transcribe():
+    """Deep link from new-episode emails: preselected episode + rss_url."""
+    product_analytics.capture(
+        'email_clicked',
+        current_user.id,
+        {'type': email_notify.NEW_EPISODES},
+    )
+    rss_url = (request.args.get('rss_url') or '').strip()
+    audio_url = (request.args.get('audio_url') or '').strip()
+    episode_title = (request.args.get('episode_title') or '').strip() or 'Episode'
+    podcast_name = (request.args.get('podcast_name') or '').strip()
+    episode_index_raw = request.args.get('episode_index')
+    if rss_url and not _is_fetchable_url(rss_url):
+        flash('That feed URL cannot be fetched.', 'error')
+        return redirect(url_for('index'))
+    if audio_url and not _is_fetchable_url(audio_url):
+        flash('That audio URL cannot be fetched.', 'error')
+        return redirect(url_for('index'))
+    if not audio_url and rss_url and episode_index_raw not in (None, ''):
+        try:
+            episode_index = int(episode_index_raw)
+        except (TypeError, ValueError):
+            episode_index = None
+        episodes, error = get_episodes_from_rss(rss_url, timeout=20)
+        if error or not episodes or episode_index is None:
+            flash(error or 'Could not load that episode.', 'error')
+            return redirect(url_for('index'))
+        if episode_index < 0 or episode_index >= len(episodes):
+            flash('That episode is no longer in the feed.', 'error')
+            return redirect(url_for('index'))
+        ep = episodes[episode_index]
+        audio_url = ep.get('audio_url') or ''
+        episode_title = ep.get('title') or episode_title
+        podcast_name = ep.get('podcast_name') or podcast_name
+    if not audio_url:
+        flash('Missing episode details.', 'error')
+        return redirect(url_for('index'))
+    return render_template(
+        'go_transcribe.html',
+        rss_url=rss_url or '',
+        audio_url=audio_url,
+        episode_title=episode_title,
+        podcast_name=podcast_name or '',
+        languages=language_choices(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Saved feeds
 # ---------------------------------------------------------------------------
@@ -3872,6 +4246,9 @@ def feeds():
 def add_feed():
     name = request.form.get('name', '').strip()
     rss_url = request.form.get('rss_url', '').strip()
+    # Checkbox is shown checked by default; an unchecked box is omitted from
+    # the POST, which we treat as opt-out.
+    email_new = request.form.get('email_new_episodes') == '1'
 
     if not name or not rss_url:
         flash('Name and RSS URL are required.', 'error')
@@ -3882,10 +4259,39 @@ def add_feed():
         flash('This feed is already saved.', 'info')
         return redirect(url_for('feeds'))
 
-    feed = SavedFeed(user_id=current_user.id, name=name, rss_url=rss_url)
+    feed = SavedFeed(
+        user_id=current_user.id, name=name, rss_url=rss_url,
+        email_new_episodes=email_new,
+    )
     db.session.add(feed)
     db.session.commit()
+    product_analytics.capture(
+        'alert_opt_in' if email_new else 'alert_opt_out',
+        current_user.id,
+        {'channel': 'new_episodes', 'source': 'feeds_add'},
+    )
     flash(f'Feed "{name}" saved.', 'success')
+    return redirect(url_for('feeds'))
+
+
+@app.route('/feeds/<int:feed_id>/email-alerts', methods=['POST'])
+@login_required
+def toggle_feed_email_alerts(feed_id):
+    """Per-feed opt-in/out for new-episode emails."""
+    feed = SavedFeed.query.filter_by(id=feed_id, user_id=current_user.id).first_or_404()
+    want = request.form.get('email_new_episodes') == '1'
+    was_on = bool(feed.email_new_episodes)
+    feed.email_new_episodes = want
+    if want and not was_on:
+        # Re-enable: reset baseline so the next poll does not flood a backlog.
+        episode_alerts.reset_feed_alert_baseline(feed)
+    db.session.commit()
+    product_analytics.capture(
+        'alert_opt_in' if want else 'alert_opt_out',
+        current_user.id,
+        {'channel': 'new_episodes', 'source': 'feeds_toggle'},
+    )
+    flash('Feed email alert preference saved.', 'success')
     return redirect(url_for('feeds'))
 
 
@@ -4163,12 +4569,14 @@ def _find_existing_web_task(user_id, source_audio_url):
     """Return a same-user task for this audio that is still live or finished.
 
     Error/cancelled tasks are intentionally omitted so the user can re-run.
-    Used only on the web path to avoid double-reserving trial minutes when
-    someone restarts an episode that is already queued, running, or done.
+    Completed *partial* previews are also omitted so buying minutes can start
+    a full run of the same source_audio_url. Used only on the web path to
+    avoid double-reserving trial minutes when someone restarts an episode
+    that is already queued, running, or done.
     """
     if not source_audio_url:
         return None
-    return (
+    task = (
         TranscriptionTask.query
         .filter(
             TranscriptionTask.user_id == user_id,
@@ -4178,6 +4586,9 @@ def _find_existing_web_task(user_id, source_audio_url):
         .order_by(TranscriptionTask.started_at.desc())
         .first()
     )
+    if task is not None and task.status == 'completed' and task_is_partial(task):
+        return None
+    return task
 
 
 def _completed_transcript_count(user_id):
@@ -4279,6 +4690,7 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
         # corrects it against the real audio before anything reaches Whisper.
         trial_charge = None
         paid_charge = None
+        partial_job = False
         if key_source == 'trial':
             # Floored at a minute: a zero reservation would quietly make the
             # task look unmetered (NULL/0 charges).
@@ -4287,38 +4699,74 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
             over_free_cap = bool(
                 TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS)
             before_trial, before_paid = _platform_remaining_seconds(user_id)
-            if over_free_cap:
-                # Free trial must not cover over-long episodes; paid credits can.
-                split = platform_reserve(user_id, estimate, paid_only=True)
+            paid_bal = before_paid
+            can_cover_full = (
+                (paid_bal >= estimate) if over_free_cap
+                else (before_trial + paid_bal) >= estimate
+            )
+
+            if can_cover_full:
+                if over_free_cap:
+                    # Full free jobs must not cover over-long episodes; paid can.
+                    split = platform_reserve(user_id, estimate, paid_only=True)
+                else:
+                    split = platform_reserve(user_id, estimate)
                 if split is None:
+                    # Race with another worker — fall through to refusal below.
+                    can_cover_full = False
+                else:
+                    trial_charge, paid_charge = split
+                    _capture_minutes_exhausted_if_depleted(
+                        user_id, source, before_trial, before_paid)
+
+            if trial_charge is None and paid_charge is None:
+                # Partial free preview only when the episode is longer than the
+                # account's remaining trial (not when the per-episode max is the
+                # sole blocker — that stays the episode_length paywall).
+                global_rem = max(0, TRIAL_GLOBAL_SECONDS - trial_global_used_seconds())
+                partial_n = min(before_trial, global_rem)
+                episode_exceeds_remaining = estimate > before_trial
+                if (paid_bal <= 0
+                        and episode_exceeds_remaining
+                        and partial_n >= TRIAL_PARTIAL_MIN_SECONDS
+                        and trial_reserve(user_id, partial_n)):
+                    trial_charge, paid_charge = partial_n, 0
+                    partial_job = True
+                    ph_props['partial'] = True
+                    ph_props['partial_minutes'] = partial_n // 60
+                    ph_props['episode_minutes'] = estimate_min
+                    _capture_minutes_exhausted_if_depleted(
+                        user_id, source, before_trial, before_paid)
+                else:
                     _, _, remaining = trial_status(user)
-                    _capture_trial_limit_hit(
-                        user_id, 'episode_length', 'start', source,
-                        estimate_min=estimate_min, remaining_min=remaining // 60)
-                    cost = openai_whisper_cost_usd(estimate_min)
-                    payload = {
-                        'error': (
-                            f'This episode is {estimate_min} minutes — too long for the '
-                            f'free trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). '
-                            f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
-                            f'or add your own OpenAI API key (about ${cost} at '
-                            f'OpenAI\'s rate).'
-                        ),
-                    }
-                    payload.update(_minutes_limit_actions(
-                        user_id, 'enqueue_episode_length', reason='episode_too_long'))
-                    return payload, 402
-                trial_charge, paid_charge = split
-                _capture_minutes_exhausted_if_depleted(
-                    user_id, source, before_trial, before_paid)
-            else:
-                split = platform_reserve(user_id, estimate)
-                if split is None:
-                    _, _, remaining = trial_status(user)
+                    if over_free_cap and not (
+                            paid_bal <= 0 and episode_exceeds_remaining
+                            and before_trial >= TRIAL_PARTIAL_MIN_SECONDS):
+                        scope = 'episode_length'
+                        _capture_trial_limit_hit(
+                            user_id, scope, 'start', source,
+                            estimate_min=estimate_min, remaining_min=remaining // 60)
+                        cost = openai_whisper_cost_usd(estimate_min)
+                        payload = {
+                            'error': (
+                                f'This episode is {estimate_min} minutes — too long for the '
+                                f'free trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). '
+                                f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
+                                f'or add your own OpenAI API key (about ${cost} at '
+                                f'OpenAI\'s rate).'
+                            ),
+                        }
+                        payload.update(_minutes_limit_actions(
+                            user_id, 'enqueue_episode_length', reason='episode_too_long'))
+                        return payload, 402
+
                     scope = trial_refusal_scope(user, estimate)
-                    # If free trial still has room but paid+trial couldn't cover,
-                    # the global ceiling ate the free path — keep that scope.
                     if remaining >= estimate and paid_balance_seconds(user) <= 0:
+                        scope = 'global'
+                    # Global pool blocked a partial that the account could afford.
+                    if (paid_bal <= 0 and episode_exceeds_remaining
+                            and before_trial >= TRIAL_PARTIAL_MIN_SECONDS
+                            and global_rem < TRIAL_PARTIAL_MIN_SECONDS):
                         scope = 'global'
                     _capture_trial_limit_hit(
                         user_id, scope, 'start', source,
@@ -4345,8 +4793,6 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                         else:
                             paywall_reason = 'low_balance'
                     else:
-                        # The user still has room; the service as a whole does not.
-                        # Saying "you have 60 minutes left" here would contradict itself.
                         paywall_reason = 'global_cap'
                         if stripe_checkout_enabled():
                             message = (
@@ -4364,9 +4810,6 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                     payload.update(_minutes_limit_actions(
                         user_id, 'enqueue', reason=paywall_reason))
                     return payload, 402
-                trial_charge, paid_charge = split
-                _capture_minutes_exhausted_if_depleted(
-                    user_id, source, before_trial, before_paid)
 
         task_id = str(uuid.uuid4())
         try:
@@ -4383,11 +4826,19 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                 episode_published=meta.get('published'),
                 source_audio_url=audio_url,
                 # Feed duration is the best ETA source we have, and it is available
-                # before a single byte is downloaded.
-                audio_duration=(meta['duration_min'] * 60) if meta.get('duration_min') else None,
+                # before a single byte is downloaded. For partials, store the
+                # reserved preview length so the progress ETA matches the work.
+                audio_duration=(
+                    float(trial_charge) if partial_job and trial_charge
+                    else ((meta['duration_min'] * 60) if meta.get('duration_min') else None)
+                ),
                 language=language or None,
                 trial_seconds_charged=trial_charge,
                 paid_seconds_charged=paid_charge,
+                partial_meta=(
+                    encode_partial_task_meta(trial_charge, estimate)
+                    if partial_job and trial_charge else None
+                ),
             )
             db.session.add(task)
             db.session.commit()
@@ -4500,8 +4951,19 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                                 # Incl. this completion (status is already completed).
                                 done_props['nth_transcript'] = (
                                     _completed_transcript_count(user_id))
+                                meta = task_partial_meta(finished)
+                                if meta:
+                                    n_min, m_min = partial_minutes_pair(meta)
+                                    done_props['partial'] = True
+                                    done_props['partial_minutes'] = n_min
+                                    done_props['episode_minutes'] = m_min
                             product_analytics.capture(
                                 'transcript_completed', user_id, done_props)
+                            # Transcript-ready email off the critical path so
+                            # Mailgun latency / retries cannot hold the worker.
+                            if finished is not None:
+                                _schedule_transcript_ready_email(
+                                    task_id, user_id)
                         except Exception:  # noqa: BLE001
                             app.logger.exception(
                                 'transcript_completed analytics failed for %s',
@@ -4809,6 +5271,13 @@ def get_status(task_id):
         return jsonify({'error': 'Task not found'}), 404
 
     _fail_if_stale(task)
+    # Touch last_polled_at so transcript-ready email can tell "still watching"
+    # from "left the page". Best-effort; never block the status payload.
+    try:
+        task.last_polled_at = datetime.now(timezone.utc)
+        db.session.commit()
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
     percent, eta = compute_live_progress(task)
     elapsed = _seconds_since(task.started_at)
 
@@ -4895,6 +5364,33 @@ def get_status(task_id):
         if task.language:
             # Display name for UI; old rows with names still look fine.
             result['language'] = display_language(task.language)
+        partial = task_partial_meta(task)
+        if partial:
+            n_min, m_min = partial_minutes_pair(partial)
+            result['partial'] = True
+            result['partial_minutes'] = n_min
+            result['episode_minutes'] = m_min
+            result['partial_note'] = partial_transcript_note(partial)
+            # Enough for the result page to offer Buy / finish-full without
+            # another round trip. duration_min is the full episode when known.
+            result['finish'] = {
+                'audio_url': task.source_audio_url or '',
+                'episode_title': task.episode_title or 'Episode',
+                'podcast_name': task.podcast_name or '',
+                'artwork': task.artwork_url or '',
+                'published': task.episode_published or '',
+                'rss_url': task.rss_url or '',
+                'duration_min': str(m_min),
+                'language': normalize_language_code(task.language) or '',
+            }
+            trial_left, paid_left = _platform_remaining_seconds(task.user_id)
+            result['paid_remaining_min'] = paid_left // 60
+            result['trial_remaining_min'] = trial_left // 60
+            result['can_finish_full'] = paid_left > 0 or bool(
+                getattr(current_user, 'openai_api_key', None))
+            if stripe_checkout_enabled():
+                result['buy_available'] = True
+                result['buy_label'] = CREDIT_PACK_LABEL
 
     return jsonify(result)
 
@@ -5010,9 +5506,14 @@ def download_file(task_id, file_type):
         return "File not found", 404
 
     safe_title = safe_download_basename(task.episode_title)
+    partial = task_partial_meta(task) if task.status == 'completed' else None
+    note = partial_transcript_note(partial) if partial else ''
 
     if file_type == 'txt':
-        content = (task.transcript_text or '').encode('utf-8')
+        body = task.transcript_text or ''
+        if note:
+            body = f'{note}\n\n{body}' if body else note
+        content = body.encode('utf-8')
         return send_file(
             BytesIO(content),
             as_attachment=True,
@@ -5020,17 +5521,36 @@ def download_file(task_id, file_type):
             mimetype='text/plain',
         )
     elif file_type == 'srt':
+        lines = []
+        index = 1
+        if note:
+            lines.extend([
+                f'{index}',
+                '00:00:00,000 --> 00:00:00,500',
+                note,
+                '',
+            ])
+            index += 1
         if task.segments_json:
-            segments = _json.loads(task.segments_json)
-            lines = []
-            for i, seg in enumerate(segments, 1):
-                lines.append(f"{i}")
-                lines.append(f"{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}")
-                lines.append(seg['text'].strip())
+            try:
+                segments = _json.loads(task.segments_json)
+            except (_json.JSONDecodeError, TypeError):
+                segments = []
+            for seg in segments:
+                lines.append(f"{index}")
+                lines.append(
+                    f"{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}")
+                lines.append((seg.get('text') or '').strip())
                 lines.append('')
-            content = '\n'.join(lines).encode('utf-8')
+                index += 1
         else:
-            content = f"1\n00:00:00,000 --> 00:00:01,000\n{task.transcript_text or ''}".encode('utf-8')
+            lines.extend([
+                f'{index}',
+                '00:00:00,500 --> 00:00:01,500' if note else '00:00:00,000 --> 00:00:01,000',
+                task.transcript_text or '',
+                '',
+            ])
+        content = '\n'.join(lines).encode('utf-8')
         return send_file(
             BytesIO(content),
             as_attachment=True,
@@ -5047,6 +5567,13 @@ def transcription_page(task_id):
     task = db.session.get(TranscriptionTask, task_id)
     if not task or task.user_id != current_user.id:
         return "Task not found", 404
+    if (request.args.get('utm_source') or '').strip().lower() == 'email':
+        campaign = (request.args.get('utm_campaign') or '').strip()[:64] or 'unknown'
+        product_analytics.capture(
+            'email_clicked',
+            current_user.id,
+            {'type': campaign},
+        )
     return render_template('transcription.html', task_id=task_id)
 
 
@@ -5122,26 +5649,22 @@ def _share_payload(share):
     }
 
 
-def parse_partial_preview_meta(error_message):
-    """Parse partial-preview metadata if present (PR #59 shape), else None.
+def share_partial_meta(task):
+    """Display metadata for a free-preview transcript on the share page, or None.
 
-    Stored as ``partial_preview:{json}`` on ``error_message`` while status is
-    not an error. Tolerates a bare prefix with no JSON.
+    Reads the canonical ``partial_meta`` column (PR #59) so a partial preview
+    is never presented publicly as the full episode.
     """
-    raw = (error_message or '').strip()
-    if not raw.startswith('partial_preview:'):
+    meta = task_partial_meta(task)
+    if not meta:
         return None
-    body = raw[len('partial_preview:'):].strip()
-    if not body:
-        return {'partial': True}
-    try:
-        data = json.loads(body)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return {'partial': True}
-    if not isinstance(data, dict):
-        return {'partial': True}
-    data.setdefault('partial', True)
-    return data
+    n, m = partial_minutes_pair(meta)
+    return {
+        'partial': True,
+        'partial_minutes': n,
+        'episode_minutes': m,
+        'note': partial_transcript_note(meta),
+    }
 
 
 def _readable_share_segments(task):
@@ -5221,7 +5744,7 @@ def transcription_share(task_id):
         product_analytics.capture(
             'share_link_created',
             current_user.id,
-            {'partial': bool(parse_partial_preview_meta(task.error_message))},
+            {'partial': bool(share_partial_meta(task))},
         )
         return jsonify(_share_payload(share))
     finally:
@@ -5261,14 +5784,28 @@ def _public_share_or_404(token):
     return share, task
 
 
+def _share_response_headers(resp):
+    """Headers for public share responses.
+
+    noindex: shared transcripts are never search results. no-referrer: the
+    token is the credential, so it must not leak to the artwork CDN or any
+    outbound link. no-store: a revoked link must not keep rendering from a
+    browser or proxy cache.
+    """
+    resp.headers['X-Robots-Tag'] = 'noindex'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
 @app.route('/t/<token>')
 def shared_transcript(token):
     """Public, unguessable share page for a completed transcript."""
     share, task = _public_share_or_404(token)
     if not share:
-        return "Not found", 404
+        return _share_response_headers(make_response("Not found", 404))
 
-    partial_meta = parse_partial_preview_meta(task.error_message)
+    partial_meta = share_partial_meta(task)
     segments = _readable_share_segments(task)
     signup_url = url_for('register', utm_source='share')
     product_analytics.capture(
@@ -5303,7 +5840,7 @@ def shared_transcript(token):
         og_title=og_title,
         og_description=og_description,
     ))
-    resp.headers['X-Robots-Tag'] = 'noindex'
+    _share_response_headers(resp)
     return resp
 
 
@@ -5322,7 +5859,11 @@ def shared_transcript_download(token, file_type):
 
     safe_title = safe_download_basename(task.episode_title)
     if file_type == 'txt':
-        content = (task.transcript_text or '').encode('utf-8')
+        body = task.transcript_text or ''
+        partial = share_partial_meta(task)
+        if partial:
+            body = partial['note'] + '\n\n' + body
+        content = body.encode('utf-8')
         resp = send_file(
             BytesIO(content),
             as_attachment=True,
@@ -5341,7 +5882,7 @@ def shared_transcript_download(token, file_type):
             download_name=f'{safe_title}.srt',
             mimetype='text/srt',
         )
-    resp.headers['X-Robots-Tag'] = 'noindex'
+    _share_response_headers(resp)
     return resp
 
 
@@ -5447,12 +5988,35 @@ def follow_task_podcast(task_id):
     existing = SavedFeed.query.filter_by(
         user_id=current_user.id, rss_url=rss_url).first()
     if existing:
-        return jsonify({'following': True, 'already': True, 'feed_id': existing.id})
+        return jsonify({
+            'following': True, 'already': True, 'feed_id': existing.id,
+            'email_new_episodes': bool(existing.email_new_episodes),
+        })
 
-    feed = SavedFeed(user_id=current_user.id, name=name, rss_url=rss_url)
+    # Default ON; JSON body or form can pass email_new_episodes=0/false.
+    raw = request.form.get('email_new_episodes')
+    if raw is None and request.is_json:
+        raw = (request.get_json(silent=True) or {}).get('email_new_episodes')
+    if raw is None:
+        email_new = True
+    else:
+        email_new = str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
+
+    feed = SavedFeed(
+        user_id=current_user.id, name=name, rss_url=rss_url,
+        email_new_episodes=email_new,
+    )
     db.session.add(feed)
     db.session.commit()
-    return jsonify({'following': True, 'already': False, 'feed_id': feed.id})
+    product_analytics.capture(
+        'alert_opt_in' if email_new else 'alert_opt_out',
+        current_user.id,
+        {'channel': 'new_episodes', 'source': 'follow'},
+    )
+    return jsonify({
+        'following': True, 'already': False, 'feed_id': feed.id,
+        'email_new_episodes': email_new,
+    })
 
 
 @app.route('/history')
@@ -6428,11 +6992,15 @@ def faq_entries():
             if stripe_checkout_enabled() else ''
         )
         free = (f'New accounts get {minutes} minutes of audio free'
-                f'{hours_bit}. For longer episodes, or once the '
-                f'trial is used up, add your own OpenAI API key: a 90-minute '
-                f'episode costs about {cost_90} at OpenAI\'s rate.{pack_bit}')
-        need_key = ('Not to start. The free trial runs on ours. Add your own key when the '
-                    'trial runs out and there is no limit beyond what you spend at OpenAI.')
+                f'{hours_bit}. Longer episodes still start free — you get the '
+                f'first {minutes} minutes as a preview, then buy minutes or add '
+                f'your own OpenAI API key to finish (a 90-minute episode costs '
+                f'about {cost_90} at OpenAI\'s rate). Once the trial is used up, '
+                f'the same options apply.{pack_bit}')
+        need_key = ('Not to start. The free trial runs on ours, including a free '
+                    'preview of the first stretch of a longer episode. Add your own '
+                    'key when the trial runs out and there is no limit beyond what '
+                    'you spend at OpenAI.')
     else:
         pack_bit = (
             f' Or buy a one-time pack: ${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for '
@@ -6810,8 +7378,10 @@ def load_changelog_entries():
     """User-facing What's new entries from changelog.json, newest first.
 
     Returns a list of dicts with id, date (YYYY-MM-DD), date_display, title,
-    summary. Missing or invalid files yield an empty list so a deploy without
-    the data file still serves the rest of the site.
+    summary. Entries with ``"hidden": true`` are skipped (for features that
+    are merged but not yet switched on in production). Missing or invalid
+    files yield an empty list so a deploy without the data file still serves
+    the rest of the site.
     """
     try:
         with open(CHANGELOG_PATH, encoding='utf-8') as f:
@@ -6825,6 +7395,8 @@ def load_changelog_entries():
     out = []
     for raw in entries:
         if not isinstance(raw, dict):
+            continue
+        if raw.get('hidden') is True:
             continue
         entry_id = (raw.get('id') or '').strip()
         title = (raw.get('title') or '').strip()
@@ -7366,14 +7938,23 @@ def _match_episode(episodes, title):
 #: Large back catalogues run to a few MB; anything past this is not a feed we want.
 SPOTIFY_FEED_MAX_BYTES = 15 * 1024 * 1024
 
+#: Closed RSS/Atom entry markers — used to stop reading once we have enough
+#: newest items for the alert poller without holding a whole mega-feed.
+_FEED_ITEM_CLOSE_RE = re.compile(br'</(item|entry)\s*>', re.I)
 
-def _fetch_feed_capped(feed_url, max_bytes=SPOTIFY_FEED_MAX_BYTES):
+
+def _fetch_feed_capped(feed_url, max_bytes=SPOTIFY_FEED_MAX_BYTES,
+                       early_stop_items=None):
     """Feed bytes, or None when the feed is unreachable or too big.
 
     A dead feed returns None instead of raising, so the resolver still gets
     to try the next show and the iTunes episode search. Redirects are followed
     by hand and every hop revalidated, as in download_audio: the route is
     public, and a public feed could otherwise 302 to a private address.
+
+    When ``early_stop_items`` is set (alert poller), streaming stops after that
+    many ``</item>`` / ``</entry>`` closes — newest-first feeds only need the
+    head. Oversized feeds without an early-stop still return None.
     """
     current = feed_url
     seen = set()
@@ -7399,13 +7980,22 @@ def _fetch_feed_capped(feed_url, max_bytes=SPOTIFY_FEED_MAX_BYTES):
                         current = urljoin(current, location)
                         continue
                     resp.raise_for_status()
-                    chunks, size = [], 0
+                    chunks, size, items_seen = [], 0, 0
                     for chunk in resp.iter_content(64 * 1024):
-                        size += len(chunk)
-                        if size > max_bytes:
-                            return None
+                        next_size = size + len(chunk)
+                        if next_size > max_bytes:
+                            # Alert poller: keep a usable prefix if we already
+                            # streamed some bytes; Spotify resolve: refuse.
+                            if not early_stop_items or not chunks:
+                                return None
+                            break
                         chunks.append(chunk)
-                    return b''.join(chunks)
+                        size = next_size
+                        if early_stop_items:
+                            items_seen += len(_FEED_ITEM_CLOSE_RE.findall(chunk))
+                            if items_seen >= early_stop_items:
+                                break
+                    return b''.join(chunks) if chunks else None
     except requests.RequestException:
         return None
     return None
@@ -7816,6 +8406,7 @@ def apply_column_migrations():
         ('users', USER_COLUMN_MIGRATIONS),
         ('credit_purchases', CREDIT_PURCHASE_COLUMN_MIGRATIONS),
         ('transcript_shares', TRANSCRIPT_SHARE_COLUMN_MIGRATIONS),
+        ('saved_feeds', SAVED_FEED_COLUMN_MIGRATIONS),
     )
     for table, migrations in tables:
         existing = _live_columns(table)
@@ -8006,10 +8597,99 @@ def ensure_transcript_shares_table():
             app.logger.exception('Could not create %s', name)
 
 
+def ensure_email_sent_log_table():
+    """Create email_sent_log if missing. Index only after the table exists.
+
+    Same IF NOT EXISTS pattern as credit_purchases: two gunicorn workers race
+    boot, and check-then-create killed a worker before. Indexes are created
+    after CREATE so a half-applied migration cannot index a missing column.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        db.session.execute(text("""
+            CREATE TABLE IF NOT EXISTS email_sent_log (
+                id INTEGER NOT NULL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                kind VARCHAR(64) NOT NULL,
+                idempotency_key VARCHAR(255) NOT NULL UNIQUE,
+                created_at DATETIME,
+                FOREIGN KEY(user_id) REFERENCES users (id)
+            )
+        """))
+        db.session.commit()
+    except OperationalError as exc:
+        db.session.rollback()
+        msg = str(exc).lower()
+        if 'already exists' not in msg:
+            raise
+        app.logger.info(
+            'email_sent_log was created by another worker; continuing')
+
+    existing = _live_columns('email_sent_log')
+    if not existing:
+        return
+    # Index AFTER columns exist (past outage: index-before-column on credit_purchases).
+    try:
+        db.session.execute(text(
+            'CREATE INDEX IF NOT EXISTS ix_email_sent_log_user_id '
+            'ON email_sent_log (user_id)'
+        ))
+        db.session.commit()
+    except OperationalError:
+        db.session.rollback()
+        app.logger.exception('Could not create ix_email_sent_log_user_id')
+
+
+def fetch_feed_for_alerts(feed_url):
+    """SSRF-safe capped feed fetch for the new-episode poller.
+
+    Uses a higher byte ceiling than Spotify resolve and may stop reading once
+    enough newest items are streamed (feeds are almost always newest-first).
+    """
+    if not _is_fetchable_url(feed_url):
+        return None
+    return _fetch_feed_capped(
+        feed_url,
+        max_bytes=episode_alerts.FEED_MAX_BYTES,
+        early_stop_items=episode_alerts.FEED_EARLY_STOP_ITEMS,
+    )
+
+
+def run_new_episode_alerts_poll():
+    """CLI / systemd entry: poll followed feeds and send digests."""
+    return episode_alerts.run_new_episode_poll(
+        app=app,
+        db=db,
+        User=User,
+        SavedFeed=SavedFeed,
+        EmailSentLog=EmailSentLog,
+        fetch_feed=fetch_feed_for_alerts,
+        public_base_url=PUBLIC_BASE_URL,
+        secret_key=app.secret_key,
+    )
+
+
 with app.app_context():
-    db.create_all()
+    # create_all is check-then-create. Two gunicorn workers (and the suite's
+    # cross-process reservation test) can both see email_sent_log as absent
+    # and the loser dies on "already exists" — same hole credit_purchases had
+    # before ensure_* used IF NOT EXISTS. Tolerate that race; the ensure_*
+    # helpers below still make the Stripe / email tables idempotent.
+    from sqlalchemy.exc import OperationalError as _BootOpError
+    try:
+        db.create_all()
+    except _BootOpError as exc:
+        db.session.rollback()
+        if 'already exists' not in str(exc).lower():
+            raise
+        app.logger.info(
+            'db.create_all raced another worker (%s); continuing',
+            str(exc).split('\n')[0][:120],
+        )
     ensure_credit_purchases_table()
     ensure_transcript_shares_table()
+    ensure_email_sent_log_table()
 
     apply_column_migrations()
     if STRIPE_MANAGED_PAYMENTS and STRIPE_AUTOMATIC_TAX:

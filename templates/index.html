@@ -19,7 +19,7 @@
        grant (often 180 for legacy accounts) and a balance banner below. #}
     {% if trial_minutes and not current_user.is_authenticated %}
     <p style="color: var(--muted); font-size: 14px; margin-top: 6px; max-width: 520px; line-height: 1.5; opacity: 0.85;">
-        First {{ trial_minutes }} minutes of audio free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} — no card, no OpenAI key needed to start.
+        First {{ trial_minutes }} minutes of audio free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} — longer episodes get that as a free preview. No card, no OpenAI key needed to start.
     </p>
     {% endif %}
 </div>
@@ -149,24 +149,24 @@
         {% if current_user.is_authenticated and trial and not trial.on_own_key %}
         <p class="form-hint" style="margin-top: 12px;">
             The free trial covers {{ trial.limit_minutes }} minutes of audio in total{% if trial.limit_minutes >= 120 %} (about {{ trial.limit_minutes // 60 }} hours){% endif %}{% if not trial.exhausted %} — {{ trial.remaining_minutes }} left{% endif %}.
+            Longer episodes get a free preview of your remaining minutes; buy a pack or add your own key to finish.
             {% if stripe_buy_enabled %}
-            After that, buy a one-time pack (${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min, VAT included),
-            or add your own OpenAI API key — a 90-minute episode costs about ${{ openai_90min_cost }} at OpenAI's rate.
+            One-time pack: ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (VAT included).
+            A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
             {% else %}
-            For longer episodes, or once the trial is used up, add your own OpenAI API key:
-            a 90-minute episode costs about ${{ openai_90min_cost }} at OpenAI's rate.
+            A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
             {% endif %}
             <a href="{{ url_for('pricing') }}">See pricing</a>.
         </p>
         {% elif trial_minutes and not current_user.is_authenticated %}
         <p class="form-hint" style="margin-top: 12px;">
             The free trial covers {{ trial_minutes }} minutes of audio in total{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.
+            Longer episodes still start free — you get the first {{ trial_minutes }} minutes, then buy minutes or add your own key to finish.
             {% if stripe_buy_enabled %}
-            After that, buy a one-time pack (${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min, VAT included),
-            or add your own OpenAI API key — a 90-minute episode costs about ${{ openai_90min_cost }} at OpenAI's rate.
+            One-time pack: ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (VAT included).
+            A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
             {% else %}
-            For longer episodes, or once the trial is used up, add your own OpenAI API key:
-            a 90-minute episode costs about ${{ openai_90min_cost }} at OpenAI's rate.
+            A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
             {% endif %}
             <a href="{{ url_for('pricing') }}">See pricing</a>.
         </p>
@@ -232,7 +232,7 @@
         <div style="font-size: 13.5px; color: var(--muted); padding: 8px 0;">
             <span style="color: var(--accent-bright); font-weight: 600;">2.</span>
             {% if trial_minutes %}
-            Create a free account and press Transcribe. Your first {{ trial_minutes }} minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} run on our key.
+            Create a free account and press Transcribe. Your first {{ trial_minutes }} minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} run on our key — including a free preview of longer episodes.
             {% else %}
             Create a free account, add your OpenAI key, and press Transcribe.
             {% endif %}
@@ -302,16 +302,24 @@
     var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
     var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
 
+    var TRIAL_PARTIAL_MIN = 5;
     function episodeNeedsOwnKey(durationMin) {
         if (TRIAL_REMAINING_MIN === null || durationMin == null) return false;
         var estimateSec = Math.max(60, Math.floor(Number(durationMin) * 60));
         if (!(estimateSec > 0)) return false;
         var paidSec = Math.max(0, Number(PAID_REMAINING_MIN) || 0) * 60;
         var freeSec = Math.max(0, Number(TRIAL_REMAINING_MIN) || 0) * 60;
+        var partialOk = (
+            paidSec <= 0
+            && freeSec >= TRIAL_PARTIAL_MIN * 60
+            && estimateSec > freeSec
+        );
         if (TRIAL_MAX_EPISODE_MIN && estimateSec > TRIAL_MAX_EPISODE_MIN * 60) {
-            return estimateSec > paidSec;
+            if (estimateSec <= paidSec) return false;
+            return !partialOk;
         }
-        return estimateSec > freeSec + paidSec;
+        if (estimateSec <= freeSec + paidSec) return false;
+        return !partialOk;
     }
 
     function clearResults() {

@@ -8,6 +8,31 @@
       "summary": "On a finished transcript, tap Share to create an unguessable public link you can send to anyone — no login required. You can revoke the link anytime; transcripts stay private until you choose to share."
     },
     {
+      "id": "unsubscribe-confirm-click",
+      "date": "2026-10-09",
+      "title": "Unsubscribe asks for a confirmation click",
+      "summary": "Opening an unsubscribe link now shows a short confirm page before anything changes, so link scanners cannot opt you out. One-click unsubscribe from your mail app still works as before."
+    },
+    {
+      "id": "partial-preview-minutes-wording",
+      "date": "2026-10-09",
+      "title": "Clearer free-preview length wording",
+      "summary": "Partial previews now spell out the episode length in minutes (not a bare number) on the result page, downloads, and copy."
+    },
+    {
+      "id": "email-alerts-coming-soon",
+      "date": "2026-10-09",
+      "hidden": true,
+      "title": "Email when a transcript is ready (coming soon)",
+      "summary": "Optional email when a long transcript finishes, and optional alerts for new episodes from podcasts you follow — with one-click unsubscribe. Not sending yet while we finish Mailgun setup."
+    },
+    {
+      "id": "partial-trial-preview",
+      "date": "2026-10-09",
+      "title": "Long episodes start with a free preview",
+      "summary": "If an episode is longer than your remaining free minutes, Podskrift transcribes the first stretch for free (60 minutes for new accounts), then lets you buy minutes to finish the rest. Paid balance or your own OpenAI key still runs the full episode."
+    },
+    {
       "id": "own-key-billing-clarity",
       "date": "2026-10-09",
       "title": "Clearer help when your OpenAI key is out of credit",
