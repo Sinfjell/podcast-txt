@@ -267,6 +267,10 @@ def openai_whisper_cost_usd(minutes):
 #: Session key for an episode an anonymous visitor picked before signing up.
 #: Cleared after resume (success or failure) so a stale stash cannot fire later.
 PENDING_TRANSCRIPTION_KEY = 'pending_transcription'
+# First-party preference cookie written by static/cookie-consent.js (12 months).
+# Necessary to remember Accept/Decline — not a tracking cookie.
+COOKIE_CONSENT_NAME = 'podskrift_cookie_consent'
+COOKIE_CONSENT_ACCEPTED = 'accepted'
 #: Relative path to return to after Stripe Checkout (cancel / success CTA).
 #: Validated with safe_return_to(); never trust a raw absolute URL here.
 BILLING_RETURN_TO_KEY = 'billing_return_to'
@@ -3351,6 +3355,20 @@ def _ph_uuid5(name):
     return uuid.uuid5(uuid.NAMESPACE_URL, str(name))
 
 
+def _consented_posthog_session_id(raw):
+    """Return a client PostHog session id only when analytics consent is on.
+
+    Server captures use the internal user id as distinct_id and never mint
+    browser cookies. $session_id / Stripe ph_sid metadata are cookie-derived,
+    so they are dropped unless podskrift_cookie_consent=accepted.
+    """
+    if not has_request_context():
+        return ''
+    if request.cookies.get(COOKIE_CONSENT_NAME) != COOKIE_CONSENT_ACCEPTED:
+        return ''
+    return (raw or '').strip()[:128]
+
+
 def _capture_purchase_failed(reason, *, stage, user_id=None, session_id=None,
                              extra=None):
     """purchase_failed — never include email/key/card. Anonymous → stripe:<cs_id>."""
@@ -3922,7 +3940,7 @@ def billing_checkout():
             return redirect(url_for('settings'))
 
     source = (request.form.get('source') or 'settings').strip()[:64]
-    ph_sid = (request.form.get('ph_sid') or '').strip()[:128]
+    ph_sid = _consented_posthog_session_id(request.form.get('ph_sid'))
     trial_ctx = _trial_context() or {}
     trial_remaining_min = trial_ctx.get('remaining_minutes')
     paid_remaining_min = trial_ctx.get('paid_minutes')
@@ -8071,6 +8089,9 @@ def inject_posthog():
             if getattr(current_user, 'is_authenticated', False)
             else ''
         ),
+        # Admin blueprint overrides to True; default False so Jinja `not`
+        # is unambiguous outside /admin.
+        'is_admin_page': False,
         'public_base_url': PUBLIC_BASE_URL,
     }
 
