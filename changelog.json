@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "forgot-password",
+      "date": "2026-10-09",
+      "title": "Reset your password from the login page",
+      "summary": "Forgot your password? Use the new link on the login page to get a one-time email and choose a new one. Your other signed-in sessions are signed out when the password changes."
+    },
+    {
       "id": "share-listen-links",
       "date": "2026-10-09",
       "title": "Listen to the episode from a shared transcript",
