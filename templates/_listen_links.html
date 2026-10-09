@@ -1,0 +1,102 @@
+{# Listen destinations for share + owner result pages.
+   Expects: listen_links (list of {platform, label, url, is_audio?})
+   Optional: listen_analytics_event (default shared_listen_clicked) #}
+{% if listen_links %}
+{% set listen_event = listen_analytics_event or 'shared_listen_clicked' %}
+<style>
+    .listen-block {
+        margin: 0 0 16px; padding: 14px 14px 12px;
+        border: 1px solid var(--border); border-radius: var(--radius);
+        background: var(--surface);
+    }
+    .listen-block h2 {
+        font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
+        margin: 0 0 10px;
+    }
+    .listen-list {
+        list-style: none; margin: 0; padding: 0;
+        display: flex; flex-direction: column; gap: 8px;
+    }
+    .listen-list a.listen-link {
+        display: flex; align-items: center; gap: 10px;
+        padding: 10px 12px; border-radius: var(--radius-sm);
+        border: 1px solid var(--border); background: var(--bg);
+        color: var(--text); text-decoration: none; font-size: 14px;
+        font-weight: 600; line-height: 1.3;
+        transition: border-color var(--transition), background var(--transition);
+    }
+    .listen-list a.listen-link:hover {
+        border-color: var(--accent-border); background: var(--accent-bg);
+    }
+    .listen-icon {
+        width: 22px; height: 22px; flex-shrink: 0; color: var(--muted);
+    }
+    .listen-audio {
+        margin-top: 4px; width: 100%;
+        max-height: 40px;
+    }
+    @media (max-width: 560px) {
+        .listen-list a.listen-link { font-size: 13.5px; }
+    }
+</style>
+<section class="listen-block" aria-label="Listen to this episode">
+    <h2>Listen to this episode</h2>
+    <ul class="listen-list">
+        {% for link in listen_links %}
+        <li>
+            <a class="listen-link" href="{{ link.url }}"
+               target="_blank" rel="noopener nofollow"
+               data-listen-platform="{{ link.platform }}"
+               data-listen-event="{{ listen_event }}">
+                {% if link.platform == 'spotify' %}
+                <svg class="listen-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75">
+                    <circle cx="12" cy="12" r="9"/>
+                    <path d="M8 10.2c2.6-1 5.4-.8 8 .6M8.5 13c2.1-.7 4.4-.5 6.4.6M9 15.6c1.5-.5 3.2-.4 4.7.4" stroke-linecap="round"/>
+                </svg>
+                {% elif link.platform == 'apple' %}
+                <svg class="listen-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75">
+                    <path d="M12 3v10.5" stroke-linecap="round"/>
+                    <circle cx="12" cy="16.5" r="2.5"/>
+                    <path d="M8 8.5a4 4 0 0 0-2 3.4v1M16 8.5a4 4 0 0 1 2 3.4v1" stroke-linecap="round"/>
+                </svg>
+                {% elif link.platform == 'website' %}
+                <svg class="listen-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75">
+                    <circle cx="12" cy="12" r="9"/>
+                    <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" stroke-linecap="round"/>
+                </svg>
+                {% else %}
+                <svg class="listen-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75">
+                    <circle cx="12" cy="12" r="9"/>
+                    <path d="M10 9.5v5l4.5-2.5L10 9.5z" fill="currentColor" stroke="none"/>
+                </svg>
+                {% endif %}
+                <span>{{ link.label }}</span>
+            </a>
+            {% if link.is_audio %}
+            <audio class="listen-audio" controls preload="none" src="{{ link.url }}">
+                Your browser does not support the audio element.
+            </audio>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+</section>
+<script>
+(function () {
+    document.querySelectorAll('[data-listen-platform]').forEach(function (el) {
+        el.addEventListener('click', function () {
+            try {
+                if (!window.posthog) return;
+                var platform = el.getAttribute('data-listen-platform') || '';
+                var eventName = el.getAttribute('data-listen-event') || 'shared_listen_clicked';
+                var props = { platform: platform };
+                if (eventName === 'shared_listen_clicked') {
+                    props.$process_person_profile = false;
+                }
+                posthog.capture(eventName, props);
+            } catch (e) { /* ignore */ }
+        });
+    });
+})();
+</script>
+{% endif %}
