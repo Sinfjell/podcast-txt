@@ -6,6 +6,7 @@
 set -euo pipefail
 
 # Backups contain plaintext OpenAI API keys and password hashes.
+# umask 077 → new files are mode 600 (owner read/write only).
 umask 077
 
 APP_DIR="${APP_DIR:-/var/www/vhosts/podskrift.nettsmed.dev/app}"
@@ -15,11 +16,13 @@ KEEP_DAYS="${KEEP_DAYS:-14}"
 
 [ -f "$DB" ] || { echo "no database at $DB" >&2; exit 1; }
 mkdir -p "$DEST"
+chmod 700 "$DEST" 2>/dev/null || true
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="$DEST/podcast-$STAMP.db"
 
 sqlite3 "$DB" ".backup '$OUT'"
+chmod 600 "$OUT"
 
 # Fail loudly rather than keeping a corrupt or empty backup.
 # `sqlite3 <missing>.db 'PRAGMA integrity_check'` CREATES the file, prints "ok"
@@ -52,6 +55,7 @@ fi
 rm -f "$OUT-wal" "$OUT-shm"
 
 gzip -f "$OUT"
+chmod 600 "$OUT.gz"
 trap - EXIT   # the backup is complete and compressed; keep it
 find "$DEST" -name 'podcast-*.db.gz' -mtime "+$KEEP_DAYS" -delete
 

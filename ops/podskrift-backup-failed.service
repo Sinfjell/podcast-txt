@@ -1,0 +1,10 @@
+[Unit]
+Description=Alert Sentry that Podskrift DB backup failed
+# Intentionally no OnFailure= — do not recurse if the alert itself fails.
+
+[Service]
+Type=oneshot
+User=podskrift
+WorkingDirectory=/var/www/vhosts/podskrift.nettsmed.dev/app
+# App venv has sentry-sdk + python-dotenv (same path as ops/sentry-check.py).
+ExecStart=/var/www/vhosts/podskrift.nettsmed.dev/app/.venv/bin/python ops/report-backup-failure.py
