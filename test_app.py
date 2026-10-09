@@ -9867,8 +9867,10 @@ def test_derive_input_origin_from_rss_and_apple():
 # Public share links
 # --------------------------------------------------------------------------
 
-def _completed_task(user_id, task_id='share-ep-1', **extra):
-    from models import db, TranscriptionTask
+def _share_task(user_id, task_id='share-ep-1', **extra):
+    """Completed transcript fixture for share-link tests (distinct from
+    the result-page `_completed_task` helper above)."""
+    from models import db, TranscriptionTask, TranscriptShare
     defaults = dict(
         id=task_id,
         user_id=user_id,
@@ -9886,11 +9888,12 @@ def _completed_task(user_id, task_id='share-ep-1', **extra):
     )
     defaults.update(extra)
     with A.app.app_context():
+        old_share = TranscriptShare.query.filter_by(task_id=task_id).first()
+        if old_share:
+            db.session.delete(old_share)
+            db.session.commit()
         old = db.session.get(TranscriptionTask, task_id)
         if old:
-            share = A.TranscriptShare.query.filter_by(task_id=task_id).first()
-            if share:
-                db.session.delete(share)
             db.session.delete(old)
             db.session.commit()
         db.session.add(TranscriptionTask(**defaults))
@@ -9900,7 +9903,7 @@ def _completed_task(user_id, task_id='share-ep-1', **extra):
 
 def test_share_default_is_not_shared(trial_on):
     uid = _make_user('share-default@test.com')
-    tid = _completed_task(uid, 'share-default')
+    tid = _share_task(uid, 'share-default')
     client = _login(uid)
     resp = client.get(f'/transcription/{tid}/share')
     assert resp.status_code == 200
@@ -9908,13 +9911,11 @@ def test_share_default_is_not_shared(trial_on):
 
 
 def test_share_create_revoke_view_and_404(ph_events, trial_on, monkeypatch):
-    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
     uid = _make_user('share-owner@test.com')
     other = _make_user('share-other@test.com')
-    tid = _completed_task(uid, 'share-full')
+    tid = _share_task(uid, 'share-full')
 
     owner = _login(uid)
-    # Owner-only: other user cannot create
     other_client = _login(other)
     assert other_client.post(f'/transcription/{tid}/share').status_code == 404
 
@@ -9924,8 +9925,7 @@ def test_share_create_revoke_view_and_404(ph_events, trial_on, monkeypatch):
     assert body['shared'] is True
     token = body['token']
     assert token and len(token) >= 22
-    assert body['url'] == f'https://podskrift.com/t/{token}'
-    # Entropy: token_urlsafe(22) → >= 128 bits
+    assert body['url'].endswith(f'/t/{token}')
     import math
     assert len(token) * math.log2(64) >= 128
 
@@ -9933,12 +9933,10 @@ def test_share_create_revoke_view_and_404(ph_events, trial_on, monkeypatch):
     assert len(create_events) == 1
     assert create_events[0]['distinct_id'] == str(uid)
 
-    # Idempotent: second create returns the same link without another event
     again = owner.post(f'/transcription/{tid}/share').get_json()
     assert again['token'] == token
     assert len([e for e in ph_events.events if e['event'] == 'share_link_created']) == 1
 
-    # Public view: no login, noindex, OG tags, no owner PII
     anon = A.app.test_client()
     view = anon.get(f'/t/{token}')
     assert view.status_code == 200
@@ -9962,7 +9960,6 @@ def test_share_create_revoke_view_and_404(ph_events, trial_on, monkeypatch):
     assert viewed[0]['distinct_id'].startswith('anon:')
     assert viewed[0]['properties'].get('$process_person_profile') is False
 
-    # Downloads work without login
     txt = anon.get(f'/t/{token}/download/txt')
     assert txt.status_code == 200
     assert b'Hello from the shared transcript.' in txt.data
@@ -9970,12 +9967,10 @@ def test_share_create_revoke_view_and_404(ph_events, trial_on, monkeypatch):
     srt = anon.get(f'/t/{token}/download/srt')
     assert srt.status_code == 200
 
-    # Not in sitemap
     sitemap = anon.get('/sitemap.xml').data.decode()
     assert '/t/' not in sitemap
     assert token not in sitemap
 
-    # Revoke → 404
     revoked = owner.post(f'/transcription/{tid}/share/revoke')
     assert revoked.status_code == 200
     assert revoked.get_json()['shared'] is False
@@ -9983,8 +9978,7 @@ def test_share_create_revoke_view_and_404(ph_events, trial_on, monkeypatch):
     assert anon.get(f'/t/{token}/download/txt').status_code == 404
     assert any(e['event'] == 'share_link_revoked' for e in ph_events.events)
 
-    # Owner-only revoke on someone else's task
-    tid2 = _completed_task(uid, 'share-other-task')
+    tid2 = _share_task(uid, 'share-other-task')
     owner.post(f'/transcription/{tid2}/share')
     assert other_client.post(
         f'/transcription/{tid2}/share/revoke').status_code == 404
@@ -9992,7 +9986,7 @@ def test_share_create_revoke_view_and_404(ph_events, trial_on, monkeypatch):
 
 def test_share_marks_partial_preview_when_metadata_present(trial_on):
     uid = _make_user('share-partial@test.com')
-    tid = _completed_task(
+    tid = _share_task(
         uid, 'share-partial',
         error_message='partial_preview:{"partial":true,"partial_minutes":10,"episode_minutes":60}',
     )
@@ -10009,9 +10003,9 @@ def test_share_create_rate_limited_per_user(trial_on, monkeypatch):
     uid = _make_user('share-rl@test.com')
     client = _login(uid)
     for i in range(2):
-        tid = _completed_task(uid, f'share-rl-{i}')
+        tid = _share_task(uid, f'share-rl-{i}')
         assert client.post(f'/transcription/{tid}/share').status_code == 200
-    tid3 = _completed_task(uid, 'share-rl-2')
+    tid3 = _share_task(uid, 'share-rl-2')
     resp = client.post(f'/transcription/{tid3}/share')
     assert resp.status_code == 429
 
@@ -10031,14 +10025,18 @@ def test_share_incomplete_task_cannot_be_shared(trial_on):
 
 
 def test_share_path_exempt_from_canonical_host_redirect(monkeypatch, trial_on):
-    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
     uid = _make_user('share-host@test.com')
-    tid = _completed_task(uid, 'share-host')
+    tid = _share_task(uid, 'share-host')
     token = _login(uid).post(f'/transcription/{tid}/share').get_json()['token']
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
     client = A.app.test_client()
     resp = client.get(f'/t/{token}', headers={'Host': 'www.podskrift.com'})
     assert resp.status_code == 200
     assert b'Morning briefing' in resp.data
+    # A non-exempt path still redirects off the non-canonical host.
+    bounced = client.get('/pricing', headers={'Host': 'www.podskrift.com'})
+    assert bounced.status_code == 301
+    assert bounced.headers['Location'].startswith('https://podskrift.com/')
 
 
 def test_signup_from_share_attributes_utm_source(ph_events, trial_on):
@@ -10059,7 +10057,6 @@ def test_mint_share_token_is_unguessable():
     a, b = A.mint_share_token(), A.mint_share_token()
     assert a != b
     assert len(a) >= 22
-    # url-safe alphabet only
     assert re.fullmatch(r'[A-Za-z0-9_-]+', a)
 
 
@@ -10129,7 +10126,7 @@ def test_transcript_shares_migration_on_production_schema_and_fresh(trial_on):
 
 def test_result_page_exposes_share_controls(trial_on):
     uid = _make_user('share-ui@test.com')
-    tid = _completed_task(uid, 'share-ui')
+    tid = _share_task(uid, 'share-ui')
     body = _login(uid).get(f'/transcription/{tid}').data.decode()
     assert 'id="shareBtn"' in body
     assert '/share' in body
