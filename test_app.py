@@ -6062,10 +6062,14 @@ def test_posthog_snippet_renders_when_key_is_set(monkeypatch):
     assert "posthog.register({app: 'podskrift'})" in body
     assert 'podskriftPaywallShown' in body
     assert 'buy_clicked' in body
-    # GDPR: memory + opted out until Accept; no recording before consent.
-    assert "persistence: accepted ? 'localStorage+cookie' : 'memory'" in body
-    assert 'opt_out_capturing_by_default: !accepted' in body
-    assert 'disable_session_recording: !accepted' in body
+    # GDPR: the SDK (array.js + init) is only injected after Accept, so
+    # nothing talks to PostHog or writes ph_* storage before consent.
+    assert 'function loadPosthogSdk' in body
+    assert "if (choice() === 'accepted') {\n            loadPosthogSdk();" in body
+    head, _, rest = body.partition('function loadPosthogSdk')
+    assert 'posthog.init(' not in head
+    assert '-assets.i.posthog.com' not in head
+    assert 'function clearPosthogStorage' in body
     assert 'cookie-consent.js' in body
     assert 'id="cookieConsent"' in body
     assert 'id="cookieConsentAccept"' in body
@@ -11888,3 +11892,21 @@ def test_apple_url_for_feed_matches_episode_and_sends_only_name(monkeypatch):
     assert url == 'https://podcasts.apple.com/podcast/id77?i=2'
     assert all('TOKEN123' not in str(p) for p in seen)
     assert seen[0]['term'] == 'My Show'
+
+
+def test_server_side_signup_event_ignores_cookie_consent(ph_events):
+    """Declined browser analytics must not suppress server funnel events."""
+    from models import User
+    A._register_attempts.clear()
+    client = A.app.test_client()
+    client.set_cookie('podskrift_cookie_consent', 'declined')
+    resp = client.post('/register', data={
+        'email': 'declined-signup@example.com',
+        'password': 'password123',
+        'password2': 'password123',
+    })
+    assert resp.status_code in (302, 303)
+    with A.app.app_context():
+        uid = User.query.filter_by(email='declined-signup@example.com').first().id
+    events = [e for e in ph_events.events if e['event'] == 'user_signed_up']
+    assert events and events[-1]['distinct_id'] == str(uid)
