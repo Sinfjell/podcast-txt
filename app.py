@@ -17,6 +17,7 @@ import math
 import os
 import re
 import secrets
+import signal
 import sqlite3
 import shutil
 import subprocess
@@ -165,6 +166,8 @@ def _canonical_host_exempt(path):
         return True
     if path.startswith('/email/unsubscribe'):
         return True
+    if path.startswith('/internal/'):
+        return True
     # Public share links must resolve on whichever host they were opened
     # (www / bare / staging), not bounce through a host redirect that can
     # drop cookies or confuse chat-app link previews.
@@ -180,6 +183,13 @@ def _canonical_redirect_target():
     path = request.path or '/'
     qs = request.query_string.decode('utf-8', errors='replace') if request.query_string else ''
     return PUBLIC_BASE_URL + path + (('?' + qs) if qs else '')
+
+
+@app.before_request
+def _ensure_shutdown_handlers():
+    """Wrap gunicorn's SIGTERM handler once the worker has installed it."""
+    if not _shutdown_handlers_installed:
+        install_shutdown_handlers()
 
 
 @app.before_request
@@ -835,6 +845,113 @@ class SourceAudioUnavailable(Exception):
 
 class TaskAbandoned(Exception):
     """Raised when a task was failed out from under the worker still running it."""
+
+
+class ServerRestart(Exception):
+    """Process shutdown (deploy SIGTERM) interrupted this job mid-flight.
+
+    Not a corrupt file and not an app bug when auto-resume will pick it up.
+    ``reason`` is always ``server_restart`` for analytics.
+    """
+
+    REASON = 'server_restart'
+    MSG_AUTO = (
+        "Our server restarted while processing this episode — "
+        "we've restarted it automatically."
+    )
+    MSG_RETRY = (
+        "Our server restarted while processing this episode — please try again."
+    )
+
+    def __init__(self, message=None, *, auto_resumed=True):
+        super().__init__(message or (self.MSG_AUTO if auto_resumed else self.MSG_RETRY))
+        self.reason = self.REASON
+        self.auto_resumed = auto_resumed
+
+
+#: Set when the worker receives SIGTERM/SIGINT so ffmpeg failures and long
+#: loops stop at a safe point instead of blaming the user's audio file.
+_shutting_down = threading.Event()
+#: Set by gunicorn.conf.py ``on_starting`` in the arbiter before it forks, so
+#: every worker of one server generation (including a worker respawned
+#: mid-life after a timeout) shares the same start time. Unset for scripts
+#: that import app (new-episode poller, ops one-offs, tests).
+_SERVER_STARTED_AT_ENV = os.getenv('PODSKRIFT_SERVER_STARTED_AT', '').strip()
+try:
+    _PROCESS_STARTED_AT = float(_SERVER_STARTED_AT_ENV) if _SERVER_STARTED_AT_ENV else time.time()
+except ValueError:
+    _SERVER_STARTED_AT_ENV = ''
+    _PROCESS_STARTED_AT = time.time()
+_shutdown_handlers_installed = False
+
+
+def is_shutting_down():
+    return _shutting_down.is_set()
+
+
+def request_shutdown(signum=None, frame=None):
+    """Mark this process as shutting down (gunicorn SIGTERM / Ctrl-C)."""
+    _shutting_down.set()
+    if signum is not None:
+        app.logger.info('shutdown signal %s received; stopping transcription work',
+                        signum)
+
+
+def install_shutdown_handlers():
+    """Chain SIGTERM/SIGINT so we set the shutdown flag without replacing gunicorn.
+
+    Gunicorn's gthread worker calls ``init_signals`` *after* loading the app, so
+    a handler installed at import time is overwritten. We install from the first
+    request (and from ``post_worker_init`` when using gunicorn.conf.py), wrapping
+    whatever handler is already registered.
+    """
+    global _shutdown_handlers_installed
+    if os.getenv('PODSKRIFT_DISABLE_SHUTDOWN_HANDLERS', '').strip().lower() in (
+            '1', 'true', 'yes'):
+        return False
+    wrapped_any = False
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            prev = signal.getsignal(sig)
+            if getattr(prev, '_podskrift_shutdown', False):
+                continue
+
+            def handler(signum, frame, _prev=prev):
+                request_shutdown(signum, frame)
+                if callable(_prev) and _prev not in (signal.SIG_DFL, signal.SIG_IGN):
+                    _prev(signum, frame)
+
+            handler._podskrift_shutdown = True
+            signal.signal(sig, handler)
+            wrapped_any = True
+        except (ValueError, OSError):
+            # Not the main thread, or signals unsupported — ignore.
+            pass
+    if wrapped_any:
+        _shutdown_handlers_installed = True
+    return wrapped_any
+
+
+def _ffmpeg_killed_by_signal(returncode, stderr=b''):
+    """True when ffmpeg exited because the process/host sent it a kill signal."""
+    if returncode is None:
+        return False
+    if returncode < 0:
+        return True
+    # 128 + signal number (shell convention): 143=SIGTERM, 137=SIGKILL, 130=SIGINT
+    if returncode in (130, 137, 143, 255):
+        return True
+    detail = (stderr or b'').decode('utf-8', 'replace').lower()
+    return any(
+        token in detail
+        for token in ('signal 15', 'signal 9', 'sigterm', 'sigkill', 'interrupted')
+    )
+
+
+def _raise_if_ffmpeg_shutdown(returncode, stderr=b''):
+    """Raise ServerRestart when ffmpeg died from our shutdown or a kill signal."""
+    if is_shutting_down() or _ffmpeg_killed_by_signal(returncode, stderr):
+        raise ServerRestart(auto_resumed=True)
 
 
 def trial_available():
@@ -1853,6 +1970,8 @@ def download_audio(url, filename, task_id):
     try:
         with open(filename, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
+                if is_shutting_down():
+                    raise ServerRestart(auto_resumed=True)
                 if not chunk:
                     continue
                 f.write(chunk)
@@ -1972,8 +2091,18 @@ def probe_audio_bitrate_kbps(audio_file):
         return None
 
 
-def _ffmpeg_error(message, stderr=b''):
-    """Log ffmpeg's own words, hand the user something they can act on."""
+def _ffmpeg_error(message, stderr=b'', *, returncode=None):
+    """Log ffmpeg's own words, hand the user something they can act on.
+
+    Shutdown / SIGTERM kills must not become "corrupt or unsupported format".
+    """
+    if returncode is not None or stderr:
+        try:
+            _raise_if_ffmpeg_shutdown(returncode if returncode is not None else 1, stderr)
+        except ServerRestart:
+            raise
+    if is_shutting_down():
+        raise ServerRestart(auto_resumed=True)
     detail = (stderr or b'').decode('utf-8', 'replace').strip()
     if detail:
         app.logger.error('ffmpeg failed: %s', detail[:2000])
@@ -2037,9 +2166,11 @@ def trim_audio_file(audio_file, max_seconds):
                     os.remove(tmp_path)
                 except OSError:
                     pass
+            err = encoded.stderr if encoded.returncode else copy.stderr
+            code = encoded.returncode if encoded.returncode else copy.returncode
             raise _ffmpeg_error(
                 'This audio file could not be processed. It may be corrupt or in an '
-                'unsupported format.', encoded.stderr if encoded.returncode else copy.stderr)
+                'unsupported format.', err, returncode=code)
 
     os.replace(tmp_path, audio_file)
     return audio_file
@@ -2088,6 +2219,9 @@ def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
     bitrate = min(WHISPER_AUDIO_BITRATE_KBPS,
                   probe_audio_bitrate_kbps(audio_file) or WHISPER_AUDIO_BITRATE_KBPS)
 
+    if is_shutting_down():
+        raise ServerRestart(auto_resumed=True)
+
     try:
         result = subprocess.run(
             ['nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y', '-i', audio_file,
@@ -2103,6 +2237,8 @@ def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
             'Please try again later, or contact support if it persists.')
     except subprocess.TimeoutExpired:
         _cleanup_glob(produced_glob)
+        if is_shutting_down():
+            raise ServerRestart(auto_resumed=True)
         raise _ffmpeg_error('This episode took too long to process. Please try a shorter one.')
 
     parts = sorted(glob.glob(produced_glob))
@@ -2110,7 +2246,7 @@ def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
         _cleanup_glob(produced_glob)
         raise _ffmpeg_error(
             'This audio file could not be processed. It may be corrupt or in an '
-            'unsupported format.', result.stderr)
+            'unsupported format.', result.stderr, returncode=result.returncode)
 
     # Drop the segmenter's rounding crumb, but never the only part, and never
     # silently: this is the one place content could go missing without an error.
@@ -2365,15 +2501,17 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
     Returns (full_text, segments). `remaining` is mutated as chunks are consumed
     so the caller can clean up whatever is left if this raises.
 
-    Resume after a worker death is not attempted: chunk files live only for the
-    life of the thread (cleaned in `finally`), so the only safe recovery is to
-    fail the task, refund unspent trial minutes, and let the user retry.
+    Mid-chunk resume is not attempted here: part files live only for the life
+    of the thread. Process death is recovered at boot by re-queuing the whole
+    task (re-download + re-encode) via ``resume_interrupted_tasks``.
     """
     all_segments = []
     full_text = ""
     total = len(audio_chunks)
 
     for i, chunk_file in enumerate(audio_chunks):
+        if is_shutting_down():
+            raise ServerRestart(auto_resumed=True)
         # The stale sweeper may have given up on this task and refunded the
         # unspent allowance. Read the status straight from the database rather
         # than through the session, which may still hold our own last write.
@@ -4874,6 +5012,30 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                                 abandoned.user_id,
                                 {**ph_props, 'reason': 'abandoned'},
                             )
+                    except ServerRestart as e:
+                        # Deploy/SIGTERM interrupted work. Leave the row
+                        # non-terminal so boot resume can re-queue it once;
+                        # if we already resumed once, fail with a clear message.
+                        interrupted = db.session.get(TranscriptionTask, task_id)
+                        attempts = int(
+                            getattr(interrupted, 'resume_attempts', 0) or 0
+                        ) if interrupted else 0
+                        if interrupted is not None and attempts >= 1:
+                            fail_task_and_refund(task_id, ServerRestart.MSG_RETRY)
+                            trial_refund_task(interrupted)
+                            product_analytics.capture(
+                                'transcript_failed',
+                                interrupted.user_id,
+                                {**ph_props, 'reason': ServerRestart.REASON},
+                            )
+                            report_task_failure(
+                                e, task_id=task_id, key_source=key_source)
+                        else:
+                            app.logger.warning(
+                                'task %s interrupted by server restart '
+                                '(resume_attempts=%s); leaving for boot resume',
+                                task_id, attempts,
+                            )
                     except Exception as e:
                         # Settle the reservation in the same write as status='error'
                         # (see fail_task_and_refund) so a failed task is never
@@ -5166,11 +5328,10 @@ def _task_key_source_for_analytics(task):
 def _fail_if_stale(task, source='poll'):
     """Fail a task whose worker has stopped writing progress.
 
-    Called from /status, /active-jobs, boot recovery, and the background
-    watchdog. A task orphaned by a restart has a heartbeat only seconds old, so
-    the boot sweep on that same boot skips it; the watchdog (and any later
-    poll) is what notices. Resume is not attempted: chunk files are gone with
-    the dead thread.
+    Called from /status, /active-jobs, and the background watchdog. Boot
+    recovery uses ``resume_interrupted_tasks`` instead (re-queue once). Chunk
+    files are gone with the dead thread, so resume re-downloads from
+    ``source_audio_url``.
     """
     if task.status == 'completed' or task.status in TERMINAL_STATUSES:
         return False
@@ -5261,6 +5422,320 @@ def start_stale_watchdog():
     thread.start()
     _stale_watchdog_started = True
     return True
+
+
+def count_in_flight_transcriptions():
+    """Queued / running transcriptions (anything not completed or terminal)."""
+    return (
+        TranscriptionTask.query
+        .filter(~TranscriptionTask.status.in_(['completed', *TERMINAL_STATUSES]))
+        .count()
+    )
+
+
+def _task_heartbeat_ts(task):
+    hb = task.heartbeat_at or task.started_at
+    if hb is None:
+        return None
+    if hb.tzinfo is None:
+        hb = hb.replace(tzinfo=timezone.utc)
+    return hb.timestamp()
+
+
+def _task_is_orphaned(task):
+    """True when the task's last heartbeat predates this process.
+
+    A live job owned by another gunicorn worker keeps heartbeating after we
+    boot; an interrupted job does not.
+    """
+    ts = _task_heartbeat_ts(task)
+    if ts is None:
+        return True
+    return ts < (_PROCESS_STARTED_AT - 0.5)
+
+
+def _claim_task_for_resume(task_id):
+    """Mark one orphaned task for a single automatic re-queue. True if we won.
+
+    Keeps trial/paid reservations untouched. Resets progress fields so the
+    worker re-downloads and re-encodes (chunk files died with the old process).
+    """
+    now = datetime.now(timezone.utc)
+    result = db.session.execute(text("""
+        UPDATE transcription_tasks
+           SET resume_attempts = COALESCE(resume_attempts, 0) + 1,
+               status = 'downloading',
+               phase = 'downloading',
+               progress = 0,
+               download_progress = 0,
+               chunk_index = NULL,
+               chunk_total = NULL,
+               bytes_downloaded = NULL,
+               bytes_total = NULL,
+               error_message = NULL,
+               phase_started_at = :now,
+               heartbeat_at = :now
+         WHERE id = :tid
+           AND COALESCE(resume_attempts, 0) = 0
+           AND status NOT IN ('completed', 'error', 'cancelled')
+           AND COALESCE(trial_settled, 0) = 0
+    """), {'tid': task_id, 'now': now})
+    db.session.commit()
+    return result.rowcount == 1
+
+
+def _ph_props_for_task(task, key_source, source='resume'):
+    """Analytics labels for a resumed (or otherwise continued) task."""
+    duration_min = None
+    if task.audio_duration:
+        duration_min = round(float(task.audio_duration) / 60.0, 2)
+    return {
+        'key_source': key_source,
+        'source': source,
+        'duration_min': duration_min,
+        'language': task.language or None,
+        'input_origin': 'resume',
+        'has_feed': bool((task.rss_url or '').strip()),
+        'podcast_name': task.podcast_name or None,
+        'nth_transcript': _completed_transcript_count(task.user_id) + 1,
+        'resumed': True,
+    }
+
+
+def _spawn_worker_for_existing_task(task):
+    """Start the download+Whisper thread for a row that already holds a reservation.
+
+    Returns True when the thread was started (and owns the capacity slot).
+    """
+    source_url = (task.source_audio_url or '').strip()
+    if not source_url or not _is_fetchable_url(source_url):
+        fail_task_and_refund(
+            task.id,
+            'This episode could not be restarted automatically — please try again.',
+        )
+        report_task_failure(
+            RuntimeError('resume missing source_audio_url'),
+            task_id=task.id, key_source='unknown',
+        )
+        return False
+
+    user = db.session.get(User, task.user_id)
+    if user is None:
+        fail_task_and_refund(task.id, ServerRestart.MSG_RETRY)
+        return False
+
+    api_key, key_source = resolve_openai_key(user)
+    if not api_key:
+        fail_task_and_refund(
+            task.id,
+            'No OpenAI API key configured. Add your key in Settings.',
+        )
+        return False
+
+    if not _transcription_slots.acquire(blocking=False):
+        app.logger.warning(
+            'resume deferred for %s: worker at its concurrent limit', task.id)
+        return False
+
+    openai_client = build_openai_client(api_key)
+    task_id = task.id
+    language = task.language or ''
+    ph_props = _ph_props_for_task(task, key_source)
+    parsed_url = urlparse(source_url)
+    audio_filename = (
+        f'temp_audio_{task_id}'
+        + (os.path.splitext(parsed_url.path)[1] or '.mp3')
+    )
+    user_id = task.user_id
+    source = 'resume'
+
+    def transcribe_thread():
+        try:
+            with app.app_context():
+                try:
+                    download_audio(source_url, audio_filename, task_id)
+                    transcribe_audio(
+                        audio_filename, task_id, openai_client, language=language)
+                except TaskAbandoned:
+                    abandoned = db.session.get(TranscriptionTask, task_id)
+                    if abandoned:
+                        trial_refund_task(abandoned)
+                        product_analytics.capture(
+                            'transcript_failed',
+                            abandoned.user_id,
+                            {**ph_props, 'reason': 'abandoned'},
+                        )
+                except ServerRestart as e:
+                    interrupted = db.session.get(TranscriptionTask, task_id)
+                    attempts = int(
+                        getattr(interrupted, 'resume_attempts', 0) or 0
+                    ) if interrupted else 0
+                    if interrupted is not None and attempts >= 1:
+                        fail_task_and_refund(task_id, ServerRestart.MSG_RETRY)
+                        trial_refund_task(interrupted)
+                        product_analytics.capture(
+                            'transcript_failed',
+                            interrupted.user_id,
+                            {**ph_props, 'reason': ServerRestart.REASON},
+                        )
+                        report_task_failure(
+                            e, task_id=task_id, key_source=key_source)
+                    else:
+                        app.logger.warning(
+                            'resumed task %s interrupted again before boot '
+                            'marker; leaving for next resume',
+                            task_id,
+                        )
+                except Exception as e:
+                    error_message = (
+                        describe_openai_error(e, key_source=key_source)
+                        if _is_openai_error(e) else str(e))
+                    fail_task_and_refund(task_id, error_message)
+                    failed = db.session.get(TranscriptionTask, task_id)
+                    reason = 'other'
+                    if failed:
+                        trial_refund_task(failed)
+                        if isinstance(e, TrialExhausted):
+                            reason = 'trial_exhausted'
+                        elif isinstance(e, SourceAudioUnavailable):
+                            reason = e.reason
+                        elif _is_openai_error(e):
+                            reason = product_analytics.openai_fail_reason(
+                                e, key_source=key_source)
+                        product_analytics.capture(
+                            'transcript_failed',
+                            failed.user_id,
+                            {**ph_props, 'reason': reason},
+                        )
+                    if isinstance(e, SourceAudioUnavailable):
+                        app.logger.warning(
+                            'Source audio unavailable for resumed task %s: %s',
+                            task_id, e.reason)
+                    elif reason in ('own_key_no_credit', 'own_key_invalid'):
+                        app.logger.warning(
+                            'Own-key OpenAI account error for resumed task %s: %s',
+                            task_id, reason)
+                    else:
+                        report_task_failure(
+                            e, task_id=task_id, key_source=key_source)
+                else:
+                    try:
+                        done_props = dict(ph_props)
+                        finished = db.session.get(TranscriptionTask, task_id)
+                        if finished is not None:
+                            if finished.audio_duration:
+                                done_props['duration_min'] = round(
+                                    finished.audio_duration / 60.0, 2)
+                            if finished.language:
+                                done_props['language'] = normalize_language_code(
+                                    finished.language) or None
+                            done_props['nth_transcript'] = (
+                                _completed_transcript_count(user_id))
+                        product_analytics.capture(
+                            'transcript_completed', user_id, done_props)
+                        if finished is not None:
+                            _schedule_transcript_ready_email(task_id, user_id)
+                    except Exception:  # noqa: BLE001
+                        app.logger.exception(
+                            'transcript_completed analytics failed for resumed %s',
+                            task_id)
+                finally:
+                    if os.path.exists(audio_filename):
+                        try:
+                            os.remove(audio_filename)
+                        except OSError:
+                            pass
+        except Exception:
+            app.logger.exception(
+                'resumed transcription worker for %s died before it could start',
+                task_id)
+        finally:
+            _transcription_slots.release()
+
+    thread = threading.Thread(
+        target=transcribe_thread, name=f'resume-{task_id[:8]}', daemon=True)
+    thread.start()
+    product_analytics.capture('transcript_started', user_id, ph_props)
+    app.logger.info('resumed interrupted transcription %s', task_id)
+    return True
+
+
+def resume_interrupted_tasks():
+    """Re-queue tasks left mid-flight by a previous process death. Once each.
+
+    Idempotent across two gunicorn workers: the conditional UPDATE on
+    ``resume_attempts`` is the claim. Reservations stay on the row (no
+    re-reserve / no double charge). A task that fails again after resume is
+    failed with ServerRestart.MSG_RETRY and reported to Sentry.
+    """
+    running = (
+        TranscriptionTask.query
+        .filter(~TranscriptionTask.status.in_(['completed', *TERMINAL_STATUSES]))
+        .all()
+    )
+    resumed = 0
+    failed_second = 0
+    for task in running:
+        if not _task_is_orphaned(task):
+            continue
+        attempts = int(task.resume_attempts or 0)
+        if attempts >= 1:
+            fail_task_and_refund(task.id, ServerRestart.MSG_RETRY)
+            db.session.expire(task)
+            report_task_failure(
+                ServerRestart(auto_resumed=False),
+                task_id=task.id,
+                key_source=_task_key_source_for_analytics(task),
+            )
+            try:
+                product_analytics.capture(
+                    'transcript_failed',
+                    task.user_id,
+                    {
+                        'reason': ServerRestart.REASON,
+                        'key_source': _task_key_source_for_analytics(task),
+                        'resumed': True,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                app.logger.exception(
+                    'transcript_failed analytics failed for resume-exhausted %s',
+                    task.id)
+            failed_second += 1
+            continue
+        if not _claim_task_for_resume(task.id):
+            continue
+        db.session.expire(task)
+        claimed = db.session.get(TranscriptionTask, task.id)
+        if claimed is None:
+            continue
+        if _spawn_worker_for_existing_task(claimed):
+            resumed += 1
+        else:
+            # No capacity slot — leave downloading/resume_attempts=1; the
+            # stale watchdog or a later boot will settle it if still stuck.
+            app.logger.warning(
+                'claimed %s for resume but could not start a worker', task.id)
+    if resumed or failed_second:
+        app.logger.info(
+            'boot resume: started=%s failed_after_resume=%s',
+            resumed, failed_second)
+    return {'resumed': resumed, 'failed_second': failed_second}
+
+
+@app.route('/internal/in-flight')
+def internal_in_flight():
+    """Local-only count of queued/running transcriptions for deploy drain."""
+    remote = (request.remote_addr or '').strip()
+    # Public traffic also arrives from 127.0.0.1 (Plesk nginx/Apache proxy),
+    # but always carries forwarding headers; the drain script's direct curl
+    # to 127.0.0.1:5002 never does.
+    proxied = any(request.headers.get(h) for h in (
+        'X-Real-IP', 'X-Forwarded-For', 'X-Forwarded-Host', 'Forwarded'))
+    if remote not in ('127.0.0.1', '::1') or proxied:
+        return jsonify({'error': 'forbidden'}), 403
+    n = count_in_flight_transcriptions()
+    return jsonify({'ok': True, 'in_flight': n})
 
 
 @app.route('/status/<task_id>')
@@ -8702,13 +9177,23 @@ with app.app_context():
             'prefer a Dashboard Price with tax_behavior set explicitly')
     inspector = sa_inspect(db.engine)
 
-    # Transcription runs in a daemon thread, so a deploy or crash leaves tasks
-    # stuck in a running state forever. Fail those at boot -- but only ones that
-    # have gone quiet: this module is imported by every gunicorn worker, and a
-    # worker respawning mid-life must not kill jobs another worker is running.
-    # Shared with the watchdog / poll paths so refunds and transcript_failed
-    # fire the same way regardless of who notices.
-    _sweep_stale_tasks(source='boot')
+    # Transcription runs in a daemon thread, so a deploy restart leaves tasks
+    # mid-flight. Re-queue each orphaned task once (reservation kept); a second
+    # failure after resume gets a clear server_restart message. Live jobs owned
+    # by another worker keep heartbeating and are skipped. Two gunicorn workers
+    # race the same claim; resume_attempts is the conditional UPDATE.
+    install_shutdown_handlers()
+    if _SERVER_STARTED_AT_ENV:
+        # Real server boot (gunicorn.conf.py): orphan = heartbeat older than
+        # this server generation, so a lone respawned worker never steals a
+        # live job from its sibling.
+        resume_interrupted_tasks()
+    else:
+        # Any other importer (the new-episode poller timer, ops scripts) must
+        # never claim or spawn transcription work: its own start time says
+        # nothing about whether gunicorn's jobs are alive. Keep the old,
+        # threshold-based stale sweep only.
+        _sweep_stale_tasks(source='boot')
 
     settle_stranded_charges()
 

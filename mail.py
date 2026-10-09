@@ -35,6 +35,13 @@ DEFAULT_DOMAIN = 'podskrift.com'
 DEFAULT_FROM = 'Podskrift <hello@podskrift.com>'
 DEFAULT_TIMEOUT_SEC = 10
 
+#: send_email outcomes. 'ambiguous' = transport timeout / connection drop —
+#: the request may already have been accepted, so callers must not release
+#: an idempotency claim (or retry with a new Message-Id).
+SEND_SENT = 'sent'
+SEND_FAILED = 'failed'
+SEND_AMBIGUOUS = 'ambiguous'
+
 # Kinds already reported this process lifetime — avoid inbox-scale Sentry spam.
 _sentry_kinds_reported: set[str] = set()
 
@@ -138,28 +145,30 @@ def send_email(
     timeout: float = DEFAULT_TIMEOUT_SEC,
     message_id: Optional[str] = None,
     idempotency_key: str = '',
-) -> bool:
-    """Send one message via Mailgun. Never raises. Returns True on 2xx.
+) -> str:
+    """Send one message via Mailgun. Never raises.
 
-    When email is disabled or misconfigured: log and return False.
+    Returns SEND_SENT, SEND_FAILED, or SEND_AMBIGUOUS (timeout / connection
+    error — treat as possibly delivered; do not release idempotency claims).
+
+    When email is disabled or misconfigured: log and return SEND_FAILED.
     Retries with exponential backoff on clear 5xx responses only.
-    Transport timeouts / connection errors are not retried (ambiguous: the
-    first attempt may already have been accepted). A stable Message-Id is set
-    for every attempt of this call.
+    Transport timeouts / connection errors are not retried. A stable
+    Message-Id is set for every attempt of this call.
     """
     if not to or not subject:
         logger.warning('mail.send skipped (%s): missing to/subject', kind)
-        return False
+        return SEND_FAILED
     if not email_enabled():
         logger.info('mail.send no-op (%s): EMAIL_ENABLED is off', kind)
-        return False
+        return SEND_FAILED
     if not mail_configured():
         logger.warning(
             'mail.send no-op (%s): MAILGUN_API_KEY not set',
             kind,
         )
         _report_once('misconfigured', message='Mailgun not configured while EMAIL_ENABLED')
-        return False
+        return SEND_FAILED
 
     domain = mailgun_domain()
     url = f'{mailgun_base_url()}/v3/{domain}/messages'
@@ -209,7 +218,7 @@ def send_email(
             resp = requests.post(
                 url, auth=auth, data=fields, timeout=post_timeout)
             if 200 <= resp.status_code < 300:
-                return True
+                return SEND_SENT
             if 500 <= resp.status_code < 600:
                 logger.warning(
                     'mailgun %s %s attempt %s/%s',
@@ -222,7 +231,7 @@ def send_email(
                     f'http_{resp.status_code}',
                     message=f'Mailgun {resp.status_code} for kind={kind}',
                 )
-                return False
+                return SEND_FAILED
             # 4xx — do not retry (bad address, auth, etc.). Warning level so
             # Sentry's logging integration (ERROR+) does not create an event
             # per recipient; _report_once still records the kind once.
@@ -234,7 +243,7 @@ def send_email(
                 f'http_{resp.status_code}',
                 message=f'Mailgun {resp.status_code} for kind={kind}',
             )
-            return False
+            return SEND_FAILED
         except requests.RequestException as exc:
             # Ambiguous: the request may have reached Mailgun after we timed
             # out. Do not retry — Message-Id alone is not a guaranteed dedupe.
@@ -243,5 +252,5 @@ def send_email(
                 kind, type(exc).__name__,
             )
             _report_once('transport', exc)
-            return False
-    return False
+            return SEND_AMBIGUOUS
+    return SEND_FAILED

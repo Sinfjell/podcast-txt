@@ -88,7 +88,8 @@ jobs:
     needs: test
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Drain can wait up to 20 minutes for in-flight transcriptions before restart.
+    timeout-minutes: 30
     steps:
       - name: Configure SSH
         env:
@@ -106,7 +107,7 @@ jobs:
           printf '%s\n' "$PODSKRIFT_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
-      - name: Pull main and restart podskrift
+      - name: Pull main, drain in-flight jobs, restart podskrift
         env:
           PODSKRIFT_SSH_HOST: ${{ secrets.PODSKRIFT_SSH_HOST }}
           PODSKRIFT_SSH_USER: ${{ secrets.PODSKRIFT_SSH_USER }}
@@ -123,6 +124,13 @@ jobs:
                cd /var/www/vhosts/podskrift.nettsmed.dev/app
                git fetch origin
                git checkout main
+               # Drain BEFORE pulling: the old process keeps serving during the
+               # wait (up to 20 min) and must not lazily load new templates or
+               # modules from a half-updated tree. Script comes from the new
+               # commit without touching the working tree. Anything still
+               # running after the wait is re-queued on boot resume.
+               git show origin/main:ops/drain-in-flight.sh \
+                 | PODSKRIFT_DRAIN_MAX_WAIT_SEC=1200 bash -s
                git pull --ff-only origin main
                systemctl restart podskrift
                systemctl is-active --quiet podskrift

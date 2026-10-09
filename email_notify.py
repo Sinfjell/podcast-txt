@@ -336,7 +336,7 @@ def notify_transcript_ready(
             unsub_url=unsub,
             is_partial=is_partial,
         )
-        ok = mailer.send_email(
+        outcome = mailer.send_email(
             to=user.email,
             subject=subject,
             text=text,
@@ -347,8 +347,11 @@ def notify_transcript_ready(
             timeout=8,
             idempotency_key=key,
         )
-        if not ok:
-            release_email_send(db, EmailSentLog, idempotency_key=key)
+        if outcome != mailer.SEND_SENT:
+            # Clear failures can retry later; ambiguous (timeout) keeps the
+            # claim so a late accept is not duplicated.
+            if outcome == mailer.SEND_FAILED:
+                release_email_send(db, EmailSentLog, idempotency_key=key)
             return False
         props = {'type': TRANSCRIPT_READY}
         if is_partial:
@@ -396,7 +399,7 @@ def notify_new_episodes_digest(
             items=items, unsub_url=unsub)
         # Digest covers many episodes; key the Message-Id on the first claim.
         digest_key = claim_keys[0] if claim_keys else ''
-        ok = mailer.send_email(
+        outcome = mailer.send_email(
             to=user.email,
             subject=subject,
             text=text,
@@ -406,16 +409,24 @@ def notify_new_episodes_digest(
             kind=NEW_EPISODES,
             idempotency_key=digest_key,
         )
-        if not ok:
-            for key in claim_keys:
-                release_email_send(db, EmailSentLog, idempotency_key=key)
+        if outcome == mailer.SEND_SENT:
+            product_analytics.capture(
+                'email_sent',
+                user.id,
+                {'type': NEW_EPISODES, 'episode_count': len(items)},
+            )
+            return True
+        if outcome == mailer.SEND_AMBIGUOUS:
+            # Timeout / connection drop: Mailgun may have accepted the message.
+            # Keep every episode claim so a later poll cannot re-send the digest.
+            logger.warning(
+                'digest send ambiguous for user %s; keeping sent-log claims',
+                getattr(user, 'id', '?'),
+            )
             return False
-        product_analytics.capture(
-            'email_sent',
-            user.id,
-            {'type': NEW_EPISODES, 'episode_count': len(items)},
-        )
-        return True
+        for key in claim_keys:
+            release_email_send(db, EmailSentLog, idempotency_key=key)
+        return False
     except Exception:  # noqa: BLE001
         logger.exception('notify_new_episodes_digest failed for user %s',
                          getattr(user, 'id', '?'))
