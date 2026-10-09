@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "public-share-links",
+      "date": "2026-10-09",
+      "title": "Share a transcript with a private link",
+      "summary": "On a finished transcript, tap Share to create an unguessable public link you can send to anyone — no login required. You can revoke the link anytime; transcripts stay private until you choose to share."
+    },
+    {
       "id": "unsubscribe-confirm-click",
       "date": "2026-10-09",
       "title": "Unsubscribe asks for a confirmation click",
