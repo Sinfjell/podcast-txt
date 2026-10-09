@@ -3,12 +3,16 @@
 
 {% block content %}
 <style>
-    .form-error {
-        font-size: 12.5px; color: var(--error); margin-top: 6px;
-        display: none;
+    .auth-wrap { max-width: 420px; margin: 24px auto 48px; }
+    .auth-title {
+        font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em;
+        line-height: 1.05; margin-bottom: 32px;
     }
+    .form-error { font-size: 14px; color: var(--danger); margin-top: 8px; display: none; }
     .form-error.visible { display: block; }
-    .form-input.invalid { border-color: var(--error); }
+    .form-input.invalid { border: 2px solid var(--danger); }
+    .auth-links { margin-top: 24px; font-size: 15px; color: var(--muted); }
+    .auth-links p + p { margin-top: 8px; }
     .btn-spinner {
         display: inline-block; width: 12px; height: 12px; margin-right: 8px;
         border: 2px solid currentColor; border-right-color: transparent;
@@ -17,43 +21,41 @@
     }
     @keyframes loginSpin { to { transform: rotate(360deg); } }
 </style>
-<div style="max-width: 400px; margin: 40px auto;">
-    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">
+<div class="auth-wrap">
+    <h1 class="auth-title">
         {% if login_for_transcript %}
         Log in to open your saved transcript
         {% else %}
         Log in
         {% endif %}
     </h1>
-    <div class="card">
-        <div class="card-body">
-            <form method="POST" action="{{ url_for('login', next=next) if next else url_for('login') }}"
-                  id="loginForm" novalidate>
-                {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
-                <div class="form-group">
-                    <label class="form-label" for="email">Email</label>
-                    <input type="email" class="form-input ph-no-capture" id="email" name="email"
-                           required autofocus autocomplete="email">
-                    <p class="form-error" id="emailError" role="alert">Enter a valid email address</p>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="password">Password</label>
-                    <input type="password" class="form-input ph-no-capture" id="password" name="password"
-                           required autocomplete="current-password">
-                    <p class="form-error" id="passwordError" role="alert">Enter your password</p>
-                </div>
-                <button type="submit" class="btn btn-primary w-full" id="loginSubmit"
-                        style="justify-content: center;" data-label="Log in">Log in</button>
-            </form>
+    <form method="POST" action="{{ url_for('login', next=next) if next else url_for('login') }}"
+          id="loginForm" novalidate>
+        {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+        <div class="form-group">
+            <label class="form-label" for="email">Email</label>
+            <input type="email" class="form-input ph-no-capture" id="email" name="email"
+                   required autofocus autocomplete="email">
+            <p class="form-error" id="emailError" role="alert">Enter a valid email address</p>
         </div>
+        <div class="form-group">
+            <label class="form-label" for="password">Password</label>
+            <input type="password" class="form-input ph-no-capture" id="password" name="password"
+                   required autocomplete="current-password">
+            <p class="form-error" id="passwordError" role="alert">Enter your password</p>
+        </div>
+        <button type="submit" class="btn btn-primary w-full" id="loginSubmit"
+                data-label="Log in">Log in</button>
+    </form>
+    <div class="auth-links">
+        <p>
+            <a href="{{ url_for('forgot_password') }}">Forgot password?</a>
+        </p>
+        <p>
+            Don't have an account?
+            <a href="{{ url_for('register', next=next) if next else url_for('register') }}">Sign up</a>
+        </p>
     </div>
-    <p class="text-center text-muted mt-2 text-sm">
-        <a href="{{ url_for('forgot_password') }}">Forgot password?</a>
-    </p>
-    <p class="text-center text-muted mt-2 text-sm">
-        Don't have an account?
-        <a href="{{ url_for('register', next=next) if next else url_for('register') }}">Sign up</a>
-    </p>
 </div>
 {% endblock %}
 

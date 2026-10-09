@@ -6520,19 +6520,20 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'forgot-password'
-    assert entries[1]['id'] == 'share-listen-links'
-    assert entries[2]['id'] == 'keyboard-and-faster-loading'
-    assert entries[3]['id'] == 'show-landing-pages'
-    assert entries[4]['id'] == 'public-share-links'
-    assert entries[5]['id'] == 'unsubscribe-confirm-click'
-    assert entries[6]['id'] == 'partial-preview-minutes-wording'
-    assert entries[7]['id'] == 'partial-trial-preview'
-    assert entries[8]['id'] == 'own-key-billing-clarity'
-    assert entries[9]['id'] == 'clearer-missing-episode-audio'
-    assert entries[10]['id'] == 'new-signup-60-min-trial'
-    assert entries[11]['id'] == 'spotify-paste-robustness'
-    assert entries[12]['id'] == 'no-double-charge-restart'
+    assert entries[0]['id'] == 'new-look'
+    assert entries[1]['id'] == 'forgot-password'
+    assert entries[2]['id'] == 'share-listen-links'
+    assert entries[3]['id'] == 'keyboard-and-faster-loading'
+    assert entries[4]['id'] == 'show-landing-pages'
+    assert entries[5]['id'] == 'public-share-links'
+    assert entries[6]['id'] == 'unsubscribe-confirm-click'
+    assert entries[7]['id'] == 'partial-preview-minutes-wording'
+    assert entries[8]['id'] == 'partial-trial-preview'
+    assert entries[9]['id'] == 'own-key-billing-clarity'
+    assert entries[10]['id'] == 'clearer-missing-episode-audio'
+    assert entries[11]['id'] == 'new-signup-60-min-trial'
+    assert entries[12]['id'] == 'spotify-paste-robustness'
+    assert entries[13]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -10800,7 +10801,7 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'forgot-password'
+    assert entries[0]['id'] == 'new-look'
 
 
 # --------------------------------------------------------------------------
@@ -12339,3 +12340,15 @@ def test_session_version_column_added_with_default_zero_on_legacy_users_table(tm
                 + A.USER_COLUMN_MIGRATIONS['session_version'])
     assert con.execute('SELECT session_version FROM users').fetchone()[0] == 0
     con.close()
+
+
+def test_home_hero_price_line_uses_live_trial_and_pack_values(trial_on):
+    body = A.app.test_client().get('/', headers={'Accept': 'text/html'}).data.decode()
+    assert 'data-testid="hero-price-line"' in body
+    price = f'{A.CREDIT_PACK_AMOUNT_CENTS / 100:.0f}'
+    assert f'${price} for {A.CREDIT_PACK_MINUTES} min' in body
+    trial = A.advertised_trial_minutes()
+    if trial:
+        assert f'{trial} min free · then ${price}' in body
+    # Price line sits directly under the H1 (above the fold on mobile).
+    assert body.index('hero-price-line') - body.index('class="hp-title"') < 400

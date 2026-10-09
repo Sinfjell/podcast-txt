@@ -2,11 +2,18 @@
 {% block title %}Unsubscribe — Podskrift{% endblock %}
 
 {% block content %}
-<div style="max-width: 480px; margin: 48px auto; text-align: center;">
-    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 16px;">
+<style>
+    .unsub-page { max-width: 68ch; margin: 48px auto; }
+    .unsub-page h1 {
+        font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em;
+        line-height: 1.05; margin-bottom: 16px;
+    }
+</style>
+<div class="unsub-page">
+    <h1>
         Unsubscribe
     </h1>
-    <p style="color: var(--muted); font-size: 15px; line-height: 1.6;">
+    <p>
         Stop receiving emails from Podskrift? This turns off transcript-ready
         mail and new-episode alerts for your account.
     </p>
@@ -16,7 +23,7 @@
         <button type="submit" class="btn btn-primary">Yes, unsubscribe me</button>
     </form>
     <p style="margin-top: 24px;">
-        <a href="{{ url_for('index') }}" class="btn btn-ghost">Cancel</a>
+        <a href="{{ url_for('index') }}" class="btn btn-secondary">Cancel</a>
     </p>
 </div>
 {% endblock %}

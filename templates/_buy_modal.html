@@ -11,9 +11,8 @@
     .buy-modal-scrim.is-open { display: flex; }
     .buy-modal {
         width: 100%; max-width: 420px;
-        background: var(--surface); border: 1px solid var(--border);
-        border-radius: 14px; padding: 24px 24px 20px;
-        box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+        background: var(--paper); border: 1px solid var(--line);
+        border-radius: var(--radius); padding: 24px;
     }
     .buy-modal-head {
         display: flex; align-items: flex-start; justify-content: space-between;
@@ -25,9 +24,10 @@
     }
     .buy-modal-close {
         background: none; border: 0; color: var(--muted); cursor: pointer;
-        font-size: 22px; line-height: 1; padding: 0 2px;
+        font-size: 22px; line-height: 1; min-width: 44px; min-height: 44px; margin: -8px -8px 0 0;
+        border-radius: var(--radius);
     }
-    .buy-modal-close:hover { color: var(--text); }
+    .buy-modal-close:hover { color: var(--ink); }
     .buy-modal-sub {
         color: var(--muted); font-size: 14px; line-height: 1.55;
         margin: 0 0 18px;
@@ -35,9 +35,9 @@
     .buy-modal-pack {
         display: flex; justify-content: space-between; align-items: baseline;
         padding: 14px 0; margin-bottom: 8px;
-        border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+        border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
     }
-    .buy-modal-pack strong { font-size: 18px; letter-spacing: -0.02em; }
+    .buy-modal-pack strong { font-size: 17px; letter-spacing: -0.02em; }
     .buy-modal-foot {
         text-align: center; color: var(--muted); font-size: 12px;
         margin-top: 12px; line-height: 1.45;
@@ -46,7 +46,7 @@
         display: block; text-align: center; margin-top: 14px;
         font-size: 13px; color: var(--muted);
     }
-    .buy-modal-alt a { color: var(--accent-bright); }
+    .buy-modal-alt a { color: var(--accent); }
 </style>
 <div class="buy-modal-scrim" id="buyModalScrim" role="dialog" aria-modal="true"
      aria-labelledby="buyModalTitle" hidden>

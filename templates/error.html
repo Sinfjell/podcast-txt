@@ -5,19 +5,27 @@
 {% block canonical_link %}{% endblock %}
 
 {% block content %}
-<div style="max-width: 520px; margin: 48px auto; text-align: center;">
+<style>
+    .error-page { max-width: 68ch; margin: 48px auto; }
+    .error-page h1 {
+        font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em;
+        line-height: 1.05; margin-bottom: 16px;
+    }
+    .error-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+</style>
+<div class="error-page">
     <p class="section-label" style="margin-bottom: 8px;">Error {{ code }}</p>
-    <h1 style="font-size: 28px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 12px;">
+    <h1>
         This page doesn’t exist
     </h1>
-    <p style="color: var(--muted); margin-bottom: 24px;">
+    <p class="text-muted" style="margin-bottom: 24px;">
         The link may be old or mistyped. If it was a shared transcript, its
         owner may have turned sharing off.
     </p>
-    <p style="display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
+    <p class="error-actions">
         <a href="{{ url_for('index') }}" class="btn btn-primary">Search for a podcast</a>
-        <a href="{{ url_for('pricing') }}" class="btn btn-ghost">Pricing</a>
-        <a href="{{ url_for('rss_help') }}" class="btn btn-ghost">Help</a>
+        <a href="{{ url_for('pricing') }}" class="btn btn-secondary">Pricing</a>
+        <a href="{{ url_for('rss_help') }}" class="btn btn-secondary">Help</a>
     </p>
 </div>
 {% endblock %}

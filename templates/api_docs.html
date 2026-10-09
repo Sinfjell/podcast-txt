@@ -8,76 +8,54 @@
 
 {% block content %}
 <style>
-    .docs-page { max-width: 640px; margin: 24px auto; }
+    .docs-page { max-width: 68ch; margin: 24px auto 48px; }
     .docs-body h1 {
-        font-size: 24px; font-weight: 700; letter-spacing: -0.03em;
-        margin-bottom: 16px; color: var(--text);
+        font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em;
+        line-height: 1.05; margin-bottom: 24px; color: var(--ink);
     }
     .docs-body h2 {
-        font-size: 16px; font-weight: 600; margin: 24px 0 10px;
-        letter-spacing: -0.02em; color: var(--text);
+        font-size: 24px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.2;
+        margin: 40px 0 12px; color: var(--ink);
     }
-    .docs-body h3 {
-        font-size: 14px; font-weight: 600; margin: 18px 0 8px; color: var(--text);
-    }
-    .docs-body p {
-        color: var(--muted); font-size: 14px; line-height: 1.7;
-        margin-bottom: 12px;
-    }
-    .docs-body p strong { color: var(--text); font-weight: 600; }
+    .docs-body h3 { font-size: 19px; font-weight: 700; letter-spacing: -0.015em; margin: 24px 0 8px; color: var(--ink); }
+    .docs-body p { color: var(--ink); font-size: 17px; line-height: 1.55; margin-bottom: 16px; }
+    .docs-body p strong { font-weight: 700; }
     .docs-body code {
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 12.5px;
+        font-size: 15px;
         background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 4px;
-        padding: 1px 5px;
-        color: var(--text);
+        border-radius: var(--radius-sm);
+        padding: 2px 6px;
+        color: var(--ink);
+        overflow-wrap: anywhere;
     }
     .docs-body pre {
         background: var(--surface);
-        border: 1px solid var(--border);
         border-radius: var(--radius);
-        padding: 14px 16px;
+        padding: 16px;
         overflow-x: auto;
-        margin: 14px 0 18px;
-        font-size: 12.5px;
+        margin: 16px 0 24px;
+        font-size: 14px;
         line-height: 1.55;
     }
-    .docs-body pre code {
-        background: none; border: none; padding: 0;
-        color: var(--text); font-size: inherit;
-    }
-    .docs-body table {
-        width: 100%; border-collapse: collapse;
-        margin: 12px 0 18px; font-size: 13.5px;
-    }
-    .docs-body th, .docs-body td {
-        text-align: left; padding: 8px 10px;
-        border: 1px solid var(--border);
-    }
-    .docs-body th {
-        color: var(--muted); font-weight: 600; font-size: 12px;
-        text-transform: uppercase; letter-spacing: 0.04em;
-        background: var(--surface);
-    }
-    .docs-body td { color: var(--text); }
-    .docs-body ul {
-        margin: 8px 0 16px 18px; color: var(--muted);
-        font-size: 14px; line-height: 1.7;
-    }
-    .docs-body li { margin-bottom: 4px; }
+    .docs-body pre code { background: none; padding: 0; font-size: inherit; overflow-wrap: normal; }
+    .docs-body table { max-width: 100%; }
+    .docs-body table { display: block; overflow-x: auto; border-collapse: collapse; margin: 16px 0 24px; font-size: 15px; }
+    .docs-body th, .docs-body td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .docs-body th { color: var(--muted); font-weight: 700; font-size: 14px; background: var(--surface); white-space: nowrap; }
+    .docs-body td { color: var(--ink); }
+    .docs-body ul, .docs-body ol { margin: 8px 0 16px 0; padding-left: 24px; color: var(--ink); font-size: 17px; line-height: 1.55; }
+    .docs-body li { margin-bottom: 8px; }
     .docs-callout {
-        border: 1px solid var(--accent-border);
-        background: var(--accent-bg);
+        background: var(--accent-tint);
         border-radius: var(--radius);
-        padding: 12px 14px;
-        margin: 0 0 20px;
-        font-size: 13.5px;
-        line-height: 1.6;
-        color: var(--text);
+        padding: 12px 16px;
+        margin: 0 0 32px;
+        font-size: 15px;
+        line-height: 1.5;
+        color: var(--on-accent-tint);
     }
-    .docs-callout a { font-weight: 600; }
+    .docs-callout a { color: inherit; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
 </style>
 
 <div class="docs-page">

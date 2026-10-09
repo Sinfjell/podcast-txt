@@ -2,8 +2,8 @@
 {% block title %}Help — Podskrift{% endblock %}
 
 {% block content %}
-<div style="max-width: 600px; margin: 24px auto;">
-    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">Finding RSS Feeds</h1>
+<div style="max-width: 68ch; margin: 24px auto; font-size: 17px; line-height: 1.55;">
+    <h1 style="font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em; line-height: 1.05; margin-bottom: 24px;">Finding RSS Feeds</h1>
 
     <div class="card">
         <div class="card-header">
@@ -21,16 +21,16 @@
         </div>
         <div class="card-body">
             <div style="margin-bottom: 16px;">
-                <p style="font-weight: 600; margin-bottom: 4px;">Apple Podcasts</p>
-                <p class="text-muted text-sm">Copy the podcast URL, paste it in our search — we convert Apple URLs automatically.</p>
+                <p style="font-weight: 700; margin-bottom: 4px;">Apple Podcasts</p>
+                <p class="text-muted">Copy the podcast URL, paste it in our search — we convert Apple URLs automatically.</p>
             </div>
             <div style="margin-bottom: 16px;">
-                <p style="font-weight: 600; margin-bottom: 4px;">Spotify</p>
-                <p class="text-muted text-sm">Spotify doesn't expose RSS feeds. Use the search bar instead — it finds the same podcast via iTunes.</p>
+                <p style="font-weight: 700; margin-bottom: 4px;">Spotify</p>
+                <p class="text-muted">Spotify doesn't expose RSS feeds. Use the search bar instead — it finds the same podcast via iTunes.</p>
             </div>
             <div>
-                <p style="font-weight: 600; margin-bottom: 4px;">Direct RSS</p>
-                <p class="text-muted text-sm">If you have the RSS URL (from the podcast's website), paste it directly in the RSS field on the home page.</p>
+                <p style="font-weight: 700; margin-bottom: 4px;">Direct RSS</p>
+                <p class="text-muted">If you have the RSS URL (from the podcast's website), paste it directly in the RSS field on the home page.</p>
             </div>
         </div>
     </div>
@@ -40,7 +40,7 @@
             <h2>What you need</h2>
         </div>
         <div class="card-body">
-            <p class="text-muted text-sm">An <a href="https://platform.openai.com/api-keys" target="_blank">OpenAI API key</a>. Transcription uses the Whisper API — you pay OpenAI directly at ~$0.006/minute of audio. A typical 1-hour episode costs about $0.36.</p>
+            <p class="text-muted">An <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">OpenAI API key</a>. Transcription uses the Whisper API — you pay OpenAI directly at ~$0.006/minute of audio. A typical 1-hour episode costs about $0.36.</p>
         </div>
     </div>
 </div>

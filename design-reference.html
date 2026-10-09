@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Podskrift design reference</title>
+<style>
+@font-face{font-family:"Schibsted Grotesk";src:url("static/fonts/schibsted-grotesk-latin.woff2") format("woff2");font-weight:400 800;font-style:normal;font-display:swap}
+@font-face{font-family:"Newsreader";src:url("static/fonts/newsreader-latin.woff2") format("woff2");font-weight:400 500;font-style:normal;font-display:swap}
+
+:root{
+  --paper:#FFFFFF;--surface:#F4F6F5;--surface-hover:#EAEEEC;--line:#DCE2DF;--line-strong:#0E1512;
+  --ink:#0E1512;--muted:#56635D;
+  --accent:#0A7A55;--accent-hover:#075C40;--on-accent:#FFFFFF;
+  --accent-tint:#E3F3EC;--on-accent-tint:#064E36;
+  --warning-tint:#FFF1D6;--on-warning-tint:#6B3F00;
+  --danger:#B42318;--danger-tint:#FDE7E4;--on-danger-tint:#8A1C12;
+  --font-sans:"Schibsted Grotesk",system-ui,sans-serif;--font-serif:"Newsreader",Georgia,serif;
+  --space-1:0.25rem;--space-2:0.5rem;--space-3:0.75rem;--space-4:1rem;--space-6:1.5rem;--space-9:2.25rem;--space-12:3rem;--space-24:6rem;
+  --radius-sm:0.25rem;--radius-md:0.5rem;
+  --width-page:70rem;--width-prose:47.5rem;
+  --display-fluid:clamp(2.5rem,6vw,4rem);--title-fluid:clamp(1.875rem,5vw,2.75rem);
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --paper:#0A0F0D;--surface:#121916;--surface-hover:#18211D;--line:#24302B;--line-strong:#5C6F66;
+    --ink:#EEF2F0;--muted:#9AA8A1;
+    --accent:#34D399;--accent-hover:#6EE7B7;--on-accent:#06241A;
+    --accent-tint:#0F2A20;--on-accent-tint:#A7F3D0;
+    --warning-tint:#2A2008;--on-warning-tint:#FCD34D;
+    --danger:#F87171;--danger-tint:#2A0F0C;--on-danger-tint:#FCA5A5;
+  }
+}
+
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--font-sans);font-size:1.0625rem;line-height:1.55}
+h1,h2,h3,p{margin:0}
+a{color:var(--accent);text-underline-offset:0.2em}
+a:hover{color:var(--accent-hover)}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+svg{display:block}
+
+.skip-link{position:absolute;left:var(--space-4);top:-4rem;z-index:10;padding:var(--space-3) var(--space-4);background:var(--paper);color:var(--ink);border:1px solid var(--line-strong);border-radius:var(--radius-md);font-weight:700}
+.skip-link:focus{top:var(--space-2)}
+
+.wrap{max-width:var(--width-page);margin:0 auto;padding:0 var(--space-6)}
+.prose{max-width:var(--width-prose);margin:0 auto;padding:0 var(--space-6)}
+.stack{display:flex;flex-direction:column}
+.section{padding:var(--space-24) 0;border-top:1px solid var(--line)}
+.section.alt{background:var(--surface)}
+
+/* type */
+.t-display{font-size:var(--display-fluid);font-weight:800;letter-spacing:-0.035em;line-height:1.02}
+.t-title{font-size:var(--title-fluid);font-weight:800;letter-spacing:-0.03em;line-height:1.05}
+.t-heading{font-size:1.5rem;font-weight:700;letter-spacing:-0.015em;line-height:1.2}
+.t-small{font-size:0.875rem;line-height:1.5}
+.t-muted{color:var(--muted)}
+.t-label{font-size:0.75rem;font-weight:700;letter-spacing:0.08em;line-height:1.2;color:var(--muted)}
+.tnum{font-variant-numeric:tabular-nums}
+
+/* header */
+.site-header{border-bottom:1px solid var(--line)}
+.nav{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2) var(--space-6);padding:var(--space-3) 0}
+.brand{display:flex;align-items:center;gap:var(--space-3);min-height:44px;color:var(--ink);text-decoration:none;font-size:1.375rem;font-weight:800;letter-spacing:-0.035em}
+.brand:hover{color:var(--ink)}
+.nav-spacer{flex-grow:1}
+.nav a.nav-link{display:flex;align-items:center;min-height:44px;color:var(--ink);text-decoration:none;font-weight:500;font-size:1rem}
+.nav a.nav-link:hover{color:var(--accent)}
+
+/* buttons */
+.btn{display:inline-flex;align-items:center;justify-content:center;height:48px;padding:0 var(--space-6);font-family:inherit;font-size:1rem;font-weight:700;line-height:1.2;text-decoration:none;border:1px solid transparent;border-radius:var(--radius-md);cursor:pointer}
+.btn-sm{height:44px;padding:0 var(--space-4)}
+.btn-lg{height:56px;font-size:1.0625rem}
+.btn-primary{background:var(--accent);color:var(--on-accent)}
+.btn-primary:hover{background:var(--accent-hover);color:var(--on-accent)}
+.btn-secondary{background:var(--paper);color:var(--ink);border-color:var(--line-strong)}
+.btn-secondary:hover{background:var(--surface);color:var(--ink)}
+.btn-nav-cta{background:var(--ink);color:var(--paper)}
+.btn-nav-cta:hover{background:var(--ink);color:var(--paper)}
+.btn-tertiary{background:transparent;color:var(--accent);font-weight:600;padding:0 var(--space-4)}
+.btn-tertiary:hover{background:var(--surface);color:var(--accent-hover)}
+.btn-danger{background:var(--paper);color:var(--danger);border-color:var(--danger)}
+.btn-danger:hover{background:var(--surface);color:var(--danger)}
+.btn[disabled]{background:var(--surface);color:var(--muted);border-color:transparent;cursor:not-allowed}
+.btn[disabled]:hover{background:var(--surface);color:var(--muted)}
+
+/* hero */
+.hero{display:flex;flex-wrap:wrap;gap:var(--space-12);align-items:center;padding:var(--space-24) 0}
+.hero-copy{flex:1 1 32rem;min-width:0;display:flex;flex-direction:column;gap:var(--space-6)}
+.hero-lede{font-size:1.1875rem;line-height:1.5;color:var(--muted);max-width:32.5rem}
+.hero-panel{flex:1 1 25rem;min-width:0;background:var(--surface);border-radius:var(--radius-md);padding:var(--space-6);display:flex;flex-direction:column;gap:var(--space-6)}
+
+/* tabs + search */
+.tabs{display:flex;gap:var(--space-6);border-bottom:1px solid var(--line)}
+.tab{height:44px;padding:0;font-family:inherit;font-size:1rem;font-weight:500;color:var(--muted);background:none;border:0;border-bottom:3px solid transparent;cursor:pointer}
+.tab[aria-pressed="true"]{font-weight:700;color:var(--ink);border-bottom-color:var(--accent)}
+.tab:hover{color:var(--ink)}
+.search{display:flex;flex-wrap:wrap;gap:var(--space-3)}
+.field{width:100%;height:48px;padding:0 var(--space-4);font-family:inherit;font-size:1rem;color:var(--ink);background:var(--paper);border:1px solid var(--line-strong);border-radius:var(--radius-md)}
+.field::placeholder{color:var(--muted)}
+.field-lg{height:56px;font-size:1.0625rem}
+.search .field{flex:1 1 15rem;min-width:0;width:auto}
+.field[aria-invalid="true"]{border:2px solid var(--danger)}
+
+/* sound-to-text strip */
+.strip{width:100%;height:auto}
+.wave rect{transform-box:fill-box;transform-origin:center;animation:bar 1.1s ease-in-out infinite alternate}
+.wave rect:nth-child(3n){animation-delay:-.35s}
+.wave rect:nth-child(3n+1){animation-delay:-.7s}
+.wave rect:nth-child(4n){animation-duration:.8s}
+.lines rect{transform-box:fill-box;transform-origin:left center;animation:draw 5s ease-out infinite backwards}
+.lines rect:nth-child(2){animation-delay:.45s}
+.lines rect:nth-child(3){animation-delay:.9s}
+.say{animation:say .6s ease-out .6s backwards}
+.say2{animation-delay:1.5s}
+@keyframes bar{from{transform:scaleY(.35)}to{transform:scaleY(1)}}
+@keyframes draw{0%{transform:scaleX(0);opacity:1}30%{transform:scaleX(1);opacity:1}88%{transform:scaleX(1);opacity:1}100%{transform:scaleX(1);opacity:0}}
+@keyframes say{from{opacity:0;transform:translateY(6px)}}
+
+/* cards */
+.grid-3{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:var(--space-9)}
+.card{display:flex;flex-direction:column;gap:var(--space-3);padding:var(--space-6);background:var(--paper);border:1px solid var(--line);border-radius:var(--radius-md)}
+.card .icon{width:40px;height:40px;color:var(--accent)}
+.card h3{font-size:1.1875rem;font-weight:700;line-height:1.3}
+
+/* swatches */
+.swatches{display:grid;grid-template-columns:repeat(auto-fill,minmax(13rem,1fr));gap:var(--space-4)}
+.swatch{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:var(--radius-md);overflow:hidden;background:var(--paper)}
+.swatch-chip{height:56px;border-bottom:1px solid var(--line)}
+.swatch-meta{display:flex;flex-direction:column;gap:var(--space-1);padding:var(--space-3)}
+.swatch-name{font-weight:700;font-size:0.9375rem}
+.swatch-hex{font-size:0.8125rem;color:var(--muted);font-variant-numeric:tabular-nums}
+
+/* groups */
+.group{display:flex;flex-direction:column;gap:var(--space-4)}
+.row{display:flex;flex-wrap:wrap;gap:var(--space-3);align-items:center}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(20rem,1fr));gap:var(--space-12);align-items:start}
+
+/* form */
+.form{display:flex;flex-direction:column;gap:var(--space-6);max-width:30rem}
+.form-group{display:flex;flex-direction:column;gap:var(--space-2)}
+.form label{font-size:0.875rem;font-weight:700}
+.form .opt{font-weight:400;color:var(--muted)}
+.hint{font-size:0.875rem;color:var(--muted)}
+.error-msg{display:flex;align-items:flex-start;gap:var(--space-2);font-size:0.875rem;font-weight:500;color:var(--danger)}
+.error-msg svg{flex:none;width:18px;height:18px;transform:translateY(2px)}
+select.field{width:100%}
+.field-narrow{width:9ch}
+.check{display:flex;align-items:center;gap:var(--space-3);font-size:1rem;font-weight:400}
+.check input{width:24px;height:24px;margin:0;accent-color:var(--accent)}
+
+/* alerts */
+.alert{display:flex;align-items:flex-start;gap:var(--space-3);padding:var(--space-3) var(--space-4);border-radius:var(--radius-md);font-size:1.0625rem;line-height:1.45}
+.alert svg{flex:none;width:22px;height:22px;transform:translateY(1px)}
+.alert a{font-weight:700;color:inherit}
+.alert-info{background:var(--accent-tint);color:var(--on-accent-tint)}
+.alert-warning{background:var(--warning-tint);color:var(--on-warning-tint)}
+.alert-danger{background:var(--danger-tint);color:var(--on-danger-tint)}
+
+/* episode rows */
+.episodes{display:flex;flex-direction:column;border-bottom:1px solid var(--line)}
+.episode{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2) var(--space-4);padding:var(--space-4) var(--space-3);border-top:1px solid var(--line)}
+.episode:hover{background:var(--surface-hover)}
+.episode-text{flex:1 1 18rem;min-width:0;display:flex;flex-direction:column;gap:var(--space-1)}
+.episode-title{font-weight:700}
+.episode-meta{font-size:0.875rem;color:var(--muted);font-variant-numeric:tabular-nums}
+.episode a.view{display:flex;align-items:center;height:44px;font-weight:700;font-size:1rem}
+.cover{flex:none;width:56px;height:56px;border-radius:var(--radius-sm);background:var(--surface);border:1px solid var(--line)}
+.show{display:flex;align-items:center;gap:var(--space-4);padding:var(--space-3);border:1px solid var(--line);border-radius:var(--radius-md);color:var(--ink);text-decoration:none}
+.show:hover{background:var(--surface-hover);color:var(--ink)}
+.show svg{flex:none;width:20px;height:20px}
+
+/* job card */
+.job{display:flex;flex-direction:column;gap:var(--space-4);padding:var(--space-6);background:var(--surface);border-radius:var(--radius-md)}
+.job-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:var(--space-2) var(--space-4)}
+.progress{height:8px;border-radius:var(--radius-sm);background:var(--line)}
+.progress > span{display:block;height:8px;border-radius:var(--radius-sm);background:var(--accent);transition:width .4s ease}
+.job-foot{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:var(--space-2) var(--space-4)}
+
+/* transcript */
+.transcript-box{border:1px solid var(--line);border-radius:var(--radius-md)}
+.transcript-bar{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-3);padding:var(--space-3) var(--space-4);border-bottom:1px solid var(--line)}
+.transcript-bar strong{flex-grow:1}
+.transcript-body{display:flex;flex-direction:column;gap:var(--space-4);padding:var(--space-6)}
+.tline{display:flex;gap:var(--space-4)}
+.ts{flex:none;width:48px;padding-top:var(--space-1);font-size:0.8125rem;font-weight:700;line-height:1.2;color:var(--accent);font-variant-numeric:tabular-nums}
+.tx{font-family:var(--font-serif);font-size:1.25rem;line-height:1.55}
+
+/* credit pack */
+.pack{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-6);padding:var(--space-6);background:var(--paper);border:1px solid var(--line-strong);border-radius:var(--radius-md)}
+.pack-text{flex:1 1 14rem;display:flex;flex-direction:column;gap:var(--space-1)}
+.pack-figure{font-size:1.5rem;font-weight:800;letter-spacing:-0.02em;line-height:1.2}
+
+/* article */
+.article{display:flex;flex-direction:column;gap:var(--space-4)}
+.article p{max-width:40rem}
+
+/* footer */
+.site-footer{border-top:1px solid var(--line);padding:var(--space-12) 0}
+.footer-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(11rem,1fr));gap:var(--space-9)}
+.footer-cols ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.footer-cols a{display:flex;align-items:center;min-height:44px;color:var(--ink);text-decoration:none}
+.footer-cols a:hover{color:var(--accent)}
+
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none !important;transition:none !important;scroll-behavior:auto !important}
+}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+
+<header class="site-header">
+  <div class="wrap">
+    <nav class="nav" aria-label="Main">
+      <a class="brand" href="#top"><svg width="30" height="28" viewBox="0 0 30 28" aria-hidden="true"><g fill="var(--ink)"><rect x="2" y="9" width="3" height="10" rx="1.5"/><rect x="8" y="4" width="3" height="20" rx="1.5"/><rect x="14" y="8" width="3" height="12" rx="1.5"/></g><g fill="var(--accent)"><rect x="20" y="7" width="8" height="3" rx="1.5"/><rect x="20" y="12.5" width="8" height="3" rx="1.5"/><rect x="20" y="18" width="5" height="3" rx="1.5"/></g></svg>podskrift</a>
+      <div class="nav-spacer"></div>
+      <a class="nav-link" href="#pricing">Pricing</a>
+      <a class="nav-link" href="#components">Components</a>
+      <a class="nav-link" href="#read">Questions</a>
+      <a class="nav-link" href="#login">Log in</a>
+      <a class="btn btn-nav-cta btn-sm" href="#signup">Sign up</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<div class="wrap" id="top">
+  <section class="hero" aria-labelledby="hero-h">
+    <div class="hero-copy">
+      <h1 id="hero-h" class="t-display">Transcribe any podcast in minutes</h1>
+      <p class="hero-lede">Search for a podcast, pick an episode, get the full transcript. First 60 minutes free.</p>
+      <div class="group">
+        <div class="tabs">
+          <button type="button" class="tab" aria-pressed="true">Podcasts</button>
+          <button type="button" class="tab" aria-pressed="false">Episodes</button>
+        </div>
+        <div class="search">
+          <input class="field field-lg" type="text" aria-label="Search podcasts" placeholder="Search by name, or paste a Spotify link">
+          <button type="button" class="btn btn-primary btn-lg">Search</button>
+        </div>
+        <p class="t-small t-muted">Public feeds only. Not in the index? <a href="#feed">Paste an RSS feed URL</a></p>
+      </div>
+    </div>
+    <div class="hero-panel">
+      <svg class="strip" viewBox="0 0 520 48" role="img" aria-label="Sound wave turning into lines of text"><g class="wave" fill="var(--ink)"><rect x="0" y="20" width="4" height="8" rx="2"/><rect x="10" y="17" width="4" height="14" rx="2"/><rect x="20" y="13" width="4" height="22" rx="2"/><rect x="30" y="7" width="4" height="34" rx="2"/><rect x="40" y="15" width="4" height="18" rx="2"/><rect x="50" y="10" width="4" height="28" rx="2"/><rect x="60" y="4" width="4" height="40" rx="2"/><rect x="70" y="12" width="4" height="24" rx="2"/><rect x="80" y="18" width="4" height="12" rx="2"/><rect x="90" y="9" width="4" height="30" rx="2"/><rect x="100" y="2" width="4" height="44" rx="2"/><rect x="110" y="11" width="4" height="26" rx="2"/><rect x="120" y="16" width="4" height="16" rx="2"/><rect x="130" y="6" width="4" height="36" rx="2"/><rect x="140" y="13" width="4" height="22" rx="2"/><rect x="150" y="19" width="4" height="10" rx="2"/><rect x="160" y="10" width="4" height="28" rx="2"/><rect x="170" y="5" width="4" height="38" rx="2"/><rect x="180" y="14" width="4" height="20" rx="2"/><rect x="190" y="17" width="4" height="14" rx="2"/><rect x="200" y="12" width="4" height="24" rx="2"/><rect x="210" y="18" width="4" height="12" rx="2"/><rect x="220" y="20" width="4" height="8" rx="2"/><rect x="230" y="21" width="4" height="6" rx="2"/></g><g class="lines" fill="var(--accent)"><rect x="256" y="8" width="264" height="4" rx="2"/><rect x="256" y="22" width="264" height="4" rx="2"/><rect x="256" y="36" width="168" height="4" rx="2"/></g></svg>
+      <div class="tline say"><div class="ts">00:14</div><div class="tx">Welcome back. Today we are talking about why a written version of a conversation is often more useful than the recording.</div></div>
+      <div class="tline say say2"><div class="ts">00:31</div><div class="tx">You can search it, quote it and skim it. None of that works with audio.</div></div>
+      <p class="t-small t-muted" style="border-top:1px solid var(--line);padding-top:var(--space-4)">Download as .txt or as .srt subtitles with timestamps.</p>
+    </div>
+  </section>
+</div>
+
+<section class="section" aria-labelledby="how-h">
+  <div class="wrap stack" style="gap:var(--space-9)">
+    <h2 id="how-h" class="t-heading">How it works</h2>
+    <div class="grid-3">
+      <div class="card">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+        <h3>Search</h3>
+        <p class="t-muted">Search by podcast name, or jump straight to an episode.</p>
+      </div>
+      <div class="card">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+        <h3>Pick an episode</h3>
+        <p class="t-muted">Select the episode to transcribe. No file to upload.</p>
+      </div>
+      <div class="card">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></svg>
+        <h3>Download</h3>
+        <p class="t-muted">Get the transcript as .txt or .srt.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section alt" id="pricing" aria-labelledby="pricing-h">
+  <div class="wrap stack" style="gap:var(--space-9)">
+    <div class="stack" style="gap:var(--space-2)">
+      <h2 id="pricing-h" class="t-heading">Pay for minutes, not months</h2>
+      <p class="t-muted">There is no subscription.</p>
+    </div>
+    <div class="group">
+      <div class="pack">
+        <div class="pack-text"><div class="pack-figure">300 minutes</div><div class="t-small t-muted">One-time purchase. No subscription.</div></div>
+        <button type="button" class="btn btn-secondary">Buy for $5</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" aria-labelledby="palette-h">
+  <div class="wrap stack" style="gap:var(--space-9)">
+    <div class="stack" style="gap:var(--space-2)">
+      <h2 id="palette-h" class="t-heading">Colour palette</h2>
+      <p class="t-muted">The swatches follow the visitor's theme. Light and dark hex values are listed under each name.</p>
+    </div>
+    <div class="swatches">
+      <div class="swatch"><div class="swatch-chip" style="background:var(--paper)"></div><div class="swatch-meta"><span class="swatch-name">paper</span><span class="swatch-hex">Light #FFFFFF · Dark #0A0F0D</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--surface)"></div><div class="swatch-meta"><span class="swatch-name">surface</span><span class="swatch-hex">Light #F4F6F5 · Dark #121916</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--surface-hover)"></div><div class="swatch-meta"><span class="swatch-name">surface-hover</span><span class="swatch-hex">Light #EAEEEC · Dark #18211D</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--line)"></div><div class="swatch-meta"><span class="swatch-name">line</span><span class="swatch-hex">Light #DCE2DF · Dark #24302B</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--line-strong)"></div><div class="swatch-meta"><span class="swatch-name">line-strong</span><span class="swatch-hex">Light #0E1512 · Dark #5C6F66</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--ink)"></div><div class="swatch-meta"><span class="swatch-name">ink</span><span class="swatch-hex">Light #0E1512 · Dark #EEF2F0</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--muted)"></div><div class="swatch-meta"><span class="swatch-name">muted</span><span class="swatch-hex">Light #56635D · Dark #9AA8A1</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--accent)"></div><div class="swatch-meta"><span class="swatch-name">accent</span><span class="swatch-hex">Light #0A7A55 · Dark #34D399</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--accent-hover)"></div><div class="swatch-meta"><span class="swatch-name">accent-hover</span><span class="swatch-hex">Light #075C40 · Dark #6EE7B7</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--on-accent)"></div><div class="swatch-meta"><span class="swatch-name">on-accent</span><span class="swatch-hex">Light #FFFFFF · Dark #06241A</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--accent-tint)"></div><div class="swatch-meta"><span class="swatch-name">accent-tint</span><span class="swatch-hex">Light #E3F3EC · Dark #0F2A20</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--on-accent-tint)"></div><div class="swatch-meta"><span class="swatch-name">on-accent-tint</span><span class="swatch-hex">Light #064E36 · Dark #A7F3D0</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--warning-tint)"></div><div class="swatch-meta"><span class="swatch-name">warning-tint</span><span class="swatch-hex">Light #FFF1D6 · Dark #2A2008</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--on-warning-tint)"></div><div class="swatch-meta"><span class="swatch-name">on-warning-tint</span><span class="swatch-hex">Light #6B3F00 · Dark #FCD34D</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--danger)"></div><div class="swatch-meta"><span class="swatch-name">danger</span><span class="swatch-hex">Light #B42318 · Dark #F87171</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--danger-tint)"></div><div class="swatch-meta"><span class="swatch-name">danger-tint</span><span class="swatch-hex">Light #FDE7E4 · Dark #2A0F0C</span></div></div>
+      <div class="swatch"><div class="swatch-chip" style="background:var(--on-danger-tint)"></div><div class="swatch-meta"><span class="swatch-name">on-danger-tint</span><span class="swatch-hex">Light #8A1C12 · Dark #FCA5A5</span></div></div>
+    </div>
+  </div>
+</section>
+
+<section class="section alt" id="components" aria-labelledby="comp-h">
+  <div class="wrap stack" style="gap:var(--space-12)">
+    <div class="stack" style="gap:var(--space-2)">
+      <h2 id="comp-h" class="t-heading">Components</h2>
+      <p class="t-muted">Reference sheet. A real screen carries one accent-filled button; this sheet shows each variant once.</p>
+    </div>
+
+    <div class="two">
+      <div class="stack" style="gap:var(--space-9)">
+
+        <div class="group">
+          <div class="t-label">BUTTONS</div>
+          <div class="row">
+            <button type="button" class="btn btn-primary">Transcribe</button>
+            <button type="button" class="btn btn-secondary">Get episodes</button>
+            <button type="button" class="btn btn-tertiary">Manage</button>
+            <button type="button" class="btn btn-secondary" disabled>Transcribing</button>
+            <button type="button" class="btn btn-danger">Cancel</button>
+            <a class="btn btn-nav-cta btn-sm" href="#signup">Sign up</a>
+          </div>
+          <p class="t-small t-muted">One green button per screen. The rest are outline or plain text. The ink-filled "Sign up" is the desktop nav call to action, the one allowed non-accent filled button; in the mobile menu it is the accent button.</p>
+        </div>
+
+        <div class="group">
+          <div class="t-label">TABS AND SEARCH</div>
+          <div class="tabs">
+            <button type="button" class="tab" aria-pressed="true">Podcasts</button>
+            <button type="button" class="tab" aria-pressed="false">Episodes</button>
+          </div>
+          <div class="search">
+            <input class="field" type="text" aria-label="Search podcasts" placeholder="Search by name, or paste a Spotify link">
+            <button type="button" class="btn btn-secondary">Search</button>
+          </div>
+          <a class="show" href="#feed">
+            <span class="cover" aria-hidden="true"></span>
+            <span class="stack" style="flex:1;min-width:0;gap:var(--space-1)"><strong>The Long Listen</strong><span class="t-small t-muted">Example Studio · 214 episodes</span></span>
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4l6 6-6 6"/></svg>
+          </a>
+        </div>
+
+        <div class="group" id="feed">
+          <div class="t-label">FORM</div>
+          <form class="form" onsubmit="return false" novalidate>
+            <div class="form-group">
+              <label for="f-lang">Spoken language <span class="opt">(optional)</span></label>
+              <span class="hint" id="f-lang-hint">Leave on auto unless the result is in the wrong language.</span>
+              <select class="field" id="f-lang" aria-describedby="f-lang-hint"><option>Auto-detect</option><option>English</option><option>Norwegian</option></select>
+            </div>
+            <div class="form-group">
+              <label for="f-key">OpenAI API key <span class="opt">(required)</span></label>
+              <span class="error-msg" id="f-key-err"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="8"/><path d="M10 6v5M10 14h.01"/></svg>OpenAI rejected this key. Check that it is active and has billing set up.</span>
+              <input class="field" id="f-key" type="text" value="sk-proj-…" aria-invalid="true" aria-describedby="f-key-err" autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label for="f-start">Start at minute <span class="opt">(optional)</span></label>
+              <input class="field field-narrow" id="f-start" type="text" inputmode="numeric" value="0">
+            </div>
+            <label class="check"><input type="checkbox"> Email me when it is done</label>
+            <div><button type="submit" class="btn btn-secondary">Save key</button></div>
+          </form>
+        </div>
+
+      </div>
+
+      <div class="stack" style="gap:var(--space-9)">
+
+        <div class="group">
+          <div class="t-label">EPISODE ROWS</div>
+          <div class="episodes">
+            <div class="episode">
+              <div class="episode-text"><div class="episode-title">Why we still take notes</div><div class="episode-meta">2 Oct 2026 · 48 min</div></div>
+              <button type="button" class="btn btn-primary btn-sm">Transcribe</button>
+            </div>
+            <div class="episode">
+              <div class="episode-text"><div class="episode-title">The case for slow interviews</div><div class="episode-meta">25 Sep 2026 · 1 h 12 min</div></div>
+              <a class="view" href="#transcript">View transcript</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="t-label">JOB CARD, TRANSCRIPTION RUNNING</div>
+          <div class="job">
+            <svg class="strip" viewBox="0 0 520 48" role="img" aria-label="Sound wave turning into lines of text"><g class="wave" fill="var(--ink)"><rect x="0" y="20" width="4" height="8" rx="2"/><rect x="10" y="17" width="4" height="14" rx="2"/><rect x="20" y="13" width="4" height="22" rx="2"/><rect x="30" y="7" width="4" height="34" rx="2"/><rect x="40" y="15" width="4" height="18" rx="2"/><rect x="50" y="10" width="4" height="28" rx="2"/><rect x="60" y="4" width="4" height="40" rx="2"/><rect x="70" y="12" width="4" height="24" rx="2"/><rect x="80" y="18" width="4" height="12" rx="2"/><rect x="90" y="9" width="4" height="30" rx="2"/><rect x="100" y="2" width="4" height="44" rx="2"/><rect x="110" y="11" width="4" height="26" rx="2"/><rect x="120" y="16" width="4" height="16" rx="2"/><rect x="130" y="6" width="4" height="36" rx="2"/><rect x="140" y="13" width="4" height="22" rx="2"/><rect x="150" y="19" width="4" height="10" rx="2"/><rect x="160" y="10" width="4" height="28" rx="2"/><rect x="170" y="5" width="4" height="38" rx="2"/><rect x="180" y="14" width="4" height="20" rx="2"/><rect x="190" y="17" width="4" height="14" rx="2"/><rect x="200" y="12" width="4" height="24" rx="2"/><rect x="210" y="18" width="4" height="12" rx="2"/><rect x="220" y="20" width="4" height="8" rx="2"/><rect x="230" y="21" width="4" height="6" rx="2"/></g><g class="lines" fill="var(--accent)"><rect x="256" y="8" width="264" height="4" rx="2"/><rect x="256" y="22" width="264" height="4" rx="2"/><rect x="256" y="36" width="168" height="4" rx="2"/></g></svg>
+            <div class="job-head"><div class="t-heading" aria-live="polite" style="font-size:1.0625rem">Transcribing part 3 of 5</div><div class="t-small t-muted tnum">about 2 min left</div></div>
+            <div class="progress" role="progressbar" aria-valuenow="50" aria-valuemin="0" aria-valuemax="100" aria-label="Transcription progress"><span style="width:50%"></span></div>
+            <div class="job-foot"><div class="t-small t-muted">It keeps going if you close the page.</div><button type="button" class="btn btn-danger btn-sm">Cancel</button></div>
+          </div>
+        </div>
+
+        <div class="group" id="transcript">
+          <div class="t-label">TRANSCRIPT</div>
+          <div class="transcript-box">
+            <div class="transcript-bar">
+              <strong>Transcript</strong>
+              <button type="button" class="btn btn-secondary btn-sm">Copy</button>
+              <button type="button" class="btn btn-secondary btn-sm">.txt</button>
+              <button type="button" class="btn btn-secondary btn-sm">.srt</button>
+            </div>
+            <div class="transcript-body">
+              <div class="tline"><div class="ts">00:14</div><div class="tx">Welcome back. Today we are talking about why a written version of a conversation is often more useful than the recording.</div></div>
+              <div class="tline"><div class="ts">00:31</div><div class="tx">You can search it, quote it and skim it. None of that works with audio.</div></div>
+              <div class="tline"><div class="ts">01:27</div><div class="tx">So the summary was never the useful part. The exact words were.</div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="t-label">ALERTS</div>
+          <div class="alert alert-info"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/></svg><div>Free trial: 46 minutes of audio left, on our key. <a href="#key">Add your own key</a> for unlimited use.</div></div>
+          <div class="alert alert-warning"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l10 18H2L12 3z"/><path d="M12 10v5M12 18h.01"/></svg><div>Your free trial is used up. <a href="#key">Add your own OpenAI API key</a> to keep transcribing.</div></div>
+          <div class="alert alert-danger" role="alert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 16.5h.01"/></svg><div>We could not fetch this feed. Check that the RSS link is public.</div></div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="read" aria-labelledby="read-h">
+  <div class="prose">
+    <article class="article">
+      <h2 id="read-h" class="t-heading">Why a transcript beats a recording</h2>
+      <p>A podcast episode is a long stretch of time. Forty-eight minutes of audio can hold three good ideas and one sentence you will want to quote, and the only way to find any of them again is to listen from the start. A transcript turns that stretch of time into a page. You can search it for a name, skim it for the part about pricing, and copy the exact words into your notes without pausing and rewinding.</p>
+      <p>Podskrift downloads the audio for the episode you pick and runs it through OpenAI Whisper. The work happens on our side, so you can close the tab and come back later; the job keeps going and the result is waiting in your history. Long episodes are split into parts and stitched back together, which is why the progress bar counts parts rather than minutes.</p>
+      <p>You pay for minutes of audio, not for a month of access. New accounts get 60 minutes free on our key. After that you can buy a pack of 300 minutes for $5, or add your own OpenAI API key and pay OpenAI directly at about <a href="#pricing">$0.36 per hour</a> of audio. There is no subscription to cancel and nothing to remember to turn off.</p>
+      <p>The text comes back with timestamps, so every line points to a moment in the recording. Download it as plain text for reading, or as an SRT file when you need subtitles. If the language is detected wrongly, name it before you start and run the episode again; unused trial minutes are returned when you cancel a running job.</p>
+    </article>
+  </div>
+</section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer-cols">
+      <div class="stack" style="gap:var(--space-3)">
+        <a class="brand" href="#top" style="min-height:44px"><svg width="30" height="28" viewBox="0 0 30 28" aria-hidden="true"><g fill="var(--ink)"><rect x="2" y="9" width="3" height="10" rx="1.5"/><rect x="8" y="4" width="3" height="20" rx="1.5"/><rect x="14" y="8" width="3" height="12" rx="1.5"/></g><g fill="var(--accent)"><rect x="20" y="7" width="8" height="3" rx="1.5"/><rect x="20" y="12.5" width="8" height="3" rx="1.5"/><rect x="20" y="18" width="5" height="3" rx="1.5"/></g></svg>podskrift</a>
+        <p class="t-small t-muted">Podcast episodes to text. First 60 minutes free.</p>
+      </div>
+      <ul aria-label="Product">
+        <li><a href="#pricing">Pricing</a></li>
+        <li><a href="#read">Questions</a></li>
+        <li><a href="#feed">Find an RSS feed</a></li>
+      </ul>
+      <ul aria-label="Account">
+        <li><a href="#login">Log in</a></li>
+        <li><a href="#signup">Sign up</a></li>
+        <li><a href="#key">API docs</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+</body>
+</html>
