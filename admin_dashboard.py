@@ -1164,6 +1164,24 @@ def dashboard():
             'cached': False,
             'fetched_at_oslo': format_oslo(datetime.now(timezone.utc)),
         }
+    # Cost estimates are local SQLite only — never fail the page.
+    try:
+        from admin_costs import collect_costs
+        costs = collect_costs(db, chart_days=30)
+    except Exception as exc:  # noqa: BLE001
+        current_app.logger.exception('admin costs panel failed')
+        costs = {
+            'estimate': True,
+            'error': 'Cost estimate unavailable (' + type(exc).__name__ + ')',
+            'windows': {},
+            'chart': {'labels': [], 'openai_usd': [], 'fixed_usd': [],
+                      'total_usd': []},
+            'fixed_breakdown': [],
+            'fixed_monthly_usd': 0,
+            'fixed_daily_usd': 0,
+            'note': '',
+            'as_of_oslo': format_oslo(datetime.now(timezone.utc)),
+        }
     return render_template(
         'admin/dashboard.html',
         kpis=kpis,
@@ -1172,6 +1190,7 @@ def dashboard():
         tasks_table=tasks,
         trial_default_minutes=trial_default // 60,
         stripe_revenue=stripe_revenue,
+        costs=costs,
     )
 
 
