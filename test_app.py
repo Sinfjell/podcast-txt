@@ -5001,6 +5001,104 @@ def test_request_bodies_and_pii_are_never_collected(sentry_events):
     assert options['traces_sample_rate'] == 0.0
 
 
+def _wait_task_error_settled(task_id, timeout_s=5.0, user_id=None,
+                             expect_used=None, expect_paid=None):
+    """Poll until status=error and platform charges are settled (or unmetered).
+
+    Worker threads used to write status='error' before refunding; waiting only
+    on status raced that window. Prefer trial_settled / charged==0, and when
+    ``user_id`` is given also wait for the user balances to match.
+    """
+    import types
+    from models import TranscriptionTask, db
+
+    deadline = time.time() + timeout_s
+    last = None
+    while time.time() < deadline:
+        with A.app.app_context():
+            task = db.session.get(TranscriptionTask, task_id)
+            if task is not None:
+                last = types.SimpleNamespace(
+                    status=task.status,
+                    error_message=task.error_message,
+                    trial_seconds_charged=task.trial_seconds_charged,
+                    paid_seconds_charged=task.paid_seconds_charged,
+                    trial_settled=bool(task.trial_settled),
+                )
+                charged = (last.trial_seconds_charged or 0) + (
+                    last.paid_seconds_charged or 0)
+                # Own-key / zero-reserve rows never set trial_settled; charged==0
+                # is enough. Metered rows must be settled.
+                settled = last.status == 'error' and (
+                    last.trial_settled or charged == 0)
+                if settled and user_id is not None:
+                    if expect_used is not None and _used(user_id) != expect_used:
+                        settled = False
+                    if expect_paid is not None and _paid(user_id) != expect_paid:
+                        settled = False
+                if settled:
+                    return last
+        time.sleep(0.05)
+    assert last is not None, f'task {task_id} never appeared'
+    assert last.status == 'error', f'task {task_id} stuck at {last.status!r}'
+    charged = (last.trial_seconds_charged or 0) + (last.paid_seconds_charged or 0)
+    assert last.trial_settled or charged == 0, (
+        f'task {task_id} error but unsettle: trial={last.trial_seconds_charged} '
+        f'paid={last.paid_seconds_charged} settled={last.trial_settled}')
+    if user_id is not None and expect_used is not None:
+        assert _used(user_id) == expect_used
+    if user_id is not None and expect_paid is not None:
+        assert _paid(user_id) == expect_paid
+    return last
+
+
+def test_fail_task_and_refund_settles_in_same_write(trial_on):
+    """status='error' and settled charges land together — no error-with-charge window."""
+    from models import TranscriptionTask, db
+
+    uid = _make_user('failatomic@test.com', limit=3600, used=0)
+    with A.app.app_context():
+        assert A.trial_reserve(uid, 600)
+        db.session.add(TranscriptionTask(
+            id='fail-atomic', user_id=uid, episode_title='x',
+            status='downloading', trial_seconds_charged=600, paid_seconds_charged=0,
+            trial_settled=False))
+        db.session.commit()
+        refunded = A.fail_task_and_refund('fail-atomic', 'boom')
+        assert refunded == 600
+        task = db.session.get(TranscriptionTask, 'fail-atomic')
+        assert task.status == 'error'
+        assert task.error_message == 'boom'
+        assert task.trial_settled is True
+        assert (task.trial_seconds_charged or 0) == 0
+        assert (task.paid_seconds_charged or 0) == 0
+        # Idempotent: second call / backstop cannot double-credit.
+        assert A.fail_task_and_refund('fail-atomic', 'boom again') == 0
+        assert A.trial_refund_task(task) == 0
+    assert _used(uid) == 0
+
+
+def test_fail_task_and_refund_pro_rata_matches_trial_refund(trial_on):
+    from models import TranscriptionTask, db
+
+    uid = _make_user('failprorata@test.com', limit=3600, used=0)
+    with A.app.app_context():
+        assert A.trial_reserve(uid, 800)
+        db.session.add(TranscriptionTask(
+            id='fail-prorata', user_id=uid, episode_title='x',
+            status='transcribing', chunk_total=4, chunk_index=1,
+            trial_seconds_charged=800, trial_settled=False))
+        db.session.commit()
+        # 2 of 4 chunks in flight → spend 400, refund 400.
+        assert A.fail_task_and_refund('fail-prorata', 'mid') == 400
+        task = db.session.get(TranscriptionTask, 'fail-prorata')
+        assert task.status == 'error'
+        assert task.trial_settled is True
+        assert task.trial_seconds_charged == 400
+        assert A.trial_refund_task(task) == 0
+    assert _used(uid) == 400
+
+
 def test_a_failed_transcription_is_reported_and_still_refunded(trial_on, monkeypatch, sentry_events):
     """The real route and the real worker thread, failing in download.
 
@@ -5021,7 +5119,10 @@ def test_a_failed_transcription_is_reported_and_still_refunded(trial_on, monkeyp
         'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
         'duration_min': '5', 'language': 'no'})
     assert resp.status_code == 200
+    task_id = resp.get_json()['task_id']
 
+    task = _wait_task_error_settled(
+        task_id, user_id=uid, expect_used=0)
     for _ in range(100):
         if sentry_events:
             break
@@ -5029,11 +5130,9 @@ def test_a_failed_transcription_is_reported_and_still_refunded(trial_on, monkeyp
     (event,) = sentry_events
     assert event['exception']['values'][-1]['value'] == 'HTTP error 502'
     assert event['tags']['task.key_source'] == 'trial'
-    assert event['contexts']['task']['id'] == resp.get_json()['task_id']
-    for _ in range(100):
-        if _used(uid) == 0:
-            break
-        time.sleep(0.05)
+    assert event['contexts']['task']['id'] == task_id
+    assert (task.trial_seconds_charged or 0) == 0
+    assert task.trial_settled is True
     assert _used(uid) == 0, 'the failed job kept its trial reservation'
 
 
@@ -5052,21 +5151,18 @@ def test_a_broken_reporter_cannot_cost_a_refund(trial_on, monkeypatch, sentry_ev
     with client.session_transaction() as sess:
         sess['_user_id'] = str(uid)
         sess['_fresh'] = True
-    assert client.post('/start_transcription', data={
+    resp = client.post('/start_transcription', data={
         'audio_url': 'https://example.com/ep.mp3', 'episode_title': 'Ep',
-        'duration_min': '5', 'language': 'no'}).status_code == 200
-    for _ in range(100):
-        if _used(uid) == 0:
-            break
-        time.sleep(0.05)
+        'duration_min': '5', 'language': 'no'})
+    assert resp.status_code == 200
+    _wait_task_error_settled(
+        resp.get_json()['task_id'], user_id=uid, expect_used=0)
     assert _used(uid) == 0, 'a failing reporter cost the user their refund'
 
 
 def test_missing_source_audio_is_clear_refunded_and_not_sentry(
         trial_on, monkeypatch, sentry_events, ph_events):
     """Libsyn 404: specific PostHog reason, clear UI message, full refund, no Sentry."""
-    from models import TranscriptionTask, db
-
     monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
     monkeypatch.setattr(
         A, 'download_audio',
@@ -5087,20 +5183,13 @@ def test_missing_source_audio_is_clear_refunded_and_not_sentry(
     assert resp.status_code == 200
     task_id = resp.get_json()['task_id']
 
-    for _ in range(100):
-        with A.app.app_context():
-            task = db.session.get(TranscriptionTask, task_id)
-            if task and task.status == 'error':
-                break
-        time.sleep(0.05)
-    with A.app.app_context():
-        task = db.session.get(TranscriptionTask, task_id)
-        assert task is not None
-        assert task.status == 'error'
-        assert "no longer serves this episode's audio" in (task.error_message or '')
-        assert 'Try another episode' in (task.error_message or '')
-        assert (task.trial_seconds_charged or 0) == 0
-        assert (task.paid_seconds_charged or 0) == 0
+    task = _wait_task_error_settled(
+        task_id, user_id=uid, expect_used=0, expect_paid=1800)
+    assert "no longer serves this episode's audio" in (task.error_message or '')
+    assert 'Try another episode' in (task.error_message or '')
+    assert (task.trial_seconds_charged or 0) == 0
+    assert (task.paid_seconds_charged or 0) == 0
+    assert task.trial_settled is True
     assert _used(uid) == 0
     assert _paid(uid) == 1800
 
@@ -6277,6 +6366,15 @@ def test_openai_fail_reason_is_coarse():
     nested = E429()
     nested.body = {'error': {'code': 'insufficient_quota'}}
     assert analytics.openai_error_code(nested) == 'insufficient_quota'
+    # BYOK remaps auth/billing; transient rate limits stay rate_limit.
+    assert analytics.openai_fail_reason(
+        E429Quota(), key_source='user') == 'own_key_no_credit'
+    assert analytics.openai_fail_reason(
+        E401(), key_source='user') == 'own_key_invalid'
+    assert analytics.openai_fail_reason(
+        E429Rate(), key_source='user') == 'rate_limit'
+    assert analytics.openai_fail_reason(
+        E429Quota(), key_source='trial') == 'no_billing'
 
 
 def test_privacy_page_mentions_posthog():
@@ -6291,14 +6389,15 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'clearer-missing-episode-audio'
-    assert entries[1]['id'] == 'new-signup-60-min-trial'
-    assert entries[2]['id'] == 'spotify-paste-robustness'
-    assert entries[3]['id'] == 'no-double-charge-restart'
-    assert entries[4]['id'] == 'apple-rss-link-resolve'
-    assert entries[5]['id'] == 'related-episodes-feed-fix'
-    assert entries[6]['id'] == 'stay-logged-in'
-    assert entries[7]['id'] == 'spotify-resolve-clarity'
+    assert entries[0]['id'] == 'own-key-billing-clarity'
+    assert entries[1]['id'] == 'clearer-missing-episode-audio'
+    assert entries[2]['id'] == 'new-signup-60-min-trial'
+    assert entries[3]['id'] == 'spotify-paste-robustness'
+    assert entries[4]['id'] == 'no-double-charge-restart'
+    assert entries[5]['id'] == 'apple-rss-link-resolve'
+    assert entries[6]['id'] == 'related-episodes-feed-fix'
+    assert entries[7]['id'] == 'stay-logged-in'
+    assert entries[8]['id'] == 'spotify-resolve-clarity'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -6970,6 +7069,8 @@ def test_transcription_page_has_no_billing_retry_ui(stripe_on):
     assert 'retryEpisode' in src
     assert 'transcription_no_billing' in src
     assert 'Your OpenAI account has no credit' in src
+    assert 'remove the key in' in src
+    assert 'Settings to use Podskrift free or paid minutes' in src
 
 
 def test_enqueue_stores_source_audio_url_for_retry(monkeypatch, trial_on):
@@ -7053,18 +7154,22 @@ def test_saved_openai_key_never_leaks_into_html_or_analytics(ph_events, monkeypa
     assert key not in settings
 
 
-def test_transcript_failed_distinguishes_rate_limit(ph_events, monkeypatch, trial_on):
+def _openai_exc(status_code, code=None, name='OpenAIError'):
+    """Build an exception that looks like it came from the OpenAI SDK."""
+    cls = type(name, (Exception,), {
+        'status_code': status_code,
+        'code': code,
+    })
+    cls.__module__ = 'openai'
+    return cls(f'{name}:{code or status_code}')
+
+
+def _enqueue_with_openai_boom(monkeypatch, uid, exc):
+    """Run enqueue_transcription with a worker that raises `exc` immediately."""
     import types
-    uid = _make_user('ratefail@test.com', key='sk-' + 't' * 40)
-
-    class RateLimited(Exception):
-        status_code = 429
-        code = 'rate_limit_exceeded'
-
-    RateLimited.__module__ = 'openai'
 
     def boom(*a, **kw):
-        raise RateLimited('rate limited')
+        raise exc
 
     monkeypatch.setattr(
         A.threading, 'Thread',
@@ -7074,21 +7179,168 @@ def test_transcript_failed_distinguishes_rate_limit(ph_events, monkeypatch, tria
     monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
     monkeypatch.setattr(
         A, '_is_openai_error',
-        lambda exc: type(exc).__module__.split('.')[0] == 'openai')
+        lambda e: type(e).__module__.split('.')[0] == 'openai')
 
     with A.app.app_context():
         user = A.db.session.get(A.User, uid)
-        payload, status = A.enqueue_transcription(
+        return A.enqueue_transcription(
             user,
             {'title': 'Ep', 'audio_url': 'https://example.com/ep.mp3',
              'duration_min': 1},
         )
+
+
+def test_transcript_failed_distinguishes_rate_limit(
+        ph_events, monkeypatch, trial_on, sentry_events):
+    """Transient 429 rate_limit_exceeded stays rate_limit (not own_key_*) and
+    still reports to Sentry — not an account-billing outcome."""
+    uid = _make_user('ratefail@test.com', key='sk-' + 't' * 40)
+    payload, status = _enqueue_with_openai_boom(
+        monkeypatch, uid,
+        _openai_exc(429, 'rate_limit_exceeded', 'RateLimitError'))
     assert status == 200, payload
     failed = [e for e in ph_events.events
               if e['event'] == 'transcript_failed' and e['distinct_id'] == str(uid)]
     assert len(failed) == 1, [(e['event'], e.get('properties')) for e in ph_events.events]
     assert failed[0]['properties']['reason'] == 'rate_limit'
     assert 'sk-' not in str(failed[0])
+    assert len(sentry_events) == 1
+    assert sentry_events[0]['tags']['task.key_source'] == 'user'
+    assert sentry_events[0]['tags']['openai.status'] == '429'
+
+
+def test_byok_insufficient_quota_is_clear_refunded_and_not_sentry(
+        trial_on, monkeypatch, sentry_events, ph_events):
+    """PODSKRIFT-3: user's empty OpenAI account is not our outage."""
+    from models import TranscriptionTask, db
+
+    uid = _make_user('byokquota@test.com', key='sk-' + 'q' * 40, limit=3600)
+    payload, status = _enqueue_with_openai_boom(
+        monkeypatch, uid,
+        _openai_exc(429, 'insufficient_quota', 'RateLimitError'))
+    assert status == 200, payload
+    task_id = payload['task_id']
+
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        assert task is not None
+        assert task.status == 'error'
+        err = task.error_message or ''
+        assert 'no credit' in err.lower()
+        assert 'platform.openai.com/account/billing' in err
+        assert 'Settings' in err
+        assert 'free or paid minutes' in err
+        assert 'insufficient_quota' not in err
+        # Own-key jobs are unmetered; reservation must stay released / unused.
+        assert task.trial_seconds_charged is None
+        assert (task.paid_seconds_charged or 0) == 0
+    assert _used(uid) == 0
+
+    failed = [e for e in ph_events.events
+              if e['event'] == 'transcript_failed' and e['distinct_id'] == str(uid)]
+    assert len(failed) == 1
+    assert failed[0]['properties']['reason'] == 'own_key_no_credit'
+    assert failed[0]['properties']['key_source'] == 'user'
+    assert sentry_events == [], 'BYOK quota must not fire the Sentry alert'
+
+
+def test_byok_invalid_key_is_not_sentry(trial_on, monkeypatch, sentry_events, ph_events):
+    uid = _make_user('byokbadkey@test.com', key='sk-' + 'i' * 40, limit=3600)
+    payload, status = _enqueue_with_openai_boom(
+        monkeypatch, uid,
+        _openai_exc(401, 'invalid_api_key', 'AuthenticationError'))
+    assert status == 200, payload
+    failed = [e for e in ph_events.events
+              if e['event'] == 'transcript_failed' and e['distinct_id'] == str(uid)]
+    assert len(failed) == 1
+    assert failed[0]['properties']['reason'] == 'own_key_invalid'
+    assert sentry_events == []
+    assert _used(uid) == 0
+    with A.app.app_context():
+        task = A.db.session.get(A.TranscriptionTask, payload['task_id'])
+        assert 'rejected' in (task.error_message or '').lower()
+        assert 'Settings' in (task.error_message or '')
+
+
+def test_platform_key_insufficient_quota_still_goes_to_sentry(
+        trial_on, monkeypatch, sentry_events, ph_events):
+    """Our key out of credit is a real outage — must alert."""
+    from models import TranscriptionTask, db
+
+    uid = _make_user('ourquota@test.com', limit=3600, used=0)
+    payload, status = _enqueue_with_openai_boom(
+        monkeypatch, uid,
+        _openai_exc(429, 'insufficient_quota', 'RateLimitError'))
+    assert status == 200, payload
+    task_id = payload['task_id']
+
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, task_id)
+        assert task.status == 'error'
+        # Reservation released (pro-rata refund of unsent work).
+        assert (task.trial_seconds_charged or 0) == 0
+    assert _used(uid) == 0
+
+    failed = [e for e in ph_events.events
+              if e['event'] == 'transcript_failed' and e['distinct_id'] == str(uid)]
+    assert len(failed) == 1
+    assert failed[0]['properties']['reason'] == 'no_billing'
+    assert failed[0]['properties']['key_source'] == 'trial'
+    assert len(sentry_events) == 1
+    assert sentry_events[0]['tags']['task.key_source'] == 'trial'
+    assert sentry_events[0]['tags']['openai.status'] == '429'
+
+
+def test_byok_quota_message_hints_remove_key():
+    exc = _openai_exc(429, 'insufficient_quota')
+    msg = A.describe_openai_error(exc, key_source='user')
+    assert 'no credit' in msg.lower()
+    assert 'Settings' in msg
+    assert 'free or paid minutes' in msg
+    # Platform-key copy must not tell the user to remove a key they do not have.
+    trial_msg = A.describe_openai_error(exc, key_source='trial')
+    assert 'Settings' not in trial_msg
+
+
+def test_whisper_does_not_retry_quota_or_auth_errors(tmp_path, monkeypatch):
+    """Auth/billing 4xx must fail immediately; only timeouts/connection retry."""
+    attempts = {'n': 0}
+
+    class FakeClient:
+        class audio:
+            class transcriptions:
+                @staticmethod
+                def create(**kw):
+                    attempts['n'] += 1
+                    raise _openai_exc(429, 'insufficient_quota', 'RateLimitError')
+
+    chunk = tmp_path / 'c0.mp3'
+    chunk.write_bytes(b'\0' * 16)
+    monkeypatch.setattr(A.time, 'sleep', lambda *_: None)
+
+    with pytest.raises(Exception) as caught:
+        A._whisper_transcribe_chunk(
+            FakeClient(), str(chunk), 'no', chunk_label='chunk 1/1')
+    assert getattr(caught.value, 'code', None) == 'insufficient_quota'
+    assert attempts['n'] == 1, 'quota errors must not burn the retry budget'
+
+    attempts['n'] = 0
+
+    class RateClient:
+        class audio:
+            class transcriptions:
+                @staticmethod
+                def create(**kw):
+                    attempts['n'] += 1
+                    raise _openai_exc(429, 'rate_limit_exceeded', 'RateLimitError')
+
+    with pytest.raises(Exception) as caught:
+        A._whisper_transcribe_chunk(
+            RateClient(), str(chunk), 'no', chunk_label='chunk 1/1')
+    assert getattr(caught.value, 'code', None) == 'rate_limit_exceeded'
+    # Existing behaviour: rate_limit_exceeded is not retried in the chunk loop
+    # (only APITimeoutError / APIConnectionError are). Keep that contract.
+    assert attempts['n'] == 1
 
 
 def test_own_key_user_gets_null_trial_badge(trial_on):
