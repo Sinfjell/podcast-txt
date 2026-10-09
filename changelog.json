@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "spotify-paste-robustness",
+      "date": "2026-10-09",
+      "title": "Spotify pastes are more forgiving",
+      "summary": "Embed iframe code, glued junk after the episode id, and shows that only label themselves “Podcast” now resolve correctly. Transient Spotify lookups are retried once with a clearer error when something still fails."
+    },
+    {
       "id": "no-double-charge-restart",
       "date": "2026-10-08",
       "title": "Restarting an episode won’t use free minutes twice",
