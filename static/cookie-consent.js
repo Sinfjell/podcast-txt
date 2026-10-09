@@ -21,7 +21,7 @@
 
     function readCookie(name) {
         try {
-            var parts = (';cookie || '').split(';');
+            var parts = (document.cookie || '').split(';');
             for (var i = 0; i < parts.length; i++) {
                 var p = parts[i].trim();
                 if (p.indexOf(name + '=') === 0) {
