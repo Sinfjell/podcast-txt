@@ -89,8 +89,19 @@
 <!-- Result banner -->
 <div id="resultBanner" class="hidden">
     <div class="alert alert-success" style="flex-direction: column; align-items: flex-start;">
-        <strong>Transcription complete</strong>
+        <strong id="completionTitle">Transcription complete</strong>
         <span id="completionInfo" class="text-sm" style="margin-top: 4px; opacity: 0.8;"></span>
+    </div>
+</div>
+
+<!-- Partial free preview: buy / finish full episode -->
+<div id="partialPreviewCard" class="hidden card mb-2" style="margin-top: 16px; border-color: var(--accent-border);">
+    <div class="card-body">
+        <p style="font-weight: 700; font-size: 15px; margin: 0 0 6px;" id="partialPreviewTitle">
+            Free preview
+        </p>
+        <p class="text-sm text-muted" id="partialPreviewNote" style="margin: 0 0 12px; line-height: 1.55;"></p>
+        <div style="display: flex; flex-wrap: wrap; gap: 8px;" id="partialPreviewActions"></div>
     </div>
 </div>
 
@@ -211,6 +222,7 @@
     var retryCount = 0;
     var maxRetries = 5;
     var transcriptText = '';
+    var partialNote = '';
     var PHASE_ORDER = ['downloading', 'splitting', 'transcribing', 'completed'];
     var STRIPE_BUY = {{ stripe_buy_enabled|tojson }};
     var BUY_LABEL = {{ credit_pack_label|tojson }};
@@ -251,7 +263,7 @@
         node.style.display = visible ? '' : 'none';
     }
 
-    function postBuyForm(source) {
+    function postBuyForm(source, returnTo) {
         var form = document.createElement('form');
         form.method = 'POST';
         form.action = BUY_URL;
@@ -267,8 +279,85 @@
         var sid = '';
         try { if (window.posthog) sid = posthog.get_session_id() || ''; } catch (e) { sid = ''; }
         hidden('ph_sid', sid);
+        if (returnTo) hidden('return_to', returnTo);
         document.body.appendChild(form);
         form.submit();
+    }
+
+    function renderPartialPreview(d) {
+        var card = el('partialPreviewCard');
+        var actions = el('partialPreviewActions');
+        if (!card || !actions) return;
+        el('partialPreviewTitle').textContent =
+            'Free preview: first ' + d.partial_minutes + ' minutes of ' + d.episode_minutes;
+        el('partialPreviewNote').textContent =
+            'This transcript covers the opening of the episode. Buy minutes to finish the rest on paid credit.';
+        while (actions.firstChild) actions.removeChild(actions.firstChild);
+
+        if (d.can_finish_full && d.finish && d.finish.audio_url) {
+            var finishBtn = document.createElement('button');
+            finishBtn.type = 'button';
+            finishBtn.className = 'btn btn-sm btn-primary';
+            finishBtn.textContent = 'Transcribe the full episode';
+            finishBtn.addEventListener('click', function() {
+                phCapture('finish_episode_clicked', {
+                    task_id: taskId,
+                    partial_minutes: d.partial_minutes,
+                    episode_minutes: d.episode_minutes,
+                    paid_remaining_min: d.paid_remaining_min,
+                });
+                finishFullEpisode(d.finish, d);
+            });
+            actions.appendChild(finishBtn);
+        } else if (d.buy_available && STRIPE_BUY) {
+            var buyBtn = document.createElement('button');
+            buyBtn.type = 'button';
+            buyBtn.className = 'btn btn-sm btn-primary';
+            buyBtn.textContent = 'Buy minutes to finish this episode';
+            buyBtn.addEventListener('click', function() {
+                phCapture('finish_episode_clicked', {
+                    task_id: taskId,
+                    partial_minutes: d.partial_minutes,
+                    episode_minutes: d.episode_minutes,
+                    action: 'buy',
+                });
+                postBuyForm('partial_preview', window.location.pathname);
+            });
+            actions.appendChild(buyBtn);
+        }
+
+        var keyLink = document.createElement('a');
+        keyLink.href = SETTINGS_OPENAI;
+        keyLink.className = 'btn btn-sm btn-ghost';
+        keyLink.textContent = 'Add OpenAI key →';
+        actions.appendChild(keyLink);
+        show(card, true);
+    }
+
+    function finishFullEpisode(finish, d) {
+        if (!finish || !finish.audio_url) return;
+        var form = new FormData();
+        form.append('audio_url', finish.audio_url);
+        form.append('episode_title', finish.episode_title || 'Episode');
+        form.append('podcast_name', finish.podcast_name || '');
+        form.append('artwork', finish.artwork || '');
+        form.append('published', finish.published || '');
+        if (finish.rss_url) form.append('rss_url', finish.rss_url);
+        if (finish.duration_min) form.append('duration_min', finish.duration_min);
+        if (finish.language) form.append('language', finish.language);
+        fetch(START_URL, { method: 'POST', body: form })
+            .then(function(r) { return r.json().then(function(data) { return { status: r.status, data: data }; }); })
+            .then(function(res) {
+                if (res.data && res.data.task_id) {
+                    // Server emits transcript_started for the full run.
+                    window.location.href = '/transcription/' + res.data.task_id;
+                    return;
+                }
+                alert((res.data && res.data.error) || 'Could not start the full episode.');
+            })
+            .catch(function() {
+                alert('Could not start the full episode. Try again.');
+            });
     }
 
     function renderMinutesActions(d) {
@@ -475,11 +564,19 @@
             show(el('resultBanner'), true);
             setSteps('completed');
             transcriptText = d.transcript_text || '';
+            partialNote = d.partial_note || '';
             el('transcriptPane').textContent = transcriptText;
             var bits = [];
             if (d.language) bits.push('Language: ' + d.language);
             if (d.actual_transcription_time) bits.push('Took ' + d.actual_transcription_time);
             el('completionInfo').textContent = bits.join(' · ');
+            if (d.partial) {
+                el('completionTitle').textContent = 'Free preview ready';
+                renderPartialPreview(d);
+            } else {
+                el('completionTitle').textContent = 'Transcription complete';
+                show(el('partialPreviewCard'), false);
+            }
             if (d.download_txt) {
                 el('downloadTxt').href = d.download_txt;
                 show(el('downloadTxt'), true);
@@ -587,7 +684,11 @@
 
     window.copyTranscript = function() {
         var btn = el('copyBtn');
-        navigator.clipboard.writeText(transcriptText).then(function() {
+        var text = transcriptText || '';
+        if (partialNote) {
+            text = text ? (partialNote + '\n\n' + text) : partialNote;
+        }
+        navigator.clipboard.writeText(text).then(function() {
             btn.textContent = 'Copied!';
             setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
             phCapture('transcript_copied', { task_id: taskId });

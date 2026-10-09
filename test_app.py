@@ -1671,9 +1671,10 @@ def test_reconcile_tops_up_an_underestimate(trial_on):
     assert _used(uid) == 900
 
 
-def test_reconcile_refuses_an_episode_that_does_not_fit(trial_on):
-    """The feed said 10 minutes, the file is 40. Refusing here is free;
-    refusing after the first chunk is not."""
+def test_reconcile_trims_when_episode_does_not_fit_trial(trial_on):
+    """The feed said 10 minutes, the file is 40. Trial-only overruns return
+    'trim' so the worker shortens the file to the reservation instead of
+    failing (and never call Whisper on the unreserved remainder)."""
     from models import db, TranscriptionTask
     uid = _make_user('recon3@test.com', limit=900)
     with A.app.app_context():
@@ -1682,14 +1683,16 @@ def test_reconcile_refuses_an_episode_that_does_not_fit(trial_on):
                                          episode_title='x', status='transcribing',
                                          trial_seconds_charged=600))
         db.session.commit()
-        with pytest.raises(A.TrialExhausted):
-            A.trial_reconcile_task('trial-recon-3', 2400)
+        assert A.trial_reconcile_task('trial-recon-3', 2400) == 'trim'
+        task = db.session.get(TranscriptionTask, 'trial-recon-3')
         # Still holding only the original reservation, nothing extra taken.
-        assert db.session.get(TranscriptionTask, 'trial-recon-3').trial_seconds_charged == 600
+        assert task.trial_seconds_charged == 600
+        assert A.task_is_partial(task)
     assert _used(uid) == 600
 
 
-def test_reconcile_refuses_an_over_long_episode(trial_on, monkeypatch):
+def test_reconcile_trims_an_over_long_episode_without_paid(trial_on, monkeypatch):
+    """Real audio over the free per-episode max, no paid cover → trim preview."""
     from models import db, TranscriptionTask
     monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 1800)
     uid = _make_user('recon4@test.com', limit=10 ** 6)
@@ -1699,8 +1702,10 @@ def test_reconcile_refuses_an_over_long_episode(trial_on, monkeypatch):
                                          episode_title='x', status='transcribing',
                                          trial_seconds_charged=600))
         db.session.commit()
-        with pytest.raises(A.TrialExhausted):
-            A.trial_reconcile_task('trial-recon-4', 3600)
+        assert A.trial_reconcile_task('trial-recon-4', 3600) == 'trim'
+        task = db.session.get(TranscriptionTask, 'trial-recon-4')
+        assert task.trial_seconds_charged == 600
+        assert A.task_is_partial(task)
 
 
 def test_own_key_task_is_never_metered(trial_on):
@@ -1716,13 +1721,12 @@ def test_own_key_task_is_never_metered(trial_on):
     assert _used(uid) == 0
 
 
-def test_billing_ignores_the_duration_the_client_claimed(trial_on, monkeypatch, tmp_path):
-    """The hole the first cut of this feature shipped with.
+def test_billing_trims_when_client_under_claims_duration(trial_on, monkeypatch, tmp_path):
+    """Client-claimed short duration must not let Whisper see the full file.
 
-    Both the reservation and task.audio_duration came from duration_min, a
-    form field on the direct path and itunes:duration on the RSS path -- both
-    client-supplied. Reconcile therefore compared a number to itself and was a
-    guaranteed no-op: claim one minute, transcribe four hours on our key.
+    Both the reservation and task.audio_duration came from duration_min — both
+    attacker-controlled. We now trim to the reservation (and mark a partial
+    preview) instead of failing, so claim-one-minute cannot bill four hours.
     """
     from models import db, TranscriptionTask
 
@@ -1730,8 +1734,20 @@ def test_billing_ignores_the_duration_the_client_claimed(trial_on, monkeypatch, 
     audio = tmp_path / 'ep.mp3'
     audio.write_bytes(b'\0' * 1024)
     calls = []
-    # The file really is four hours long; the client said one minute.
-    monkeypatch.setattr(A, 'probe_audio_duration', lambda f: 14400.0)
+    probes = {'n': 0}
+    trimmed = []
+
+    def probe(f):
+        probes['n'] += 1
+        # First probe sees the real length; after trim, the reserved length.
+        return 14400.0 if probes['n'] == 1 else 60.0
+
+    def fake_trim(path, seconds):
+        trimmed.append(seconds)
+        return path
+
+    monkeypatch.setattr(A, 'probe_audio_duration', probe)
+    monkeypatch.setattr(A, 'trim_audio_file', fake_trim)
     monkeypatch.setattr(A, 'prepare_audio_for_whisper', lambda f, **kw: [str(audio)])
     monkeypatch.setattr(A, '_transcribe_chunks',
                         lambda *a, **kw: calls.append(a) or ('text', []))
@@ -1742,10 +1758,15 @@ def test_billing_ignores_the_duration_the_client_claimed(trial_on, monkeypatch, 
             id='trial-liar', user_id=uid, episode_title='x', status='downloading',
             audio_duration=60.0, trial_seconds_charged=60))
         db.session.commit()
-        with pytest.raises(A.TrialExhausted):
-            A.transcribe_audio(str(audio), 'trial-liar', object(), language='no')
+        A.transcribe_audio(str(audio), 'trial-liar', object(), language='no')
+        task = db.session.get(TranscriptionTask, 'trial-liar')
+        assert task.status == 'completed'
+        assert A.task_is_partial(task)
+        assert task.trial_seconds_charged == 60
 
-    assert calls == [], 'four hours of audio was billed as one claimed minute'
+    assert trimmed == [60], 'audio must be cut to the reserved minute'
+    assert len(calls) == 1, 'Whisper still runs on the trimmed minute'
+    assert _used(uid) == 60
 
 
 def test_billing_uses_the_size_estimate_when_ffprobe_fails(trial_on, monkeypatch, tmp_path):
@@ -6389,15 +6410,16 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'own-key-billing-clarity'
-    assert entries[1]['id'] == 'clearer-missing-episode-audio'
-    assert entries[2]['id'] == 'new-signup-60-min-trial'
-    assert entries[3]['id'] == 'spotify-paste-robustness'
-    assert entries[4]['id'] == 'no-double-charge-restart'
-    assert entries[5]['id'] == 'apple-rss-link-resolve'
-    assert entries[6]['id'] == 'related-episodes-feed-fix'
-    assert entries[7]['id'] == 'stay-logged-in'
-    assert entries[8]['id'] == 'spotify-resolve-clarity'
+    assert entries[0]['id'] == 'partial-trial-preview'
+    assert entries[1]['id'] == 'own-key-billing-clarity'
+    assert entries[2]['id'] == 'clearer-missing-episode-audio'
+    assert entries[3]['id'] == 'new-signup-60-min-trial'
+    assert entries[4]['id'] == 'spotify-paste-robustness'
+    assert entries[5]['id'] == 'no-double-charge-restart'
+    assert entries[6]['id'] == 'apple-rss-link-resolve'
+    assert entries[7]['id'] == 'related-episodes-feed-fix'
+    assert entries[8]['id'] == 'stay-logged-in'
+    assert entries[9]['id'] == 'spotify-resolve-clarity'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -6528,15 +6550,19 @@ def test_reconcile_names_the_cap_that_refused(trial_on, monkeypatch):
                                          episode_title='x', status='transcribing',
                                          trial_seconds_charged=600))
         db.session.commit()
-        with pytest.raises(A.TrialExhausted) as short:
-            A.trial_reconcile_task('trial-recon-scope', 2400)
-        assert short.value.scope == 'user'
+        # Under the free per-episode max: trim to reservation (partial preview).
+        assert A.trial_reconcile_task('trial-recon-scope', 2400) == 'trim'
+        assert A.task_is_partial(db.session.get(TranscriptionTask, 'trial-recon-scope'))
+
+        # Clear partial marker so the over-max path is exercised alone.
+        task = db.session.get(TranscriptionTask, 'trial-recon-scope')
+        task.partial_meta = None
+        db.session.commit()
 
         monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 1800)
-        with pytest.raises(A.TrialExhausted) as too_long:
-            A.trial_reconcile_task('trial-recon-scope', 3600)
-        assert too_long.value.scope == 'episode_length'
-    assert _used(uid) == 600  # neither refusal took anything extra
+        assert A.trial_reconcile_task('trial-recon-scope', 3600) == 'trim'
+        assert A.task_is_partial(db.session.get(TranscriptionTask, 'trial-recon-scope'))
+    assert _used(uid) == 600  # neither path took anything extra
 
 
 def test_worker_reports_trial_exhausted_at_reconcile(ph_events, monkeypatch, trial_on):
@@ -6616,8 +6642,8 @@ def test_search_emits_podcast_searched_with_query_and_input_type(monkeypatch):
         assert f"'{kind}'" in body
 
 
-def test_reconcile_names_the_global_cap(trial_on, monkeypatch):
-    """The account has room; the service does not."""
+def test_reconcile_trims_when_global_cap_blocks_top_up(trial_on, monkeypatch):
+    """The account has room; the service does not — keep the reservation and trim."""
     from models import db, TranscriptionTask
     uid = _make_user('phrecon-global@test.com', limit=10 ** 6)
     with A.app.app_context():
@@ -6627,9 +6653,10 @@ def test_reconcile_names_the_global_cap(trial_on, monkeypatch):
                                          trial_seconds_charged=600))
         db.session.commit()
         monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', A.trial_global_used_seconds())
-        with pytest.raises(A.TrialExhausted) as refused:
-            A.trial_reconcile_task('trial-recon-global', 1200)
-        assert refused.value.scope == 'global'
+        assert A.trial_reconcile_task('trial-recon-global', 1200) == 'trim'
+        task = db.session.get(TranscriptionTask, 'trial-recon-global')
+        assert task.trial_seconds_charged == 600
+        assert A.task_is_partial(task)
     assert _used(uid) == 600
 
 
@@ -6666,8 +6693,14 @@ def test_episode_needs_own_key_badge_logic(trial_on):
     assert A.episode_needs_own_key(None, 60) is False
     assert A.episode_needs_own_key(95, None) is False
     assert A.episode_needs_own_key(45, 60) is False
-    assert A.episode_needs_own_key(95, 60) is True
+    # Longer than remaining free trial with no paid → free preview, not a badge.
+    assert A.episode_needs_own_key(95, 60) is False
+    # Over free per-episode max with plenty of remaining trial → still needs pack/key.
     assert A.episode_needs_own_key(200, 300) is True
+    # Tiny remainder cannot start a useful preview.
+    assert A.episode_needs_own_key(95, 3) is True
+    # Paid balance that does not cover the episode still needs a pack/key.
+    assert A.episode_needs_own_key(95, 60, paid_minutes=10) is True
 
 
 def test_anonymous_pending_transcription_goes_to_register(monkeypatch, trial_on):
@@ -7433,23 +7466,31 @@ def test_health_reports_trial_available_without_numbers(trial_on, monkeypatch):
     assert A.trial_global_pool_available() is False
 
 
-def test_new_user_long_episode_hits_remaining_paywall_not_max_cap(
+def test_new_user_long_episode_starts_partial_preview_not_max_cap(
         monkeypatch, trial_on):
     """A 90-min episode for a 60-min new user is under TRIAL_MAX_EPISODE (180)
-    but over remaining trial — start returns the buy/paywall path (402)."""
+    but over remaining trial — start a partial preview of the first 60 min."""
+    from models import db, TranscriptionTask
     monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
     monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 10 ** 7)
-    uid = _make_user('sixty-paywall@test.com', limit=60 * 60, used=0)
+    uid = _make_user('sixty-partial@test.com', limit=60 * 60, used=0)
     resp = _post_start(monkeypatch, uid, {
         'audio_url': 'https://example.com/ep.mp3',
         'episode_title': 'Long one',
         'duration_min': '90',
     })
-    assert resp.status_code == 402
+    assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
-    assert 'free minutes you have left' in body['error']
-    assert 'too long for the free trial' not in body['error']
-    assert body.get('paywall_reason') in ('low_balance', 'trial_exhausted')
+    assert 'task_id' in body
+    assert _used(uid) == 60 * 60
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, body['task_id'])
+        assert A.task_is_partial(task)
+        assert task.trial_seconds_charged == 60 * 60
+        assert (task.paid_seconds_charged or 0) == 0
+        meta = A.task_partial_meta(task)
+        assert meta['partial_seconds'] == 60 * 60
+        assert meta['episode_seconds'] == 90 * 60
 
 
 # --------------------------------------------------------------------------
@@ -9860,3 +9901,428 @@ def test_derive_input_origin_from_rss_and_apple():
     assert A.derive_input_origin(
         {'input_origin': 'itunes_episode'}, rss_url=None) == 'itunes_episode'
     assert A.derive_input_origin({}, rss_url=None) == 'audio'
+
+
+# --------------------------------------------------------------------------
+# Partial free-trial preview (long episode → first N minutes)
+# --------------------------------------------------------------------------
+
+def test_partial_preview_trims_and_charges_remaining_trial(
+        monkeypatch, trial_on, tmp_path, ph_events):
+    """Enqueue reserves N, worker trims to N, Whisper sees only the preview."""
+    import shutil
+    import subprocess
+    import types
+    from models import db, TranscriptionTask
+
+    uid = _make_user('partial-trim@test.com', limit=60 * 60, used=0)
+    audio = tmp_path / 'long.mp3'
+    subprocess.run(
+        ['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=f=440:d=3',
+         '-ac', '1', str(audio)],
+        check=True, capture_output=True)
+
+    probes = {'n': 0}
+    trimmed = []
+
+    def probe(f):
+        probes['n'] += 1
+        return 90 * 60.0 if probes['n'] == 1 else 60 * 60.0
+
+    def fake_trim(path, seconds):
+        trimmed.append(int(seconds))
+        return path
+
+    def fake_download(url, path, task_id):
+        shutil.copy(str(audio), path)
+
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
+    monkeypatch.setattr(A, 'probe_audio_duration', probe)
+    monkeypatch.setattr(A, 'trim_audio_file', fake_trim)
+    monkeypatch.setattr(A, 'prepare_audio_for_whisper',
+                        lambda f, **kw: [str(audio)])
+    monkeypatch.setattr(A, '_transcribe_chunks',
+                        lambda *a, **kw: ('preview text', []))
+    monkeypatch.setattr(A, 'download_audio', fake_download)
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: target and target()))
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+
+    with A.app.app_context():
+        user = db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user,
+            {'title': 'Long', 'audio_url': 'https://example.com/long.mp3',
+             'duration_min': 90},
+            source='web')
+    assert status == 200, payload
+    assert _used(uid) == 60 * 60
+    assert trimmed == [60 * 60]
+
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, payload['task_id'])
+        assert task.status == 'completed', task.error_message
+        assert A.task_is_partial(task)
+        assert task.transcript_text == 'preview text'
+        assert task.trial_seconds_charged == 60 * 60
+
+    started = [e for e in ph_events.events if e['event'] == 'transcript_started']
+    done = [e for e in ph_events.events if e['event'] == 'transcript_completed']
+    assert started and started[0]['properties'].get('partial') is True
+    assert started[0]['properties']['partial_minutes'] == 60
+    assert started[0]['properties']['episode_minutes'] == 90
+    assert done and done[0]['properties'].get('partial') is True
+
+
+def test_partial_preview_not_used_when_paid_covers_full(monkeypatch, trial_on):
+    uid = _make_user('partial-paid@test.com', limit=60 * 60, used=0)
+    _set_paid(uid, 90 * 60)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/paid-full.mp3',
+        'episode_title': 'Covered',
+        'duration_min': '90',
+    })
+    assert resp.status_code == 200, resp.get_json()
+    from models import db, TranscriptionTask
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, resp.get_json()['task_id'])
+        assert not A.task_is_partial(task)
+        # Trial first, then paid for the remainder.
+        assert task.trial_seconds_charged == 60 * 60
+        assert task.paid_seconds_charged == 30 * 60
+
+
+def test_partial_preview_not_used_for_own_key(monkeypatch, trial_on):
+    uid = _make_user('partial-byok@test.com', key='sk-' + 'e' * 40, limit=60 * 60)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/byok.mp3',
+        'episode_title': 'Own key',
+        'duration_min': '90',
+    })
+    assert resp.status_code == 200, resp.get_json()
+    from models import db, TranscriptionTask
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, resp.get_json()['task_id'])
+        assert not A.task_is_partial(task)
+        assert task.trial_seconds_charged is None
+    assert _used(uid) == 0
+
+
+def test_partial_preview_respects_global_pool(monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
+    # Seal the global pool at whatever the shared test DB has already used.
+    with A.app.app_context():
+        monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', A.trial_global_used_seconds())
+    uid_b = _make_user('partial-global-b@test.com', limit=60 * 60, used=0)
+    resp = _post_start(monkeypatch, uid_b, {
+        'audio_url': 'https://example.com/global-block.mp3',
+        'episode_title': 'Blocked',
+        'duration_min': '90',
+    })
+    assert resp.status_code == 402
+    assert resp.get_json().get('paywall_reason') == 'global_cap'
+    assert _used(uid_b) == 0
+
+
+def test_completed_partial_allows_full_rerun_after_purchase(monkeypatch, trial_on):
+    """Duplicate guard must not block upgrading a completed partial to full."""
+    import threading as _t
+    from models import db, TranscriptionTask
+
+    monkeypatch.setattr(A, 'MAX_CONCURRENT_TRANSCRIPTIONS', 2)
+    monkeypatch.setattr(A, '_transcription_slots', _t.BoundedSemaphore(2))
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
+
+    uid = _make_user('partial-upgrade@test.com', limit=60 * 60, used=0)
+    audio = 'https://example.com/upgrade-ep.mp3'
+    first = _post_start(monkeypatch, uid, {
+        'audio_url': audio,
+        'episode_title': 'Preview',
+        'duration_min': '90',
+    })
+    assert first.status_code == 200, first.get_json()
+    partial_id = first.get_json()['task_id']
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, partial_id)
+        task.status = 'completed'
+        task.phase = 'completed'
+        task.transcript_text = 'preview'
+        task.trial_settled = True
+        db.session.commit()
+        assert A.task_is_partial(task)
+
+    _set_paid(uid, 90 * 60)
+    second = _post_start(monkeypatch, uid, {
+        'audio_url': audio,
+        'episode_title': 'Full',
+        'duration_min': '90',
+    })
+    assert second.status_code == 200, second.get_json()
+    body = second.get_json()
+    assert body.get('existing') is not True
+    assert body['task_id'] != partial_id
+    with A.app.app_context():
+        full = db.session.get(TranscriptionTask, body['task_id'])
+        assert not A.task_is_partial(full)
+        # Trial already spent on the preview; full run uses paid.
+        assert (full.trial_seconds_charged or 0) == 0
+        assert full.paid_seconds_charged == 90 * 60
+
+
+def test_partial_download_and_status_include_preview_note(monkeypatch, trial_on):
+    from models import db, TranscriptionTask
+
+    uid = _make_user('partial-dl@test.com', limit=60 * 60)
+    with A.app.app_context():
+        task = TranscriptionTask(
+            id='partial-dl-1',
+            user_id=uid,
+            episode_title='Preview Ep',
+            status='completed',
+            phase='completed',
+            transcript_text='Hello world',
+            segments_json='[{"start":0,"end":1,"text":"Hello world"}]',
+            source_audio_url='https://example.com/p.mp3',
+            trial_seconds_charged=60 * 60,
+            partial_meta=A.encode_partial_task_meta(60 * 60, 90 * 60),
+        )
+        db.session.add(task)
+        db.session.commit()
+
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+
+    status = client.get('/status/partial-dl-1').get_json()
+    assert status['partial'] is True
+    assert status['partial_minutes'] == 60
+    assert status['episode_minutes'] == 90
+    assert 'first 60 minutes of 90' in status['partial_note']
+    assert status['finish']['audio_url'] == 'https://example.com/p.mp3'
+    assert 'error' not in status
+    assert status.get('error_message') is None
+
+    txt = client.get('/download/partial-dl-1/txt')
+    assert txt.status_code == 200
+    body = txt.data.decode()
+    assert body.startswith('Free preview: first 60 minutes of 90.')
+    assert 'Hello world' in body
+
+    srt = client.get('/download/partial-dl-1/srt')
+    assert srt.status_code == 200
+    assert 'Free preview: first 60 minutes of 90.' in srt.data.decode()
+
+
+def test_partial_preview_refund_on_failure_settles_once(
+        monkeypatch, trial_on, ph_events):
+    """Failed partials go through fail_task_and_refund; reservation settles once."""
+    import types
+    from models import db, TranscriptionTask
+
+    uid = _make_user('partial-refund@test.com', limit=60 * 60, used=0)
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
+    monkeypatch.setattr(A, 'download_audio', lambda *a, **kw: None)
+
+    def boom(*a, **kw):
+        raise RuntimeError('whisper down')
+
+    monkeypatch.setattr(A, 'transcribe_audio', boom)
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: target and target()))
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+
+    with A.app.app_context():
+        user = db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user,
+            {'title': 'Fail', 'audio_url': 'https://example.com/fail.mp3',
+             'duration_min': 90},
+            source='web')
+    assert status == 200, payload
+    assert _used(uid) == 0  # full refund: nothing reached Whisper
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, payload['task_id'])
+        assert task.status == 'error'
+        assert task.trial_settled in (True, 1)
+        assert A.task_is_partial(task)  # meta survives on the dedicated column
+        assert task.error_message == 'whisper down'
+        # Second settle is a no-op (exactly once).
+        assert A.fail_task_and_refund(task.id, 'again') == 0
+        assert A.trial_refund_task(task) == 0
+    assert _used(uid) == 0
+    failed = [e for e in ph_events.events if e['event'] == 'transcript_failed']
+    assert len(failed) == 1
+    assert failed[0]['properties']['reason'] == 'other'
+
+
+def test_homepage_mentions_long_episode_preview(trial_on):
+    home = A.app.test_client().get('/').data.decode()
+    assert 'longer episodes' in home.lower() or 'free preview' in home.lower()
+    answers = dict(A.faq_entries())
+    free = answers['Is it free?']
+    assert 'preview' in free.lower()
+    pricing = A.app.test_client().get('/pricing').data.decode()
+    assert 'preview' in pricing.lower()
+
+
+def test_partial_meta_column_has_guarded_migration():
+    """partial_meta is additive TEXT via TASK_COLUMN_MIGRATIONS (no index)."""
+    from models import TASK_COLUMN_MIGRATIONS, TranscriptionTask
+    assert 'partial_meta' in TASK_COLUMN_MIGRATIONS
+    assert TASK_COLUMN_MIGRATIONS['partial_meta'] == 'TEXT'
+    assert hasattr(TranscriptionTask, 'partial_meta')
+
+
+def test_partial_meta_migration_on_production_shaped_schema(tmp_path):
+    """ALTER ADD COLUMN works on a DB that looks like current production schema."""
+    import sqlite3
+    from sqlalchemy import create_engine, text as sa_text
+    from sqlalchemy.exc import OperationalError
+    from models import TASK_COLUMN_MIGRATIONS
+
+    db_path = tmp_path / 'prod-shaped.db'
+    conn = sqlite3.connect(str(db_path))
+    # Minimal pre-partial_meta transcription_tasks shape (columns that exist
+    # in production before this PR — no partial_meta).
+    conn.execute('''
+        CREATE TABLE transcription_tasks (
+            id VARCHAR(36) PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            episode_title VARCHAR(512) NOT NULL,
+            rss_url VARCHAR(1024),
+            status VARCHAR(20) NOT NULL,
+            progress INTEGER NOT NULL DEFAULT 0,
+            download_progress INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            transcript_text TEXT,
+            segments_json TEXT,
+            language VARCHAR(10),
+            audio_duration FLOAT,
+            transcription_time FLOAT,
+            started_at DATETIME,
+            completed_at DATETIME,
+            podcast_name VARCHAR(512),
+            artwork_url VARCHAR(1024),
+            episode_published VARCHAR(128),
+            source_audio_url VARCHAR(1024),
+            phase VARCHAR(20),
+            phase_started_at DATETIME,
+            chunk_index INTEGER,
+            chunk_total INTEGER,
+            bytes_downloaded BIGINT,
+            bytes_total BIGINT,
+            heartbeat_at DATETIME,
+            trial_seconds_charged INTEGER,
+            paid_seconds_charged INTEGER,
+            trial_settled BOOLEAN NOT NULL DEFAULT 0
+        )
+    ''')
+    conn.commit()
+    cols_before = {row[1] for row in conn.execute('PRAGMA table_info(transcription_tasks)')}
+    assert 'partial_meta' not in cols_before
+    conn.close()
+
+    uri = f'sqlite:///{db_path}'
+    engine = create_engine(uri)
+    with engine.begin() as bind:
+        existing = {row[1] for row in bind.execute(
+            sa_text('PRAGMA table_info(transcription_tasks)')).fetchall()}
+        assert 'partial_meta' not in existing
+        for column, ddl_type in TASK_COLUMN_MIGRATIONS.items():
+            if column in existing:
+                continue
+            bind.execute(sa_text(
+                f'ALTER TABLE transcription_tasks ADD COLUMN {column} {ddl_type}'
+            ))
+        cols_after = {row[1] for row in bind.execute(
+            sa_text('PRAGMA table_info(transcription_tasks)')).fetchall()}
+    assert 'partial_meta' in cols_after
+
+    # Re-running ADD must be tolerated (duplicate column) — same as
+    # apply_column_migrations' guarded race handling.
+    with engine.begin() as bind:
+        try:
+            bind.execute(sa_text(
+                'ALTER TABLE transcription_tasks ADD COLUMN partial_meta TEXT'))
+            raised = False
+        except OperationalError as exc:
+            raised = True
+            assert 'duplicate column name' in str(exc).lower()
+    engine.dispose()
+    assert raised is True
+
+
+def test_completed_partial_not_shown_or_counted_as_failure(
+        monkeypatch, trial_on, ph_events):
+    """History, API, status, and metrics treat a completed partial as success."""
+    from models import db, TranscriptionTask
+
+    uid = _make_user('partial-not-fail@test.com', limit=60 * 60)
+    with A.app.app_context():
+        task = TranscriptionTask(
+            id='partial-ok-1',
+            user_id=uid,
+            episode_title='Preview Not Error',
+            status='completed',
+            phase='completed',
+            transcript_text='preview body',
+            completed_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc),
+            audio_duration=60 * 60,
+            trial_seconds_charged=60 * 60,
+            trial_settled=False,
+            partial_meta=A.encode_partial_task_meta(60 * 60, 120 * 60),
+            error_message=None,
+            source_audio_url='https://example.com/ok.mp3',
+        )
+        db.session.add(task)
+        db.session.commit()
+
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+
+    # History lists completed only — partial appears as a normal transcript.
+    hist = client.get('/history').data.decode()
+    assert 'Preview Not Error' in hist
+    assert 'error' not in hist.lower() or 'No transcriptions' not in hist
+
+    status = client.get('/status/partial-ok-1').get_json()
+    assert status['status'] == 'completed'
+    assert 'error' not in status
+    assert status.get('partial') is True
+
+    # Agent/API payload exposes error_message only when status == 'error'.
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'partial-ok-1')
+        payload = A._agent_episode_payload(task)
+        assert payload['transcript_status'] == 'ready'
+        assert payload['error_message'] is None
+        assert payload['task_status'] == 'completed'
+
+    # Ops metrics SQL counts failures by status, not by partial_meta / error_message.
+    import sqlite3
+    uri = A.app.config['SQLALCHEMY_DATABASE_URI']
+    assert uri.startswith('sqlite:///')
+    db_file = uri.replace('sqlite:///', '', 1)
+    conn = sqlite3.connect(db_file)
+    errors = conn.execute(
+        "SELECT COUNT(*) FROM transcription_tasks "
+        "WHERE status IN ('error', 'failed') AND id = 'partial-ok-1'"
+    ).fetchone()[0]
+    completed = conn.execute(
+        "SELECT COUNT(*) FROM transcription_tasks "
+        "WHERE status = 'completed' AND id = 'partial-ok-1'"
+    ).fetchone()[0]
+    conn.close()
+    assert errors == 0
+    assert completed == 1
+
+    # No transcript_failed analytics for a successful partial.
+    assert not any(e['event'] == 'transcript_failed' for e in ph_events.events)
