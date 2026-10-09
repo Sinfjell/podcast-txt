@@ -12273,3 +12273,69 @@ def test_ensure_password_reset_tokens_table_indexes_after_columns():
             'password_reset_tokens')}
         assert 'ix_password_reset_tokens_token_hash' in idx
         assert 'ix_password_reset_tokens_user_id' in idx
+
+
+def test_pre_deploy_sessions_and_remember_cookies_stay_logged_in():
+    """Deploy safety: sessions/remember cookies minted before session_version
+    existed carry a bare id. They must stay valid while the version is 0, and
+    stop working once a password reset bumps the version."""
+    from flask_login.utils import encode_cookie
+    from models import db, User
+    uid = _make_user('legacy-session@test.com')
+    with A.app.app_context():
+        assert int(db.session.get(User, uid).session_version or 0) == 0
+
+    # 1. Legacy Flask session: _user_id is the bare id.
+    legacy = A.app.test_client()
+    with legacy.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    assert legacy.get('/settings').status_code == 200
+
+    # 2. Legacy remember cookie only (session expired): bare id payload.
+    with A.app.test_request_context():
+        cookie_val = encode_cookie(str(uid))
+    remembered = A.app.test_client()
+    remembered.set_cookie(A.app.config.get('REMEMBER_COOKIE_NAME', 'remember_token'),
+                          cookie_val)
+    assert remembered.get('/settings').status_code == 200
+
+    # 3. New-format id (uid:0) also valid.
+    fresh = A.app.test_client()
+    with fresh.session_transaction() as sess:
+        sess['_user_id'] = f'{uid}:0'
+        sess['_fresh'] = True
+    assert fresh.get('/settings').status_code == 200
+
+    # 4. After a reset bumps the version, all three old sessions are dropped.
+    with A.app.app_context():
+        u = db.session.get(User, uid)
+        u.session_version = 1
+        db.session.commit()
+    for client in (legacy, fresh):
+        r = client.get('/settings')
+        assert r.status_code in (302, 303) and '/login' in r.headers['Location']
+    stale = A.app.test_client()
+    stale.set_cookie(A.app.config.get('REMEMBER_COOKIE_NAME', 'remember_token'),
+                     cookie_val)
+    r = stale.get('/settings')
+    assert r.status_code in (302, 303) and '/login' in r.headers['Location']
+    # The current version still works.
+    cur = A.app.test_client()
+    with cur.session_transaction() as sess:
+        sess['_user_id'] = f'{uid}:1'
+        sess['_fresh'] = True
+    assert cur.get('/settings').status_code == 200
+
+
+def test_session_version_column_added_with_default_zero_on_legacy_users_table(tmp_path):
+    """users rows that predate the column read as session_version 0."""
+    import sqlite3
+    p = tmp_path / 'legacy.db'
+    con = sqlite3.connect(p)
+    con.execute('CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)')
+    con.execute("INSERT INTO users (email) VALUES ('a@b.c')")
+    con.execute('ALTER TABLE users ADD COLUMN session_version '
+                + A.USER_COLUMN_MIGRATIONS['session_version'])
+    assert con.execute('SELECT session_version FROM users').fetchone()[0] == 0
+    con.close()
