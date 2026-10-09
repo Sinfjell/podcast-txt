@@ -1,0 +1,437 @@
+{% extends "base.html" %}
+{% block title %}Admin — Podskrift{% endblock %}
+{% block meta_description %}Internal admin dashboard. Not for public indexing.{% endblock %}
+{% block robots_meta %}<meta name="robots" content="noindex, nofollow">{% endblock %}
+{% block canonical_url %}{% endblock %}
+{% block og_title %}Admin — Podskrift{% endblock %}
+{% block og_description %}Internal admin dashboard.{% endblock %}
+
+{% block content %}
+<style>
+    .admin-wrap { max-width: 1100px; margin: 0 auto; }
+    .admin-header {
+        display: flex; flex-wrap: wrap; align-items: baseline;
+        justify-content: space-between; gap: 8px 16px; margin-bottom: 20px;
+    }
+    .admin-header h1 {
+        font-size: 24px; font-weight: 700; letter-spacing: -0.03em;
+    }
+    .admin-meta { color: var(--muted); font-size: 13px; }
+    .kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        gap: 10px;
+        margin-bottom: 28px;
+    }
+    .kpi {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 14px 14px 12px;
+    }
+    .kpi-label {
+        font-size: 11px; font-weight: 500; color: var(--muted);
+        text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px;
+    }
+    .kpi-value {
+        font-size: 22px; font-weight: 700; letter-spacing: -0.03em;
+        font-variant-numeric: tabular-nums; line-height: 1.2;
+    }
+    .kpi-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .admin-section { margin-bottom: 32px; }
+    .admin-section h2 {
+        font-size: 16px; font-weight: 600; margin-bottom: 12px;
+        letter-spacing: -0.02em;
+    }
+    .chart-toolbar {
+        display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap;
+    }
+    .chart-toolbar button {
+        background: var(--surface); border: 1px solid var(--border);
+        color: var(--muted); font: inherit; font-size: 13px;
+        padding: 5px 12px; border-radius: var(--radius-sm); cursor: pointer;
+    }
+    .chart-toolbar button.active {
+        color: var(--accent-bright); border-color: var(--accent-border);
+        background: var(--accent-bg);
+    }
+    .chart-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+    }
+    @media (max-width: 720px) {
+        .chart-grid { grid-template-columns: 1fr; }
+    }
+    .chart-card {
+        background: var(--surface); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 14px;
+    }
+    .chart-card h3 {
+        font-size: 13px; font-weight: 500; color: var(--muted);
+        margin-bottom: 8px;
+    }
+    .chart-card canvas { width: 100% !important; max-height: 220px; }
+    .admin-table-wrap {
+        overflow-x: auto; border: 1px solid var(--border);
+        border-radius: var(--radius); background: var(--surface);
+    }
+    table.admin-table {
+        width: 100%; border-collapse: collapse; font-size: 13px;
+    }
+    table.admin-table th, table.admin-table td {
+        text-align: left; padding: 9px 12px;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+    }
+    table.admin-table th {
+        color: var(--muted); font-weight: 500; font-size: 11px;
+        text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    table.admin-table tr:last-child td { border-bottom: 0; }
+    table.admin-table a { color: var(--accent-bright); }
+    .status-pill {
+        display: inline-block; font-size: 11px; font-weight: 500;
+        padding: 2px 7px; border-radius: 4px;
+        background: var(--border); color: var(--muted);
+    }
+    .status-pill.completed { background: var(--accent-bg); color: var(--accent-bright); }
+    .status-pill.error { background: var(--error-bg); color: var(--error); }
+    .status-pill.cancelled { background: var(--warning-bg); color: var(--warning); }
+    .pager {
+        display: flex; gap: 8px; align-items: center; margin-top: 10px;
+        font-size: 13px; color: var(--muted); flex-wrap: wrap;
+    }
+    .search-row {
+        display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap;
+    }
+    .search-row input {
+        flex: 1; min-width: 180px; max-width: 320px;
+        background: var(--surface); border: 1px solid var(--border);
+        color: var(--text); border-radius: var(--radius-sm);
+        padding: 8px 12px; font: inherit; font-size: 14px;
+    }
+    .search-row button, .pager a {
+        background: var(--surface); border: 1px solid var(--border);
+        color: var(--text); font: inherit; font-size: 13px;
+        padding: 7px 12px; border-radius: var(--radius-sm);
+        text-decoration: none; cursor: pointer;
+    }
+    .pager a:hover, .search-row button:hover { border-color: var(--border-light); }
+    .pager .disabled { opacity: 0.4; pointer-events: none; }
+</style>
+
+<div class="admin-wrap ph-no-capture">
+    <div class="admin-header">
+        <h1>Admin</h1>
+        <span class="admin-meta">Times in {{ admin_tz_name }} · read-only</span>
+    </div>
+
+    <div class="kpi-grid" id="adminKpis">
+        <div class="kpi">
+            <div class="kpi-label">Users</div>
+            <div class="kpi-value" data-kpi="total_users">{{ kpis.total_users }}</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Signups</div>
+            <div class="kpi-value" data-kpi="signups_today">{{ kpis.signups_today }}</div>
+            <div class="kpi-sub">
+                today · {{ kpis.signups_7d }} / 7d · {{ kpis.signups_30d }} / 30d
+            </div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Activated</div>
+            <div class="kpi-value" data-kpi="activated_users">{{ kpis.activated_users }}</div>
+            <div class="kpi-sub">≥1 completed transcript</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Returning</div>
+            <div class="kpi-value" data-kpi="returning_users">{{ kpis.returning_users }}</div>
+            <div class="kpi-sub">≥2 days with transcripts</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Transcripts 7d</div>
+            <div class="kpi-value" data-kpi="completed_7d">{{ kpis.completed_7d }}</div>
+            <div class="kpi-sub">{{ kpis.failed_7d }} failed</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Minutes 7d</div>
+            <div class="kpi-value" data-kpi="minutes_7d">{{ kpis.minutes_7d }}</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Trial pool</div>
+            <div class="kpi-value" data-kpi="trial_used_minutes">{{ kpis.trial_used_minutes }}</div>
+            <div class="kpi-sub">of {{ kpis.trial_global_minutes }} min</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Purchases</div>
+            <div class="kpi-value" data-kpi="purchase_count">{{ kpis.purchase_count }}</div>
+            <div class="kpi-sub">${{ '%.2f'|format(kpis.purchase_revenue_usd) }} credited</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">BYOK</div>
+            <div class="kpi-value" data-kpi="byok_users">{{ kpis.byok_users }}</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Followed feeds</div>
+            <div class="kpi-value" data-kpi="followed_feeds">{{ kpis.followed_feeds }}</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Email alerts</div>
+            <div class="kpi-value" data-kpi="email_alerts_opted_in">{{ kpis.email_alerts_opted_in }}</div>
+            <div class="kpi-sub">feeds opted in</div>
+        </div>
+    </div>
+
+    <section class="admin-section">
+        <div class="flex-between" style="align-items: center; margin-bottom: 4px;">
+            <h2 style="margin: 0;">Charts</h2>
+            <div class="chart-toolbar" role="group" aria-label="Chart range">
+                <button type="button" class="range-btn active" data-range="30">30 days</button>
+                <button type="button" class="range-btn" data-range="90">90 days</button>
+            </div>
+        </div>
+        <div class="chart-grid">
+            <div class="chart-card">
+                <h3>Signups</h3>
+                <canvas id="chartSignups" height="180"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>Completed transcripts</h3>
+                <canvas id="chartCompleted" height="180"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>Active users</h3>
+                <canvas id="chartActive" height="180"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>Minutes transcribed</h3>
+                <canvas id="chartMinutes" height="180"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>Funnel</h3>
+                <canvas id="chartFunnel" height="180"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>Failure reasons (error_kind)</h3>
+                <canvas id="chartFailures" height="180"></canvas>
+            </div>
+        </div>
+    </section>
+
+    <section class="admin-section">
+        <h2>Latest signups</h2>
+        <form class="search-row" method="get" action="{{ url_for('admin.dashboard') }}" role="search">
+            <input type="search" name="q" value="{{ users_table.q }}"
+                   placeholder="Search by email" aria-label="Search users by email"
+                   maxlength="200" autocomplete="off">
+            {% if tasks_table.page > 1 %}
+            <input type="hidden" name="tasks_page" value="{{ tasks_table.page }}">
+            {% endif %}
+            <button type="submit">Search</button>
+            {% if users_table.q %}
+            <a href="{{ url_for('admin.dashboard', tasks_page=tasks_table.page if tasks_table.page > 1 else none) }}">Clear</a>
+            {% endif %}
+        </form>
+        <div class="admin-table-wrap">
+            <table class="admin-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Email</th>
+                        <th>Signed up</th>
+                        <th>Source</th>
+                        <th>Trial</th>
+                        <th>Tx</th>
+                        <th>Last active</th>
+                        <th>BYOK</th>
+                        <th>Purchases</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for u in users_table.users %}
+                    <tr>
+                        <td><a href="{{ url_for('admin.user_page', user_id=u.id) }}">{{ u.id }}</a></td>
+                        <td class="ph-no-capture"><a href="{{ url_for('admin.user_page', user_id=u.id) }}">{{ u.email }}</a></td>
+                        <td>{{ u.created_at_oslo }}</td>
+                        <td>{{ u.signup_source or '—' }}</td>
+                        <td>{{ u.trial_used_min }}{% if u.trial_limit_min is not none %} / {{ u.trial_limit_min }}{% else %} / {{ trial_default_minutes }}{% endif %}</td>
+                        <td>{{ u.tx_count }}</td>
+                        <td>{{ u.last_active_oslo }}</td>
+                        <td>{{ 'yes' if u.byok else 'no' }}</td>
+                        <td>{{ u.purchase_count }}</td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="9" style="color: var(--muted);">No users match.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div class="pager">
+            <span>Page {{ users_table.page }} of {{ users_table.pages }} ({{ users_table.total }})</span>
+            {% set prev_u = users_table.page - 1 %}
+            {% set next_u = users_table.page + 1 %}
+            <a class="{{ 'disabled' if users_table.page <= 1 }}"
+               href="{{ url_for('admin.dashboard', users_page=prev_u, q=users_table.q or none, tasks_page=tasks_table.page if tasks_table.page > 1 else none) }}">Prev</a>
+            <a class="{{ 'disabled' if users_table.page >= users_table.pages }}"
+               href="{{ url_for('admin.dashboard', users_page=next_u, q=users_table.q or none, tasks_page=tasks_table.page if tasks_table.page > 1 else none) }}">Next</a>
+        </div>
+    </section>
+
+    <section class="admin-section">
+        <h2>Latest transcription tasks</h2>
+        <div class="admin-table-wrap">
+            <table class="admin-table">
+                <thead>
+                    <tr>
+                        <th>User</th>
+                        <th>Title</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                        <th>error_kind</th>
+                        <th>Created</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for t in tasks_table.tasks %}
+                    <tr>
+                        <td class="ph-no-capture">
+                            {% if t.user_id %}
+                            <a href="{{ url_for('admin.user_page', user_id=t.user_id) }}">{{ t.email }}</a>
+                            {% else %}{{ t.email }}{% endif %}
+                        </td>
+                        <td style="max-width: 240px; overflow: hidden; text-overflow: ellipsis;" title="{{ t.title }}">{{ t.title }}</td>
+                        <td><span class="status-pill {{ t.status }}">{{ t.status }}</span></td>
+                        <td>{% if t.duration_min is not none %}{{ t.duration_min }} min{% else %}—{% endif %}</td>
+                        <td>{{ t.error_kind or '—' }}</td>
+                        <td>{{ t.created_oslo }}</td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="6" style="color: var(--muted);">No tasks yet.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div class="pager">
+            <span>Page {{ tasks_table.page }} of {{ tasks_table.pages }} ({{ tasks_table.total }})</span>
+            {% set prev_t = tasks_table.page - 1 %}
+            {% set next_t = tasks_table.page + 1 %}
+            <a class="{{ 'disabled' if tasks_table.page <= 1 }}"
+               href="{{ url_for('admin.dashboard', tasks_page=prev_t, users_page=users_table.page if users_table.page > 1 else none, q=users_table.q or none) }}">Prev</a>
+            <a class="{{ 'disabled' if tasks_table.page >= tasks_table.pages }}"
+               href="{{ url_for('admin.dashboard', tasks_page=next_t, users_page=users_table.page if users_table.page > 1 else none, q=users_table.q or none) }}">Next</a>
+        </div>
+    </section>
+</div>
+
+<script type="application/json" id="adminChartData">{{ charts | tojson }}</script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script>
+(function () {
+    var dataEl = document.getElementById('adminChartData');
+    if (!dataEl || typeof Chart === 'undefined') return;
+    var data = JSON.parse(dataEl.textContent);
+    var charts = {};
+    var palette = {
+        grid: '#1f1f1f',
+        text: '#808080',
+        line: '#10b981',
+        fill: 'rgba(16, 185, 129, 0.12)',
+        fail: '#f87171',
+        funnel: ['#10b981', '#34d399', '#6ee7b7'],
+    };
+
+    function baseOpts() {
+        return {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+                x: {
+                    ticks: { color: palette.text, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 10 } },
+                    grid: { color: palette.grid },
+                },
+                y: {
+                    beginAtZero: true,
+                    ticks: { color: palette.text, precision: 0, font: { size: 10 } },
+                    grid: { color: palette.grid },
+                },
+            },
+        };
+    }
+
+    function lineChart(canvasId, labels, values) {
+        var ctx = document.getElementById(canvasId);
+        if (!ctx) return null;
+        return new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    data: values,
+                    borderColor: palette.line,
+                    backgroundColor: palette.fill,
+                    fill: true,
+                    tension: 0.25,
+                    pointRadius: 0,
+                    borderWidth: 2,
+                }],
+            },
+            options: baseOpts(),
+        });
+    }
+
+    function applyRange(range) {
+        var series = range === '90' ? data.range_90 : data.range_30;
+        Object.keys(charts).forEach(function (k) {
+            if (charts[k]) charts[k].destroy();
+        });
+        charts.signups = lineChart('chartSignups', series.labels, series.signups);
+        charts.completed = lineChart('chartCompleted', series.labels, series.completed);
+        charts.active = lineChart('chartActive', series.labels, series.active_users);
+        charts.minutes = lineChart('chartMinutes', series.labels, series.minutes);
+
+        var funnelCtx = document.getElementById('chartFunnel');
+        if (funnelCtx) {
+            charts.funnel = new Chart(funnelCtx, {
+                type: 'bar',
+                data: {
+                    labels: data.funnel.labels,
+                    datasets: [{
+                        data: data.funnel.values,
+                        backgroundColor: palette.funnel,
+                        borderRadius: 4,
+                    }],
+                },
+                options: baseOpts(),
+            });
+        }
+        var failCtx = document.getElementById('chartFailures');
+        if (failCtx) {
+            charts.failures = new Chart(failCtx, {
+                type: 'bar',
+                data: {
+                    labels: data.failures.labels.length ? data.failures.labels : ['none'],
+                    datasets: [{
+                        data: data.failures.values.length ? data.failures.values : [0],
+                        backgroundColor: palette.fail,
+                        borderRadius: 4,
+                    }],
+                },
+                options: baseOpts(),
+            });
+        }
+    }
+
+    document.querySelectorAll('.range-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            document.querySelectorAll('.range-btn').forEach(function (b) {
+                b.classList.toggle('active', b === btn);
+            });
+            applyRange(btn.getAttribute('data-range'));
+        });
+    });
+    applyRange('30');
+})();
+</script>
+{% endblock %}

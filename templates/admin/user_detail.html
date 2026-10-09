@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% block title %}User {{ user.id }} — Admin — Podskrift{% endblock %}
+{% block meta_description %}Internal admin user detail. Not for public indexing.{% endblock %}
+{% block robots_meta %}<meta name="robots" content="noindex, nofollow">{% endblock %}
+{% block canonical_url %}{% endblock %}
+
+{% block content %}
+<style>
+    .admin-wrap { max-width: 900px; margin: 0 auto; }
+    .admin-back { font-size: 13px; color: var(--muted); margin-bottom: 12px; display: inline-block; }
+    .admin-wrap h1 {
+        font-size: 22px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 4px;
+    }
+    .admin-meta { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+    .detail-grid {
+        display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+        gap: 10px; margin-bottom: 28px;
+    }
+    .detail-card {
+        background: var(--surface); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 12px;
+    }
+    .detail-card .label {
+        font-size: 11px; color: var(--muted); text-transform: uppercase;
+        letter-spacing: 0.04em; margin-bottom: 2px;
+    }
+    .detail-card .value {
+        font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums;
+    }
+    .admin-section { margin-bottom: 28px; }
+    .admin-section h2 {
+        font-size: 15px; font-weight: 600; margin-bottom: 10px;
+    }
+    .admin-table-wrap {
+        overflow-x: auto; border: 1px solid var(--border);
+        border-radius: var(--radius); background: var(--surface);
+    }
+    table.admin-table {
+        width: 100%; border-collapse: collapse; font-size: 13px;
+    }
+    table.admin-table th, table.admin-table td {
+        text-align: left; padding: 9px 12px;
+        border-bottom: 1px solid var(--border); white-space: nowrap;
+    }
+    table.admin-table th {
+        color: var(--muted); font-weight: 500; font-size: 11px;
+        text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    table.admin-table tr:last-child td { border-bottom: 0; }
+    .status-pill {
+        display: inline-block; font-size: 11px; font-weight: 500;
+        padding: 2px 7px; border-radius: 4px;
+        background: var(--border); color: var(--muted);
+    }
+    .status-pill.completed { background: var(--accent-bg); color: var(--accent-bright); }
+    .status-pill.error { background: var(--error-bg); color: var(--error); }
+    .status-pill.cancelled { background: var(--warning-bg); color: var(--warning); }
+    .feed-url {
+        max-width: 280px; overflow: hidden; text-overflow: ellipsis;
+        color: var(--muted); font-size: 12px;
+    }
+</style>
+
+<div class="admin-wrap ph-no-capture">
+    <a class="admin-back" href="{{ url_for('admin.dashboard') }}">← Admin</a>
+    <h1 class="ph-no-capture">{{ user.email }}</h1>
+    <p class="admin-meta">User #{{ user.id }} · signed up {{ user.created_at_oslo }} ({{ admin_tz_name }})</p>
+
+    <div class="detail-grid">
+        <div class="detail-card">
+            <div class="label">Trial</div>
+            <div class="value">{{ user.trial_used_min }} / {{ user.trial_limit_min }} min</div>
+        </div>
+        <div class="detail-card">
+            <div class="label">Paid balance</div>
+            <div class="value">{{ user.paid_min }} min</div>
+        </div>
+        <div class="detail-card">
+            <div class="label">BYOK</div>
+            <div class="value">{{ 'yes' if user.byok else 'no' }}</div>
+        </div>
+        <div class="detail-card">
+            <div class="label">Transcript email</div>
+            <div class="value">{{ 'on' if user.email_transcript_ready else 'off' }}</div>
+        </div>
+        <div class="detail-card">
+            <div class="label">Unsubscribed</div>
+            <div class="value">{{ 'yes' if user.email_unsubscribed else 'no' }}</div>
+        </div>
+    </div>
+
+    <section class="admin-section">
+        <h2>Tasks ({{ user.tasks|length }})</h2>
+        <div class="admin-table-wrap">
+            <table class="admin-table">
+                <thead>
+                    <tr>
+                        <th>Title</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                        <th>error_kind</th>
+                        <th>Created</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for t in user.tasks %}
+                    <tr>
+                        <td title="{{ t.podcast_name or '' }}">{{ t.title }}</td>
+                        <td><span class="status-pill {{ t.status }}">{{ t.status }}</span></td>
+                        <td>{% if t.duration_min is not none %}{{ t.duration_min }} min{% else %}—{% endif %}</td>
+                        <td>{{ t.error_kind or '—' }}</td>
+                        <td>{{ t.created_oslo }}</td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="5" style="color: var(--muted);">No tasks.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="admin-section">
+        <h2>Followed feeds ({{ user.feeds|length }})</h2>
+        <div class="admin-table-wrap">
+            <table class="admin-table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>URL</th>
+                        <th>Alerts</th>
+                        <th>Followed</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for f in user.feeds %}
+                    <tr>
+                        <td>{{ f.name }}</td>
+                        <td class="feed-url" title="{{ f.rss_url }}">{{ f.rss_url }}</td>
+                        <td>{{ 'on' if f.email_alerts else 'off' }}</td>
+                        <td>{{ f.created_oslo }}</td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="4" style="color: var(--muted);">No feeds.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="admin-section">
+        <h2>Purchases ({{ user.purchases|length }})</h2>
+        <div class="admin-table-wrap">
+            <table class="admin-table">
+                <thead>
+                    <tr>
+                        <th>When</th>
+                        <th>Minutes</th>
+                        <th>Amount</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for p in user.purchases %}
+                    <tr>
+                        <td>{{ p.created_oslo }}</td>
+                        <td>{{ p.minutes }}</td>
+                        <td>${{ '%.2f'|format(p.amount_usd) }} {{ p.currency }}</td>
+                        <td>{{ p.status }}</td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="4" style="color: var(--muted);">No purchases.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
+{% endblock %}

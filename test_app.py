@@ -3513,7 +3513,7 @@ def test_robots_txt_keeps_crawlers_out_of_session_only_pages(trial_on):
     personal -- a transcript is the user's, not the index's."""
     body = A.app.test_client().get('/robots.txt').data.decode()
     for path in ('/settings', '/history', '/transcription/', '/download/',
-                 '/api/', '/active-jobs', '/cancel/', '/t/'):
+                 '/api/', '/active-jobs', '/cancel/', '/t/', '/admin'):
         assert f'Disallow: {path}' in body, f'{path} is crawlable'
 
 
@@ -11229,3 +11229,199 @@ def test_resume_attempts_migration_on_production_shaped_schema(tmp_path):
             assert 'duplicate column name' in str(exc).lower()
     engine.dispose()
     assert raised is True
+
+
+# --------------------------------------------------------------------------
+# Admin dashboard (internal; email allowlist; 404 for everyone else)
+# --------------------------------------------------------------------------
+
+def _admin_login(email='sindrefjelle@gmail.com', password='password123'):
+    """Create (or reuse) an allowlisted user and return a logged-in client."""
+    from models import db, User
+    with A.app.app_context():
+        u = User.query.filter_by(email=email.lower()).first()
+        if u is None:
+            u = User(email=email.lower(), trial_seconds_limit=A.NEW_USER_TRIAL_SECONDS)
+            u.set_password(password)
+            db.session.add(u)
+            db.session.commit()
+        uid = u.id
+    return _login(uid), uid
+
+
+def test_admin_anonymous_gets_404():
+    client = A.app.test_client()
+    assert client.get('/admin').status_code == 404
+    assert client.get('/admin/').status_code == 404
+    assert client.get('/admin/users/1').status_code == 404
+
+
+def test_admin_non_admin_logged_in_gets_404():
+    uid = _make_user('not-an-admin@example.com')
+    client = _login(uid)
+    assert client.get('/admin').status_code == 404
+    assert client.get('/admin/users/%d' % uid).status_code == 404
+
+
+def test_admin_allowlisted_user_gets_200(monkeypatch):
+    monkeypatch.setenv('ADMIN_EMAILS', 'Admin@Example.com, other@x.com')
+    # Reload allowlist is read from env each call — no cache.
+    client, uid = _admin_login('admin@example.com')
+    resp = client.get('/admin')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'Admin' in body
+    assert 'data-kpi="total_users"' in body
+    assert 'noindex' in body
+    # PostHog must stay off on admin even if a key were configured.
+    assert 'posthog.init' not in body
+    detail = client.get(f'/admin/users/{uid}')
+    assert detail.status_code == 200
+    assert 'admin@example.com' in detail.data.decode()
+
+
+def test_admin_default_allowlist_includes_sindre(monkeypatch):
+    monkeypatch.delenv('ADMIN_EMAILS', raising=False)
+    import admin_dashboard as AD
+    assert 'sindrefjelle@gmail.com' in AD.admin_emails()
+    client, _uid = _admin_login('sindrefjelle@gmail.com')
+    assert client.get('/admin').status_code == 200
+
+
+def test_admin_kpis_match_fixture_data(monkeypatch):
+    """Seed known rows and assert collect_kpis deltas (shared suite DB)."""
+    from models import (db, User, TranscriptionTask, SavedFeed, CreditPurchase)
+    import admin_dashboard as AD
+    import uuid as _uuid
+
+    monkeypatch.setenv('ADMIN_EMAILS', 'kpi-admin@test.com')
+    prefix = 'kpi-fix-%s' % _uuid.uuid4().hex[:8]
+
+    with A.app.app_context():
+        before = AD.collect_kpis(db, A.TRIAL_GLOBAL_SECONDS)
+
+        now = datetime.now(timezone.utc)
+        users = []
+        for i, extra in enumerate([
+            dict(trial_seconds_used=600, openai_api_key=None),
+            dict(trial_seconds_used=120, openai_api_key='sk-test-byok'),
+            dict(trial_seconds_used=0, openai_api_key=None),
+        ]):
+            u = User(email=f'{prefix}-{i}@test.com',
+                     trial_seconds_limit=3600, **extra)
+            u.set_password('password123')
+            u.created_at = now - timedelta(hours=1)
+            db.session.add(u)
+            users.append(u)
+        db.session.commit()
+
+        # User 0: two completed on different days → activated + returning
+        db.session.add(TranscriptionTask(
+            id=f'{prefix}-t1', user_id=users[0].id, episode_title='Ep 1',
+            status='completed', audio_duration=600.0,
+            started_at=now - timedelta(days=2),
+            completed_at=now - timedelta(days=2)))
+        db.session.add(TranscriptionTask(
+            id=f'{prefix}-t2', user_id=users[0].id, episode_title='Ep 2',
+            status='completed', audio_duration=300.0,
+            started_at=now - timedelta(days=1),
+            completed_at=now - timedelta(days=1)))
+        # User 1: one completed (activated, not returning) + one error
+        db.session.add(TranscriptionTask(
+            id=f'{prefix}-t3', user_id=users[1].id, episode_title='Ep 3',
+            status='completed', audio_duration=120.0,
+            started_at=now - timedelta(hours=3),
+            completed_at=now - timedelta(hours=3)))
+        db.session.add(TranscriptionTask(
+            id=f'{prefix}-t4', user_id=users[1].id, episode_title='Fail',
+            status='error',
+            error_message='Transcription stopped making progress and was stopped.',
+            started_at=now - timedelta(hours=2),
+            completed_at=now - timedelta(hours=2)))
+        # Feed with alerts + one purchase
+        db.session.add(SavedFeed(
+            user_id=users[0].id, name='Show', rss_url='https://example.com/feed.xml',
+            email_new_episodes=True))
+        db.session.add(CreditPurchase(
+            user_id=users[0].id,
+            stripe_session_id=f'cs_{prefix}',
+            amount_cents=500, amount_total_cents=500, currency='usd',
+            minutes=300, status='credited'))
+        db.session.commit()
+
+        after = AD.collect_kpis(db, A.TRIAL_GLOBAL_SECONDS)
+        charts = AD.collect_chart_data(db, days=90)
+
+    assert after['total_users'] == before['total_users'] + 3
+    assert after['activated_users'] == before['activated_users'] + 2
+    assert after['returning_users'] == before['returning_users'] + 1
+    assert after['completed_7d'] == before['completed_7d'] + 3
+    assert after['failed_7d'] == before['failed_7d'] + 1
+    assert after['minutes_7d'] == pytest.approx(before['minutes_7d'] + 17.0, abs=0.1)
+    assert after['byok_users'] == before['byok_users'] + 1
+    assert after['followed_feeds'] == before['followed_feeds'] + 1
+    assert after['email_alerts_opted_in'] == before['email_alerts_opted_in'] + 1
+    assert after['purchase_count'] == before['purchase_count'] + 1
+    assert after['purchase_revenue_usd'] == pytest.approx(
+        before['purchase_revenue_usd'] + 5.0, abs=0.01)
+    assert after['trial_used_minutes'] == pytest.approx(
+        before['trial_used_minutes'] + 12.0, abs=0.1)  # 600+120 seconds
+    assert after['trial_global_minutes'] == A.TRIAL_GLOBAL_SECONDS // 60
+
+    assert charts['funnel']['values'][0] == after['total_users']
+    assert charts['funnel']['values'][1] == after['activated_users']
+    assert charts['funnel']['values'][2] == after['returning_users']
+    assert 'stale' in charts['failures']['labels']
+
+    # HTML surface for the admin still renders after fixture seed.
+    client, _ = _admin_login('kpi-admin@test.com')
+    body = client.get('/admin').data.decode()
+    assert 'data-kpi="total_users"' in body
+    assert 'data-kpi="activated_users"' in body
+    assert 'chartSignups' in body
+    # User detail lists tasks / feeds / purchases
+    with A.app.app_context():
+        uid0 = User.query.filter_by(email=f'{prefix}-0@test.com').one().id
+    detail = client.get(f'/admin/users/{uid0}').data.decode()
+    assert f'{prefix}-0@test.com' in detail
+    assert 'Ep 1' in detail
+    assert 'Show' in detail
+    assert '$5.00' in detail
+
+
+def test_admin_user_search_filters_by_email(monkeypatch):
+    monkeypatch.setenv('ADMIN_EMAILS', 'search-admin@test.com')
+    import uuid as _uuid
+    token = _uuid.uuid4().hex[:8]
+    _make_user(f'findme-{token}@search.test')
+    _make_user(f'other-{token}@search.test')
+    client, _ = _admin_login('search-admin@test.com')
+    body = client.get(f'/admin?q=findme-{token}').data.decode()
+    assert f'findme-{token}@search.test' in body
+    assert f'other-{token}@search.test' not in body
+
+
+def test_admin_error_kind_classifier():
+    import admin_dashboard as AD
+    assert AD.classify_error_kind(
+        'Transcription stopped making progress and was stopped.') == 'stale'
+    assert AD.classify_error_kind('Cancelled.') == 'cancelled'
+    assert AD.classify_error_kind('') == 'unknown'
+    assert AD.classify_error_kind('Something weird happened') == 'other'
+
+
+def test_admin_not_in_sitemap_or_llms():
+    sitemap = A.app.test_client().get('/sitemap.xml').data.decode()
+    assert '/admin' not in sitemap
+    llms = A.app.test_client().get('/llms.txt').data.decode()
+    assert '/admin' not in llms
+
+
+def test_admin_is_admin_user_case_insensitive(monkeypatch):
+    import admin_dashboard as AD
+    monkeypatch.setenv('ADMIN_EMAILS', 'SiNdReFjElLe@Gmail.COM')
+    uid = _make_user('sindrefjelle@gmail.com')
+    with A.app.app_context():
+        from models import db, User
+        u = db.session.get(User, uid)
+        assert AD.is_admin_user(u) is True
