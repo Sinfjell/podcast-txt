@@ -90,14 +90,36 @@
     </div>
     {% endif %}
 
+    <div class="card" style="margin-top: 16px;" id="email">
+        <div class="card-header"><h5>Email</h5></div>
+        <div class="card-body">
+            <div class="form-group">
+                <label class="form-label">Address</label>
+                <input type="email" class="form-input ph-no-capture" value="{{ current_user.email }}"
+                       disabled style="opacity: 0.5;" autocomplete="email">
+            </div>
+            <form method="POST">
+                <input type="hidden" name="form" value="email_prefs">
+                <label style="display: flex; align-items: flex-start; gap: 8px; font-size: 14px; line-height: 1.5;">
+                    <input type="checkbox" name="email_transcript_ready" value="1"
+                           {% if current_user.email_transcript_ready and not current_user.email_unsubscribed_at %}checked{% endif %}
+                           style="margin-top: 3px;">
+                    <span>
+                        Email me when a transcript is ready
+                        <span class="form-hint" style="display: block; margin-top: 4px;">
+                            Only if the job takes a while or you’ve left the page — not while you’re watching a quick one.
+                            New-episode alerts are per feed under My Feeds.
+                        </span>
+                    </span>
+                </label>
+                <button type="submit" class="btn btn-primary" style="margin-top: 12px;">Save email prefs</button>
+            </form>
+        </div>
+    </div>
+
     <div class="card" style="margin-top: 16px;">
         <div class="card-body">
             <form method="POST">
-                <div class="form-group">
-                    <label class="form-label">Email</label>
-                    <input type="email" class="form-input ph-no-capture" value="{{ current_user.email }}"
-                           disabled style="opacity: 0.5;" autocomplete="email">
-                </div>
                 <div class="form-group" id="openai">
                     <label class="form-label" for="openai_api_key">OpenAI API Key</label>
                     <input type="password" class="form-input ph-no-capture" id="openai_api_key" name="openai_api_key"

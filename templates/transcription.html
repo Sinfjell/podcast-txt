@@ -113,6 +113,11 @@
             <div class="flex-center" style="gap: 8px; flex-wrap: wrap;">
                 <button type="button" class="btn btn-sm btn-ghost hidden" id="followBtn"
                         aria-live="polite">Follow this podcast</button>
+                <label id="followEmailLabel" class="hidden text-sm text-muted"
+                       style="display: none; align-items: center; gap: 6px; margin: 0;">
+                    <input type="checkbox" id="followEmailNew" value="1" checked>
+                    Email me when new episodes come out
+                </label>
                 <a href="{{ url_for('history') }}" class="btn btn-sm btn-ghost" id="historyLink">History</a>
             </div>
         </div>
@@ -879,12 +884,20 @@
         btn.disabled = true;
         var prev = btn.textContent;
         btn.innerHTML = '<span class="btn-spinner" aria-hidden="true"></span>Saving…';
-        fetch(FOLLOW_URL, { method: 'POST' })
+        var body = new FormData();
+        var emailBox = el('followEmailNew');
+        body.append('email_new_episodes', (emailBox && emailBox.checked) ? '1' : '0');
+        fetch(FOLLOW_URL, { method: 'POST', body: body })
             .then(function(r) { return r.json().then(function(data) { return { ok: r.ok, data: data }; }); })
             .then(function(res) {
                 if (res.ok && res.data && res.data.following) {
                     setFollowButton(true);
                     if (relatedCache) relatedCache.following = true;
+                    var emailLab = el('followEmailLabel');
+                    if (emailLab) {
+                        emailLab.classList.add('hidden');
+                        emailLab.style.display = 'none';
+                    }
                     phCapture('podcast_followed', {
                         task_id: taskId,
                         already: !!res.data.already,
@@ -909,9 +922,24 @@
         };
         if (!data || !data.has_feed) {
             show(el('followBtn'), false);
+            var emailLabOff = el('followEmailLabel');
+            if (emailLabOff) {
+                emailLabOff.classList.add('hidden');
+                emailLabOff.style.display = 'none';
+            }
             show(el('moreEpisodesBlock'), false);
         } else {
             setFollowButton(!!data.following);
+            var emailLab = el('followEmailLabel');
+            if (emailLab) {
+                if (data.following) {
+                    emailLab.classList.add('hidden');
+                    emailLab.style.display = 'none';
+                } else {
+                    emailLab.classList.remove('hidden');
+                    emailLab.style.display = 'flex';
+                }
+            }
             renderMoreEpisodes(data.episodes || [], data.podcast_name || '');
         }
         if (copyNextShown) renderCopyNextEpisodes(relatedCache);

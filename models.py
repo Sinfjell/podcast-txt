@@ -38,6 +38,13 @@ class User(UserMixin, db.Model):
     api_key_prefix = db.Column(db.String(16), nullable=True)
     api_key_created_at = db.Column(db.DateTime, nullable=True)
 
+    # Transactional email prefs. Default ON for transcript-ready; global
+    # unsubscribe stamps email_unsubscribed_at and suppresses all mail.
+    # We do not verify addresses today — mail goes to the registered email.
+    email_transcript_ready = db.Column(db.Boolean, nullable=False, default=True,
+                                       server_default='1')
+    email_unsubscribed_at = db.Column(db.DateTime, nullable=True)
+
     feeds = db.relationship('SavedFeed', backref='user', lazy=True, cascade='all, delete-orphan')
     tasks = db.relationship('TranscriptionTask', backref='user', lazy=True, cascade='all, delete-orphan')
     credit_purchases = db.relationship('CreditPurchase', backref='user', lazy=True,
@@ -62,6 +69,16 @@ class SavedFeed(db.Model):
     name = db.Column(db.String(255), nullable=False)
     rss_url = db.Column(db.String(1024), nullable=False)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+    # New-episode email alerts (opt-in at follow time, default checked).
+    email_new_episodes = db.Column(db.Boolean, nullable=False, default=True,
+                                   server_default='1')
+    # First poller run only records a baseline (no flood). Subsequent runs
+    # email episodes newer than this watermark.
+    alerts_initialized = db.Column(db.Boolean, nullable=False, default=False,
+                                   server_default='0')
+    last_seen_episode_guid = db.Column(db.String(1024), nullable=True)
+    last_seen_published_ts = db.Column(db.Float, nullable=True)
 
 
 class TranscriptionTask(db.Model):
@@ -100,6 +117,9 @@ class TranscriptionTask(db.Model):
     # Touched on every progress write, so a restart can tell a live task
     # (owned by another gunicorn worker) from one abandoned by a crash.
     heartbeat_at = db.Column(db.DateTime, nullable=True)
+    # Last /status poll from the result page — used to skip transcript-ready
+    # email when the owner is still watching a short job.
+    last_polled_at = db.Column(db.DateTime, nullable=True)
 
     # Seconds of audio currently reserved against the owner's trial allowance.
     # NULL for tasks run on the user's own key.
@@ -154,6 +174,17 @@ class CreditPurchase(db.Model):
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class EmailSentLog(db.Model):
+    """Idempotency log for transactional mail — never send the same key twice."""
+    __tablename__ = 'email_sent_log'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    kind = db.Column(db.String(64), nullable=False)
+    idempotency_key = db.Column(db.String(255), unique=True, nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 #: Columns added after the first release, applied via ALTER TABLE on startup.
 #: Keyed by column name so the migration stays declarative as the model grows.
 TASK_COLUMN_MIGRATIONS = {
@@ -169,6 +200,7 @@ TASK_COLUMN_MIGRATIONS = {
     'bytes_downloaded': 'BIGINT',
     'bytes_total': 'BIGINT',
     'heartbeat_at': 'DATETIME',
+    'last_polled_at': 'DATETIME',
     'trial_seconds_charged': 'INTEGER',
     'paid_seconds_charged': 'INTEGER',
     'trial_settled': 'BOOLEAN NOT NULL DEFAULT 0',
@@ -183,6 +215,16 @@ USER_COLUMN_MIGRATIONS = {
     'api_key_hash': 'VARCHAR(64)',
     'api_key_prefix': 'VARCHAR(16)',
     'api_key_created_at': 'DATETIME',
+    'email_transcript_ready': 'BOOLEAN NOT NULL DEFAULT 1',
+    'email_unsubscribed_at': 'DATETIME',
+}
+
+#: Additive columns for saved_feeds (new-episode email alerts).
+SAVED_FEED_COLUMN_MIGRATIONS = {
+    'email_new_episodes': 'BOOLEAN NOT NULL DEFAULT 1',
+    'alerts_initialized': 'BOOLEAN NOT NULL DEFAULT 0',
+    'last_seen_episode_guid': 'VARCHAR(1024)',
+    'last_seen_published_ts': 'FLOAT',
 }
 
 #: Additive columns for credit_purchases (Stripe hardening). Applied by

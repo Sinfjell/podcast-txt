@@ -1,0 +1,15 @@
+[Unit]
+Description=Podskrift new-episode email poll
+After=network.target
+
+# Failures surface via journalctl / systemctl status. Wire OnFailure= when an
+# alert unit exists (same pattern as podskrift-backup.service).
+
+[Service]
+Type=oneshot
+User=podskrift
+WorkingDirectory=/var/www/vhosts/podskrift.nettsmed.dev/app
+# Load the same EnvironmentFile as the web unit so MAILGUN_* / EMAIL_ENABLED /
+# PUBLIC_BASE_URL / SECRET_KEY / DATABASE_URL match production.
+EnvironmentFile=-/var/www/vhosts/podskrift.nettsmed.dev/app/.env
+ExecStart=/var/www/vhosts/podskrift.nettsmed.dev/app/.venv/bin/python ops/poll-new-episodes.py

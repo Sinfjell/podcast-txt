@@ -54,10 +54,15 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError as SaIntegrityError
 
 from models import (db, User, SavedFeed, TranscriptionTask, CreditPurchase,
+                    EmailSentLog,
                     TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS,
-                    CREDIT_PURCHASE_COLUMN_MIGRATIONS)
+                    CREDIT_PURCHASE_COLUMN_MIGRATIONS,
+                    SAVED_FEED_COLUMN_MIGRATIONS)
 from observability import init_sentry, report_stale_task, report_task_failure
 import analytics as product_analytics
+import email_notify
+import mail as mailer
+import episode_alerts
 
 try:
     import stripe
@@ -153,8 +158,10 @@ def public_url(endpoint, **values):
 
 
 def _canonical_host_exempt(path):
-    """True for Stripe webhooks, /api/*, and common health probes."""
+    """True for Stripe webhooks, /api/*, email unsub, and common health probes."""
     if path.startswith('/stripe/webhook') or path.startswith('/api/'):
+        return True
+    if path.startswith('/email/unsubscribe'):
         return True
     if path in ('/health', '/healthz', '/ready', '/ping') or path.startswith('/health'):
         return True
@@ -3601,6 +3608,23 @@ def handle_dispute(dispute_dict, event_type, event_id=None):
 @login_required
 def settings():
     if request.method == 'POST':
+        # Email preference toggle (separate from the OpenAI key field).
+        if request.form.get('form') == 'email_prefs':
+            want = request.form.get('email_transcript_ready') == '1'
+            current_user.email_transcript_ready = want
+            if want and current_user.email_unsubscribed_at is not None:
+                # Re-enabling transcript-ready clears a prior global unsub so
+                # new-episode alerts can work again if the feed opt-in is on.
+                current_user.email_unsubscribed_at = None
+            db.session.commit()
+            product_analytics.capture(
+                'alert_opt_in' if want else 'alert_opt_out',
+                current_user.id,
+                {'channel': 'transcript_ready'},
+            )
+            flash('Email preferences saved.', 'success')
+            return redirect(url_for('settings') + '#email')
+
         api_key = request.form.get('openai_api_key', '').strip()
 
         # Empty field means "leave the saved key alone". Clearing used to be the
@@ -4019,6 +4043,95 @@ def settings_revoke_api_key():
     return redirect(url_for('settings'))
 
 
+def _apply_global_unsubscribe(user):
+    """Stamp global unsub + turn off transcript-ready. Idempotent."""
+    user.email_unsubscribed_at = user.email_unsubscribed_at or datetime.now(timezone.utc)
+    user.email_transcript_ready = False
+    db.session.commit()
+    product_analytics.capture('unsubscribe', user.id, {'channel': 'all'})
+
+
+@app.route('/email/unsubscribe/<token>', methods=['GET', 'POST'])
+def email_unsubscribe(token):
+    """One-click unsubscribe without login (List-Unsubscribe + footer link)."""
+    user_id = email_notify.parse_unsubscribe_token(app.secret_key, token)
+    if user_id is None:
+        return render_template(
+            'email_unsubscribed.html',
+            ok=False,
+            message='That unsubscribe link is invalid or expired.',
+        ), 400
+    user = db.session.get(User, user_id)
+    if user is None:
+        return render_template(
+            'email_unsubscribed.html',
+            ok=False,
+            message='That account is no longer here.',
+        ), 404
+    _apply_global_unsubscribe(user)
+    # Also opt out of per-feed alerts so digests stop without a second click.
+    SavedFeed.query.filter_by(user_id=user.id).update(
+        {'email_new_episodes': False}, synchronize_session=False)
+    db.session.commit()
+    if request.method == 'POST':
+        # RFC 8058 one-click agents expect a simple 200.
+        return ('', 200)
+    return render_template(
+        'email_unsubscribed.html',
+        ok=True,
+        message='You are unsubscribed from Podskrift emails.',
+    )
+
+
+@app.route('/go/transcribe')
+@login_required
+def go_transcribe():
+    """Deep link from new-episode emails: preselected episode + rss_url."""
+    product_analytics.capture(
+        'email_clicked',
+        current_user.id,
+        {'type': email_notify.NEW_EPISODES},
+    )
+    rss_url = (request.args.get('rss_url') or '').strip()
+    audio_url = (request.args.get('audio_url') or '').strip()
+    episode_title = (request.args.get('episode_title') or '').strip() or 'Episode'
+    podcast_name = (request.args.get('podcast_name') or '').strip()
+    episode_index_raw = request.args.get('episode_index')
+    if rss_url and not _is_fetchable_url(rss_url):
+        flash('That feed URL cannot be fetched.', 'error')
+        return redirect(url_for('index'))
+    if audio_url and not _is_fetchable_url(audio_url):
+        flash('That audio URL cannot be fetched.', 'error')
+        return redirect(url_for('index'))
+    if not audio_url and rss_url and episode_index_raw not in (None, ''):
+        try:
+            episode_index = int(episode_index_raw)
+        except (TypeError, ValueError):
+            episode_index = None
+        episodes, error = get_episodes_from_rss(rss_url, timeout=20)
+        if error or not episodes or episode_index is None:
+            flash(error or 'Could not load that episode.', 'error')
+            return redirect(url_for('index'))
+        if episode_index < 0 or episode_index >= len(episodes):
+            flash('That episode is no longer in the feed.', 'error')
+            return redirect(url_for('index'))
+        ep = episodes[episode_index]
+        audio_url = ep.get('audio_url') or ''
+        episode_title = ep.get('title') or episode_title
+        podcast_name = ep.get('podcast_name') or podcast_name
+    if not audio_url:
+        flash('Missing episode details.', 'error')
+        return redirect(url_for('index'))
+    return render_template(
+        'go_transcribe.html',
+        rss_url=rss_url or '',
+        audio_url=audio_url,
+        episode_title=episode_title,
+        podcast_name=podcast_name or '',
+        languages=language_choices(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Saved feeds
 # ---------------------------------------------------------------------------
@@ -4035,6 +4148,9 @@ def feeds():
 def add_feed():
     name = request.form.get('name', '').strip()
     rss_url = request.form.get('rss_url', '').strip()
+    # Checkbox is shown checked by default; an unchecked box is omitted from
+    # the POST, which we treat as opt-out.
+    email_new = request.form.get('email_new_episodes') == '1'
 
     if not name or not rss_url:
         flash('Name and RSS URL are required.', 'error')
@@ -4045,10 +4161,35 @@ def add_feed():
         flash('This feed is already saved.', 'info')
         return redirect(url_for('feeds'))
 
-    feed = SavedFeed(user_id=current_user.id, name=name, rss_url=rss_url)
+    feed = SavedFeed(
+        user_id=current_user.id, name=name, rss_url=rss_url,
+        email_new_episodes=email_new,
+    )
     db.session.add(feed)
     db.session.commit()
+    product_analytics.capture(
+        'alert_opt_in' if email_new else 'alert_opt_out',
+        current_user.id,
+        {'channel': 'new_episodes', 'source': 'feeds_add'},
+    )
     flash(f'Feed "{name}" saved.', 'success')
+    return redirect(url_for('feeds'))
+
+
+@app.route('/feeds/<int:feed_id>/email-alerts', methods=['POST'])
+@login_required
+def toggle_feed_email_alerts(feed_id):
+    """Per-feed opt-in/out for new-episode emails."""
+    feed = SavedFeed.query.filter_by(id=feed_id, user_id=current_user.id).first_or_404()
+    want = request.form.get('email_new_episodes') == '1'
+    feed.email_new_episodes = want
+    db.session.commit()
+    product_analytics.capture(
+        'alert_opt_in' if want else 'alert_opt_out',
+        current_user.id,
+        {'channel': 'new_episodes', 'source': 'feeds_toggle'},
+    )
+    flash('Feed email alert preference saved.', 'success')
     return redirect(url_for('feeds'))
 
 
@@ -4716,6 +4857,19 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                                     done_props['episode_minutes'] = m_min
                             product_analytics.capture(
                                 'transcript_completed', user_id, done_props)
+                            # Transcript-ready email: gated by EMAIL_ENABLED +
+                            # prefs + "slow job or owner left" timing rule.
+                            if finished is not None:
+                                owner = db.session.get(User, user_id)
+                                if owner is not None:
+                                    email_notify.notify_transcript_ready(
+                                        db=db,
+                                        user=owner,
+                                        task=finished,
+                                        EmailSentLog=EmailSentLog,
+                                        public_base_url=PUBLIC_BASE_URL,
+                                        secret_key=app.secret_key,
+                                    )
                         except Exception:  # noqa: BLE001
                             app.logger.exception(
                                 'transcript_completed analytics failed for %s',
@@ -5023,6 +5177,13 @@ def get_status(task_id):
         return jsonify({'error': 'Task not found'}), 404
 
     _fail_if_stale(task)
+    # Touch last_polled_at so transcript-ready email can tell "still watching"
+    # from "left the page". Best-effort; never block the status payload.
+    try:
+        task.last_polled_at = datetime.now(timezone.utc)
+        db.session.commit()
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
     percent, eta = compute_live_progress(task)
     elapsed = _seconds_since(task.started_at)
 
@@ -5312,6 +5473,13 @@ def transcription_page(task_id):
     task = db.session.get(TranscriptionTask, task_id)
     if not task or task.user_id != current_user.id:
         return "Task not found", 404
+    if (request.args.get('utm_source') or '').strip().lower() == 'email':
+        campaign = (request.args.get('utm_campaign') or '').strip()[:64] or 'unknown'
+        product_analytics.capture(
+            'email_clicked',
+            current_user.id,
+            {'type': campaign},
+        )
     return render_template('transcription.html', task_id=task_id)
 
 
@@ -5425,12 +5593,35 @@ def follow_task_podcast(task_id):
     existing = SavedFeed.query.filter_by(
         user_id=current_user.id, rss_url=rss_url).first()
     if existing:
-        return jsonify({'following': True, 'already': True, 'feed_id': existing.id})
+        return jsonify({
+            'following': True, 'already': True, 'feed_id': existing.id,
+            'email_new_episodes': bool(existing.email_new_episodes),
+        })
 
-    feed = SavedFeed(user_id=current_user.id, name=name, rss_url=rss_url)
+    # Default ON; JSON body or form can pass email_new_episodes=0/false.
+    raw = request.form.get('email_new_episodes')
+    if raw is None and request.is_json:
+        raw = (request.get_json(silent=True) or {}).get('email_new_episodes')
+    if raw is None:
+        email_new = True
+    else:
+        email_new = str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
+
+    feed = SavedFeed(
+        user_id=current_user.id, name=name, rss_url=rss_url,
+        email_new_episodes=email_new,
+    )
     db.session.add(feed)
     db.session.commit()
-    return jsonify({'following': True, 'already': False, 'feed_id': feed.id})
+    product_analytics.capture(
+        'alert_opt_in' if email_new else 'alert_opt_out',
+        current_user.id,
+        {'channel': 'new_episodes', 'source': 'follow'},
+    )
+    return jsonify({
+        'following': True, 'already': False, 'feed_id': feed.id,
+        'email_new_episodes': email_new,
+    })
 
 
 @app.route('/history')
@@ -6792,8 +6983,10 @@ def load_changelog_entries():
     """User-facing What's new entries from changelog.json, newest first.
 
     Returns a list of dicts with id, date (YYYY-MM-DD), date_display, title,
-    summary. Missing or invalid files yield an empty list so a deploy without
-    the data file still serves the rest of the site.
+    summary. Entries with ``"hidden": true`` are skipped (for features that
+    are merged but not yet switched on in production). Missing or invalid
+    files yield an empty list so a deploy without the data file still serves
+    the rest of the site.
     """
     try:
         with open(CHANGELOG_PATH, encoding='utf-8') as f:
@@ -6807,6 +7000,8 @@ def load_changelog_entries():
     out = []
     for raw in entries:
         if not isinstance(raw, dict):
+            continue
+        if raw.get('hidden') is True:
             continue
         entry_id = (raw.get('id') or '').strip()
         title = (raw.get('title') or '').strip()
@@ -7797,6 +7992,7 @@ def apply_column_migrations():
         ('transcription_tasks', TASK_COLUMN_MIGRATIONS),
         ('users', USER_COLUMN_MIGRATIONS),
         ('credit_purchases', CREDIT_PURCHASE_COLUMN_MIGRATIONS),
+        ('saved_feeds', SAVED_FEED_COLUMN_MIGRATIONS),
     )
     for table, migrations in tables:
         existing = _live_columns(table)
@@ -7905,9 +8101,75 @@ def ensure_credit_purchases_table():
             'Could not create ix_credit_purchases_stripe_payment_intent_id')
 
 
+def ensure_email_sent_log_table():
+    """Create email_sent_log if missing. Index only after the table exists.
+
+    Same IF NOT EXISTS pattern as credit_purchases: two gunicorn workers race
+    boot, and check-then-create killed a worker before. Indexes are created
+    after CREATE so a half-applied migration cannot index a missing column.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        db.session.execute(text("""
+            CREATE TABLE IF NOT EXISTS email_sent_log (
+                id INTEGER NOT NULL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                kind VARCHAR(64) NOT NULL,
+                idempotency_key VARCHAR(255) NOT NULL UNIQUE,
+                created_at DATETIME,
+                FOREIGN KEY(user_id) REFERENCES users (id)
+            )
+        """))
+        db.session.commit()
+    except OperationalError as exc:
+        db.session.rollback()
+        msg = str(exc).lower()
+        if 'already exists' not in msg:
+            raise
+        app.logger.info(
+            'email_sent_log was created by another worker; continuing')
+
+    existing = _live_columns('email_sent_log')
+    if not existing:
+        return
+    # Index AFTER columns exist (past outage: index-before-column on credit_purchases).
+    try:
+        db.session.execute(text(
+            'CREATE INDEX IF NOT EXISTS ix_email_sent_log_user_id '
+            'ON email_sent_log (user_id)'
+        ))
+        db.session.commit()
+    except OperationalError:
+        db.session.rollback()
+        app.logger.exception('Could not create ix_email_sent_log_user_id')
+
+
+def fetch_feed_for_alerts(feed_url):
+    """SSRF-safe capped feed fetch for the new-episode poller."""
+    if not _is_fetchable_url(feed_url):
+        return None
+    return _fetch_feed_capped(feed_url, max_bytes=episode_alerts.FEED_MAX_BYTES)
+
+
+def run_new_episode_alerts_poll():
+    """CLI / systemd entry: poll followed feeds and send digests."""
+    return episode_alerts.run_new_episode_poll(
+        app=app,
+        db=db,
+        User=User,
+        SavedFeed=SavedFeed,
+        EmailSentLog=EmailSentLog,
+        fetch_feed=fetch_feed_for_alerts,
+        public_base_url=PUBLIC_BASE_URL,
+        secret_key=app.secret_key,
+    )
+
+
 with app.app_context():
     db.create_all()
     ensure_credit_purchases_table()
+    ensure_email_sent_log_table()
 
     apply_column_migrations()
     if STRIPE_MANAGED_PAYMENTS and STRIPE_AUTOMATIC_TAX:
