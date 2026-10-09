@@ -870,3 +870,21 @@ def test_format_summary_for_txt_partial_label():
     })
     assert 'Preview' in text
     assert 'TL;DR: Preview only' in text
+
+
+def test_summary_email_refuses_transcription_outside_gunicorn(monkeypatch):
+    """Poller is a oneshot process: threads it starts would die on exit."""
+    import app as A
+    monkeypatch.setattr(A, '_SERVER_STARTED_AT_ENV', '')
+    monkeypatch.setattr(A, 'GLOBAL_OPENAI_KEY', 'sk-test')
+
+    class Job:
+        audio_url = 'https://cdn.example.com/ep.mp3'
+        episode_title = 'Ep'
+        rss_url = 'https://feeds.example.com/x.xml'
+        podcast_name = 'X'
+        duration_seconds = 600.0
+
+    with A.app.app_context():
+        assert A.start_shared_transcription_for_summary_email(
+            Job(), owner_user_id=1) is None

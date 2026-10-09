@@ -17,6 +17,7 @@ import math
 import os
 import re
 import secrets
+import signal
 import sqlite3
 import shutil
 import subprocess
@@ -40,7 +41,8 @@ if not os.path.exists(certifi.where()):
         os.environ.setdefault('REQUESTS_CA_BUNDLE', _sys_ca)
         os.environ.setdefault('SSL_CERT_FILE', _sys_ca)
 from flask import (Flask, render_template, request, jsonify, send_file, flash,
-                   redirect, url_for, Response, g, session, has_request_context)
+                   redirect, url_for, Response, g, session, has_request_context,
+                   make_response)
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from urllib.parse import parse_qs, urljoin, urlparse, unquote
 import uuid
@@ -54,10 +56,11 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError as SaIntegrityError
 
 from models import (db, User, SavedFeed, TranscriptionTask, CreditPurchase,
-                    EmailSentLog, SummaryEmailJob, SummaryEmailBudgetDay,
+                    TranscriptShare, EmailSentLog, SummaryEmailJob, SummaryEmailBudgetDay,
                     TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS,
                     CREDIT_PURCHASE_COLUMN_MIGRATIONS,
-                    SAVED_FEED_COLUMN_MIGRATIONS)
+                    SAVED_FEED_COLUMN_MIGRATIONS,
+                    TRANSCRIPT_SHARE_COLUMN_MIGRATIONS)
 from observability import init_sentry, report_stale_task, report_task_failure
 import analytics as product_analytics
 import email_notify
@@ -160,10 +163,17 @@ def public_url(endpoint, **values):
 
 
 def _canonical_host_exempt(path):
-    """True for Stripe webhooks, /api/*, email unsub, and common health probes."""
+    """True for Stripe webhooks, /api/*, email unsub, share links, and health probes."""
     if path.startswith('/stripe/webhook') or path.startswith('/api/'):
         return True
     if path.startswith('/email/unsubscribe'):
+        return True
+    if path.startswith('/internal/'):
+        return True
+    # Public share links must resolve on whichever host they were opened
+    # (www / bare / staging), not bounce through a host redirect that can
+    # drop cookies or confuse chat-app link previews.
+    if path.startswith('/t/'):
         return True
     if path in ('/health', '/healthz', '/ready', '/ping') or path.startswith('/health'):
         return True
@@ -175,6 +185,13 @@ def _canonical_redirect_target():
     path = request.path or '/'
     qs = request.query_string.decode('utf-8', errors='replace') if request.query_string else ''
     return PUBLIC_BASE_URL + path + (('?' + qs) if qs else '')
+
+
+@app.before_request
+def _ensure_shutdown_handlers():
+    """Wrap gunicorn's SIGTERM handler once the worker has installed it."""
+    if not _shutdown_handlers_installed:
+        install_shutdown_handlers()
 
 
 @app.before_request
@@ -839,6 +856,113 @@ class TaskAbandoned(Exception):
     """Raised when a task was failed out from under the worker still running it."""
 
 
+class ServerRestart(Exception):
+    """Process shutdown (deploy SIGTERM) interrupted this job mid-flight.
+
+    Not a corrupt file and not an app bug when auto-resume will pick it up.
+    ``reason`` is always ``server_restart`` for analytics.
+    """
+
+    REASON = 'server_restart'
+    MSG_AUTO = (
+        "Our server restarted while processing this episode — "
+        "we've restarted it automatically."
+    )
+    MSG_RETRY = (
+        "Our server restarted while processing this episode — please try again."
+    )
+
+    def __init__(self, message=None, *, auto_resumed=True):
+        super().__init__(message or (self.MSG_AUTO if auto_resumed else self.MSG_RETRY))
+        self.reason = self.REASON
+        self.auto_resumed = auto_resumed
+
+
+#: Set when the worker receives SIGTERM/SIGINT so ffmpeg failures and long
+#: loops stop at a safe point instead of blaming the user's audio file.
+_shutting_down = threading.Event()
+#: Set by gunicorn.conf.py ``on_starting`` in the arbiter before it forks, so
+#: every worker of one server generation (including a worker respawned
+#: mid-life after a timeout) shares the same start time. Unset for scripts
+#: that import app (new-episode poller, ops one-offs, tests).
+_SERVER_STARTED_AT_ENV = os.getenv('PODSKRIFT_SERVER_STARTED_AT', '').strip()
+try:
+    _PROCESS_STARTED_AT = float(_SERVER_STARTED_AT_ENV) if _SERVER_STARTED_AT_ENV else time.time()
+except ValueError:
+    _SERVER_STARTED_AT_ENV = ''
+    _PROCESS_STARTED_AT = time.time()
+_shutdown_handlers_installed = False
+
+
+def is_shutting_down():
+    return _shutting_down.is_set()
+
+
+def request_shutdown(signum=None, frame=None):
+    """Mark this process as shutting down (gunicorn SIGTERM / Ctrl-C)."""
+    _shutting_down.set()
+    if signum is not None:
+        app.logger.info('shutdown signal %s received; stopping transcription work',
+                        signum)
+
+
+def install_shutdown_handlers():
+    """Chain SIGTERM/SIGINT so we set the shutdown flag without replacing gunicorn.
+
+    Gunicorn's gthread worker calls ``init_signals`` *after* loading the app, so
+    a handler installed at import time is overwritten. We install from the first
+    request (and from ``post_worker_init`` when using gunicorn.conf.py), wrapping
+    whatever handler is already registered.
+    """
+    global _shutdown_handlers_installed
+    if os.getenv('PODSKRIFT_DISABLE_SHUTDOWN_HANDLERS', '').strip().lower() in (
+            '1', 'true', 'yes'):
+        return False
+    wrapped_any = False
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            prev = signal.getsignal(sig)
+            if getattr(prev, '_podskrift_shutdown', False):
+                continue
+
+            def handler(signum, frame, _prev=prev):
+                request_shutdown(signum, frame)
+                if callable(_prev) and _prev not in (signal.SIG_DFL, signal.SIG_IGN):
+                    _prev(signum, frame)
+
+            handler._podskrift_shutdown = True
+            signal.signal(sig, handler)
+            wrapped_any = True
+        except (ValueError, OSError):
+            # Not the main thread, or signals unsupported — ignore.
+            pass
+    if wrapped_any:
+        _shutdown_handlers_installed = True
+    return wrapped_any
+
+
+def _ffmpeg_killed_by_signal(returncode, stderr=b''):
+    """True when ffmpeg exited because the process/host sent it a kill signal."""
+    if returncode is None:
+        return False
+    if returncode < 0:
+        return True
+    # 128 + signal number (shell convention): 143=SIGTERM, 137=SIGKILL, 130=SIGINT
+    if returncode in (130, 137, 143, 255):
+        return True
+    detail = (stderr or b'').decode('utf-8', 'replace').lower()
+    return any(
+        token in detail
+        for token in ('signal 15', 'signal 9', 'sigterm', 'sigkill', 'interrupted')
+    )
+
+
+def _raise_if_ffmpeg_shutdown(returncode, stderr=b''):
+    """Raise ServerRestart when ffmpeg died from our shutdown or a kill signal."""
+    if is_shutting_down() or _ffmpeg_killed_by_signal(returncode, stderr):
+        raise ServerRestart(auto_resumed=True)
+
+
 def trial_available():
     """Is there a trial to hand out at all?"""
     return bool(TRIAL_ENABLED and GLOBAL_OPENAI_KEY and TRIAL_DEFAULT_SECONDS > 0)
@@ -1403,6 +1527,17 @@ DISPOSABLE_EMAIL_DOMAINS = {
 _register_attempts = collections.defaultdict(list)
 _register_lock = threading.Lock()
 
+#: Share-link creates per user per window. Tokens are unguessable; this only
+#: bounds accidental/abusive minting, not enumeration.
+SHARE_CREATE_MAX_PER_USER = 20
+SHARE_CREATE_WINDOW_SECONDS = 3600
+#: 22 bytes → 176 bits of entropy (url-safe); requirement is >= 128-bit.
+SHARE_TOKEN_BYTES = 22
+UTM_SESSION_KEY = '_utm_source'
+
+_share_create_attempts = collections.defaultdict(list)
+_share_create_lock = threading.Lock()
+
 
 def _client_ip():
     """Real client IP, from a source the client cannot forge.
@@ -1844,6 +1979,8 @@ def download_audio(url, filename, task_id):
     try:
         with open(filename, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
+                if is_shutting_down():
+                    raise ServerRestart(auto_resumed=True)
                 if not chunk:
                     continue
                 f.write(chunk)
@@ -1963,8 +2100,18 @@ def probe_audio_bitrate_kbps(audio_file):
         return None
 
 
-def _ffmpeg_error(message, stderr=b''):
-    """Log ffmpeg's own words, hand the user something they can act on."""
+def _ffmpeg_error(message, stderr=b'', *, returncode=None):
+    """Log ffmpeg's own words, hand the user something they can act on.
+
+    Shutdown / SIGTERM kills must not become "corrupt or unsupported format".
+    """
+    if returncode is not None or stderr:
+        try:
+            _raise_if_ffmpeg_shutdown(returncode if returncode is not None else 1, stderr)
+        except ServerRestart:
+            raise
+    if is_shutting_down():
+        raise ServerRestart(auto_resumed=True)
     detail = (stderr or b'').decode('utf-8', 'replace').strip()
     if detail:
         app.logger.error('ffmpeg failed: %s', detail[:2000])
@@ -2028,9 +2175,11 @@ def trim_audio_file(audio_file, max_seconds):
                     os.remove(tmp_path)
                 except OSError:
                     pass
+            err = encoded.stderr if encoded.returncode else copy.stderr
+            code = encoded.returncode if encoded.returncode else copy.returncode
             raise _ffmpeg_error(
                 'This audio file could not be processed. It may be corrupt or in an '
-                'unsupported format.', encoded.stderr if encoded.returncode else copy.stderr)
+                'unsupported format.', err, returncode=code)
 
     os.replace(tmp_path, audio_file)
     return audio_file
@@ -2079,6 +2228,9 @@ def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
     bitrate = min(WHISPER_AUDIO_BITRATE_KBPS,
                   probe_audio_bitrate_kbps(audio_file) or WHISPER_AUDIO_BITRATE_KBPS)
 
+    if is_shutting_down():
+        raise ServerRestart(auto_resumed=True)
+
     try:
         result = subprocess.run(
             ['nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y', '-i', audio_file,
@@ -2094,6 +2246,8 @@ def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
             'Please try again later, or contact support if it persists.')
     except subprocess.TimeoutExpired:
         _cleanup_glob(produced_glob)
+        if is_shutting_down():
+            raise ServerRestart(auto_resumed=True)
         raise _ffmpeg_error('This episode took too long to process. Please try a shorter one.')
 
     parts = sorted(glob.glob(produced_glob))
@@ -2101,7 +2255,7 @@ def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
         _cleanup_glob(produced_glob)
         raise _ffmpeg_error(
             'This audio file could not be processed. It may be corrupt or in an '
-            'unsupported format.', result.stderr)
+            'unsupported format.', result.stderr, returncode=result.returncode)
 
     # Drop the segmenter's rounding crumb, but never the only part, and never
     # silently: this is the one place content could go missing without an error.
@@ -2356,15 +2510,17 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
     Returns (full_text, segments). `remaining` is mutated as chunks are consumed
     so the caller can clean up whatever is left if this raises.
 
-    Resume after a worker death is not attempted: chunk files live only for the
-    life of the thread (cleaned in `finally`), so the only safe recovery is to
-    fail the task, refund unspent trial minutes, and let the user retry.
+    Mid-chunk resume is not attempted here: part files live only for the life
+    of the thread. Process death is recovered at boot by re-queuing the whole
+    task (re-download + re-encode) via ``resume_interrupted_tasks``.
     """
     all_segments = []
     full_text = ""
     total = len(audio_chunks)
 
     for i, chunk_file in enumerate(audio_chunks):
+        if is_shutting_down():
+            raise ServerRestart(auto_resumed=True)
         # The stale sweeper may have given up on this task and refunded the
         # unspent allowance. Read the status straight from the database rather
         # than through the session, which may still hold our own last write.
@@ -2700,6 +2856,24 @@ def _analytics_anon_id():
     return f'anon:{aid}'
 
 
+def _stash_utm_from_request():
+    """Remember utm_source from the query string for the eventual signup event."""
+    src = (request.args.get('utm_source') or '').strip()
+    if not src:
+        return
+    session[UTM_SESSION_KEY] = src[:64]
+
+
+def _utm_source_for_signup():
+    """utm_source from session (stashed) or the signup form/query, if any."""
+    src = session.pop(UTM_SESSION_KEY, None)
+    if not src:
+        src = (request.values.get('utm_source') or '').strip() or None
+    if not src:
+        return None
+    return str(src)[:64]
+
+
 def _capture_register_failed(reason):
     """register_failed — coarse reason only; never email/password."""
     product_analytics.capture(
@@ -2763,6 +2937,8 @@ def register():
     if current_user.is_authenticated:
         return _redirect_after_auth()
 
+    _stash_utm_from_request()
+
     if request.method != 'POST':
         return _register_template()
 
@@ -2817,7 +2993,12 @@ def register():
         created = True
 
         _persist_login(user)
-        product_analytics.capture('user_signed_up', user.id)
+        signup_props = {}
+        utm = _utm_source_for_signup()
+        if utm:
+            signup_props['utm_source'] = utm
+        product_analytics.capture(
+            'user_signed_up', user.id, signup_props or None)
         if session.get(PENDING_TRANSCRIPTION_KEY):
             flash('Account created — starting your transcript.', 'success')
         else:
@@ -4936,6 +5117,30 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                                 abandoned.user_id,
                                 {**ph_props, 'reason': 'abandoned'},
                             )
+                    except ServerRestart as e:
+                        # Deploy/SIGTERM interrupted work. Leave the row
+                        # non-terminal so boot resume can re-queue it once;
+                        # if we already resumed once, fail with a clear message.
+                        interrupted = db.session.get(TranscriptionTask, task_id)
+                        attempts = int(
+                            getattr(interrupted, 'resume_attempts', 0) or 0
+                        ) if interrupted else 0
+                        if interrupted is not None and attempts >= 1:
+                            fail_task_and_refund(task_id, ServerRestart.MSG_RETRY)
+                            trial_refund_task(interrupted)
+                            product_analytics.capture(
+                                'transcript_failed',
+                                interrupted.user_id,
+                                {**ph_props, 'reason': ServerRestart.REASON},
+                            )
+                            report_task_failure(
+                                e, task_id=task_id, key_source=key_source)
+                        else:
+                            app.logger.warning(
+                                'task %s interrupted by server restart '
+                                '(resume_attempts=%s); leaving for boot resume',
+                                task_id, attempts,
+                            )
                     except Exception as e:
                         # Settle the reservation in the same write as status='error'
                         # (see fail_task_and_refund) so a failed task is never
@@ -5230,11 +5435,10 @@ def _task_key_source_for_analytics(task):
 def _fail_if_stale(task, source='poll'):
     """Fail a task whose worker has stopped writing progress.
 
-    Called from /status, /active-jobs, boot recovery, and the background
-    watchdog. A task orphaned by a restart has a heartbeat only seconds old, so
-    the boot sweep on that same boot skips it; the watchdog (and any later
-    poll) is what notices. Resume is not attempted: chunk files are gone with
-    the dead thread.
+    Called from /status, /active-jobs, and the background watchdog. Boot
+    recovery uses ``resume_interrupted_tasks`` instead (re-queue once). Chunk
+    files are gone with the dead thread, so resume re-downloads from
+    ``source_audio_url``.
     """
     if task.status == 'completed' or task.status in TERMINAL_STATUSES:
         return False
@@ -5325,6 +5529,322 @@ def start_stale_watchdog():
     thread.start()
     _stale_watchdog_started = True
     return True
+
+
+def count_in_flight_transcriptions():
+    """Queued / running transcriptions (anything not completed or terminal)."""
+    return (
+        TranscriptionTask.query
+        .filter(~TranscriptionTask.status.in_(['completed', *TERMINAL_STATUSES]))
+        .count()
+    )
+
+
+def _task_heartbeat_ts(task):
+    hb = task.heartbeat_at or task.started_at
+    if hb is None:
+        return None
+    if hb.tzinfo is None:
+        hb = hb.replace(tzinfo=timezone.utc)
+    return hb.timestamp()
+
+
+def _task_is_orphaned(task):
+    """True when the task's last heartbeat predates this process.
+
+    A live job owned by another gunicorn worker keeps heartbeating after we
+    boot; an interrupted job does not.
+    """
+    ts = _task_heartbeat_ts(task)
+    if ts is None:
+        return True
+    return ts < (_PROCESS_STARTED_AT - 0.5)
+
+
+def _claim_task_for_resume(task_id):
+    """Mark one orphaned task for a single automatic re-queue. True if we won.
+
+    Keeps trial/paid reservations untouched. Resets progress fields so the
+    worker re-downloads and re-encodes (chunk files died with the old process).
+    """
+    now = datetime.now(timezone.utc)
+    result = db.session.execute(text("""
+        UPDATE transcription_tasks
+           SET resume_attempts = COALESCE(resume_attempts, 0) + 1,
+               status = 'downloading',
+               phase = 'downloading',
+               progress = 0,
+               download_progress = 0,
+               chunk_index = NULL,
+               chunk_total = NULL,
+               bytes_downloaded = NULL,
+               bytes_total = NULL,
+               error_message = NULL,
+               phase_started_at = :now,
+               heartbeat_at = :now
+         WHERE id = :tid
+           AND COALESCE(resume_attempts, 0) = 0
+           AND status NOT IN ('completed', 'error', 'cancelled')
+           AND COALESCE(trial_settled, 0) = 0
+    """), {'tid': task_id, 'now': now})
+    db.session.commit()
+    return result.rowcount == 1
+
+
+def _ph_props_for_task(task, key_source, source='resume'):
+    """Analytics labels for a resumed (or otherwise continued) task."""
+    duration_min = None
+    if task.audio_duration:
+        duration_min = round(float(task.audio_duration) / 60.0, 2)
+    return {
+        'key_source': key_source,
+        'source': source,
+        'duration_min': duration_min,
+        'language': task.language or None,
+        'input_origin': 'resume',
+        'has_feed': bool((task.rss_url or '').strip()),
+        'podcast_name': task.podcast_name or None,
+        'nth_transcript': _completed_transcript_count(task.user_id) + 1,
+        'resumed': True,
+    }
+
+
+def _spawn_worker_for_existing_task(task):
+    """Start the download+Whisper thread for a row that already holds a reservation.
+
+    Returns True when the thread was started (and owns the capacity slot).
+    """
+    source_url = (task.source_audio_url or '').strip()
+    if not source_url or not _is_fetchable_url(source_url):
+        fail_task_and_refund(
+            task.id,
+            'This episode could not be restarted automatically — please try again.',
+        )
+        report_task_failure(
+            RuntimeError('resume missing source_audio_url'),
+            task_id=task.id, key_source='unknown',
+        )
+        return False
+
+    user = db.session.get(User, task.user_id)
+    if user is None:
+        fail_task_and_refund(task.id, ServerRestart.MSG_RETRY)
+        return False
+
+    api_key, key_source = resolve_openai_key(user)
+    if not api_key:
+        fail_task_and_refund(
+            task.id,
+            'No OpenAI API key configured. Add your key in Settings.',
+        )
+        return False
+
+    if not _transcription_slots.acquire(blocking=False):
+        app.logger.warning(
+            'resume deferred for %s: worker at its concurrent limit', task.id)
+        return False
+
+    openai_client = build_openai_client(api_key)
+    task_id = task.id
+    language = task.language or ''
+    ph_props = _ph_props_for_task(task, key_source)
+    parsed_url = urlparse(source_url)
+    audio_filename = (
+        f'temp_audio_{task_id}'
+        + (os.path.splitext(parsed_url.path)[1] or '.mp3')
+    )
+    user_id = task.user_id
+    source = 'resume'
+
+    def transcribe_thread():
+        try:
+            with app.app_context():
+                try:
+                    download_audio(source_url, audio_filename, task_id)
+                    transcribe_audio(
+                        audio_filename, task_id, openai_client, language=language)
+                except TaskAbandoned:
+                    abandoned = db.session.get(TranscriptionTask, task_id)
+                    if abandoned:
+                        trial_refund_task(abandoned)
+                        product_analytics.capture(
+                            'transcript_failed',
+                            abandoned.user_id,
+                            {**ph_props, 'reason': 'abandoned'},
+                        )
+                except ServerRestart as e:
+                    interrupted = db.session.get(TranscriptionTask, task_id)
+                    attempts = int(
+                        getattr(interrupted, 'resume_attempts', 0) or 0
+                    ) if interrupted else 0
+                    if interrupted is not None and attempts >= 1:
+                        fail_task_and_refund(task_id, ServerRestart.MSG_RETRY)
+                        trial_refund_task(interrupted)
+                        product_analytics.capture(
+                            'transcript_failed',
+                            interrupted.user_id,
+                            {**ph_props, 'reason': ServerRestart.REASON},
+                        )
+                        report_task_failure(
+                            e, task_id=task_id, key_source=key_source)
+                    else:
+                        app.logger.warning(
+                            'resumed task %s interrupted again before boot '
+                            'marker; leaving for next resume',
+                            task_id,
+                        )
+                except Exception as e:
+                    error_message = (
+                        describe_openai_error(e, key_source=key_source)
+                        if _is_openai_error(e) else str(e))
+                    fail_task_and_refund(task_id, error_message)
+                    failed = db.session.get(TranscriptionTask, task_id)
+                    reason = 'other'
+                    if failed:
+                        trial_refund_task(failed)
+                        if isinstance(e, TrialExhausted):
+                            reason = 'trial_exhausted'
+                        elif isinstance(e, SourceAudioUnavailable):
+                            reason = e.reason
+                        elif _is_openai_error(e):
+                            reason = product_analytics.openai_fail_reason(
+                                e, key_source=key_source)
+                        product_analytics.capture(
+                            'transcript_failed',
+                            failed.user_id,
+                            {**ph_props, 'reason': reason},
+                        )
+                    if isinstance(e, SourceAudioUnavailable):
+                        app.logger.warning(
+                            'Source audio unavailable for resumed task %s: %s',
+                            task_id, e.reason)
+                    elif reason in ('own_key_no_credit', 'own_key_invalid'):
+                        app.logger.warning(
+                            'Own-key OpenAI account error for resumed task %s: %s',
+                            task_id, reason)
+                    else:
+                        report_task_failure(
+                            e, task_id=task_id, key_source=key_source)
+                else:
+                    try:
+                        done_props = dict(ph_props)
+                        finished = db.session.get(TranscriptionTask, task_id)
+                        if finished is not None:
+                            if finished.audio_duration:
+                                done_props['duration_min'] = round(
+                                    finished.audio_duration / 60.0, 2)
+                            if finished.language:
+                                done_props['language'] = normalize_language_code(
+                                    finished.language) or None
+                            done_props['nth_transcript'] = (
+                                _completed_transcript_count(user_id))
+                        product_analytics.capture(
+                            'transcript_completed', user_id, done_props)
+                        if finished is not None:
+                            _schedule_transcript_ready_email(task_id, user_id)
+                            # Optional AI summary — never fails the transcript.
+                            _schedule_transcript_summary(task_id, user_id)
+                    except Exception:  # noqa: BLE001
+                        app.logger.exception(
+                            'transcript_completed analytics failed for resumed %s',
+                            task_id)
+                finally:
+                    if os.path.exists(audio_filename):
+                        try:
+                            os.remove(audio_filename)
+                        except OSError:
+                            pass
+        except Exception:
+            app.logger.exception(
+                'resumed transcription worker for %s died before it could start',
+                task_id)
+        finally:
+            _transcription_slots.release()
+
+    thread = threading.Thread(
+        target=transcribe_thread, name=f'resume-{task_id[:8]}', daemon=True)
+    thread.start()
+    product_analytics.capture('transcript_started', user_id, ph_props)
+    app.logger.info('resumed interrupted transcription %s', task_id)
+    return True
+
+
+def resume_interrupted_tasks():
+    """Re-queue tasks left mid-flight by a previous process death. Once each.
+
+    Idempotent across two gunicorn workers: the conditional UPDATE on
+    ``resume_attempts`` is the claim. Reservations stay on the row (no
+    re-reserve / no double charge). A task that fails again after resume is
+    failed with ServerRestart.MSG_RETRY and reported to Sentry.
+    """
+    running = (
+        TranscriptionTask.query
+        .filter(~TranscriptionTask.status.in_(['completed', *TERMINAL_STATUSES]))
+        .all()
+    )
+    resumed = 0
+    failed_second = 0
+    for task in running:
+        if not _task_is_orphaned(task):
+            continue
+        attempts = int(task.resume_attempts or 0)
+        if attempts >= 1:
+            fail_task_and_refund(task.id, ServerRestart.MSG_RETRY)
+            db.session.expire(task)
+            report_task_failure(
+                ServerRestart(auto_resumed=False),
+                task_id=task.id,
+                key_source=_task_key_source_for_analytics(task),
+            )
+            try:
+                product_analytics.capture(
+                    'transcript_failed',
+                    task.user_id,
+                    {
+                        'reason': ServerRestart.REASON,
+                        'key_source': _task_key_source_for_analytics(task),
+                        'resumed': True,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                app.logger.exception(
+                    'transcript_failed analytics failed for resume-exhausted %s',
+                    task.id)
+            failed_second += 1
+            continue
+        if not _claim_task_for_resume(task.id):
+            continue
+        db.session.expire(task)
+        claimed = db.session.get(TranscriptionTask, task.id)
+        if claimed is None:
+            continue
+        if _spawn_worker_for_existing_task(claimed):
+            resumed += 1
+        else:
+            # No capacity slot — leave downloading/resume_attempts=1; the
+            # stale watchdog or a later boot will settle it if still stuck.
+            app.logger.warning(
+                'claimed %s for resume but could not start a worker', task.id)
+    if resumed or failed_second:
+        app.logger.info(
+            'boot resume: started=%s failed_after_resume=%s',
+            resumed, failed_second)
+    return {'resumed': resumed, 'failed_second': failed_second}
+
+
+@app.route('/internal/in-flight')
+def internal_in_flight():
+    """Local-only count of queued/running transcriptions for deploy drain."""
+    remote = (request.remote_addr or '').strip()
+    # Public traffic also arrives from 127.0.0.1 (Plesk nginx/Apache proxy),
+    # but always carries forwarding headers; the drain script's direct curl
+    # to 127.0.0.1:5002 never does.
+    proxied = any(request.headers.get(h) for h in (
+        'X-Real-IP', 'X-Forwarded-For', 'X-Forwarded-Host', 'Forwarded'))
+    if remote not in ('127.0.0.1', '::1') or proxied:
+        return jsonify({'error': 'forbidden'}), 403
+    n = count_in_flight_transcriptions()
+    return jsonify({'ok': True, 'in_flight': n})
 
 
 @app.route('/status/<task_id>')
@@ -5430,6 +5950,15 @@ def get_status(task_id):
             result['language'] = display_language(task.language)
         # Optional AI summary (flagged; status may still be pending).
         result['summary_status'] = getattr(task, 'summary_status', None)
+        if (result['summary_status'] is None and summary_mod.summary_enabled()
+                and task.status == 'completed' and task.completed_at is not None):
+            # The summary thread starts just after completion; report it as
+            # pending for a short window so the page keeps checking for it.
+            done_at = task.completed_at
+            if done_at.tzinfo is None:
+                done_at = done_at.replace(tzinfo=timezone.utc)
+            if (datetime.now(timezone.utc) - done_at).total_seconds() < 120:
+                result['summary_status'] = 'pending'
         if getattr(task, 'summary_status', None) == 'ready':
             parsed = summary_mod.parse_summary_json(
                 getattr(task, 'summary_json', None))
@@ -5661,6 +6190,307 @@ def _task_owned_or_404(task_id):
     if not task or task.user_id != current_user.id:
         return None, (jsonify({'error': 'Task not found'}), 404)
     return task, None
+
+
+def mint_share_token():
+    """Unguessable url-safe token (>=128-bit entropy)."""
+    return secrets.token_urlsafe(SHARE_TOKEN_BYTES)
+
+
+def share_create_reserve(user_id):
+    """Atomically take one share-create slot for this user, or None if capped."""
+    now = time.time()
+    key = int(user_id)
+    with _share_create_lock:
+        seen = [t for t in _share_create_attempts.get(key, ())
+                if now - t[0] < SHARE_CREATE_WINDOW_SECONDS]
+        if len(seen) >= SHARE_CREATE_MAX_PER_USER:
+            _share_create_attempts[key] = seen
+            return None
+        token = (now, uuid.uuid4().hex)
+        seen.append(token)
+        _share_create_attempts[key] = seen
+        if len(_share_create_attempts) > 10000:
+            stale = [k for k, v in list(_share_create_attempts.items())
+                     if not v or now - v[-1][0] > SHARE_CREATE_WINDOW_SECONDS]
+            for k in stale:
+                _share_create_attempts.pop(k, None)
+        return token
+
+
+def share_create_release(user_id, token):
+    if token is None:
+        return
+    key = int(user_id)
+    with _share_create_lock:
+        held = _share_create_attempts.get(key)
+        if not held:
+            return
+        try:
+            held.remove(token)
+        except ValueError:
+            return
+        if not held:
+            _share_create_attempts.pop(key, None)
+
+
+def _active_share_for_task(task_id):
+    """Non-revoked TranscriptShare for task_id, or None."""
+    return TranscriptShare.query.filter_by(
+        task_id=task_id, revoked_at=None,
+    ).first()
+
+
+def _share_public_url(token):
+    """Absolute public URL for a share token (prefers PUBLIC_BASE_URL)."""
+    return public_url('shared_transcript', token=token)
+
+
+def _share_payload(share):
+    if not share or share.revoked_at is not None:
+        return {'shared': False, 'url': None, 'token': None}
+    return {
+        'shared': True,
+        'url': _share_public_url(share.token),
+        'token': share.token,
+    }
+
+
+def share_partial_meta(task):
+    """Display metadata for a free-preview transcript on the share page, or None.
+
+    Reads the canonical ``partial_meta`` column (PR #59) so a partial preview
+    is never presented publicly as the full episode.
+    """
+    meta = task_partial_meta(task)
+    if not meta:
+        return None
+    n, m = partial_minutes_pair(meta)
+    return {
+        'partial': True,
+        'partial_minutes': n,
+        'episode_minutes': m,
+        'note': partial_transcript_note(meta),
+    }
+
+
+def _readable_share_segments(task):
+    """Timestamped lines for the public share page, or [] when unavailable."""
+    if not task.segments_json:
+        return []
+    try:
+        segments = json.loads(task.segments_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(segments, list):
+        return []
+    lines = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        text = (seg.get('text') or '').strip()
+        if not text:
+            continue
+        start = seg.get('start')
+        try:
+            ts = format_timestamp(float(start)) if start is not None else ''
+        except (TypeError, ValueError):
+            ts = ''
+        # format_timestamp is SRT-style (HH:MM:SS,mmm); show a short clock.
+        if ts and ',' in ts:
+            ts = ts.split(',', 1)[0]
+        lines.append({'start': ts, 'text': text})
+    return lines
+
+
+@app.route('/transcription/<task_id>/share', methods=['GET', 'POST'])
+@login_required
+def transcription_share(task_id):
+    """Opt-in public share link for a completed transcript (owner only)."""
+    task, err = _task_owned_or_404(task_id)
+    if err:
+        return err
+
+    if request.method == 'GET':
+        return jsonify(_share_payload(_active_share_for_task(task.id)))
+
+    if task.status != 'completed' or not (task.transcript_text or '').strip():
+        return jsonify({'error': 'Only completed transcripts can be shared'}), 400
+
+    existing = _active_share_for_task(task.id)
+    if existing:
+        return jsonify(_share_payload(existing))
+
+    slot = share_create_reserve(current_user.id)
+    if slot is None:
+        return jsonify({
+            'error': 'Too many share links created. Try again later.',
+        }), 429
+
+    created = False
+    try:
+        # Reuse a revoked row for this task (unique task_id) with a new token.
+        share = TranscriptShare.query.filter_by(task_id=task.id).first()
+        token = mint_share_token()
+        now = datetime.now(timezone.utc)
+        if share:
+            share.token = token
+            share.user_id = current_user.id
+            share.created_at = now
+            share.revoked_at = None
+        else:
+            share = TranscriptShare(
+                token=token,
+                task_id=task.id,
+                user_id=current_user.id,
+                created_at=now,
+            )
+            db.session.add(share)
+        db.session.commit()
+        created = True
+        product_analytics.capture(
+            'share_link_created',
+            current_user.id,
+            {'partial': bool(share_partial_meta(task))},
+        )
+        return jsonify(_share_payload(share))
+    finally:
+        if not created:
+            share_create_release(current_user.id, slot)
+
+
+@app.route('/transcription/<task_id>/share/revoke', methods=['POST'])
+@login_required
+def transcription_share_revoke(task_id):
+    """Revoke the public share link for a transcript (owner only)."""
+    task, err = _task_owned_or_404(task_id)
+    if err:
+        return err
+
+    share = _active_share_for_task(task.id)
+    if not share:
+        return jsonify({'shared': False, 'url': None, 'token': None})
+
+    share.revoked_at = datetime.now(timezone.utc)
+    db.session.commit()
+    product_analytics.capture('share_link_revoked', current_user.id)
+    return jsonify({'shared': False, 'url': None, 'token': None})
+
+
+def _public_share_or_404(token):
+    """Active share + completed task for token, or None."""
+    token = (token or '').strip()
+    if not token or len(token) > 64:
+        return None, None
+    share = TranscriptShare.query.filter_by(token=token, revoked_at=None).first()
+    if not share:
+        return None, None
+    task = db.session.get(TranscriptionTask, share.task_id)
+    if not task or task.status != 'completed' or not (task.transcript_text or '').strip():
+        return None, None
+    return share, task
+
+
+def _share_response_headers(resp):
+    """Headers for public share responses.
+
+    noindex: shared transcripts are never search results. no-referrer: the
+    token is the credential, so it must not leak to the artwork CDN or any
+    outbound link. no-store: a revoked link must not keep rendering from a
+    browser or proxy cache.
+    """
+    resp.headers['X-Robots-Tag'] = 'noindex'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@app.route('/t/<token>')
+def shared_transcript(token):
+    """Public, unguessable share page for a completed transcript."""
+    share, task = _public_share_or_404(token)
+    if not share:
+        return _share_response_headers(make_response("Not found", 404))
+
+    partial_meta = share_partial_meta(task)
+    segments = _readable_share_segments(task)
+    signup_url = url_for('register', utm_source='share')
+    product_analytics.capture(
+        'shared_transcript_viewed',
+        _analytics_anon_id(),
+        {
+            'partial': bool(partial_meta),
+            'has_timestamps': bool(segments),
+            '$process_person_profile': False,
+        },
+    )
+    episode = task.episode_title or 'Episode'
+    podcast = task.podcast_name or ''
+    og_title = f'{episode} — {podcast}' if podcast else f'{episode} — Podskrift'
+    og_description = (
+        f'Transcript of {episode}'
+        + (f' from {podcast}' if podcast else '')
+        + '. Shared via Podskrift.'
+    )
+    resp = make_response(render_template(
+        'shared_transcript.html',
+        task=task,
+        segments=segments,
+        partial_meta=partial_meta,
+        signup_url=signup_url,
+        download_txt_url=url_for('shared_transcript_download',
+                                 token=token, file_type='txt'),
+        download_srt_url=(
+            url_for('shared_transcript_download', token=token, file_type='srt')
+            if task.segments_json else None
+        ),
+        og_title=og_title,
+        og_description=og_description,
+    ))
+    _share_response_headers(resp)
+    return resp
+
+
+@app.route('/t/<token>/download/<file_type>')
+def shared_transcript_download(token, file_type):
+    """Download .txt / .srt for a public share (no login)."""
+    from io import BytesIO
+
+    share, task = _public_share_or_404(token)
+    if not share:
+        return "File not found", 404
+    if file_type not in ('txt', 'srt'):
+        return "Invalid file type", 400
+    if file_type == 'srt' and not task.segments_json:
+        return "File not found", 404
+
+    safe_title = safe_download_basename(task.episode_title)
+    if file_type == 'txt':
+        body = task.transcript_text or ''
+        partial = share_partial_meta(task)
+        if partial:
+            body = partial['note'] + '\n\n' + body
+        content = body.encode('utf-8')
+        resp = send_file(
+            BytesIO(content),
+            as_attachment=True,
+            download_name=f'{safe_title}.txt',
+            mimetype='text/plain',
+        )
+    else:
+        srt = _segments_to_srt(
+            task.segments_json, task.transcript_text or '',
+        )
+        if not srt:
+            return "File not found", 404
+        resp = send_file(
+            BytesIO(srt.encode('utf-8')),
+            as_attachment=True,
+            download_name=f'{safe_title}.srt',
+            mimetype='text/srt',
+        )
+    _share_response_headers(resp)
+    return resp
 
 
 def _feed_already_saved(user_id, rss_url):
@@ -6998,7 +7828,7 @@ def robots_txt():
     """
     disallow = ['Disallow: ' + path for path in (
         '/settings', '/history', '/feeds', '/transcription/', '/download/',
-        '/api/', '/status/', '/active-jobs', '/cancel/',
+        '/api/', '/status/', '/active-jobs', '/cancel/', '/t/',
     )]
     lines = [
         '# Podskrift -- podcast transcription',
@@ -8201,6 +9031,7 @@ def apply_column_migrations():
         ('transcription_tasks', TASK_COLUMN_MIGRATIONS),
         ('users', USER_COLUMN_MIGRATIONS),
         ('credit_purchases', CREDIT_PURCHASE_COLUMN_MIGRATIONS),
+        ('transcript_shares', TRANSCRIPT_SHARE_COLUMN_MIGRATIONS),
         ('saved_feeds', SAVED_FEED_COLUMN_MIGRATIONS),
     )
     for table, migrations in tables:
@@ -8308,6 +9139,88 @@ def ensure_credit_purchases_table():
         db.session.rollback()
         app.logger.exception(
             'Could not create ix_credit_purchases_stripe_payment_intent_id')
+
+
+def ensure_transcript_shares_table():
+    """Create transcript_shares if missing. Safe when two gunicorn workers race.
+
+    Indexes that reference a column are created only AFTER that column is
+    known to exist (CREATE TABLE includes it, or an ALTER has added it). A
+    past outage came from indexing a column before the ALTER landed.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        db.session.execute(text("""
+            CREATE TABLE IF NOT EXISTS transcript_shares (
+                id INTEGER NOT NULL PRIMARY KEY,
+                token VARCHAR(64) NOT NULL UNIQUE,
+                task_id VARCHAR(36) NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                created_at DATETIME,
+                revoked_at DATETIME,
+                FOREIGN KEY(task_id) REFERENCES transcription_tasks (id),
+                FOREIGN KEY(user_id) REFERENCES users (id)
+            )
+        """))
+        db.session.commit()
+    except OperationalError as exc:
+        db.session.rollback()
+        msg = str(exc).lower()
+        if 'already exists' not in msg:
+            raise
+        app.logger.info(
+            'transcript_shares was created by another worker; continuing')
+
+    # Additive column upgrades first — never index a column that might be
+    # missing on a table created by an earlier ship of this feature.
+    existing = _live_columns('transcript_shares')
+    if not existing:
+        return
+    for column, ddl_type in TRANSCRIPT_SHARE_COLUMN_MIGRATIONS.items():
+        if column in existing:
+            continue
+        try:
+            db.session.execute(text(
+                f'ALTER TABLE transcript_shares ADD COLUMN {column} {ddl_type}'
+            ))
+            db.session.commit()
+        except OperationalError as exc:
+            db.session.rollback()
+            if 'duplicate column name' not in str(exc).lower():
+                raise
+            app.logger.info(
+                'transcript_shares.%s was added by another worker; continuing',
+                column)
+
+    # Re-read after ALTERs so indexes only target columns that exist now.
+    existing = _live_columns('transcript_shares')
+    index_specs = []
+    if 'token' in existing:
+        index_specs.append(
+            ('ix_transcript_shares_token',
+             'CREATE UNIQUE INDEX IF NOT EXISTS ix_transcript_shares_token '
+             'ON transcript_shares (token)')
+        )
+    if 'task_id' in existing:
+        index_specs.append(
+            ('ix_transcript_shares_task_id',
+             'CREATE UNIQUE INDEX IF NOT EXISTS ix_transcript_shares_task_id '
+             'ON transcript_shares (task_id)')
+        )
+    if 'user_id' in existing:
+        index_specs.append(
+            ('ix_transcript_shares_user_id',
+             'CREATE INDEX IF NOT EXISTS ix_transcript_shares_user_id '
+             'ON transcript_shares (user_id)')
+        )
+    for name, ddl in index_specs:
+        try:
+            db.session.execute(text(ddl))
+            db.session.commit()
+        except OperationalError:
+            db.session.rollback()
+            app.logger.exception('Could not create %s', name)
 
 
 def ensure_email_sent_log_table():
@@ -8420,6 +9333,17 @@ def start_shared_transcription_for_summary_email(job, *, owner_user_id):
     platform OpenAI key. Returns task_id or None.
     """
     if not GLOBAL_OPENAI_KEY:
+        return None
+    if not _SERVER_STARTED_AT_ENV:
+        # Hard stop: this is called from the new-episode poller, a oneshot
+        # systemd process. A transcription thread started here dies when the
+        # poller exits (mid-download / mid-Whisper, platform key already
+        # spent), and unknown-duration episodes are not trimmed to the cap.
+        # Until shared transcriptions are handed to the gunicorn server,
+        # refuse rather than burn budget on work that cannot finish.
+        app.logger.warning(
+            'summary-email: refusing to start transcription outside the '
+            'gunicorn server process (poller); job left for a later design')
         return None
     audio_url = (job.audio_url or '').strip()
     if not audio_url or not _is_fetchable_url(audio_url):
@@ -8618,6 +9542,7 @@ with app.app_context():
             str(exc).split('\n')[0][:120],
         )
     ensure_credit_purchases_table()
+    ensure_transcript_shares_table()
     ensure_email_sent_log_table()
     ensure_summary_email_tables()
 
@@ -8632,13 +9557,23 @@ with app.app_context():
             'prefer a Dashboard Price with tax_behavior set explicitly')
     inspector = sa_inspect(db.engine)
 
-    # Transcription runs in a daemon thread, so a deploy or crash leaves tasks
-    # stuck in a running state forever. Fail those at boot -- but only ones that
-    # have gone quiet: this module is imported by every gunicorn worker, and a
-    # worker respawning mid-life must not kill jobs another worker is running.
-    # Shared with the watchdog / poll paths so refunds and transcript_failed
-    # fire the same way regardless of who notices.
-    _sweep_stale_tasks(source='boot')
+    # Transcription runs in a daemon thread, so a deploy restart leaves tasks
+    # mid-flight. Re-queue each orphaned task once (reservation kept); a second
+    # failure after resume gets a clear server_restart message. Live jobs owned
+    # by another worker keep heartbeating and are skipped. Two gunicorn workers
+    # race the same claim; resume_attempts is the conditional UPDATE.
+    install_shutdown_handlers()
+    if _SERVER_STARTED_AT_ENV:
+        # Real server boot (gunicorn.conf.py): orphan = heartbeat older than
+        # this server generation, so a lone respawned worker never steals a
+        # live job from its sibling.
+        resume_interrupted_tasks()
+    else:
+        # Any other importer (the new-episode poller timer, ops scripts) must
+        # never claim or spawn transcription work: its own start time says
+        # nothing about whether gunicorn's jobs are alive. Keep the old,
+        # threshold-based stale sweep only.
+        _sweep_stale_tasks(source='boot')
 
     settle_stranded_charges()
 

@@ -196,11 +196,25 @@
         <h5>Transcript</h5>
         <div class="flex-center" style="gap: 8px; flex-wrap: wrap;" id="transcriptActions">
             <button type="button" class="btn btn-sm btn-primary hidden" id="copyBtn" onclick="copyTranscript()">Copy</button>
+            <button type="button" class="btn btn-sm btn-ghost hidden" id="shareBtn">Share</button>
             <span class="download-group hidden" id="downloadGroup" aria-label="Download">
                 <a href="#" id="downloadTxt" class="btn btn-sm btn-ghost hidden">Download .txt</a>
                 <a href="#" id="downloadSrt" class="btn btn-sm btn-ghost hidden">Download .srt</a>
             </span>
         </div>
+    </div>
+    <div id="sharePanel" class="hidden share-panel" role="region" aria-label="Share transcript">
+        <p class="text-sm text-muted" id="shareHint" style="margin: 0 0 8px;">
+            Create a private link anyone can open — no login required. You can revoke it anytime.
+        </p>
+        <div class="share-panel-row">
+            <input type="text" class="form-input" id="shareUrlInput" readonly
+                   placeholder="Link appears here after you create it" aria-label="Share link">
+            <button type="button" class="btn btn-sm btn-primary" id="shareCreateBtn">Create link</button>
+            <button type="button" class="btn btn-sm btn-ghost hidden" id="shareCopyLinkBtn">Copy link</button>
+            <button type="button" class="btn btn-sm btn-ghost hidden" id="shareRevokeBtn">Revoke</button>
+        </div>
+        <p class="text-sm text-muted hidden" id="shareStatus" style="margin: 8px 0 0;" aria-live="polite"></p>
     </div>
     <!-- Shown right after Copy: next episodes + follow, while the lower What’s next stays too -->
     <div id="copyNextSteps" class="hidden copy-next" role="status">
@@ -225,6 +239,15 @@
         display: inline-flex; gap: 6px; flex-wrap: wrap; align-items: center;
         padding-left: 8px; border-left: 1px solid var(--border);
     }
+    .share-panel {
+        margin: 0 16px 12px; padding: 12px 14px;
+        border: 1px solid var(--border); border-radius: var(--radius-sm);
+        background: var(--surface);
+    }
+    .share-panel-row {
+        display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    }
+    .share-panel-row .form-input { flex: 1 1 220px; min-width: 0; }
     .copy-next {
         margin: 0 16px 12px; padding: 12px 14px;
         border: 1px solid var(--border); border-radius: var(--radius-sm);
@@ -258,12 +281,15 @@
     var START_URL = {{ url_for('start_transcription')|tojson }};
     var RELATED_URL = {{ url_for('related_episodes', task_id=task_id)|tojson }};
     var FOLLOW_URL = {{ url_for('follow_task_podcast', task_id=task_id)|tojson }};
+    var SHARE_URL = {{ url_for('transcription_share', task_id=task_id)|tojson }};
+    var SHARE_REVOKE_URL = {{ url_for('transcription_share_revoke', task_id=task_id)|tojson }};
     var resultViewed = false;
     var nextStepsLoaded = false;
     var taskHasRss = false;
     var RELATED_CLIENT_TIMEOUT_MS = 10000;
     var relatedCache = null; // {has_feed, following, podcast_name, episodes, error?}
     var copyNextShown = false;
+    var shareLoaded = false;
 
     var el = function(id) { return document.getElementById(id); };
 
@@ -580,6 +606,28 @@
         show(card, true);
     }
 
+    // The summary is generated a few seconds AFTER the transcript completes,
+    // and polling stops at 'completed' — re-check a bounded number of times.
+    var summaryRefreshLeft = 20;
+    var summaryRefreshTimer = null;
+    function scheduleSummaryRefresh(d) {
+        if (!d || d.summary_status !== 'pending') return;
+        if (summaryRefreshTimer || summaryRefreshLeft <= 0) return;
+        summaryRefreshLeft -= 1;
+        summaryRefreshTimer = setTimeout(function () {
+            summaryRefreshTimer = null;
+            fetch('/status/' + taskId)
+                .then(function (r) { return r.ok ? r.json() : null; })
+                .then(function (s) {
+                    if (!s) return;
+                    renderSummary(s);
+                    if (s.download_txt) el('downloadTxt').href = s.download_txt;
+                    scheduleSummaryRefresh(s);
+                })
+                .catch(function () {});
+        }, 3000);
+    }
+
     function updateUI(d) {
         renderHeader(d);
         if (d.has_rss != null) taskHasRss = !!d.has_rss;
@@ -641,6 +689,7 @@
                 show(el('partialPreviewCard'), false);
             }
             renderSummary(d);
+            scheduleSummaryRefresh(d);
             if (d.download_txt) {
                 el('downloadTxt').href = d.download_txt;
                 show(el('downloadTxt'), true);
@@ -651,6 +700,8 @@
             }
             if (d.download_txt || d.download_srt) show(el('downloadGroup'), true);
             show(el('copyBtn'), true);
+            show(el('shareBtn'), true);
+            loadShareState();
             loadNextSteps();
             return;
         }
@@ -759,6 +810,112 @@
             showCopyNextSteps();
         });
     };
+
+    function setShareUi(data) {
+        var shared = !!(data && data.shared && data.url);
+        var input = el('shareUrlInput');
+        var createBtn = el('shareCreateBtn');
+        var copyLinkBtn = el('shareCopyLinkBtn');
+        var revokeBtn = el('shareRevokeBtn');
+        var status = el('shareStatus');
+        if (input) input.value = shared ? data.url : '';
+        show(createBtn, !shared);
+        show(copyLinkBtn, shared);
+        show(revokeBtn, shared);
+        if (status) {
+            status.textContent = shared
+                ? 'Anyone with this link can read the transcript. Revoke to turn it off.'
+                : '';
+            show(status, shared);
+        }
+    }
+
+    function loadShareState() {
+        if (shareLoaded) return;
+        shareLoaded = true;
+        fetch(SHARE_URL)
+            .then(function(r) { return r.json(); })
+            .then(function(data) { setShareUi(data); })
+            .catch(function() { /* ignore */ });
+    }
+
+    function createShareLink() {
+        var btn = el('shareCreateBtn');
+        var status = el('shareStatus');
+        if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+        fetch(SHARE_URL, { method: 'POST' })
+            .then(function(r) {
+                return r.json().then(function(data) { return { status: r.status, data: data }; });
+            })
+            .then(function(res) {
+                if (btn) { btn.disabled = false; btn.textContent = 'Create link'; }
+                if (res.status >= 400) {
+                    if (status) {
+                        status.textContent = (res.data && res.data.error) || 'Could not create link.';
+                        show(status, true);
+                    }
+                    return;
+                }
+                setShareUi(res.data);
+            })
+            .catch(function() {
+                if (btn) { btn.disabled = false; btn.textContent = 'Create link'; }
+                if (status) {
+                    status.textContent = 'Could not create link. Try again.';
+                    show(status, true);
+                }
+            });
+    }
+
+    function revokeShareLink() {
+        if (!confirm('Revoke this share link? Anyone with it will get a 404.')) return;
+        var btn = el('shareRevokeBtn');
+        if (btn) { btn.disabled = true; }
+        fetch(SHARE_REVOKE_URL, { method: 'POST' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (btn) btn.disabled = false;
+                setShareUi(data);
+            })
+            .catch(function() {
+                if (btn) btn.disabled = false;
+            });
+    }
+
+    function wireShareControls() {
+        var shareBtn = el('shareBtn');
+        if (shareBtn && !shareBtn.dataset.wired) {
+            shareBtn.dataset.wired = '1';
+            shareBtn.addEventListener('click', function() {
+                var panel = el('sharePanel');
+                var open = panel && !panel.classList.contains('hidden');
+                show(panel, !open);
+                if (!open) loadShareState();
+            });
+        }
+        var createBtn = el('shareCreateBtn');
+        if (createBtn && !createBtn.dataset.wired) {
+            createBtn.dataset.wired = '1';
+            createBtn.addEventListener('click', createShareLink);
+        }
+        var revokeBtn = el('shareRevokeBtn');
+        if (revokeBtn && !revokeBtn.dataset.wired) {
+            revokeBtn.dataset.wired = '1';
+            revokeBtn.addEventListener('click', revokeShareLink);
+        }
+        var copyLinkBtn = el('shareCopyLinkBtn');
+        if (copyLinkBtn && !copyLinkBtn.dataset.wired) {
+            copyLinkBtn.dataset.wired = '1';
+            copyLinkBtn.addEventListener('click', function() {
+                var input = el('shareUrlInput');
+                if (!input || !input.value) return;
+                navigator.clipboard.writeText(input.value).then(function() {
+                    copyLinkBtn.textContent = 'Copied!';
+                    setTimeout(function() { copyLinkBtn.textContent = 'Copy link'; }, 2000);
+                }).catch(function() {});
+            });
+        }
+    }
 
     function wireDownloadTracking() {
         var txt = el('downloadTxt');
@@ -1062,6 +1219,7 @@
     }
 
     wireDownloadTracking();
+    wireShareControls();
     show(el('resultBanner'), false);
     show(el('errorContainer'), false);
     show(el('nextSteps'), false);
