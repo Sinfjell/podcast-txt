@@ -3171,8 +3171,9 @@ def test_the_mobile_menu_extras_are_hidden_on_desktop(trial_on):
 def test_the_logged_in_menu_offers_the_account_pages(trial_on):
     uid = _make_user('menu@test.com')
     body = _login(uid).get('/').data.decode()
-    for label in ('New transcript', 'Feeds', 'History', 'Settings', 'Log out'):
+    for label in ('New transcript', 'History', 'Settings', 'Log out'):
         assert label in body, f'{label} missing from the menu'
+    assert 'Feeds' not in body
     assert 'nav-sep' in body, 'log out is not separated from the rest'
 
 def test_cancelling_cannot_overwrite_a_finished_transcript(trial_on, monkeypatch):
@@ -11789,13 +11790,13 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
     assert 'data-kpi="trial_daily_used_minutes"' in body
     assert 'Trial today' in body
     assert 'chartSignups' in body
-    # User detail lists tasks / feeds / purchases
+    # User detail lists tasks / purchases
     with A.app.app_context():
         uid0 = User.query.filter_by(email=f'{prefix}-0@test.com').one().id
     detail = client.get(f'/admin/users/{uid0}').data.decode()
     assert f'{prefix}-0@test.com' in detail
     assert 'Ep 1' in detail
-    assert 'Show' in detail
+    assert 'Followed feeds' not in detail
     assert '$5.00' in detail
 
 
