@@ -2,6 +2,13 @@
   "version": 1,
   "entries": [
     {
+      "id": "email-alerts-coming-soon",
+      "date": "2026-10-09",
+      "hidden": true,
+      "title": "Email when a transcript is ready (coming soon)",
+      "summary": "Optional email when a long transcript finishes, and optional alerts for new episodes from podcasts you follow — with one-click unsubscribe. Not sending yet while we finish Mailgun setup."
+    },
+    {
       "id": "partial-trial-preview",
       "date": "2026-10-09",
       "title": "Long episodes start with a free preview",

@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Unsubscribe — Podskrift{% endblock %}
+
+{% block content %}
+<div style="max-width: 480px; margin: 48px auto; text-align: center;">
+    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 16px;">
+        {% if ok %}Unsubscribed{% else %}Unsubscribe{% endif %}
+    </h1>
+    <p style="color: var(--muted); font-size: 15px; line-height: 1.6;">{{ message }}</p>
+    {% if ok %}
+    <p style="color: var(--muted); font-size: 14px; line-height: 1.6; margin-top: 16px;">
+        You can turn transcript emails back on in
+        <a href="{{ url_for('settings') }}#email">Settings</a>
+        after you sign in.
+    </p>
+    {% endif %}
+    <p style="margin-top: 24px;">
+        <a href="{{ url_for('index') }}" class="btn btn-ghost">Back to Podskrift</a>
+    </p>
+</div>
+{% endblock %}

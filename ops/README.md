@@ -39,6 +39,71 @@ git rev-parse --short HEAD
 
 To return to tracking `main` afterward: `git checkout main && git pull --ff-only`.
 
+## Transactional email (Mailgun EU)
+
+Feature-flagged. Off until `EMAIL_ENABLED=1` and `MAILGUN_API_KEY` is set.
+When disabled the app logs and no-ops; the new-episode poller still advances
+per-feed baselines so turning mail on later does not flood inboxes.
+
+Sending domain is the **root** domain `podskrift.com` (EU region, verified).
+API base URL defaults to `https://api.eu.mailgun.net`. From defaults to
+`Podskrift <hello@podskrift.com>`. Inbound replies to `hello@` are forwarded by
+a Mailgun route — no `Reply-To` needed. Tracking CNAME `email.podskrift.com`
+exists, but Mailgun click/open tracking is sent as **off**; we use our own
+`utm_source=email` / `utm_campaign=…` links instead.
+
+We do not verify email addresses today — mail goes to the registered account
+email. Bounce handling is future work.
+
+### Env vars
+
+| Var | Required when enabled | Default | Notes |
+| --- | --- | --- | --- |
+| `EMAIL_ENABLED` | — | off (`0`) | Feature flag |
+| `MAILGUN_API_KEY` | yes | — | Domain sending key |
+| `MAILGUN_DOMAIN` | no | `podskrift.com` | Root sending domain |
+| `MAILGUN_BASE_URL` | no | `https://api.eu.mailgun.net` | EU API |
+| `MAIL_FROM` | no | `Podskrift <hello@podskrift.com>` | |
+| `MAIL_REPLY_TO` | no | unset | Optional; leave unset |
+
+Also needs `PUBLIC_BASE_URL` and `SECRET_KEY` (unsubscribe tokens + absolute links).
+
+### Env (append to the app `.env`, then restart)
+
+```bash
+# once, as root, from the app directory
+printf '%s\n' \
+  'EMAIL_ENABLED=0' \
+  'MAILGUN_API_KEY=key-...' \
+  'MAILGUN_DOMAIN=podskrift.com' \
+  'MAILGUN_BASE_URL=https://api.eu.mailgun.net' \
+  'MAIL_FROM=Podskrift <hello@podskrift.com>' \
+  >> .env
+# When ready to send:
+#   sed -i 's/^EMAIL_ENABLED=0/EMAIL_ENABLED=1/' .env
+systemctl restart podskrift
+```
+
+### New-episode poller (systemd timer, every 6 hours)
+
+```bash
+cd /var/www/vhosts/podskrift.nettsmed.dev/app
+cp ops/podskrift-new-episodes.service /etc/systemd/system/podskrift-new-episodes.service
+cp ops/podskrift-new-episodes.timer /etc/systemd/system/podskrift-new-episodes.timer
+systemctl daemon-reload
+systemctl enable --now podskrift-new-episodes.timer
+systemctl start podskrift-new-episodes.service   # prove it once
+systemctl status podskrift-new-episodes.service
+journalctl -u podskrift-new-episodes.service -n 50 --no-pager
+```
+
+Manual run:
+
+```bash
+cd /var/www/vhosts/podskrift.nettsmed.dev/app
+sudo -u podskrift .venv/bin/python ops/poll-new-episodes.py
+```
+
 ## Database backups
 
 Until 2026-09-09 there were none. The database is the only copy of every user's
