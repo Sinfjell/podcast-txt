@@ -25,15 +25,16 @@ before or right after that deploy; see Sentry / PostHog install notes below.
 
 ### Gunicorn graceful shutdown
 
-Production should run gunicorn with `--graceful-timeout 120` (and a matching
-systemd `TimeoutStopSec`) so SIGTERM lets workers finish current HTTP
-requests. Transcription threads observe the same SIGTERM via
-`request_shutdown()` and stop at safe points (between download chunks /
-Whisper parts) rather than mid-ffmpeg with a corrupt-file error.
+Production should use [gunicorn.conf.py](../gunicorn.conf.py) (`graceful_timeout
+= 120`, `post_worker_init` chains our shutdown flag onto gunicorn’s SIGTERM
+handler) and a matching systemd `TimeoutStopSec`. That lets workers finish
+current HTTP requests while transcription threads stop at safe points (between
+download chunks / Whisper parts) instead of mid-ffmpeg with a corrupt-file
+error.
 
-See [ops/podskrift.service.example](podskrift.service.example) for the full
-`ExecStart` line. Apply on the host once if the live unit still omits
-`--graceful-timeout`, then `systemctl daemon-reload`.
+See [ops/podskrift.service.example](podskrift.service.example). Apply on the
+host once if the live unit still uses bare CLI flags without `-c gunicorn.conf.py`,
+then `systemctl daemon-reload`.
 
 ### GitHub secrets (Settings → Secrets and variables → Actions)
 

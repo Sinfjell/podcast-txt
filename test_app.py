@@ -6413,16 +6413,17 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'unsubscribe-confirm-click'
-    assert entries[1]['id'] == 'partial-preview-minutes-wording'
-    assert entries[2]['id'] == 'partial-trial-preview'
-    assert entries[3]['id'] == 'own-key-billing-clarity'
-    assert entries[4]['id'] == 'clearer-missing-episode-audio'
-    assert entries[5]['id'] == 'new-signup-60-min-trial'
-    assert entries[6]['id'] == 'spotify-paste-robustness'
-    assert entries[7]['id'] == 'no-double-charge-restart'
-    assert entries[8]['id'] == 'apple-rss-link-resolve'
-    assert entries[9]['id'] == 'related-episodes-feed-fix'
+    assert entries[0]['id'] == 'resume-after-deploy'
+    assert entries[1]['id'] == 'unsubscribe-confirm-click'
+    assert entries[2]['id'] == 'partial-preview-minutes-wording'
+    assert entries[3]['id'] == 'partial-trial-preview'
+    assert entries[4]['id'] == 'own-key-billing-clarity'
+    assert entries[5]['id'] == 'clearer-missing-episode-audio'
+    assert entries[6]['id'] == 'new-signup-60-min-trial'
+    assert entries[7]['id'] == 'spotify-paste-robustness'
+    assert entries[8]['id'] == 'no-double-charge-restart'
+    assert entries[9]['id'] == 'apple-rss-link-resolve'
+    assert entries[10]['id'] == 'related-episodes-feed-fix'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())

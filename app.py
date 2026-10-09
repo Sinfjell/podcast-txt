@@ -179,6 +179,13 @@ def _canonical_redirect_target():
 
 
 @app.before_request
+def _ensure_shutdown_handlers():
+    """Wrap gunicorn's SIGTERM handler once the worker has installed it."""
+    if not _shutdown_handlers_installed:
+        install_shutdown_handlers()
+
+
+@app.before_request
 def canonical_host_redirect():
     """Send www / staging hosts to PUBLIC_BASE_URL so cookies stay on one origin.
 
@@ -875,21 +882,38 @@ def request_shutdown(signum=None, frame=None):
 
 
 def install_shutdown_handlers():
-    """Register SIGTERM/SIGINT once per process. Safe to call repeatedly."""
+    """Chain SIGTERM/SIGINT so we set the shutdown flag without replacing gunicorn.
+
+    Gunicorn's gthread worker calls ``init_signals`` *after* loading the app, so
+    a handler installed at import time is overwritten. We install from the first
+    request (and from ``post_worker_init`` when using gunicorn.conf.py), wrapping
+    whatever handler is already registered.
+    """
     global _shutdown_handlers_installed
-    if _shutdown_handlers_installed:
-        return False
     if os.getenv('PODSKRIFT_DISABLE_SHUTDOWN_HANDLERS', '').strip().lower() in (
             '1', 'true', 'yes'):
         return False
+    wrapped_any = False
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
-            signal.signal(sig, request_shutdown)
+            prev = signal.getsignal(sig)
+            if getattr(prev, '_podskrift_shutdown', False):
+                continue
+
+            def handler(signum, frame, _prev=prev):
+                request_shutdown(signum, frame)
+                if callable(_prev) and _prev not in (signal.SIG_DFL, signal.SIG_IGN):
+                    _prev(signum, frame)
+
+            handler._podskrift_shutdown = True
+            signal.signal(sig, handler)
+            wrapped_any = True
         except (ValueError, OSError):
             # Not the main thread, or signals unsupported — ignore.
             pass
-    _shutdown_handlers_installed = True
-    return True
+    if wrapped_any:
+        _shutdown_handlers_installed = True
+    return wrapped_any
 
 
 def _ffmpeg_killed_by_signal(returncode, stderr=b''):
