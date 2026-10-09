@@ -3171,8 +3171,9 @@ def test_the_mobile_menu_extras_are_hidden_on_desktop(trial_on):
 def test_the_logged_in_menu_offers_the_account_pages(trial_on):
     uid = _make_user('menu@test.com')
     body = _login(uid).get('/').data.decode()
-    for label in ('New transcript', 'Feeds', 'History', 'Settings', 'Log out'):
+    for label in ('New transcript', 'History', 'Settings', 'Log out'):
         assert label in body, f'{label} missing from the menu'
+    assert 'Feeds' not in body
     assert 'nav-sep' in body, 'log out is not separated from the rest'
 
 def test_cancelling_cannot_overwrite_a_finished_transcript(trial_on, monkeypatch):
@@ -3486,7 +3487,7 @@ def test_the_job_bar_is_on_every_page(trial_on):
     """A mini player that only exists on the home page is not a mini player."""
     uid = _make_user('jobbarpages@test.com')
     client = _login(uid)
-    for path in ('/', '/settings', '/history', '/feeds', '/rss-help'):
+    for path in ('/', '/settings', '/history', '/rss-help'):
         body = client.get(path).data.decode()
         assert 'id="jobBar"' in body, f'no job bar on {path}'
         assert "fetch('/active-jobs'" in body, f'no polling on {path}'
@@ -9229,7 +9230,7 @@ def test_episode_selection_own_key_shows_dollar_cost_not_paywall(
 
 def test_safe_return_to_rejects_absolute_and_external():
     assert A.safe_return_to('/parse_rss') == '/parse_rss'
-    assert A.safe_return_to('/feeds/use/1?x=1') == '/feeds/use/1?x=1'
+    assert A.safe_return_to('/history?x=1') == '/history?x=1'
     assert A.safe_return_to('/settings#credits') == '/settings#credits'
     assert A.safe_return_to('/') == '/'
     assert A.safe_return_to('https://evil.com') is None
@@ -9465,7 +9466,7 @@ def test_related_episodes_lists_others_from_same_feed(monkeypatch, trial_on):
         lambda url, timeout=None: (feed, None))
     data = _login(uid).get('/transcription/rel-1/related-episodes').get_json()
     assert data['has_feed'] is True
-    assert data['following'] is False
+    assert 'following' not in data
     assert data['podcast_name'] == 'Hard Fork'
     titles = [e['title'] for e in data['episodes']]
     assert 'Episode One' not in titles
@@ -9480,11 +9481,11 @@ def test_related_episodes_hidden_without_rss(trial_on):
     data = _login(uid).get('/transcription/rel-none/related-episodes').get_json()
     assert data['has_feed'] is False
     assert data['episodes'] == []
-    assert data['following'] is False
+    assert 'following' not in data
 
 
 def test_start_transcription_stores_rss_url_with_audio(monkeypatch, trial_on):
-    """Episode search / Spotify starts must persist the show feed for Follow."""
+    """Episode search / Spotify starts must persist the show feed for related episodes."""
     from models import db, TranscriptionTask
     uid = _make_user('startrss@test.com', limit=36000)
     monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
@@ -9612,38 +9613,6 @@ def test_related_episodes_respects_timeout_kwarg(monkeypatch, trial_on):
     assert data['episodes'] == []
 
 
-def test_follow_task_podcast_saves_feed(monkeypatch, trial_on):
-    from models import SavedFeed
-    uid = _make_user('followme@test.com')
-    _completed_task(uid, 'follow-1', podcast_name='Hard Fork')
-    monkeypatch.setattr(
-        A, 'get_episodes_from_rss',
-        lambda url, timeout=None: ([], 'offline'))
-    client = _login(uid)
-    data = client.post('/transcription/follow-1/follow').get_json()
-    assert data['following'] is True
-    assert data['already'] is False
-    with A.app.app_context():
-        feeds = SavedFeed.query.filter_by(user_id=uid).all()
-        assert len(feeds) == 1
-        assert feeds[0].rss_url == 'https://feeds.example.com/hardfork.xml'
-        assert feeds[0].name == 'Hard Fork'
-    again = client.post('/transcription/follow-1/follow').get_json()
-    assert again['following'] is True
-    assert again['already'] is True
-    related = client.get('/transcription/follow-1/related-episodes').get_json()
-    assert related['following'] is True
-    assert related['has_feed'] is True
-
-
-def test_follow_task_podcast_without_rss_fails(trial_on):
-    uid = _make_user('nofollow@test.com')
-    _completed_task(uid, 'follow-none', rss_url=None)
-    resp = _login(uid).post('/transcription/follow-none/follow')
-    assert resp.status_code == 400
-    assert 'feed' in resp.get_json()['error'].lower()
-
-
 def test_status_reports_has_rss(trial_on):
     uid = _make_user('hasrss@test.com')
     _completed_task(uid, 'rss-yes')
@@ -9658,7 +9627,8 @@ def test_status_reports_has_rss(trial_on):
 def test_transcription_page_has_next_steps_and_tracking():
     src = open('templates/transcription.html').read()
     assert 'id="nextSteps"' in src
-    assert 'Follow this podcast' in src
+    assert 'Follow this podcast' not in src
+    assert 'Email me when new episodes' not in src
     assert 'More episodes from' in src
     assert 'related-episodes' in src or 'RELATED_URL' in src
     assert "url_for('history')" in src
@@ -9666,7 +9636,7 @@ def test_transcription_page_has_next_steps_and_tracking():
     assert "transcript_downloaded" in src
     assert "result_viewed" in src
     assert "next_episode_clicked" in src
-    assert "podcast_followed" in src
+    assert "podcast_followed" not in src
     # Must not ship transcript text into analytics properties.
     assert "phCapture('transcript_copied', { task_id: taskId })" in src
     assert 'format: \'txt\'' in src or 'format: "txt"' in src
@@ -11739,7 +11709,7 @@ def test_admin_default_allowlist_includes_sindre(monkeypatch):
 
 def test_admin_kpis_match_fixture_data(monkeypatch):
     """Seed known rows and assert collect_kpis deltas (shared suite DB)."""
-    from models import (db, User, TranscriptionTask, SavedFeed, CreditPurchase,
+    from models import (db, User, TranscriptionTask, CreditPurchase,
                         TrialBudgetDay)
     import admin_dashboard as AD
     import uuid as _uuid
@@ -11801,10 +11771,7 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
             error_message='Transcription stopped making progress and was stopped.',
             started_at=now - timedelta(hours=2),
             completed_at=now - timedelta(hours=2)))
-        # Feed with alerts + one purchase
-        db.session.add(SavedFeed(
-            user_id=users[0].id, name='Show', rss_url='https://example.com/feed.xml',
-            email_new_episodes=True))
+        # One purchase
         db.session.add(CreditPurchase(
             user_id=users[0].id,
             stripe_session_id=f'cs_{prefix}',
@@ -11823,8 +11790,8 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
     assert after['failed_7d'] == before['failed_7d'] + 1
     assert after['minutes_7d'] == pytest.approx(before['minutes_7d'] + 17.0, abs=0.1)
     assert after['byok_users'] == before['byok_users'] + 1
-    assert after['followed_feeds'] == before['followed_feeds'] + 1
-    assert after['email_alerts_opted_in'] == before['email_alerts_opted_in'] + 1
+    assert 'followed_feeds' not in after
+    assert 'email_alerts_opted_in' not in after
     assert after['purchase_count'] == before['purchase_count'] + 1
     assert after['purchase_revenue_usd'] == pytest.approx(
         before['purchase_revenue_usd'] + 5.0, abs=0.01)
@@ -11845,13 +11812,13 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
     assert 'data-kpi="trial_daily_used_minutes"' in body
     assert 'Trial today' in body
     assert 'chartSignups' in body
-    # User detail lists tasks / feeds / purchases
+    # User detail lists tasks / purchases
     with A.app.app_context():
         uid0 = User.query.filter_by(email=f'{prefix}-0@test.com').one().id
     detail = client.get(f'/admin/users/{uid0}').data.decode()
     assert f'{prefix}-0@test.com' in detail
     assert 'Ep 1' in detail
-    assert 'Show' in detail
+    assert 'Followed feeds' not in detail
     assert '$5.00' in detail
 
 
@@ -12715,3 +12682,78 @@ def test_home_hero_price_line_uses_live_trial_and_pack_values(trial_on):
         assert f'{trial} min free · then ${price}' in body
     # Price line sits directly under the H1 (above the fold on mobile).
     assert body.index('hero-price-line') - body.index('class="hp-title"') < 400
+
+
+# ---------------------------------------------------------------------------
+# Saved feeds removed
+# ---------------------------------------------------------------------------
+
+def test_feeds_page_redirects_home(trial_on):
+    uid = _make_user('feeds-gone@test.com')
+    client = _login(uid)
+    resp = client.get('/feeds', follow_redirects=False)
+    assert resp.status_code == 301
+    assert resp.headers['Location'].endswith('/')
+
+
+def test_feed_api_endpoints_are_gone(trial_on):
+    uid = _make_user('feeds-api-gone@test.com')
+    client = _login(uid)
+    for path in (
+        '/feeds/add',
+        '/feeds/1/email-alerts',
+        '/feeds/1/email-summaries',
+        '/feeds/delete/1',
+        '/feeds/use/1',
+    ):
+        assert client.post(path).status_code == 410, path
+        assert client.get(path).status_code == 410, path
+
+
+def test_follow_endpoint_is_gone(trial_on):
+    uid = _make_user('follow-gone@test.com')
+    _completed_task(uid, 'follow-gone-1')
+    resp = _login(uid).post('/transcription/follow-gone-1/follow')
+    assert resp.status_code == 410
+
+
+def test_no_follow_ui_on_result_show_or_share_pages():
+    for path in (
+        'templates/transcription.html',
+        'templates/podcast_show.html',
+        'templates/shared_transcript.html',
+        'templates/episode_selection.html',
+    ):
+        src = open(path).read()
+        assert 'Follow this podcast' not in src, path
+        assert 'Follow podcast' not in src, path
+        assert 'Email me when new episodes' not in src, path
+        assert 'Email me new episodes' not in src, path
+
+
+def test_nav_has_no_feeds_link():
+    src = open('templates/base.html').read()
+    assert "url_for('feeds')" not in src
+    assert '>Feeds<' not in src
+
+
+def test_deploy_docs_do_not_reference_new_episode_poller():
+    readme = open('ops/README.md').read()
+    assert 'podskrift-new-episodes' not in readme
+    assert 'poll-new-episodes' not in readme
+    assert not os.path.exists('ops/poll-new-episodes.py')
+    assert not os.path.exists('ops/podskrift-new-episodes.service')
+    assert not os.path.exists('ops/podskrift-new-episodes.timer')
+
+
+def test_cookie_banner_copy_is_generic_and_privacy_names_processor(monkeypatch):
+    import re as _re
+    monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
+    body = A.app.test_client().get('/', headers={'Accept': 'text/html'}).data.decode()
+    m = _re.search(r'id="cookieConsentDesc">(.*?)</p>', body, _re.S)
+    assert m, 'banner renders when PostHog is configured'
+    banner = m.group(1)
+    assert 'PostHog' not in banner
+    assert 'anonymous, cookie-free usage statistics' in ' '.join(banner.split())
+    priv = A.app.test_client().get('/privacy').data.decode()
+    assert 'PostHog' in priv

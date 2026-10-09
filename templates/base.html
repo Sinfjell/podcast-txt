@@ -1142,10 +1142,6 @@
                     Buy minutes
                 </a>
                 {% endif %}
-                <a href="{{ url_for('feeds') }}">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/></svg>
-                    Feeds
-                </a>
                 <a href="{{ url_for('history') }}">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                     History
@@ -1239,9 +1235,8 @@
         <div class="cookie-consent-inner">
             <p class="cookie-consent-copy" id="cookieConsentDesc">
                 <span id="cookieConsentTitle" class="sr-only">Cookie settings</span>
-                Accept enables full product analytics and session replay
-                (PostHog EU), including cookies. Decline still allows
-                anonymous, cookie-free usage statistics.
+                Accept enables analytics and session replay, including cookies.
+                Decline still allows anonymous, cookie-free usage statistics.
                 <a href="{{ url_for('privacy') }}">Privacy</a>
             </p>
             <div class="cookie-consent-actions">

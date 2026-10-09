@@ -70,9 +70,7 @@ import analytics as product_analytics
 from site_standards import init_site_standards
 import email_notify
 import mail as mailer
-import episode_alerts
 import summary as summary_mod
-import summary_email as summary_email_mod
 from admin_dashboard import admin_bp, ensure_admin_indexes
 
 try:
@@ -282,8 +280,6 @@ WHISPER_COST_PER_MINUTE = 0.006
 # TL;DR + key points + short quotes — never meters trial/paid minutes.
 SUMMARY_ENABLED = summary_mod.summary_enabled()
 SUMMARY_MODEL = summary_mod.summary_model()
-# Follow-show summary emails (off until SUMMARY_EMAIL_ENABLED=1).
-SUMMARY_EMAIL_ENABLED = summary_email_mod.summary_email_enabled()
 
 
 def openai_whisper_cost_usd(minutes):
@@ -948,7 +944,7 @@ _shutting_down = threading.Event()
 #: Set by gunicorn.conf.py ``on_starting`` in the arbiter before it forks, so
 #: every worker of one server generation (including a worker respawned
 #: mid-life after a timeout) shares the same start time. Unset for scripts
-#: that import app (new-episode poller, ops one-offs, tests).
+#: that import app (ops one-offs, tests).
 _SERVER_STARTED_AT_ENV = os.getenv('PODSKRIFT_SERVER_STARTED_AT', '').strip()
 try:
     _PROCESS_STARTED_AT = float(_SERVER_STARTED_AT_ENV) if _SERVER_STARTED_AT_ENV else time.time()
@@ -4287,8 +4283,7 @@ def settings():
             want = request.form.get('email_transcript_ready') == '1'
             current_user.email_transcript_ready = want
             if want and current_user.email_unsubscribed_at is not None:
-                # Re-enabling transcript-ready clears a prior global unsub so
-                # new-episode alerts can work again if the feed opt-in is on.
+                # Re-enabling transcript-ready clears a prior global unsub.
                 current_user.email_unsubscribed_at = None
             db.session.commit()
             product_analytics.capture(
@@ -4794,10 +4789,9 @@ def _schedule_transcript_summary(task_id, user_id):
 
 
 def _finalize_global_unsubscribe(user):
-    """Stamp unsub, disable transcript + per-feed alerts. Idempotent."""
+    """Stamp unsub and disable transcript-ready. Idempotent."""
     _apply_global_unsubscribe(user)
-    # Also opt out of per-feed alerts + summary emails so digests stop
-    # without a second click.
+    # Clear leftover per-feed alert flags on any historical saved_feeds rows.
     SavedFeed.query.filter_by(user_id=user.id).update(
         {'email_new_episodes': False, 'email_summaries': False},
         synchronize_session=False)
@@ -4859,11 +4853,11 @@ def email_unsubscribe(token):
 @app.route('/go/transcribe')
 @login_required
 def go_transcribe():
-    """Deep link from new-episode emails: preselected episode + rss_url."""
+    """Deep link with preselected episode + rss_url."""
     product_analytics.capture(
         'email_clicked',
         current_user.id,
-        {'type': email_notify.NEW_EPISODES},
+        {'type': 'go_transcribe'},
     )
     rss_url = (request.args.get('rss_url') or '').strip()
     audio_url = (request.args.get('audio_url') or '').strip()
@@ -4906,161 +4900,25 @@ def go_transcribe():
 
 
 # ---------------------------------------------------------------------------
-# Saved feeds
+# Saved feeds (removed) — leave DB tables; redirect / 410 old URLs
 # ---------------------------------------------------------------------------
 
 @app.route('/feeds')
-@login_required
+@app.route('/feeds/')
 def feeds():
-    user_feeds = SavedFeed.query.filter_by(user_id=current_user.id).order_by(SavedFeed.created_at.desc()).all()
-    return render_template('feeds.html', feeds=user_feeds)
+    """Former My Feeds page — permanently redirected home."""
+    return redirect(url_for('index'), code=301)
 
 
-@app.route('/feeds/add', methods=['POST'])
-@login_required
-def add_feed():
-    name = request.form.get('name', '').strip()
-    rss_url = request.form.get('rss_url', '').strip()
-    # Checkbox is shown checked by default; an unchecked box is omitted from
-    # the POST, which we treat as opt-out.
-    email_new = request.form.get('email_new_episodes') == '1'
-    email_sum = request.form.get('email_summaries') == '1'
+@app.route('/feeds/add', methods=['GET', 'POST'])
+@app.route('/feeds/<int:feed_id>/email-alerts', methods=['GET', 'POST'])
+@app.route('/feeds/<int:feed_id>/email-summaries', methods=['GET', 'POST'])
+@app.route('/feeds/delete/<int:feed_id>', methods=['GET', 'POST'])
+@app.route('/feeds/use/<int:feed_id>', methods=['GET', 'POST'])
+def feeds_gone(feed_id=None):
+    """Former feed CRUD / toggle endpoints — gone."""
+    return ('', 410)
 
-    if not name or not rss_url:
-        flash('Name and RSS URL are required.', 'error')
-        return redirect(url_for('feeds'))
-
-    existing = SavedFeed.query.filter_by(user_id=current_user.id, rss_url=rss_url).first()
-    if existing:
-        flash('This feed is already saved.', 'info')
-        return redirect(url_for('feeds'))
-
-    if email_sum and not summary_email_mod.can_opt_in_summary_email(
-            db, SavedFeed, current_user.id):
-        flash(
-            'Free summary email is limited to one show. Turn it off on your '
-            'other follow first, or buy minutes later to keep more.',
-            'error',
-        )
-        email_sum = False
-
-    feed = SavedFeed(
-        user_id=current_user.id, name=name, rss_url=rss_url,
-        email_new_episodes=email_new,
-        email_summaries=email_sum,
-    )
-    if email_sum:
-        summary_email_mod.stamp_summary_trial_start(feed)
-    db.session.add(feed)
-    db.session.commit()
-    product_analytics.capture(
-        'alert_opt_in' if email_new else 'alert_opt_out',
-        current_user.id,
-        {'channel': 'new_episodes', 'source': 'feeds_add'},
-    )
-    if email_sum:
-        product_analytics.capture(
-            'summary_email_opt_in', current_user.id,
-            {'source': 'feeds_add', 'feed_id': feed.id},
-        )
-    flash(f'Feed "{name}" saved.', 'success')
-    return redirect(url_for('feeds'))
-
-
-@app.route('/feeds/<int:feed_id>/email-alerts', methods=['POST'])
-@login_required
-def toggle_feed_email_alerts(feed_id):
-    """Per-feed opt-in/out for new-episode emails."""
-    feed = SavedFeed.query.filter_by(id=feed_id, user_id=current_user.id).first_or_404()
-    want = request.form.get('email_new_episodes') == '1'
-    was_on = bool(feed.email_new_episodes)
-    feed.email_new_episodes = want
-    if want and not was_on:
-        # Re-enable: reset baseline so the next poll does not flood a backlog.
-        episode_alerts.reset_feed_alert_baseline(feed)
-    db.session.commit()
-    product_analytics.capture(
-        'alert_opt_in' if want else 'alert_opt_out',
-        current_user.id,
-        {'channel': 'new_episodes', 'source': 'feeds_toggle'},
-    )
-    flash('Feed email alert preference saved.', 'success')
-    return redirect(url_for('feeds'))
-
-
-@app.route('/feeds/<int:feed_id>/email-summaries', methods=['POST'])
-@login_required
-def toggle_feed_email_summaries(feed_id):
-    """Per-feed opt-in/out for summary-by-email (separate from plain alerts)."""
-    feed = SavedFeed.query.filter_by(id=feed_id, user_id=current_user.id).first_or_404()
-    want = request.form.get('email_summaries') == '1'
-    was_on = bool(feed.email_summaries)
-    if want and not was_on:
-        if not summary_email_mod.can_opt_in_summary_email(
-                db, SavedFeed, current_user.id, exclude_feed_id=feed.id):
-            flash(
-                'Free summary email is limited to one show at a time.',
-                'error',
-            )
-            return redirect(url_for('feeds'))
-        feed.email_summaries = True
-        summary_email_mod.stamp_summary_trial_start(feed)
-        # Re-baseline so enabling does not flood a backlog of old episodes.
-        episode_alerts.reset_feed_alert_baseline(feed)
-        db.session.commit()
-        product_analytics.capture(
-            'summary_email_opt_in', current_user.id,
-            {'source': 'feeds_toggle', 'feed_id': feed.id},
-        )
-    elif not want and was_on:
-        feed.email_summaries = False
-        db.session.commit()
-        product_analytics.capture(
-            'summary_email_opt_out', current_user.id,
-            {'source': 'feeds_toggle', 'feed_id': feed.id},
-        )
-    else:
-        feed.email_summaries = want
-        db.session.commit()
-    flash('Summary email preference saved.', 'success')
-    return redirect(url_for('feeds'))
-
-
-@app.route('/feeds/delete/<int:feed_id>', methods=['POST'])
-@login_required
-def delete_feed(feed_id):
-    feed = SavedFeed.query.filter_by(id=feed_id, user_id=current_user.id).first_or_404()
-    db.session.delete(feed)
-    db.session.commit()
-    flash('Feed removed.', 'success')
-    return redirect(url_for('feeds'))
-
-
-@app.route('/feeds/use/<int:feed_id>')
-@login_required
-def use_feed(feed_id):
-    feed = SavedFeed.query.filter_by(id=feed_id, user_id=current_user.id).first_or_404()
-    episodes, error = get_episodes_from_rss(feed.rss_url)
-    if error:
-        flash(error, 'error')
-        return redirect(url_for('feeds'))
-
-    _annotate_episodes_for_trial(episodes)
-    episodes_to_show = episodes[:10]
-    has_more = len(episodes) > 10
-    return render_template(
-        'episode_selection.html',
-        episodes=episodes_to_show,
-        all_episodes=episodes,
-        rss_url=feed.rss_url,
-        feed_name=feed.name,
-        has_more=has_more,
-        needs_api_key=_episode_paywall_needed(),
-        show_openai_cost=_show_openai_cost_estimates(),
-        podcast_name=episodes[0].get('podcast_name') or feed.name,
-        artwork=episodes[0].get('artwork') or '',
-        languages=language_choices(),
-    )
 
 
 def _trial_context():
@@ -5256,19 +5114,15 @@ def _capture_paid_minutes_exhausted(user_id, source):
 
 @app.route('/')
 def index():
-    saved_feeds = []
     first_run = False
     if current_user.is_authenticated:
-        saved_feeds = SavedFeed.query.filter_by(
-            user_id=current_user.id
-        ).order_by(SavedFeed.created_at.desc()).limit(5).all()
         # No transcription rows yet → lead with "start your first transcript"
         # instead of a Buy banner (activation before purchase).
         first_run = (
             TranscriptionTask.query.filter_by(user_id=current_user.id)
             .limit(1).first() is None
         )
-    return render_template('index.html', saved_feeds=saved_feeds,
+    return render_template('index.html',
                            languages=language_choices(),
                            trial=_trial_context(),
                            first_run=first_run,
@@ -6478,8 +6332,8 @@ def get_status(task_id):
             round((task.audio_duration / 60) * WHISPER_COST_PER_MINUTE, 3)
             if task.audio_duration else None
         ),
-        # Boolean only — the result page uses this to offer Follow when the
-        # async related-episodes fetch times out or fails.
+        # Boolean only — the result page uses this when the async
+        # related-episodes fetch times out or fails.
         'has_rss': bool((task.rss_url or '').strip()),
         'listen_links': listen_links_for_task(task),
     }
@@ -7379,12 +7233,6 @@ def shared_transcript_download(token, file_type):
     return resp
 
 
-def _feed_already_saved(user_id, rss_url):
-    if not rss_url:
-        return False
-    return SavedFeed.query.filter_by(user_id=user_id, rss_url=rss_url).first() is not None
-
-
 @app.route('/transcription/<task_id>/related-episodes')
 @login_required
 def related_episodes(task_id):
@@ -7400,7 +7248,7 @@ def related_episodes(task_id):
     rss_url = (task.rss_url or '').strip()
     podcast_name = task.podcast_name or ''
     # Older search/Spotify starts never stored the feed. Recover it from the
-    # public directory by exact show name so related episodes / Follow work.
+    # public directory by exact show name so related episodes work.
     if not rss_url and podcast_name.strip():
         try:
             shows = _public_shows_named(podcast_name.strip())
@@ -7418,18 +7266,15 @@ def related_episodes(task_id):
         return jsonify({
             'has_feed': False,
             'podcast_name': podcast_name,
-            'following': False,
             'episodes': [],
         })
 
-    following = _feed_already_saved(current_user.id, rss_url)
     episodes, error = get_episodes_from_rss(
         rss_url, timeout=RELATED_EPISODES_TIMEOUT)
     if error or not episodes:
         return jsonify({
             'has_feed': True,
             'podcast_name': podcast_name,
-            'following': following,
             'episodes': [],
             'error': error or 'No episodes found',
         })
@@ -7460,75 +7305,15 @@ def related_episodes(task_id):
     return jsonify({
         'has_feed': True,
         'podcast_name': podcast_name,
-        'following': following,
         'episodes': others,
     })
 
 
-@app.route('/transcription/<task_id>/follow', methods=['POST'])
+@app.route('/transcription/<task_id>/follow', methods=['GET', 'POST'])
 @login_required
 def follow_task_podcast(task_id):
-    """One-click save of the task's RSS feed into Saved Feeds (My Feeds)."""
-    task, err = _task_owned_or_404(task_id)
-    if err:
-        return err
-
-    rss_url = (task.rss_url or '').strip()
-    if not rss_url:
-        return jsonify({'error': 'No feed URL on this transcript'}), 400
-
-    name = (task.podcast_name or '').strip() or 'Podcast'
-    existing = SavedFeed.query.filter_by(
-        user_id=current_user.id, rss_url=rss_url).first()
-    if existing:
-        return jsonify({
-            'following': True, 'already': True, 'feed_id': existing.id,
-            'email_new_episodes': bool(existing.email_new_episodes),
-            'email_summaries': bool(getattr(existing, 'email_summaries', False)),
-        })
-
-    # Default ON; JSON body or form can pass email_new_episodes=0/false.
-    raw = request.form.get('email_new_episodes')
-    if raw is None and request.is_json:
-        raw = (request.get_json(silent=True) or {}).get('email_new_episodes')
-    if raw is None:
-        email_new = True
-    else:
-        email_new = str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
-
-    raw_sum = request.form.get('email_summaries')
-    if raw_sum is None and request.is_json:
-        raw_sum = (request.get_json(silent=True) or {}).get('email_summaries')
-    # Default OFF — explicit opt-in for summary emails.
-    email_sum = str(raw_sum or '').strip().lower() in ('1', 'true', 'yes', 'on')
-    if email_sum and not summary_email_mod.can_opt_in_summary_email(
-            db, SavedFeed, current_user.id):
-        email_sum = False
-
-    feed = SavedFeed(
-        user_id=current_user.id, name=name, rss_url=rss_url,
-        email_new_episodes=email_new,
-        email_summaries=email_sum,
-    )
-    if email_sum:
-        summary_email_mod.stamp_summary_trial_start(feed)
-    db.session.add(feed)
-    db.session.commit()
-    product_analytics.capture(
-        'alert_opt_in' if email_new else 'alert_opt_out',
-        current_user.id,
-        {'channel': 'new_episodes', 'source': 'follow'},
-    )
-    if email_sum:
-        product_analytics.capture(
-            'summary_email_opt_in', current_user.id,
-            {'source': 'follow', 'feed_id': feed.id},
-        )
-    return jsonify({
-        'following': True, 'already': False, 'feed_id': feed.id,
-        'email_new_episodes': email_new,
-        'email_summaries': email_sum,
-    })
+    """Former one-click follow endpoint — gone."""
+    return ('', 410)
 
 
 @app.route('/history')
@@ -8843,7 +8628,7 @@ def robots_txt():
     bots behind that channel are allowed by name rather than by omission.
     """
     disallow = ['Disallow: ' + path for path in (
-        '/settings', '/history', '/feeds', '/transcription/', '/download/',
+        '/settings', '/history', '/transcription/', '/download/',
         '/api/', '/status/', '/active-jobs', '/cancel/', '/t/', '/admin',
     )]
     lines = [
@@ -10526,204 +10311,6 @@ def ensure_password_reset_tokens_table():
             app.logger.exception('Could not create %s', name)
 
 
-def start_shared_transcription_for_summary_email(job, *, owner_user_id):
-    """Start one platform-funded transcription for a summary-email job.
-
-    No trial/paid metering (trial_seconds_charged stays NULL). Uses the
-    platform OpenAI key. Returns task_id or None.
-    """
-    if not GLOBAL_OPENAI_KEY:
-        return None
-    if not _SERVER_STARTED_AT_ENV:
-        # Hard stop: this is called from the new-episode poller, a oneshot
-        # systemd process. A transcription thread started here dies when the
-        # poller exits (mid-download / mid-Whisper, platform key already
-        # spent), and unknown-duration episodes are not trimmed to the cap.
-        # Until shared transcriptions are handed to the gunicorn server,
-        # refuse rather than burn budget on work that cannot finish.
-        app.logger.warning(
-            'summary-email: refusing to start transcription outside the '
-            'gunicorn server process (poller); job left for a later design')
-        return None
-    audio_url = (job.audio_url or '').strip()
-    if not audio_url or not _is_fetchable_url(audio_url):
-        return None
-
-    # Reuse an in-flight or completed non-partial task for this audio.
-    cached = summary_email_mod.find_cached_completed_task(
-        db, TranscriptionTask, audio_url)
-    if cached is not None:
-        return cached.id
-    live = (
-        TranscriptionTask.query
-        .filter(
-            TranscriptionTask.source_audio_url == audio_url,
-            ~TranscriptionTask.status.in_(['completed', *TERMINAL_STATUSES]),
-        )
-        .order_by(TranscriptionTask.started_at.desc())
-        .first()
-    )
-    if live is not None:
-        return live.id
-
-    free_bytes = free_disk_bytes(os.path.dirname(os.path.abspath(__file__)))
-    if free_bytes is not None and free_bytes < MIN_FREE_DISK_BYTES:
-        app.logger.error(
-            'summary-email refuse: only %.1f GB free', free_bytes / (1024 ** 3))
-        return None
-    if not _transcription_slots.acquire(blocking=False):
-        app.logger.warning('summary-email refuse: at transcription slot cap')
-        return None
-    slot_held = True
-    task_id = str(uuid.uuid4())
-    try:
-        task = TranscriptionTask(
-            id=task_id,
-            user_id=owner_user_id,
-            episode_title=(job.episode_title or 'Episode')[:512],
-            rss_url=job.rss_url,
-            status='downloading',
-            phase='downloading',
-            phase_started_at=datetime.now(timezone.utc),
-            podcast_name=job.podcast_name,
-            source_audio_url=audio_url,
-            audio_duration=job.duration_seconds,
-            # Platform-funded summary-email job: never meter the owner.
-            trial_seconds_charged=None,
-            paid_seconds_charged=None,
-        )
-        db.session.add(task)
-        db.session.commit()
-
-        openai_client = build_openai_client(GLOBAL_OPENAI_KEY)
-        parsed_url = urlparse(audio_url)
-        audio_filename = (
-            f"temp_audio_{task_id}"
-            + (os.path.splitext(parsed_url.path)[1] or '.mp3')
-        )
-        source_url = audio_url
-        ph_props = {
-            'key_source': 'trial',
-            'source': 'summary_email',
-            'duration_min': (
-                round(job.duration_seconds / 60.0, 2)
-                if job.duration_seconds else None
-            ),
-        }
-
-        def transcribe_thread():
-            try:
-                with app.app_context():
-                    try:
-                        download_audio(source_url, audio_filename, task_id)
-                        transcribe_audio(
-                            audio_filename, task_id, openai_client, language=None)
-                    except TaskAbandoned:
-                        abandoned = db.session.get(TranscriptionTask, task_id)
-                        if abandoned:
-                            trial_refund_task(abandoned)
-                    except Exception as e:
-                        error_message = (
-                            describe_openai_error(e, key_source='trial')
-                            if _is_openai_error(e) else str(e))
-                        fail_task_and_refund(task_id, error_message)
-                        report_task_failure(
-                            e, task_id=task_id, key_source='trial')
-                    else:
-                        try:
-                            finished = db.session.get(TranscriptionTask, task_id)
-                            if finished is not None:
-                                product_analytics.capture(
-                                    'transcript_completed',
-                                    owner_user_id,
-                                    {**ph_props, 'nth_transcript': None},
-                                )
-                                _schedule_transcript_summary(
-                                    task_id, owner_user_id)
-                        except Exception:  # noqa: BLE001
-                            app.logger.exception(
-                                'summary-email completion hook failed for %s',
-                                task_id)
-                    finally:
-                        if os.path.exists(audio_filename):
-                            try:
-                                os.remove(audio_filename)
-                            except OSError:
-                                pass
-            except Exception:
-                app.logger.exception(
-                    'summary-email worker for %s died before start', task_id)
-            finally:
-                _transcription_slots.release()
-
-        threading.Thread(
-            target=transcribe_thread, daemon=True,
-            name=f'summary-email-{task_id[:8]}',
-        ).start()
-        slot_held = False
-        return task_id
-    except Exception:
-        db.session.rollback()
-        app.logger.exception('start_shared_transcription_for_summary_email failed')
-        return None
-    finally:
-        if slot_held:
-            _transcription_slots.release()
-
-
-def fetch_feed_for_alerts(feed_url):
-    """SSRF-safe capped feed fetch for the new-episode poller.
-
-    Uses a higher byte ceiling than Spotify resolve and may stop reading once
-    enough newest items are streamed (feeds are almost always newest-first).
-    """
-    if not _is_fetchable_url(feed_url):
-        return None
-    return _fetch_feed_capped(
-        feed_url,
-        max_bytes=episode_alerts.FEED_MAX_BYTES,
-        early_stop_items=episode_alerts.FEED_EARLY_STOP_ITEMS,
-    )
-
-
-def run_new_episode_alerts_poll():
-    """CLI / systemd entry: poll followed feeds and send digests.
-
-    Also enqueues/processes summary-email jobs when SUMMARY_EMAIL_ENABLED
-    (additive; plain alert path unchanged when the flag is off).
-    """
-    stats = episode_alerts.run_new_episode_poll(
-        app=app,
-        db=db,
-        User=User,
-        SavedFeed=SavedFeed,
-        EmailSentLog=EmailSentLog,
-        fetch_feed=fetch_feed_for_alerts,
-        public_base_url=PUBLIC_BASE_URL,
-        secret_key=app.secret_key,
-        SummaryEmailJob=SummaryEmailJob,
-        enqueue_summary_jobs=summary_email_mod.enqueue_from_episodes,
-    )
-    if summary_email_mod.summary_email_enabled():
-        se_stats = summary_email_mod.process_queued_jobs(
-            app=app,
-            db=db,
-            User=User,
-            SavedFeed=SavedFeed,
-            TranscriptionTask=TranscriptionTask,
-            EmailSentLog=EmailSentLog,
-            SummaryEmailJob=SummaryEmailJob,
-            SummaryEmailBudgetDay=SummaryEmailBudgetDay,
-            build_openai_client=build_openai_client,
-            platform_api_key=GLOBAL_OPENAI_KEY or '',
-            start_shared_transcription=start_shared_transcription_for_summary_email,
-            public_base_url=PUBLIC_BASE_URL,
-            secret_key=app.secret_key,
-        )
-        stats['summary_email'] = se_stats
-    return stats
-
-
 with app.app_context():
     # create_all is check-then-create. Two gunicorn workers (and the suite's
     # cross-process reservation test) can both see email_sent_log as absent
@@ -10774,10 +10361,10 @@ with app.app_context():
         # live job from its sibling.
         resume_interrupted_tasks()
     else:
-        # Any other importer (the new-episode poller timer, ops scripts) must
-        # never claim or spawn transcription work: its own start time says
-        # nothing about whether gunicorn's jobs are alive. Keep the old,
-        # threshold-based stale sweep only.
+        # Any other importer (ops scripts, one-offs) must never claim or
+        # spawn transcription work: its own start time says nothing about
+        # whether gunicorn's jobs are alive. Keep the old, threshold-based
+        # stale sweep only.
         _sweep_stale_tasks(source='boot')
 
     settle_stranded_charges()

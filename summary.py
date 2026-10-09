@@ -347,8 +347,8 @@ def summarize_task(
 ) -> bool:
     """Write summary_* columns on a completed task. Never raises. Returns ready?
 
-    `force=True` skips the SUMMARY_ENABLED gate (used by summary-email jobs,
-    which have their own SUMMARY_EMAIL_ENABLED flag).
+    `force=True` skips the SUMMARY_ENABLED gate (kept for callers that need a
+    summary even when the feature flag is off).
     """
     from email_notify import task_is_partial_preview
 

@@ -236,9 +236,6 @@ def ensure_admin_indexes(db):
         ('transcription_tasks', 'status',
          'CREATE INDEX IF NOT EXISTS ix_transcription_tasks_status '
          'ON transcription_tasks (status)'),
-        ('saved_feeds', 'user_id',
-         'CREATE INDEX IF NOT EXISTS ix_saved_feeds_user_id '
-         'ON saved_feeds (user_id)'),
     ]
     for table, column, ddl in statements:
         try:
@@ -346,17 +343,6 @@ def collect_kpis(db, trial_global_seconds, trial_daily_seconds=None):
          WHERE openai_api_key IS NOT NULL AND openai_api_key != ''
     """)).scalar() or 0
 
-    followed_feeds = db.session.execute(text(
-        'SELECT COUNT(*) FROM saved_feeds'
-    )).scalar() or 0
-
-    email_alerts = db.session.execute(text("""
-        SELECT COUNT(*) FROM saved_feeds sf
-         JOIN users u ON u.id = sf.user_id
-         WHERE sf.email_new_episodes = 1
-           AND u.email_unsubscribed_at IS NULL
-    """)).scalar() or 0
-
     return {
         'total_users': int(total_users),
         'signups_today': int(signups_today),
@@ -375,8 +361,6 @@ def collect_kpis(db, trial_global_seconds, trial_daily_seconds=None):
         'purchase_count': purchase_count,
         'purchase_revenue_usd': round(purchase_revenue_cents / 100.0, 2),
         'byok_users': int(byok_users),
-        'followed_feeds': int(followed_feeds),
-        'email_alerts_opted_in': int(email_alerts),
     }
 
 
@@ -596,13 +580,6 @@ def user_detail(db, user_id, trial_default_seconds):
          LIMIT 100
     """), {'uid': user_id}).fetchall()
 
-    feeds = db.session.execute(text("""
-        SELECT id, name, rss_url, created_at, email_new_episodes
-          FROM saved_feeds
-         WHERE user_id = :uid
-         ORDER BY created_at DESC
-    """), {'uid': user_id}).fetchall()
-
     purchases = db.session.execute(text("""
         SELECT id, minutes, amount_cents, amount_total_cents, currency,
                status, created_at, stripe_session_id
@@ -630,13 +607,6 @@ def user_detail(db, user_id, trial_default_seconds):
             'created_oslo': format_oslo(t[5]),
             'podcast_name': t[7],
         } for t in tasks],
-        'feeds': [{
-            'id': f[0],
-            'name': f[1],
-            'rss_url': f[2],
-            'created_oslo': format_oslo(f[3]),
-            'email_alerts': bool(f[4]),
-        } for f in feeds],
         'purchases': [{
             'id': p[0],
             'minutes': p[1],

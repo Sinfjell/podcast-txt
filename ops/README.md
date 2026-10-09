@@ -90,8 +90,7 @@ ops/drain-in-flight.sh
 ## Transactional email (Mailgun EU)
 
 Feature-flagged. Off until `EMAIL_ENABLED=1` and `MAILGUN_API_KEY` is set.
-When disabled the app logs and no-ops; the new-episode poller still advances
-per-feed baselines so turning mail on later does not flood inboxes.
+When disabled the app logs and no-ops.
 
 Sending domain is the **root** domain `podskrift.com` (EU region, verified).
 API base URL defaults to `https://api.eu.mailgun.net`. From defaults to
@@ -130,26 +129,6 @@ printf '%s\n' \
 # When ready to send:
 #   sed -i 's/^EMAIL_ENABLED=0/EMAIL_ENABLED=1/' .env
 systemctl restart podskrift
-```
-
-### New-episode poller (systemd timer, every 6 hours)
-
-```bash
-cd /var/www/vhosts/podskrift.nettsmed.dev/app
-cp ops/podskrift-new-episodes.service /etc/systemd/system/podskrift-new-episodes.service
-cp ops/podskrift-new-episodes.timer /etc/systemd/system/podskrift-new-episodes.timer
-systemctl daemon-reload
-systemctl enable --now podskrift-new-episodes.timer
-systemctl start podskrift-new-episodes.service   # prove it once
-systemctl status podskrift-new-episodes.service
-journalctl -u podskrift-new-episodes.service -n 50 --no-pager
-```
-
-Manual run:
-
-```bash
-cd /var/www/vhosts/podskrift.nettsmed.dev/app
-sudo -u podskrift .venv/bin/python ops/poll-new-episodes.py
 ```
 
 ## Database backups

@@ -77,9 +77,6 @@
     <div class="ep-head-info">
         <h1>{{ feed_name or podcast_name or 'Select Episode' }}</h1>
     </div>
-    {% if current_user.is_authenticated %}
-    <button type="button" class="btn btn-sm btn-secondary" id="saveFeedBtn">Save feed</button>
-    {% endif %}
 </div>
 
 <div class="ep-tools">
@@ -218,31 +215,6 @@
 </form>
 {% endif %}
 
-<!-- Save Feed Dialog -->
-{% if current_user.is_authenticated %}
-<div id="saveFeedDialog" class="hidden" style="position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 200; display: none; align-items: center; justify-content: center;">
-    <div class="card" style="width: 400px; max-width: 90vw;">
-        <form method="POST" action="{{ url_for('add_feed') }}">
-            <div class="card-header">
-                <h2>Save this feed</h2>
-                <button type="button" class="alert-close" id="closeSaveDialog" aria-label="Close">&times;</button>
-            </div>
-            <div class="card-body">
-                <input type="hidden" name="rss_url" value="{{ rss_url }}">
-                <div class="form-group">
-                    <label class="form-label" for="feedName">Feed name</label>
-                    <input type="text" class="form-input" id="feedName" name="name" required placeholder="e.g. My Podcast">
-                </div>
-                <p class="text-muted text-sm">{{ rss_url }}</p>
-            </div>
-            <div style="padding: 0 20px 20px; display: flex; gap: 8px; justify-content: flex-end;">
-                <button type="button" class="btn btn-secondary" id="cancelSave">Cancel</button>
-                <button type="submit" class="btn btn-accent">Save</button>
-            </div>
-        </form>
-    </div>
-</div>
-{% endif %}
 {% endblock %}
 
 {% block scripts %}
@@ -660,16 +632,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 openEpisodeBuyModal(selectedDuration);
             }
         });
-    }
-
-    // Save feed dialog
-    var saveBtn = document.getElementById('saveFeedBtn');
-    var dialog = document.getElementById('saveFeedDialog');
-    if (saveBtn && dialog) {
-        saveBtn.addEventListener('click', function() { dialog.style.display = 'flex'; });
-        document.getElementById('closeSaveDialog').addEventListener('click', function() { dialog.style.display = 'none'; });
-        document.getElementById('cancelSave').addEventListener('click', function() { dialog.style.display = 'none'; });
-        dialog.addEventListener('click', function(e) { if (e.target === dialog) dialog.style.display = 'none'; });
     }
 
     {% if needs_api_key and stripe_buy_enabled %}

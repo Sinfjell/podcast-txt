@@ -108,10 +108,10 @@ def test_redirects_name_the_issuer(client):
 
 
 def test_cross_site_post_is_refused_but_webhooks_are_not(client):
-    r = client.post('/feeds/add', headers={'Sec-Fetch-Site': 'cross-site'})
+    r = client.post('/settings', headers={'Sec-Fetch-Site': 'cross-site'})
     assert r.status_code == 403
-    # Same-origin passes the guard (then hits login_required as before).
-    r = client.post('/feeds/add', headers={'Sec-Fetch-Site': 'same-origin'})
+    # Same-origin passes the guard (then hits login_required / form handling).
+    r = client.post('/settings', headers={'Sec-Fetch-Site': 'same-origin'})
     assert r.status_code != 403
     r = client.post('/stripe/webhook', headers={'Sec-Fetch-Site': 'cross-site'})
     assert r.status_code != 403

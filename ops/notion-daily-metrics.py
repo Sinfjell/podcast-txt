@@ -416,12 +416,6 @@ def collect_metrics(conn: sqlite3.Connection, day: date,
         ''',
         (trial_default_seconds,),
     )
-    saved_feeds = _scalar(
-        conn,
-        'SELECT COUNT(*) FROM saved_feeds WHERE created_at < ?',
-        (end,),
-    )
-
     return {
         'day': day.isoformat(),
         'Users total': int(users_total),
@@ -441,7 +435,6 @@ def collect_metrics(conn: sqlite3.Connection, day: date,
         'Trial global used minutes': trial_daily_used_minutes,
         'Trial global cap minutes': trial_daily_cap_minutes,
         'Trial exhausted': int(trial_exhausted),
-        'Saved feeds': int(saved_feeds),
         # Internal seconds for threshold checks (not Notion-bound).
         '_trial_daily_used_seconds': trial_daily_used_seconds,
         '_trial_daily_cap_seconds': int(trial_daily_seconds),
@@ -478,7 +471,6 @@ def notion_properties(
         'Returned 2+ days',
         'Trial minutes used',
         'Trial exhausted',
-        'Saved feeds',
     ):
         props[key] = {'number': metrics[key]}
     # Only set Notes when the health check produced warnings — omit otherwise
