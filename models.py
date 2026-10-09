@@ -97,6 +97,7 @@ class PasswordResetToken(db.Model):
 
 
 class SavedFeed(db.Model):
+    """Deprecated: saved-feeds / follow UI removed. Table kept; unused by app."""
     __tablename__ = 'saved_feeds'
 
     id = db.Column(db.Integer, primary_key=True)
@@ -273,11 +274,7 @@ class EmailSentLog(db.Model):
 
 
 class SummaryEmailJob(db.Model):
-    """Queue for follow-show summary emails: one transcription per episode.
-
-    Survives restarts (poller re-queues / continues). Funded by the platform
-    key under SUMMARY_EMAIL_DAILY_MINUTES — never against user trial/paid.
-    """
+    """Deprecated: follow-show summary emails removed. Table kept; unused by app."""
     __tablename__ = 'summary_email_jobs'
 
     id = db.Column(db.Integer, primary_key=True)
@@ -304,7 +301,7 @@ class SummaryEmailJob(db.Model):
 
 
 class SummaryEmailBudgetDay(db.Model):
-    """Atomic daily spend counter for summary-email transcriptions (UTC day)."""
+    """Deprecated: summary-email budget table kept; unused by app."""
     __tablename__ = 'summary_email_budget_days'
 
     day = db.Column(db.String(10), primary_key=True)  # YYYY-MM-DD UTC

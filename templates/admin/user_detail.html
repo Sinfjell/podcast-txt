@@ -118,34 +118,6 @@
     </section>
 
     <section class="admin-section">
-        <h2>Followed feeds ({{ user.feeds|length }})</h2>
-        <div class="admin-table-wrap">
-            <table class="admin-table">
-                <thead>
-                    <tr>
-                        <th>Name</th>
-                        <th>URL</th>
-                        <th>Alerts</th>
-                        <th>Followed</th>
-                    </tr>
-                </thead>
-                <tbody>
-                {% for f in user.feeds %}
-                    <tr>
-                        <td>{{ f.name }}</td>
-                        <td class="feed-url" title="{{ f.rss_url }}">{{ f.rss_url }}</td>
-                        <td>{{ 'on' if f.email_alerts else 'off' }}</td>
-                        <td>{{ f.created_oslo }}</td>
-                    </tr>
-                {% else %}
-                    <tr><td colspan="4" style="color: var(--muted);">No feeds.</td></tr>
-                {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </section>
-
-    <section class="admin-section">
         <h2>Purchases ({{ user.purchases|length }})</h2>
         <div class="admin-table-wrap">
             <table class="admin-table">

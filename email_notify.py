@@ -1,4 +1,4 @@
-"""Transactional email content + preferences: transcript-ready and new-episode digests.
+"""Transactional email content + preferences: transcript-ready and password mail.
 
 Sending is gated by mail.mail_ready(); preference checks and idempotency live here
 so callers never need to know about Mailgun. All public helpers never raise into
@@ -26,7 +26,6 @@ UNSUBSCRIBE_SALT = 'podskrift-email-unsub-v1'
 UNSUBSCRIBE_MAX_AGE = 60 * 60 * 24 * 365 * 5  # five years
 
 TRANSCRIPT_READY = 'transcript_ready'
-NEW_EPISODES = 'new_episodes'
 PASSWORD_RESET = 'password_reset'
 PASSWORD_CHANGED = 'password_changed'
 
@@ -114,13 +113,6 @@ def user_wants_transcript_ready(user) -> bool:
         return False
     # Default ON when the column is missing/NULL on a half-migrated row.
     pref = getattr(user, 'email_transcript_ready', True)
-    return pref is not False
-
-
-def user_wants_feed_alerts(user, feed) -> bool:
-    if not user_accepts_email(user):
-        return False
-    pref = getattr(feed, 'email_new_episodes', True)
     return pref is not False
 
 
@@ -223,20 +215,13 @@ def build_transcript_ready_bodies(
             f'own OpenAI key to finish the rest.'
         )
         cta_label = 'Open your free preview'
-        follow = (
-            'Follow this podcast in Podskrift to get new episodes and optional alerts.'
-        )
     else:
         subject = f'Transcript ready: {ep}'
         lead = f'Your transcript of “{ep}” from {show} is ready.'
         cta_label = 'Open the transcript'
-        follow = (
-            'Follow this podcast in Podskrift to get new episodes and optional alerts.'
-        )
     text = (
         f'{lead}\n\n'
-        f'{cta_label}: {link}\n\n'
-        f'{follow}\n'
+        f'{cta_label}: {link}\n'
         f'{_footer_text(unsub_url)}'
     )
     safe_ep = html_lib.escape(ep)
@@ -257,46 +242,8 @@ def build_transcript_ready_bodies(
     html = (
         f'{html_lead}'
         f'<p><a href="{safe_link}">{safe_cta}</a></p>'
-        f'<p>{html_lib.escape(follow)}</p>'
         f'{_footer_html(unsub_url)}'
     )
-    return subject, text, html
-
-
-def build_new_episodes_bodies(
-    *,
-    items: list[dict[str, Any]],
-    unsub_url: str,
-) -> tuple[str, str, str]:
-    """items: {podcast_name, episode_title, transcribe_url}."""
-    n = len(items)
-    subject = (
-        'New episode from a podcast you follow'
-        if n == 1
-        else f'{n} new episodes from podcasts you follow'
-    )
-    lines = ['New episodes from podcasts you follow:', '']
-    html_parts = [
-        '<p>New episodes from podcasts you follow:</p><ul>',
-    ]
-    for item in items:
-        show = (item.get('podcast_name') or '').strip() or 'Podcast'
-        ep = (item.get('episode_title') or '').strip() or 'Episode'
-        url = with_utm(item.get('transcribe_url') or '', NEW_EPISODES)
-        lines.append(f'• {show} — {ep}')
-        lines.append(f'  Transcribe: {url}')
-        lines.append('')
-        html_parts.append(
-            '<li><strong>{}</strong> — {}<br>'
-            '<a href="{}">Transcribe this episode</a></li>'.format(
-                html_lib.escape(show),
-                html_lib.escape(ep),
-                html_lib.escape(url, quote=True),
-            )
-        )
-    html_parts.append('</ul>')
-    text = '\n'.join(lines) + _footer_text(unsub_url)
-    html = ''.join(html_parts) + _footer_html(unsub_url)
     return subject, text, html
 
 
@@ -363,77 +310,6 @@ def notify_transcript_ready(
     except Exception:  # noqa: BLE001
         logger.exception('notify_transcript_ready failed for task %s',
                          getattr(task, 'id', '?'))
-        return False
-
-
-def episode_guid(entry_or_ep: dict) -> str:
-    """Stable id for an episode dict from get_episodes_from_rss / poller."""
-    for key in ('guid', 'id', 'audio_url', 'title'):
-        val = (entry_or_ep.get(key) or '').strip()
-        if val:
-            return val[:1024]
-    return ''
-
-
-def episode_idempotency_key(user_id: int, feed_id: int, guid: str) -> str:
-    digest = hashlib.sha256(guid.encode('utf-8', errors='replace')).hexdigest()[:32]
-    return f'episode_alert:{user_id}:{feed_id}:{digest}'
-
-
-def notify_new_episodes_digest(
-    *,
-    db,
-    user,
-    items: list[dict[str, Any]],
-    EmailSentLog,
-    public_base_url: str,
-    secret_key: str,
-    claim_keys: list[str],
-) -> bool:
-    """Send one digest. claim_keys must already be reserved (one per episode)."""
-    try:
-        if not mailer.mail_ready() or not items:
-            return False
-        if not user_accepts_email(user):
-            return False
-        unsub = unsubscribe_url(public_base_url, secret_key, user.id)
-        subject, text, html = build_new_episodes_bodies(
-            items=items, unsub_url=unsub)
-        # Digest covers many episodes; key the Message-Id on the first claim.
-        digest_key = claim_keys[0] if claim_keys else ''
-        outcome = mailer.send_email(
-            to=user.email,
-            subject=subject,
-            text=text,
-            html=html,
-            headers=_list_unsubscribe_headers(unsub),
-            tags=[NEW_EPISODES],
-            kind=NEW_EPISODES,
-            idempotency_key=digest_key,
-        )
-        if outcome == mailer.SEND_SENT:
-            product_analytics.capture(
-                'email_sent',
-                user.id,
-                {'type': NEW_EPISODES, 'episode_count': len(items)},
-            )
-            return True
-        if outcome == mailer.SEND_AMBIGUOUS:
-            # Timeout / connection drop: Mailgun may have accepted the message.
-            # Keep every episode claim so a later poll cannot re-send the digest.
-            logger.warning(
-                'digest send ambiguous for user %s; keeping sent-log claims',
-                getattr(user, 'id', '?'),
-            )
-            return False
-        for key in claim_keys:
-            release_email_send(db, EmailSentLog, idempotency_key=key)
-        return False
-    except Exception:  # noqa: BLE001
-        logger.exception('notify_new_episodes_digest failed for user %s',
-                         getattr(user, 'id', '?'))
-        for key in claim_keys:
-            release_email_send(db, EmailSentLog, idempotency_key=key)
         return False
 
 

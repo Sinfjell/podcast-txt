@@ -269,24 +269,6 @@
     </div>
 </section>
 
-<!-- Saved feeds quick access -->
-{% if current_user.is_authenticated and saved_feeds %}
-<div class="card" style="margin-bottom: 48px;">
-    <div class="card-header">
-        <h2>Saved Feeds</h2>
-        <a href="{{ url_for('feeds') }}" class="btn btn-sm btn-secondary">Manage</a>
-    </div>
-    {% for feed in saved_feeds %}
-    <a href="{{ url_for('use_feed', feed_id=feed.id) }}" class="list-item" style="text-decoration: none; color: var(--ink);">
-        <div class="list-item-text">
-            <div class="list-item-title">{{ feed.name }}</div>
-        </div>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--muted);" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
-    </a>
-    {% endfor %}
-</div>
-{% endif %}
-
 <section class="hp-section" aria-labelledby="howHeading">
     <h2 id="howHeading">How it works</h2>
     <div class="hp-steps">
@@ -633,7 +615,7 @@
             }
             // Episode hits carry the audio URL already -- no need to find the
             // episode a second time inside its feed. Still send the feed URL so
-            // the result page can offer related episodes and Follow.
+            // the result page can offer related episodes.
             var fields = {
                 audio_url: item.audio_url,
                 episode_title: item.name,

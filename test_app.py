@@ -3486,7 +3486,7 @@ def test_the_job_bar_is_on_every_page(trial_on):
     """A mini player that only exists on the home page is not a mini player."""
     uid = _make_user('jobbarpages@test.com')
     client = _login(uid)
-    for path in ('/', '/settings', '/history', '/feeds', '/rss-help'):
+    for path in ('/', '/settings', '/history', '/rss-help', '/pricing'):
         body = client.get(path).data.decode()
         assert 'id="jobBar"' in body, f'no job bar on {path}'
         assert "fetch('/active-jobs'" in body, f'no polling on {path}'
@@ -9443,7 +9443,7 @@ def test_related_episodes_lists_others_from_same_feed(monkeypatch, trial_on):
         lambda url, timeout=None: (feed, None))
     data = _login(uid).get('/transcription/rel-1/related-episodes').get_json()
     assert data['has_feed'] is True
-    assert data['following'] is False
+    assert 'following' not in data
     assert data['podcast_name'] == 'Hard Fork'
     titles = [e['title'] for e in data['episodes']]
     assert 'Episode One' not in titles
@@ -9458,11 +9458,11 @@ def test_related_episodes_hidden_without_rss(trial_on):
     data = _login(uid).get('/transcription/rel-none/related-episodes').get_json()
     assert data['has_feed'] is False
     assert data['episodes'] == []
-    assert data['following'] is False
+    assert 'following' not in data
 
 
 def test_start_transcription_stores_rss_url_with_audio(monkeypatch, trial_on):
-    """Episode search / Spotify starts must persist the show feed for Follow."""
+    """Episode search / Spotify starts must persist the show feed for related episodes."""
     from models import db, TranscriptionTask
     uid = _make_user('startrss@test.com', limit=36000)
     monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
@@ -9590,36 +9590,23 @@ def test_related_episodes_respects_timeout_kwarg(monkeypatch, trial_on):
     assert data['episodes'] == []
 
 
-def test_follow_task_podcast_saves_feed(monkeypatch, trial_on):
-    from models import SavedFeed
-    uid = _make_user('followme@test.com')
+def test_follow_endpoint_is_gone(trial_on):
+    uid = _make_user('followgone@test.com')
     _completed_task(uid, 'follow-1', podcast_name='Hard Fork')
-    monkeypatch.setattr(
-        A, 'get_episodes_from_rss',
-        lambda url, timeout=None: ([], 'offline'))
+    resp = _login(uid).post('/transcription/follow-1/follow')
+    assert resp.status_code == 410
+
+
+def test_feeds_page_redirects_home(trial_on):
+    uid = _make_user('feedsgone@test.com')
     client = _login(uid)
-    data = client.post('/transcription/follow-1/follow').get_json()
-    assert data['following'] is True
-    assert data['already'] is False
-    with A.app.app_context():
-        feeds = SavedFeed.query.filter_by(user_id=uid).all()
-        assert len(feeds) == 1
-        assert feeds[0].rss_url == 'https://feeds.example.com/hardfork.xml'
-        assert feeds[0].name == 'Hard Fork'
-    again = client.post('/transcription/follow-1/follow').get_json()
-    assert again['following'] is True
-    assert again['already'] is True
-    related = client.get('/transcription/follow-1/related-episodes').get_json()
-    assert related['following'] is True
-    assert related['has_feed'] is True
-
-
-def test_follow_task_podcast_without_rss_fails(trial_on):
-    uid = _make_user('nofollow@test.com')
-    _completed_task(uid, 'follow-none', rss_url=None)
-    resp = _login(uid).post('/transcription/follow-none/follow')
-    assert resp.status_code == 400
-    assert 'feed' in resp.get_json()['error'].lower()
+    resp = client.get('/feeds', follow_redirects=False)
+    assert resp.status_code == 301
+    assert resp.headers['Location'].endswith('/')
+    resp2 = client.get('/feeds/use/1', follow_redirects=False)
+    assert resp2.status_code == 301
+    resp3 = client.post('/feeds/add', data={'name': 'X', 'rss_url': 'https://example.com/f.xml'})
+    assert resp3.status_code == 410
 
 
 def test_status_reports_has_rss(trial_on):
@@ -9636,7 +9623,10 @@ def test_status_reports_has_rss(trial_on):
 def test_transcription_page_has_next_steps_and_tracking():
     src = open('templates/transcription.html').read()
     assert 'id="nextSteps"' in src
-    assert 'Follow this podcast' in src
+    assert 'Follow this podcast' not in src
+    assert 'Email me when new episodes come out' not in src
+    assert 'podcast_followed' not in src
+    assert 'FOLLOW_URL' not in src
     assert 'More episodes from' in src
     assert 'related-episodes' in src or 'RELATED_URL' in src
     assert "url_for('history')" in src
@@ -9644,7 +9634,6 @@ def test_transcription_page_has_next_steps_and_tracking():
     assert "transcript_downloaded" in src
     assert "result_viewed" in src
     assert "next_episode_clicked" in src
-    assert "podcast_followed" in src
     # Must not ship transcript text into analytics properties.
     assert "phCapture('transcript_copied', { task_id: taskId })" in src
     assert 'format: \'txt\'' in src or 'format: "txt"' in src
@@ -9656,6 +9645,33 @@ def test_transcription_page_has_next_steps_and_tracking():
     assert 'Download .srt' in src
     assert 'showCopyNextSteps' in src
     assert 'Transcribe another episode from' in src
+
+
+def test_show_share_and_episode_pages_have_no_follow_ui(trial_on):
+    """Follow was removed; these surfaces must not advertise it."""
+    for path in (
+        'templates/podcast_show.html',
+        'templates/shared_transcript.html',
+        'templates/episode_selection.html',
+        'templates/transcription.html',
+    ):
+        src = open(path).read()
+        assert 'Follow this podcast' not in src, path
+        assert 'Follow podcast' not in src, path
+        assert 'Email me new episodes' not in src, path
+        assert 'Email me when new episodes come out' not in src, path
+
+
+def test_new_episode_poller_not_in_deploy_docs():
+    readme = open('ops/README.md').read()
+    assert 'podskrift-new-episodes' not in readme
+    assert 'poll-new-episodes' not in readme
+    from pathlib import Path as P
+    assert not P('ops/podskrift-new-episodes.timer').exists()
+    assert not P('ops/podskrift-new-episodes.service').exists()
+    assert not P('ops/poll-new-episodes.py').exists()
+    assert not P('episode_alerts.py').exists()
+    assert not P('summary_email.py').exists()
 
 
 def test_homepage_episode_click_sends_rss_url():
@@ -11717,7 +11733,7 @@ def test_admin_default_allowlist_includes_sindre(monkeypatch):
 
 def test_admin_kpis_match_fixture_data(monkeypatch):
     """Seed known rows and assert collect_kpis deltas (shared suite DB)."""
-    from models import (db, User, TranscriptionTask, SavedFeed, CreditPurchase,
+    from models import (db, User, TranscriptionTask, CreditPurchase,
                         TrialBudgetDay)
     import admin_dashboard as AD
     import uuid as _uuid
@@ -11779,10 +11795,7 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
             error_message='Transcription stopped making progress and was stopped.',
             started_at=now - timedelta(hours=2),
             completed_at=now - timedelta(hours=2)))
-        # Feed with alerts + one purchase
-        db.session.add(SavedFeed(
-            user_id=users[0].id, name='Show', rss_url='https://example.com/feed.xml',
-            email_new_episodes=True))
+        # One purchase
         db.session.add(CreditPurchase(
             user_id=users[0].id,
             stripe_session_id=f'cs_{prefix}',
@@ -11801,8 +11814,8 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
     assert after['failed_7d'] == before['failed_7d'] + 1
     assert after['minutes_7d'] == pytest.approx(before['minutes_7d'] + 17.0, abs=0.1)
     assert after['byok_users'] == before['byok_users'] + 1
-    assert after['followed_feeds'] == before['followed_feeds'] + 1
-    assert after['email_alerts_opted_in'] == before['email_alerts_opted_in'] + 1
+    assert 'followed_feeds' not in after
+    assert 'email_alerts_opted_in' not in after
     assert after['purchase_count'] == before['purchase_count'] + 1
     assert after['purchase_revenue_usd'] == pytest.approx(
         before['purchase_revenue_usd'] + 5.0, abs=0.01)
@@ -11823,13 +11836,13 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
     assert 'data-kpi="trial_daily_used_minutes"' in body
     assert 'Trial today' in body
     assert 'chartSignups' in body
-    # User detail lists tasks / feeds / purchases
+    # User detail lists tasks / purchases
     with A.app.app_context():
         uid0 = User.query.filter_by(email=f'{prefix}-0@test.com').one().id
     detail = client.get(f'/admin/users/{uid0}').data.decode()
     assert f'{prefix}-0@test.com' in detail
     assert 'Ep 1' in detail
-    assert 'Show' in detail
+    assert 'Followed feeds' not in detail
     assert '$5.00' in detail
 
 

@@ -99,25 +99,12 @@
     </div>
 </div>
 
-<!-- Next step after a completed transcript: more episodes, follow, history -->
+<!-- Next step after a completed transcript: more episodes, history -->
 <div id="nextSteps" class="hidden card mb-2" style="margin-top: 16px;">
     <div class="card-body">
         <div class="flex-between" style="flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
             <h2 style="margin: 0; font-size: 19px; font-weight: 700;">What’s next</h2>
             <div class="flex-center" style="gap: 8px; flex-wrap: wrap;">
-                <button type="button" class="btn btn-sm btn-secondary hidden" id="followBtn"
-                        aria-live="polite">Follow this podcast</button>
-                <label id="followEmailLabel" class="hidden text-sm text-muted"
-                       style="display: none; align-items: center; gap: 6px; margin: 0; flex-wrap: wrap;">
-                    <span style="display: inline-flex; align-items: center; gap: 6px;">
-                        <input type="checkbox" id="followEmailNew" value="1" checked>
-                        Email me when new episodes come out
-                    </span>
-                    <span style="display: inline-flex; align-items: center; gap: 6px;">
-                        <input type="checkbox" id="followEmailSummary" value="1">
-                        Email me a summary of each new episode
-                    </span>
-                </label>
                 <a href="{{ url_for('history') }}" class="btn btn-sm btn-text" id="historyLink">History</a>
             </div>
         </div>
@@ -215,12 +202,10 @@
         {% include '_listen_links.html' %}
         {% endwith %}
     </div>
-    <!-- Shown right after Copy: next episodes + follow, while the lower What’s next stays too -->
+    <!-- Shown right after Copy: next episodes, while the lower What’s next stays too -->
     <div id="copyNextSteps" class="hidden copy-next" role="status">
         <div class="copy-next-head">
             <strong id="copyNextTitle">Copied!</strong>
-            <button type="button" class="btn btn-sm btn-secondary hidden" id="copyFollowBtn"
-                    aria-live="polite">Follow this podcast</button>
         </div>
         <p class="text-sm text-muted" id="copyNextHint" style="margin: 6px 0 10px;"></p>
         <div id="copyNextList" class="next-ep-list"></div>
@@ -304,14 +289,13 @@
     var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
     var START_URL = {{ url_for('start_transcription')|tojson }};
     var RELATED_URL = {{ url_for('related_episodes', task_id=task_id)|tojson }};
-    var FOLLOW_URL = {{ url_for('follow_task_podcast', task_id=task_id)|tojson }};
     var SHARE_URL = {{ url_for('transcription_share', task_id=task_id)|tojson }};
     var SHARE_REVOKE_URL = {{ url_for('transcription_share_revoke', task_id=task_id)|tojson }};
     var resultViewed = false;
     var nextStepsLoaded = false;
     var taskHasRss = false;
     var RELATED_CLIENT_TIMEOUT_MS = 10000;
-    var relatedCache = null; // {has_feed, following, podcast_name, episodes, error?}
+    var relatedCache = null; // {has_feed, podcast_name, episodes, error?}
     var copyNextShown = false;
     var shareLoaded = false;
 
@@ -978,25 +962,6 @@
         }
     }
 
-    function setFollowButtonState(btn, following) {
-        if (!btn) return;
-        show(btn, true);
-        if (following) {
-            btn.disabled = true;
-            btn.textContent = 'Following';
-            btn.classList.remove('btn-primary');
-            btn.classList.add('btn-secondary');
-        } else {
-            btn.disabled = false;
-            btn.textContent = 'Follow this podcast';
-        }
-    }
-
-    function setFollowButton(following) {
-        setFollowButtonState(el('followBtn'), following);
-        setFollowButtonState(el('copyFollowBtn'), following);
-    }
-
     function startRelatedEpisode(ep, source) {
         if (!ep || !ep.audio_url) return;
         if (source === 'copy_panel') {
@@ -1084,13 +1049,11 @@
         var episodes = (data && data.episodes) || [];
         var slice = episodes.slice(0, 3);
         if (!data || !data.has_feed) {
-            show(el('copyFollowBtn'), false);
             show(el('copyNextEmpty'), false);
             el('copyNextHint').textContent =
                 'Copied! Search for another episode when you are ready.';
             return;
         }
-        setFollowButtonState(el('copyFollowBtn'), !!(data && data.following));
         if (!slice.length) {
             show(el('copyNextEmpty'), true);
             return;
@@ -1115,13 +1078,6 @@
                     ? Math.min(3, relatedCache.episodes.length) : 0
             });
         }
-        var copyFollow = el('copyFollowBtn');
-        if (copyFollow && !copyFollow.dataset.wired) {
-            copyFollow.dataset.wired = '1';
-            copyFollow.addEventListener('click', function() {
-                followPodcast('copy_panel');
-            });
-        }
         if (relatedCache) {
             renderCopyNextEpisodes(relatedCache);
             return;
@@ -1132,76 +1088,13 @@
         loadNextSteps();
     }
 
-    function followPodcast(source) {
-        var btn = source === 'copy_panel' ? el('copyFollowBtn') : el('followBtn');
-        if (!btn || btn.disabled) return;
-        if (source === 'copy_panel') {
-            phCapture('copy_next_step_clicked', {
-                task_id: taskId,
-                item: 'follow'
-            });
-        }
-        btn.disabled = true;
-        var prev = btn.textContent;
-        btn.innerHTML = '<span class="btn-spinner" aria-hidden="true"></span>Saving…';
-        var body = new FormData();
-        var emailBox = el('followEmailNew');
-        var summaryBox = el('followEmailSummary');
-        body.append('email_new_episodes', (emailBox && emailBox.checked) ? '1' : '0');
-        body.append('email_summaries', (summaryBox && summaryBox.checked) ? '1' : '0');
-        fetch(FOLLOW_URL, { method: 'POST', body: body })
-            .then(function(r) { return r.json().then(function(data) { return { ok: r.ok, data: data }; }); })
-            .then(function(res) {
-                if (res.ok && res.data && res.data.following) {
-                    setFollowButton(true);
-                    if (relatedCache) relatedCache.following = true;
-                    var emailLab = el('followEmailLabel');
-                    if (emailLab) {
-                        emailLab.classList.add('hidden');
-                        emailLab.style.display = 'none';
-                    }
-                    phCapture('podcast_followed', {
-                        task_id: taskId,
-                        already: !!res.data.already,
-                        source: source || 'next_steps'
-                    });
-                    return;
-                }
-                btn.disabled = false;
-                btn.textContent = prev;
-                alert((res.data && res.data.error) || 'Could not follow this podcast.');
-            })
-            .catch(function() {
-                btn.disabled = false;
-                btn.textContent = prev;
-                alert('Could not follow this podcast. Try again.');
-            });
-    }
-
     function applyRelatedData(data) {
         relatedCache = data || {
-            has_feed: false, following: false, podcast_name: '', episodes: []
+            has_feed: false, podcast_name: '', episodes: []
         };
         if (!data || !data.has_feed) {
-            show(el('followBtn'), false);
-            var emailLabOff = el('followEmailLabel');
-            if (emailLabOff) {
-                emailLabOff.classList.add('hidden');
-                emailLabOff.style.display = 'none';
-            }
             show(el('moreEpisodesBlock'), false);
         } else {
-            setFollowButton(!!data.following);
-            var emailLab = el('followEmailLabel');
-            if (emailLab) {
-                if (data.following) {
-                    emailLab.classList.add('hidden');
-                    emailLab.style.display = 'none';
-                } else {
-                    emailLab.classList.remove('hidden');
-                    emailLab.style.display = 'flex';
-                }
-            }
             renderMoreEpisodes(data.episodes || [], data.podcast_name || '');
         }
         if (copyNextShown) renderCopyNextEpisodes(relatedCache);
@@ -1215,11 +1108,6 @@
         nextStepsLoaded = true;
         show(el('nextSteps'), true);
         show(el('moreEpisodesLoading'), true);
-        var followBtn = el('followBtn');
-        if (followBtn && !followBtn.dataset.wired) {
-            followBtn.dataset.wired = '1';
-            followBtn.addEventListener('click', function() { followPodcast('next_steps'); });
-        }
 
         var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
         var timer = null;
@@ -1242,19 +1130,12 @@
             })
             .catch(function() {
                 show(el('moreEpisodesLoading'), false);
-                // Feed timed out — keep Follow when we know the task has a feed.
                 show(el('moreEpisodesBlock'), false);
                 relatedCache = {
                     has_feed: !!taskHasRss,
-                    following: false,
                     podcast_name: (el('podcastName') && el('podcastName').textContent) || '',
                     episodes: []
                 };
-                if (taskHasRss) {
-                    setFollowButton(false);
-                } else {
-                    show(el('followBtn'), false);
-                }
                 if (copyNextShown) renderCopyNextEpisodes(relatedCache);
             })
             .finally(function() {
