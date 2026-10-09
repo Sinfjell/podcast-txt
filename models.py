@@ -23,7 +23,7 @@ class User(UserMixin, db.Model):
     # Trial metering. Only ever touched for users transcribing on OUR key --
     # a user with their own key spends their own quota and is never metered.
     # A NULL limit means "use TRIAL_MINUTES" (legacy accounts). New signups
-    # get NEW_USER_TRIAL_MINUTES stamped here at registration — no migration.
+    # get NEW_USER_TRIAL_MINUTES stamped here at registration.
     trial_seconds_limit = db.Column(db.Integer, nullable=True)
     trial_seconds_used = db.Column(db.Integer, nullable=False, default=0,
                                    server_default='0')

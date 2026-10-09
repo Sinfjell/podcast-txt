@@ -212,7 +212,7 @@ claims, which a caller controls.
 | Variable | Default | What it bounds |
 | --- | --- | --- |
 | `TRIAL_ENABLED` | `1` | Kill switch. `0` stops handing out the key. |
-| `NEW_USER_TRIAL_MINUTES` | `60` | Free minutes stamped on `trial_seconds_limit` at signup (~$0.36). |
+| `NEW_USER_TRIAL_MINUTES` | `120` | Free minutes stamped on `trial_seconds_limit` at signup (~$0.72). Accounts created under the old 60-minute default (2026-10-09) are lifted once at boot. |
 | `TRIAL_MINUTES` | `180` | Fallback when `trial_seconds_limit` is NULL (legacy accounts). |
 | `TRIAL_GLOBAL_MINUTES` | `6000` | **Lifetime** minutes across all accounts (~$36.00). |
 | `TRIAL_MAX_EPISODE_MINUTES` | same as `TRIAL_MINUTES` | Longest single episode the trial accepts. |
