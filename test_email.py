@@ -800,7 +800,8 @@ def test_partial_preview_email_wording(monkeypatch):
 def test_changelog_hides_email_keeps_user_visible_first():
     entries = A.load_changelog_entries()
     ids = [e['id'] for e in entries]
-    assert 'resume-after-deploy' in ids  # order is owned by test_whats_new_page_renders_changelog_entries
+    # Infra/plumbing (deploy drain, restarts) never goes in What's new.
+    assert 'resume-after-deploy' not in ids
     assert 'partial-preview-minutes-wording' in ids
     assert 'partial-trial-preview' in ids
     assert 'email-alerts-coming-soon' not in set(ids)

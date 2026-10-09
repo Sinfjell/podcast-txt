@@ -14,12 +14,6 @@
       "summary": "Browse /podcasts for show pages with recent episodes and a one-click Transcribe button. Built for “transcript of [show]” searches — pages never publish transcript text."
     },
     {
-      "id": "resume-after-deploy",
-      "date": "2026-10-09",
-      "title": "Transcriptions survive server restarts",
-      "summary": "If a deploy interrupts an episode mid-processing, Podskrift restarts that job automatically and no longer shows a false “corrupt audio” error. If it cannot resume, you’ll see a clear message to try again."
-    },
-    {
       "id": "public-share-links",
       "date": "2026-10-09",
       "title": "Share a transcript with a private link",

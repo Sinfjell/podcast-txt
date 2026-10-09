@@ -7921,7 +7921,7 @@ USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscripti
 
 ## Pages
 - [Home]({public_url('index')}): search, paste Spotify/Apple/RSS, pick an episode, transcribe
-- [Podcasts]({public_url('podcasts_index')}): show landing pages (popular + transcribed shows)
+- [Podcasts]({public_url('podcasts_index')}): show landing pages for popular podcasts
 - [Pricing]({public_url('pricing')}): free trial, credit pack, or bring your own key
 - [What's new]({public_url('whats_new')}): dated feature list, newest first (build in public)
 - [API docs]({public_url('api_docs')}): customer HTTP API (resolve → transcribe → transcript)
