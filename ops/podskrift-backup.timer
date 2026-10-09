@@ -2,7 +2,9 @@
 Description=Nightly Podskrift database backup
 
 [Timer]
-OnCalendar=*-*-* 03:30:00
+# 23:45 UTC = 01:45 Europe/Oslo (CEST) / 00:45 (CET) — before the Plesk
+# server backup to S3 at 02:05 Oslo, so the offsite copy includes tonight's DB.
+OnCalendar=*-*-* 23:45:00 UTC
 Persistent=true
 
 [Install]
