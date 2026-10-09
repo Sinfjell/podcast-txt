@@ -10546,7 +10546,7 @@ def test_share_page_shows_apple_and_website_for_rss_sourced(trial_on, monkeypatc
     token = _login(uid).post(f'/transcription/{tid}/share').get_json()['token']
     html = A.app.test_client().get(f'/t/{token}').data.decode()
     assert 'Listen on Apple Podcasts' in html
-    assert apple in html
+    assert 'https://podcasts.apple.com/podcast/id1234567890' in html
     assert 'podcast&#39;s website' in html or "podcast's website" in html
     assert 'https://example.com/episodes/one' in html
     assert 'data-listen-platform="spotify"' not in html
@@ -10647,7 +10647,7 @@ def test_apple_url_for_feed_caches_and_matches_feed(monkeypatch):
         'https://feeds.example.com/show.xml', 'Example Show', timeout=1)
     b = A.apple_url_for_feed(
         'https://feeds.example.com/show.xml', 'Example Show', timeout=1)
-    assert a == 'https://podcasts.apple.com/us/podcast/id1'
+    assert a == 'https://podcasts.apple.com/podcast/id1'
     assert b == a
     assert calls['n'] == 1
 
@@ -11663,3 +11663,124 @@ def test_admin_never_renders_byok_key(monkeypatch):
         assert r.status_code == 200
         assert secret not in r.data.decode()
         assert 'SHOULD-NEVER' not in r.data.decode()
+
+
+def test_listen_links_platform_labels_require_canonical_urls():
+    links = A.listen_links_from_fields(
+        spotify_url='https://evil.example/open.spotify.com/episode/x',
+        apple_url='https://evil.example/?podcasts.apple.com/id123',
+    )
+    assert links == []
+    assert A.canonical_apple_podcasts_url(
+        'https://evil.example/podcasts.apple.com/podcast/id12') is None
+    assert A.canonical_apple_podcasts_url(
+        'https://podcasts.apple.com/us/podcast/x/id12?i=34&uo=4'
+    ) == 'https://podcasts.apple.com/podcast/id12?i=34'
+    assert A.canonical_spotify_episode_url(
+        'javascript:alert(1)//open.spotify.com/episode/abc') is None
+
+
+def test_enqueue_drops_non_platform_urls_for_platform_fields(monkeypatch, trial_on):
+    import types
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: None))
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *_a, **_k: 10 ** 12)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    uid = _make_user('listen-evil@test.com')
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(user, {
+            'title': 'Ep', 'audio_url': 'https://cdn.example.com/ep2.mp3',
+            'podcast_name': 'Show', 'duration_min': 5,
+            'spotify_url': 'https://phish.example/login',
+            'apple_url': 'https://phish.example/?podcasts.apple.com',
+            'episode_link': 'javascript:alert(1)',
+        })
+        assert status == 200, payload
+        task = A.db.session.get(A.TranscriptionTask, payload['task_id'])
+        assert task.source_spotify_url is None
+        assert task.source_apple_url is None
+        assert task.source_website_url is None
+
+
+def test_public_share_hides_raw_audio_unless_in_public_directory(trial_on, monkeypatch):
+    monkeypatch.setattr(A, 'apple_url_for_feed', lambda *a, **k: None)
+    uid = _make_user('listen-private@test.com')
+    tid = _share_task(
+        uid, 'listen-private',
+        rss_url='https://private.example/feed/SECRETTOKEN',
+        source_audio_url='https://private.example/ep.mp3?token=SECRET',
+    )
+    token = _login(uid).post(f'/transcription/{tid}/share').get_json()['token']
+    html = A.app.test_client().get(f'/t/{token}').data.decode()
+    assert 'token=SECRET' not in html
+    assert 'Play audio' not in html
+    # Owner's own result page still offers the audio.
+    status = _login(uid).get(f'/status/{tid}').get_json()
+    assert 'audio' in [L['platform'] for L in status['listen_links']]
+
+
+def test_share_view_never_does_apple_lookup_inline(trial_on, monkeypatch):
+    started = []
+
+    class FakeThread:
+        def __init__(self, target=None, args=(), **kw):
+            started.append((target, args))
+
+        def start(self):
+            return None
+
+    def boom(*a, **k):
+        raise AssertionError('network lookup on request thread')
+
+    monkeypatch.setattr(A, 'apple_url_for_feed', boom)
+    uid = _make_user('listen-async@test.com')
+    tid = _share_task(uid, 'listen-async',
+                      rss_url='https://feeds.example.com/async.xml',
+                      source_audio_url='https://cdn.example.com/a.mp3')
+    token = _login(uid).post(f'/transcription/{tid}/share')
+    monkeypatch.setitem(A.app.config, 'TESTING', False)
+    monkeypatch.setattr(A.threading, 'Thread', FakeThread)
+    A._listen_backfill_inflight.clear()
+    tok = token.get_json()['token']
+    resp = A.app.test_client().get(f'/t/{tok}', base_url='https://podskrift.com')
+    assert resp.status_code == 200
+    assert started and started[0][1] == (tid,)
+    A._listen_backfill_inflight.clear()
+
+
+def test_apple_url_for_feed_matches_episode_and_sends_only_name(monkeypatch):
+    A._apple_feed_url_cache.clear()
+    seen = []
+
+    class R:
+        def __init__(self, data):
+            self.data = data
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.data
+
+    def fake_get(url, timeout=None, params=None):
+        seen.append(dict(params or {}))
+        return R({'results': [{'feedUrl': 'https://feeds.example.com/s/TOKEN123',
+                               'collectionId': 77}]})
+
+    monkeypatch.setattr(A.requests, 'get', fake_get)
+    monkeypatch.setattr(A, '_itunes_lookup', lambda *a, **k: [
+        {'wrapperType': 'track'},
+        {'wrapperType': 'podcastEpisode', 'trackId': 1, 'trackName': 'Other',
+         'episodeUrl': 'https://cdn.example.com/other.mp3'},
+        {'wrapperType': 'podcastEpisode', 'trackId': 2, 'trackName': 'Mine',
+         'episodeUrl': 'https://cdn.example.com/mine.mp3'},
+    ])
+    url = A.apple_url_for_feed('https://feeds.example.com/s/TOKEN123', 'My Show',
+                               episode_title='mine',
+                               audio_url='https://cdn.example.com/x.mp3')
+    assert url == 'https://podcasts.apple.com/podcast/id77?i=2'
+    assert all('TOKEN123' not in str(p) for p in seen)
+    assert seen[0]['term'] == 'My Show'

@@ -4906,14 +4906,10 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
     if not audio_url or not _is_fetchable_url(audio_url):
         return {'error': 'That audio URL cannot be fetched.'}, 400
 
-    spotify_url = (
-        canonical_spotify_episode_url(meta.get('spotify_url') or '')
-        or safe_public_http_url(meta.get('spotify_url') or '')
-    )
-    apple_url = (
-        canonical_apple_podcasts_url(meta.get('apple_url') or '')
-        or safe_public_http_url(meta.get('apple_url') or '')
-    )
+    # Platform-labelled links are rebuilt from parsed ids only, so a form
+    # value cannot put an arbitrary URL behind "Listen on Spotify/Apple".
+    spotify_url = canonical_spotify_episode_url(meta.get('spotify_url') or '')
+    apple_url = canonical_apple_podcasts_url(meta.get('apple_url') or '')
     website_url = website_url_from_episode_meta(meta)
 
     # Snapshot before the worker thread: callers may pass flask_login's
@@ -6349,12 +6345,11 @@ def canonical_spotify_episode_url(raw):
 
 def canonical_apple_podcasts_url(raw):
     """Normalised podcasts.apple.com show/episode URL, or None."""
-    show_id, episode_id = parse_apple_podcasts_url(raw)
+    cleaned = safe_public_http_url(raw)
+    if not cleaned or urlparse(cleaned).hostname != 'podcasts.apple.com':
+        return None
+    show_id, episode_id = parse_apple_podcasts_url(cleaned)
     if not show_id:
-        # Allow already-valid Apple directory URLs that parse_apple accepts.
-        cleaned = safe_public_http_url(raw)
-        if cleaned and 'podcasts.apple.com' in cleaned.lower():
-            return cleaned
         return None
     base = f'https://podcasts.apple.com/podcast/id{show_id}'
     if episode_id:
@@ -6368,78 +6363,81 @@ _apple_feed_url_cache_lock = threading.Lock()
 APPLE_FEED_LOOKUP_TIMEOUT_SEC = 2.0
 
 
-def apple_url_for_feed(feed_url, podcast_name=None, *, timeout=APPLE_FEED_LOOKUP_TIMEOUT_SEC):
-    """iTunes collectionViewUrl for a feed, or None. Cached; short timeout.
+def _norm_title(value):
+    return re.sub(r'\s+', ' ', (value or '')).strip().casefold()
 
-    Never raises — callers use this on share-create / first view paths that
-    must not hang the request when Apple's directory is slow.
+
+def apple_url_for_feed(feed_url, podcast_name=None, *, episode_title=None,
+                       audio_url=None, timeout=APPLE_FEED_LOOKUP_TIMEOUT_SEC):
+    """Apple Podcasts URL for a feed (episode-level when it can match), or None.
+
+    Only the show *name* is sent to Apple's search, never the feed URL or its
+    path (private feeds carry tokens there). A hit must have exactly the same
+    feedUrl, which also proves the feed is in Apple's public directory.
+    Cached per process (misses too). Never raises. Do not call from a request
+    thread: use schedule_listen_link_backfill().
     """
     feed = safe_public_http_url(feed_url)
-    if not feed:
+    name = (podcast_name or '').strip()
+    if not feed or len(name) < 2:
         return None
-    cache_key = feed.rstrip('/').lower()
+    want_feed = feed.rstrip('/').lower()
+    audio = safe_public_http_url(audio_url) or ''
+    cache_key = (want_feed, audio, _norm_title(episode_title))
     with _apple_feed_url_cache_lock:
         if cache_key in _apple_feed_url_cache:
-            hit = _apple_feed_url_cache[cache_key]
-            return hit or None
+            return _apple_feed_url_cache[cache_key] or None
 
     found = None
     try:
-        name = (podcast_name or '').strip()
-        terms = []
-        if name:
-            terms.append(name)
-        # Host + path slug as a weak fallback when the show name is unknown.
-        parsed = urlparse(feed)
-        host = (parsed.hostname or '').removeprefix('www.')
-        slug = (parsed.path or '').rstrip('/').split('/')[-1]
-        if host and slug and slug not in ('rss', 'feed', 'podcast', 'index.xml'):
-            terms.append(f'{host} {slug}')
-        elif host:
-            terms.append(host.split('.')[0])
-
-        want_feed = cache_key
-        for term in terms[:2]:
-            if not term or len(term) < 2:
-                continue
-            try:
-                resp = requests.get(
-                    'https://itunes.apple.com/search',
-                    timeout=timeout,
-                    params={
-                        'term': term[:200],
-                        'media': 'podcast',
-                        'entity': 'podcast',
-                        'limit': 25,
-                    },
-                )
-                resp.raise_for_status()
-                results = resp.json().get('results') or []
-            except (requests.RequestException, ValueError, TypeError):
-                continue
-            for item in results:
-                item_feed = safe_public_http_url(item.get('feedUrl') or '')
-                if not item_feed:
-                    continue
-                if item_feed.rstrip('/').lower() != want_feed:
-                    continue
-                apple = (
-                    safe_public_http_url(item.get('collectionViewUrl') or '')
-                    or canonical_apple_podcasts_url(
-                        f"https://podcasts.apple.com/podcast/id{item.get('collectionId')}"
-                    )
-                )
-                if apple:
-                    found = apple
+        show_id = None
+        try:
+            resp = requests.get(
+                'https://itunes.apple.com/search',
+                timeout=timeout,
+                params={'term': name[:200], 'media': 'podcast',
+                        'entity': 'podcast', 'limit': 25},
+            )
+            resp.raise_for_status()
+            results = resp.json().get('results') or []
+        except (requests.RequestException, ValueError, TypeError):
+            results = None
+        for item in results or []:
+            item_feed = safe_public_http_url(item.get('feedUrl') or '')
+            if item_feed and item_feed.rstrip('/').lower() == want_feed:
+                cid = str(item.get('collectionId') or '')
+                if re.fullmatch(r'\d+', cid):
+                    show_id = cid
                     break
-            if found:
-                break
-    except Exception:  # noqa: BLE001 — never break share/result render
+        if show_id:
+            found = f'https://podcasts.apple.com/podcast/id{show_id}'
+            want_title = _norm_title(episode_title)
+            if audio or want_title:
+                try:
+                    eps = _itunes_lookup(show_id, entity='podcastEpisode',
+                                         limit=200)
+                except Exception:  # noqa: BLE001
+                    eps = []
+                for ep in eps or []:
+                    if ep.get('wrapperType') != 'podcastEpisode':
+                        continue
+                    tid = str(ep.get('trackId') or '')
+                    if not re.fullmatch(r'\d+', tid):
+                        continue
+                    ep_audio = safe_public_http_url(ep.get('episodeUrl') or '')
+                    if ((audio and ep_audio == audio)
+                            or (want_title
+                                and _norm_title(ep.get('trackName')) == want_title)):
+                        found = f'{found}?i={tid}'
+                        break
+    except Exception:  # noqa: BLE001 - never break share/result render
         app.logger.exception('apple feed lookup failed')
         found = None
+        return None  # do not cache unexpected failures
 
     with _apple_feed_url_cache_lock:
-        _apple_feed_url_cache[cache_key] = found or ''
+        if results is not None or found:
+            _apple_feed_url_cache[cache_key] = found or ''
     return found
 
 
@@ -6457,16 +6455,14 @@ def listen_links_from_fields(*, spotify_url=None, apple_url=None,
                              website_url=None, audio_url=None):
     """Build ordered listen-link dicts from stored/resolved URLs."""
     links = []
-    spotify = safe_public_http_url(spotify_url) or canonical_spotify_episode_url(
-        spotify_url or '')
+    spotify = canonical_spotify_episode_url(spotify_url or '')
     if spotify:
         links.append({
             'platform': 'spotify',
             'label': 'Listen on Spotify',
             'url': spotify,
         })
-    apple = safe_public_http_url(apple_url) or canonical_apple_podcasts_url(
-        apple_url or '')
+    apple = canonical_apple_podcasts_url(apple_url or '')
     if apple:
         links.append({
             'platform': 'apple',
@@ -6503,29 +6499,84 @@ def listen_links_for_task(task):
     )
 
 
-def ensure_task_listen_links(task, *, timeout=APPLE_FEED_LOOKUP_TIMEOUT_SEC):
-    """Fill missing Apple URL from the feed when cheap; persist if changed.
+def public_listen_links_for_task(task):
+    """Listen links safe for the public /t/ page.
 
-    Safe to call from share-create or a first share view. Uses a process-local
-    cache so a failed/slow lookup is not retried on every request.
+    The raw audio URL is only shown when the episode is known to be in a
+    public directory (Spotify/Apple link stored). Private/premium feeds put
+    access tokens in enclosure URLs, and a share link must not hand those out.
+    """
+    links = listen_links_for_task(task)
+    if task is None:
+        return links
+    public = bool(getattr(task, 'source_spotify_url', None)
+                  or getattr(task, 'source_apple_url', None))
+    if public:
+        return links
+    return [L for L in links if not L.get('is_audio')]
+
+
+def ensure_task_listen_links(task, *, timeout=APPLE_FEED_LOOKUP_TIMEOUT_SEC):
+    """Fill a missing Apple URL from the feed; persist if found.
+
+    Network call: run from schedule_listen_link_backfill(), never inline in a
+    request thread (except under TESTING).
     """
     if task is None:
         return listen_links_for_task(task)
-    dirty = False
     if not getattr(task, 'source_apple_url', None) and (task.rss_url or '').strip():
         apple = apple_url_for_feed(
-            task.rss_url, task.podcast_name, timeout=timeout)
+            task.rss_url, task.podcast_name,
+            episode_title=task.episode_title,
+            audio_url=getattr(task, 'source_audio_url', None),
+            timeout=timeout)
         if apple:
             task.source_apple_url = apple
-            dirty = True
-    if dirty:
-        try:
-            db.session.commit()
-        except Exception:  # noqa: BLE001
-            db.session.rollback()
-            app.logger.exception('could not persist listen links for task %s',
-                                 getattr(task, 'id', '?'))
+            try:
+                db.session.commit()
+            except Exception:  # noqa: BLE001
+                db.session.rollback()
+                app.logger.exception('could not persist listen links for task %s',
+                                     getattr(task, 'id', '?'))
     return listen_links_for_task(task)
+
+
+_listen_backfill_inflight = set()
+_listen_backfill_lock = threading.Lock()
+
+
+def _listen_backfill_worker(task_id):
+    try:
+        with app.app_context():
+            try:
+                task = db.session.get(TranscriptionTask, task_id)
+                if task is not None:
+                    ensure_task_listen_links(task)
+            finally:
+                db.session.remove()
+    except Exception:  # noqa: BLE001
+        app.logger.exception('listen-link backfill failed for %s', task_id)
+    finally:
+        with _listen_backfill_lock:
+            _listen_backfill_inflight.discard(task_id)
+
+
+def schedule_listen_link_backfill(task):
+    """Look up a missing Apple link off the request thread (single-flight)."""
+    if task is None or getattr(task, 'source_apple_url', None):
+        return
+    if not (task.rss_url or '').strip():
+        return
+    task_id = task.id
+    with _listen_backfill_lock:
+        if task_id in _listen_backfill_inflight:
+            return
+        _listen_backfill_inflight.add(task_id)
+    if app.config.get('TESTING'):
+        _listen_backfill_worker(task_id)
+        return
+    threading.Thread(target=_listen_backfill_worker, args=(task_id,),
+                     daemon=True, name=f'listen-links-{task_id[:8]}').start()
 
 
 def _active_share_for_task(task_id):
@@ -6642,8 +6693,8 @@ def transcription_share(task_id):
             db.session.add(share)
         db.session.commit()
         created = True
-        # Best-effort Apple link from the feed before anyone opens /t/<token>.
-        ensure_task_listen_links(task)
+        # Best-effort Apple link from the feed, off the request thread.
+        schedule_listen_link_backfill(task)
         product_analytics.capture(
             'share_link_created',
             current_user.id,
@@ -6710,13 +6761,11 @@ def shared_transcript(token):
 
     partial_meta = share_partial_meta(task)
     segments = _readable_share_segments(task)
-    # Prefer already-stored listen URLs. If Apple is still missing, one short
-    # cached lookup may fill it; a slow directory must not delay the HTML.
-    listen_links = listen_links_for_task(task)
-    if (not getattr(task, 'source_apple_url', None)
-            and (task.rss_url or '').strip()):
-        listen_links = ensure_task_listen_links(
-            task, timeout=min(1.5, APPLE_FEED_LOOKUP_TIMEOUT_SEC))
+    # Only stored listen URLs are rendered (no network on this path). A
+    # missing Apple link is looked up in the background for the next view.
+    # In tests the backfill runs inline, so re-read after scheduling.
+    schedule_listen_link_backfill(task)
+    listen_links = public_listen_links_for_task(task)
     signup_url = url_for('register', utm_source='share')
     product_analytics.capture(
         'shared_transcript_viewed',
