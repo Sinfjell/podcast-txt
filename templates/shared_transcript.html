@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}{{ task.episode_title or 'Transcript' }} — Podskrift{% endblock %}
+{% block meta_description %}{{ og_description }}{% endblock %}
+{% block robots_meta %}<meta name="robots" content="noindex">{% endblock %}
+{% block og_title %}{{ og_title }}{% endblock %}
+{% block og_description %}{{ og_description }}{% endblock %}
+{% block twitter_title %}{{ og_title }}{% endblock %}
+{% block twitter_description %}{{ og_description }}{% endblock %}
+{% block twitter_card %}{% if task.artwork_url %}summary_large_image{% else %}summary{% endif %}{% endblock %}
+{% block og_image_meta %}
+{% if task.artwork_url %}
+    <meta property="og:image" content="{{ task.artwork_url }}">
+    <meta name="twitter:image" content="{{ task.artwork_url }}">
+{% endif %}
+{% endblock %}
+{% block container_class %}container-wide{% endblock %}
+
+{% block content %}
+<style>
+    .share-hero {
+        display: flex; gap: 16px; align-items: flex-start;
+        margin-bottom: 18px;
+    }
+    .share-hero img {
+        width: 88px; height: 88px; border-radius: 10px; object-fit: cover;
+        flex-shrink: 0; background: var(--border);
+    }
+    .share-hero-art {
+        width: 88px; height: 88px; border-radius: 10px; flex-shrink: 0;
+        background: var(--accent-bg); border: 1px solid var(--accent-border);
+    }
+    .share-podcast {
+        color: var(--muted); font-size: 13px; font-weight: 600;
+        letter-spacing: 0.02em; text-transform: uppercase; margin-bottom: 4px;
+    }
+    .share-title {
+        font-size: 22px; font-weight: 700; letter-spacing: -0.02em;
+        line-height: 1.3; margin: 0;
+    }
+    .share-meta { color: var(--muted); font-size: 13px; margin-top: 6px; }
+    .share-partial {
+        margin: 0 0 14px; padding: 10px 12px;
+        border: 1px solid var(--warning); border-radius: var(--radius-sm);
+        background: var(--warning-bg); color: var(--warning);
+        font-size: 13.5px; line-height: 1.45;
+    }
+    .share-actions {
+        display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px;
+    }
+    .share-transcript {
+        white-space: pre-wrap; word-break: break-word;
+        font-size: 15px; line-height: 1.7;
+    }
+    .share-seg {
+        display: grid; grid-template-columns: 72px 1fr; gap: 12px;
+        padding: 6px 0; border-bottom: 1px solid var(--border);
+    }
+    .share-seg:last-child { border-bottom: none; }
+    .share-seg-ts {
+        color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums;
+        padding-top: 2px;
+    }
+    .share-seg-text { font-size: 15px; line-height: 1.55; }
+    .share-cta {
+        margin-top: 28px; padding: 18px 16px;
+        border: 1px solid var(--accent-border); border-radius: var(--radius);
+        background: var(--accent-bg); text-align: center;
+    }
+    .share-cta p {
+        margin: 0 0 12px; color: var(--text); font-size: 15px; line-height: 1.45;
+    }
+    @media (max-width: 560px) {
+        .share-hero img, .share-hero-art { width: 72px; height: 72px; }
+        .share-title { font-size: 19px; }
+        .share-seg { grid-template-columns: 56px 1fr; gap: 8px; }
+    }
+</style>
+
+<div class="card mb-2">
+    <div class="card-body">
+        <div class="share-hero">
+            {% if task.artwork_url %}
+            <img src="{{ task.artwork_url }}" alt="">
+            {% else %}
+            <div class="share-hero-art" aria-hidden="true"></div>
+            {% endif %}
+            <div>
+                {% if task.podcast_name %}
+                <p class="share-podcast">{{ task.podcast_name }}</p>
+                {% endif %}
+                <h1 class="share-title">{{ task.episode_title or 'Episode' }}</h1>
+                {% if task.episode_published %}
+                <p class="share-meta">{{ task.episode_published }}</p>
+                {% endif %}
+            </div>
+        </div>
+
+        {% if partial_meta %}
+        <div class="share-partial" role="status">
+            {% if partial_meta.partial_minutes and partial_meta.episode_minutes %}
+            Free preview: first {{ partial_meta.partial_minutes }} minutes
+            of about {{ partial_meta.episode_minutes }}.
+            {% else %}
+            This is a free preview of part of the episode, not the full transcript.
+            {% endif %}
+        </div>
+        {% endif %}
+
+        <div class="share-actions">
+            <button type="button" class="btn btn-sm btn-primary" id="shareCopyBtn">Copy</button>
+            <a class="btn btn-sm btn-ghost" href="{{ download_txt_url }}">Download .txt</a>
+            {% if download_srt_url %}
+            <a class="btn btn-sm btn-ghost" href="{{ download_srt_url }}">Download .srt</a>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header"><h5>Transcript</h5></div>
+    <div class="card-body">
+        {% if segments %}
+        <div class="ph-no-capture" id="shareTranscript">
+            {% for seg in segments %}
+            <div class="share-seg">
+                <div class="share-seg-ts">{% if seg.start %}{{ seg.start }}{% endif %}</div>
+                <div class="share-seg-text">{{ seg.text }}</div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="transcript-pane ph-no-capture share-transcript" id="shareTranscript">{{ task.transcript_text }}</div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="share-cta">
+    <p>Transcribe any podcast episode free — Podskrift</p>
+    <a class="btn btn-primary" id="shareCta"
+       href="{{ signup_url }}">Create a free account</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    var text = {{ (task.transcript_text or '')|tojson }};
+    var copyBtn = document.getElementById('shareCopyBtn');
+    if (copyBtn) {
+        copyBtn.addEventListener('click', function () {
+            navigator.clipboard.writeText(text).then(function () {
+                copyBtn.textContent = 'Copied!';
+                setTimeout(function () { copyBtn.textContent = 'Copy'; }, 2000);
+            }).catch(function () {});
+        });
+    }
+    var cta = document.getElementById('shareCta');
+    if (cta) {
+        cta.addEventListener('click', function () {
+            try {
+                if (window.posthog) {
+                    posthog.capture('shared_cta_clicked', {
+                        utm_source: 'share',
+                        $process_person_profile: false
+                    });
+                }
+            } catch (e) { /* ignore */ }
+        });
+    }
+})();
+</script>
+{% endblock %}

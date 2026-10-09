@@ -6,7 +6,8 @@
     <title>{% block title %}Podskrift{% endblock %}</title>
     {% if structured_data %}<script type="application/ld+json">{{ structured_data | safe }}</script>{% endif %}
     <meta name="description" content="{% block meta_description %}Transcribe any podcast episode to text with OpenAI Whisper, in {{ language_count }} languages. Search by podcast or episode name, pick the episode, get .txt and .srt.{% endblock %}">
-    <link rel="canonical" href="{% if public_base_url %}{{ public_base_url }}{{ request.path }}{% else %}{{ request.base_url }}{% endif %}">
+    <link rel="canonical" href="{% block canonical_url %}{% if public_base_url %}{{ public_base_url }}{{ request.path }}{% else %}{{ request.base_url }}{% endif %}{% endblock %}">
+    {% block robots_meta %}{% endblock %}
 
     {# Open Graph and Twitter cards: what a link preview shows, and what an
        assistant reads when it is handed a bare URL with no other context. #}
@@ -14,12 +15,13 @@
     <meta property="og:site_name" content="Podskrift">
     <meta property="og:title" content="{% block og_title %}Podskrift — podcast to text{% endblock %}">
     <meta property="og:description" content="{% block og_description %}Transcribe podcast episodes to text with OpenAI Whisper, in {{ language_count }} languages.{% endblock %}">
-    <meta property="og:url" content="{% if public_base_url %}{{ public_base_url }}{{ request.path }}{% else %}{{ request.base_url }}{% endif %}">
+    <meta property="og:url" content="{% block og_url %}{% if public_base_url %}{{ public_base_url }}{{ request.path }}{% else %}{{ request.base_url }}{% endif %}{% endblock %}">
+    {% block og_image_meta %}{% endblock %}
     <meta property="og:locale" content="en_US">
     <meta property="og:locale:alternate" content="nb_NO">
-    <meta name="twitter:card" content="summary">
-    <meta name="twitter:title" content="Podskrift — podcast to text">
-    <meta name="twitter:description" content="Transcribe podcast episodes to text with OpenAI Whisper, in {{ language_count }} languages.">
+    <meta name="twitter:card" content="{% block twitter_card %}summary{% endblock %}">
+    <meta name="twitter:title" content="{% block twitter_title %}Podskrift — podcast to text{% endblock %}">
+    <meta name="twitter:description" content="{% block twitter_description %}Transcribe podcast episodes to text with OpenAI Whisper, in {{ language_count }} languages.{% endblock %}">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

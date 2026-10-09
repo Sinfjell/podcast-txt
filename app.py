@@ -40,7 +40,8 @@ if not os.path.exists(certifi.where()):
         os.environ.setdefault('REQUESTS_CA_BUNDLE', _sys_ca)
         os.environ.setdefault('SSL_CERT_FILE', _sys_ca)
 from flask import (Flask, render_template, request, jsonify, send_file, flash,
-                   redirect, url_for, Response, g, session, has_request_context)
+                   redirect, url_for, Response, g, session, has_request_context,
+                   make_response)
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from urllib.parse import parse_qs, urljoin, urlparse, unquote
 import uuid
@@ -54,8 +55,10 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError as SaIntegrityError
 
 from models import (db, User, SavedFeed, TranscriptionTask, CreditPurchase,
+                    TranscriptShare,
                     TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS,
-                    CREDIT_PURCHASE_COLUMN_MIGRATIONS)
+                    CREDIT_PURCHASE_COLUMN_MIGRATIONS,
+                    TRANSCRIPT_SHARE_COLUMN_MIGRATIONS)
 from observability import init_sentry, report_stale_task, report_task_failure
 import analytics as product_analytics
 
@@ -153,8 +156,13 @@ def public_url(endpoint, **values):
 
 
 def _canonical_host_exempt(path):
-    """True for Stripe webhooks, /api/*, and common health probes."""
+    """True for Stripe webhooks, /api/*, share links, and common health probes."""
     if path.startswith('/stripe/webhook') or path.startswith('/api/'):
+        return True
+    # Public share links must resolve on whichever host they were opened
+    # (www / bare / staging), not bounce through a host redirect that can
+    # drop cookies or confuse chat-app link previews.
+    if path.startswith('/t/'):
         return True
     if path in ('/health', '/healthz', '/ready', '/ping') or path.startswith('/health'):
         return True
@@ -1292,6 +1300,17 @@ DISPOSABLE_EMAIL_DOMAINS = {
 
 _register_attempts = collections.defaultdict(list)
 _register_lock = threading.Lock()
+
+#: Share-link creates per user per window. Tokens are unguessable; this only
+#: bounds accidental/abusive minting, not enumeration.
+SHARE_CREATE_MAX_PER_USER = 20
+SHARE_CREATE_WINDOW_SECONDS = 3600
+#: 22 bytes → 176 bits of entropy (url-safe); requirement is >= 128-bit.
+SHARE_TOKEN_BYTES = 22
+UTM_SESSION_KEY = '_utm_source'
+
+_share_create_attempts = collections.defaultdict(list)
+_share_create_lock = threading.Lock()
 
 
 def _client_ip():
@@ -2477,6 +2496,24 @@ def _analytics_anon_id():
     return f'anon:{aid}'
 
 
+def _stash_utm_from_request():
+    """Remember utm_source from the query string for the eventual signup event."""
+    src = (request.args.get('utm_source') or '').strip()
+    if not src:
+        return
+    session[UTM_SESSION_KEY] = src[:64]
+
+
+def _utm_source_for_signup():
+    """utm_source from session (stashed) or the signup form/query, if any."""
+    src = session.pop(UTM_SESSION_KEY, None)
+    if not src:
+        src = (request.values.get('utm_source') or '').strip() or None
+    if not src:
+        return None
+    return str(src)[:64]
+
+
 def _capture_register_failed(reason):
     """register_failed — coarse reason only; never email/password."""
     product_analytics.capture(
@@ -2540,6 +2577,8 @@ def register():
     if current_user.is_authenticated:
         return _redirect_after_auth()
 
+    _stash_utm_from_request()
+
     if request.method != 'POST':
         return _register_template()
 
@@ -2594,7 +2633,12 @@ def register():
         created = True
 
         _persist_login(user)
-        product_analytics.capture('user_signed_up', user.id)
+        signup_props = {}
+        utm = _utm_source_for_signup()
+        if utm:
+            signup_props['utm_source'] = utm
+        product_analytics.capture(
+            'user_signed_up', user.id, signup_props or None)
         if session.get(PENDING_TRANSCRIPTION_KEY):
             flash('Account created — starting your transcript.', 'success')
         else:
@@ -5014,6 +5058,293 @@ def _task_owned_or_404(task_id):
     return task, None
 
 
+def mint_share_token():
+    """Unguessable url-safe token (>=128-bit entropy)."""
+    return secrets.token_urlsafe(SHARE_TOKEN_BYTES)
+
+
+def share_create_reserve(user_id):
+    """Atomically take one share-create slot for this user, or None if capped."""
+    now = time.time()
+    key = int(user_id)
+    with _share_create_lock:
+        seen = [t for t in _share_create_attempts.get(key, ())
+                if now - t[0] < SHARE_CREATE_WINDOW_SECONDS]
+        if len(seen) >= SHARE_CREATE_MAX_PER_USER:
+            _share_create_attempts[key] = seen
+            return None
+        token = (now, uuid.uuid4().hex)
+        seen.append(token)
+        _share_create_attempts[key] = seen
+        if len(_share_create_attempts) > 10000:
+            stale = [k for k, v in list(_share_create_attempts.items())
+                     if not v or now - v[-1][0] > SHARE_CREATE_WINDOW_SECONDS]
+            for k in stale:
+                _share_create_attempts.pop(k, None)
+        return token
+
+
+def share_create_release(user_id, token):
+    if token is None:
+        return
+    key = int(user_id)
+    with _share_create_lock:
+        held = _share_create_attempts.get(key)
+        if not held:
+            return
+        try:
+            held.remove(token)
+        except ValueError:
+            return
+        if not held:
+            _share_create_attempts.pop(key, None)
+
+
+def _active_share_for_task(task_id):
+    """Non-revoked TranscriptShare for task_id, or None."""
+    return TranscriptShare.query.filter_by(
+        task_id=task_id, revoked_at=None,
+    ).first()
+
+
+def _share_public_url(token):
+    """Absolute public URL for a share token (prefers PUBLIC_BASE_URL)."""
+    return public_url('shared_transcript', token=token)
+
+
+def _share_payload(share):
+    if not share or share.revoked_at is not None:
+        return {'shared': False, 'url': None, 'token': None}
+    return {
+        'shared': True,
+        'url': _share_public_url(share.token),
+        'token': share.token,
+    }
+
+
+def parse_partial_preview_meta(error_message):
+    """Parse partial-preview metadata if present (PR #59 shape), else None.
+
+    Stored as ``partial_preview:{json}`` on ``error_message`` while status is
+    not an error. Tolerates a bare prefix with no JSON.
+    """
+    raw = (error_message or '').strip()
+    if not raw.startswith('partial_preview:'):
+        return None
+    body = raw[len('partial_preview:'):].strip()
+    if not body:
+        return {'partial': True}
+    try:
+        data = json.loads(body)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {'partial': True}
+    if not isinstance(data, dict):
+        return {'partial': True}
+    data.setdefault('partial', True)
+    return data
+
+
+def _readable_share_segments(task):
+    """Timestamped lines for the public share page, or [] when unavailable."""
+    if not task.segments_json:
+        return []
+    try:
+        segments = json.loads(task.segments_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(segments, list):
+        return []
+    lines = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        text = (seg.get('text') or '').strip()
+        if not text:
+            continue
+        start = seg.get('start')
+        try:
+            ts = format_timestamp(float(start)) if start is not None else ''
+        except (TypeError, ValueError):
+            ts = ''
+        # format_timestamp is SRT-style (HH:MM:SS,mmm); show a short clock.
+        if ts and ',' in ts:
+            ts = ts.split(',', 1)[0]
+        lines.append({'start': ts, 'text': text})
+    return lines
+
+
+@app.route('/transcription/<task_id>/share', methods=['GET', 'POST'])
+@login_required
+def transcription_share(task_id):
+    """Opt-in public share link for a completed transcript (owner only)."""
+    task, err = _task_owned_or_404(task_id)
+    if err:
+        return err
+
+    if request.method == 'GET':
+        return jsonify(_share_payload(_active_share_for_task(task.id)))
+
+    if task.status != 'completed' or not (task.transcript_text or '').strip():
+        return jsonify({'error': 'Only completed transcripts can be shared'}), 400
+
+    existing = _active_share_for_task(task.id)
+    if existing:
+        return jsonify(_share_payload(existing))
+
+    slot = share_create_reserve(current_user.id)
+    if slot is None:
+        return jsonify({
+            'error': 'Too many share links created. Try again later.',
+        }), 429
+
+    created = False
+    try:
+        # Reuse a revoked row for this task (unique task_id) with a new token.
+        share = TranscriptShare.query.filter_by(task_id=task.id).first()
+        token = mint_share_token()
+        now = datetime.now(timezone.utc)
+        if share:
+            share.token = token
+            share.user_id = current_user.id
+            share.created_at = now
+            share.revoked_at = None
+        else:
+            share = TranscriptShare(
+                token=token,
+                task_id=task.id,
+                user_id=current_user.id,
+                created_at=now,
+            )
+            db.session.add(share)
+        db.session.commit()
+        created = True
+        product_analytics.capture(
+            'share_link_created',
+            current_user.id,
+            {'partial': bool(parse_partial_preview_meta(task.error_message))},
+        )
+        return jsonify(_share_payload(share))
+    finally:
+        if not created:
+            share_create_release(current_user.id, slot)
+
+
+@app.route('/transcription/<task_id>/share/revoke', methods=['POST'])
+@login_required
+def transcription_share_revoke(task_id):
+    """Revoke the public share link for a transcript (owner only)."""
+    task, err = _task_owned_or_404(task_id)
+    if err:
+        return err
+
+    share = _active_share_for_task(task.id)
+    if not share:
+        return jsonify({'shared': False, 'url': None, 'token': None})
+
+    share.revoked_at = datetime.now(timezone.utc)
+    db.session.commit()
+    product_analytics.capture('share_link_revoked', current_user.id)
+    return jsonify({'shared': False, 'url': None, 'token': None})
+
+
+def _public_share_or_404(token):
+    """Active share + completed task for token, or None."""
+    token = (token or '').strip()
+    if not token or len(token) > 64:
+        return None, None
+    share = TranscriptShare.query.filter_by(token=token, revoked_at=None).first()
+    if not share:
+        return None, None
+    task = db.session.get(TranscriptionTask, share.task_id)
+    if not task or task.status != 'completed' or not (task.transcript_text or '').strip():
+        return None, None
+    return share, task
+
+
+@app.route('/t/<token>')
+def shared_transcript(token):
+    """Public, unguessable share page for a completed transcript."""
+    share, task = _public_share_or_404(token)
+    if not share:
+        return "Not found", 404
+
+    partial_meta = parse_partial_preview_meta(task.error_message)
+    segments = _readable_share_segments(task)
+    signup_url = url_for('register', utm_source='share')
+    product_analytics.capture(
+        'shared_transcript_viewed',
+        _analytics_anon_id(),
+        {
+            'partial': bool(partial_meta),
+            'has_timestamps': bool(segments),
+            '$process_person_profile': False,
+        },
+    )
+    episode = task.episode_title or 'Episode'
+    podcast = task.podcast_name or ''
+    og_title = f'{episode} — {podcast}' if podcast else f'{episode} — Podskrift'
+    og_description = (
+        f'Transcript of {episode}'
+        + (f' from {podcast}' if podcast else '')
+        + '. Shared via Podskrift.'
+    )
+    resp = make_response(render_template(
+        'shared_transcript.html',
+        task=task,
+        segments=segments,
+        partial_meta=partial_meta,
+        signup_url=signup_url,
+        download_txt_url=url_for('shared_transcript_download',
+                                 token=token, file_type='txt'),
+        download_srt_url=(
+            url_for('shared_transcript_download', token=token, file_type='srt')
+            if task.segments_json else None
+        ),
+        og_title=og_title,
+        og_description=og_description,
+    ))
+    resp.headers['X-Robots-Tag'] = 'noindex'
+    return resp
+
+
+@app.route('/t/<token>/download/<file_type>')
+def shared_transcript_download(token, file_type):
+    """Download .txt / .srt for a public share (no login)."""
+    from io import BytesIO
+
+    share, task = _public_share_or_404(token)
+    if not share:
+        return "File not found", 404
+    if file_type not in ('txt', 'srt'):
+        return "Invalid file type", 400
+    if file_type == 'srt' and not task.segments_json:
+        return "File not found", 404
+
+    safe_title = safe_download_basename(task.episode_title)
+    if file_type == 'txt':
+        content = (task.transcript_text or '').encode('utf-8')
+        resp = send_file(
+            BytesIO(content),
+            as_attachment=True,
+            download_name=f'{safe_title}.txt',
+            mimetype='text/plain',
+        )
+    else:
+        srt = _segments_to_srt(
+            task.segments_json, task.transcript_text or '',
+        )
+        if not srt:
+            return "File not found", 404
+        resp = send_file(
+            BytesIO(srt.encode('utf-8')),
+            as_attachment=True,
+            download_name=f'{safe_title}.srt',
+            mimetype='text/srt',
+        )
+    resp.headers['X-Robots-Tag'] = 'noindex'
+    return resp
+
+
 def _feed_already_saved(user_id, rss_url):
     if not rss_url:
         return False
@@ -6303,7 +6634,7 @@ def robots_txt():
     """
     disallow = ['Disallow: ' + path for path in (
         '/settings', '/history', '/feeds', '/transcription/', '/download/',
-        '/api/', '/status/', '/active-jobs', '/cancel/',
+        '/api/', '/status/', '/active-jobs', '/cancel/', '/t/',
     )]
     lines = [
         '# Podskrift -- podcast transcription',
@@ -7484,6 +7815,7 @@ def apply_column_migrations():
         ('transcription_tasks', TASK_COLUMN_MIGRATIONS),
         ('users', USER_COLUMN_MIGRATIONS),
         ('credit_purchases', CREDIT_PURCHASE_COLUMN_MIGRATIONS),
+        ('transcript_shares', TRANSCRIPT_SHARE_COLUMN_MIGRATIONS),
     )
     for table, migrations in tables:
         existing = _live_columns(table)
@@ -7592,9 +7924,92 @@ def ensure_credit_purchases_table():
             'Could not create ix_credit_purchases_stripe_payment_intent_id')
 
 
+def ensure_transcript_shares_table():
+    """Create transcript_shares if missing. Safe when two gunicorn workers race.
+
+    Indexes that reference a column are created only AFTER that column is
+    known to exist (CREATE TABLE includes it, or an ALTER has added it). A
+    past outage came from indexing a column before the ALTER landed.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        db.session.execute(text("""
+            CREATE TABLE IF NOT EXISTS transcript_shares (
+                id INTEGER NOT NULL PRIMARY KEY,
+                token VARCHAR(64) NOT NULL UNIQUE,
+                task_id VARCHAR(36) NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                created_at DATETIME,
+                revoked_at DATETIME,
+                FOREIGN KEY(task_id) REFERENCES transcription_tasks (id),
+                FOREIGN KEY(user_id) REFERENCES users (id)
+            )
+        """))
+        db.session.commit()
+    except OperationalError as exc:
+        db.session.rollback()
+        msg = str(exc).lower()
+        if 'already exists' not in msg:
+            raise
+        app.logger.info(
+            'transcript_shares was created by another worker; continuing')
+
+    # Additive column upgrades first — never index a column that might be
+    # missing on a table created by an earlier ship of this feature.
+    existing = _live_columns('transcript_shares')
+    if not existing:
+        return
+    for column, ddl_type in TRANSCRIPT_SHARE_COLUMN_MIGRATIONS.items():
+        if column in existing:
+            continue
+        try:
+            db.session.execute(text(
+                f'ALTER TABLE transcript_shares ADD COLUMN {column} {ddl_type}'
+            ))
+            db.session.commit()
+        except OperationalError as exc:
+            db.session.rollback()
+            if 'duplicate column name' not in str(exc).lower():
+                raise
+            app.logger.info(
+                'transcript_shares.%s was added by another worker; continuing',
+                column)
+
+    # Re-read after ALTERs so indexes only target columns that exist now.
+    existing = _live_columns('transcript_shares')
+    index_specs = []
+    if 'token' in existing:
+        index_specs.append(
+            ('ix_transcript_shares_token',
+             'CREATE UNIQUE INDEX IF NOT EXISTS ix_transcript_shares_token '
+             'ON transcript_shares (token)')
+        )
+    if 'task_id' in existing:
+        index_specs.append(
+            ('ix_transcript_shares_task_id',
+             'CREATE UNIQUE INDEX IF NOT EXISTS ix_transcript_shares_task_id '
+             'ON transcript_shares (task_id)')
+        )
+    if 'user_id' in existing:
+        index_specs.append(
+            ('ix_transcript_shares_user_id',
+             'CREATE INDEX IF NOT EXISTS ix_transcript_shares_user_id '
+             'ON transcript_shares (user_id)')
+        )
+    for name, ddl in index_specs:
+        try:
+            db.session.execute(text(ddl))
+            db.session.commit()
+        except OperationalError:
+            db.session.rollback()
+            app.logger.exception('Could not create %s', name)
+
+
 with app.app_context():
     db.create_all()
     ensure_credit_purchases_table()
+    ensure_transcript_shares_table()
 
     apply_column_migrations()
     if STRIPE_MANAGED_PAYMENTS and STRIPE_AUTOMATIC_TAX:
