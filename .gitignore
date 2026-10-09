@@ -37,8 +37,9 @@ transcript_*.txt
 transcript_*.srt
 *.tmp
 
-# Database
-data/
+# Database — ignore contents, keep curated show landing data committed
+data/*
+!data/show_pages.json
 
 # IDE
 .vscode/

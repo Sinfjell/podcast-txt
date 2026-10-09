@@ -1,5 +1,18 @@
 # Ops
 
+## Show landing pages (seed)
+
+Curated `/podcasts/<slug>` pages are served from committed
+[`data/show_pages.json`](../data/show_pages.json). Refresh manually (not on
+deploy) when you want a newer Apple Charts snapshot:
+
+```bash
+python3 ops/seed-show-pages.py
+```
+
+Fetches top podcasts for us/gb/de/nl/no/es/br/it, looks up RSS via iTunes
+Lookup, writes ~150 shows. Live pages never call Apple at request time.
+
 ## Production deploy (GitHub Actions)
 
 On every push to `main` (merge or direct), [.github/workflows/deploy.yml](../.github/workflows/deploy.yml)
