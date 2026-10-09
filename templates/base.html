@@ -1340,7 +1340,9 @@
 
         // Apply Accept vs cookieless (pending / Decline). With on_reject,
         // capture stays paused until opt_in or opt_out — so pending visitors
-        // get cookieless counting via opt_out without writing ph_* storage.
+        // get cookieless counting via opt_out. opt_out may briefly write
+        // __ph_opt_in_out_*; we sweep ph_/__ph_ storage afterward (we remember
+        // the choice ourselves in podskrift_cookie_consent).
         function applyConsentToPosthog() {
             if (!window.posthog) return;
             try {
@@ -1358,6 +1360,8 @@
                     posthog.set_config({disable_session_recording: true});
                     posthog.opt_out_capturing();
                     clearPosthogStorage();
+                    setTimeout(clearPosthogStorage, 0);
+                    setTimeout(clearPosthogStorage, 250);
                 }
             } catch (e) { /* ignore */ }
         }
