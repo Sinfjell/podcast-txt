@@ -9704,7 +9704,7 @@ def test_login_heading_for_saved_transcript():
         '/login?next=/transcription/task-xyz').data.decode()
     assert 'Log in to open your saved transcript' in body
     assert 'Forgot password?' in body
-    assert 'hello@podskrift.com' in body
+    assert '/forgot-password' in body
 
 
 def test_login_default_heading_without_transcript_next():
