@@ -70,6 +70,7 @@ import mail as mailer
 import episode_alerts
 import summary as summary_mod
 import summary_email as summary_email_mod
+from admin_dashboard import admin_bp, ensure_admin_indexes
 
 try:
     import stripe
@@ -100,6 +101,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = (
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db.init_app(app)
+app.register_blueprint(admin_bp)
 
 
 @sa_event.listens_for(Engine, 'connect')
@@ -7978,7 +7980,7 @@ def robots_txt():
     """
     disallow = ['Disallow: ' + path for path in (
         '/settings', '/history', '/feeds', '/transcription/', '/download/',
-        '/api/', '/status/', '/active-jobs', '/cancel/', '/t/',
+        '/api/', '/status/', '/active-jobs', '/cancel/', '/t/', '/admin',
     )]
     lines = [
         '# Podskrift -- podcast transcription',
@@ -9726,6 +9728,9 @@ with app.app_context():
     ensure_summary_email_tables()
 
     apply_column_migrations()
+    # Admin dashboard indexes: only after columns exist (same rule as
+    # credit_purchases payment_intent index). Additive IF NOT EXISTS.
+    ensure_admin_indexes(db)
     if STRIPE_MANAGED_PAYMENTS and STRIPE_AUTOMATIC_TAX:
         app.logger.warning(
             'STRIPE_MANAGED_PAYMENTS and STRIPE_AUTOMATIC_TAX are both on; '
