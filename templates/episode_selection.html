@@ -239,7 +239,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     var ALL_EPISODES = {{ all_episodes|tojson }};
     var renderedCount = {{ episodes|length }};
-    var PRESELECTED_INDEX = {{ preselected_index|tojson if preselected_index is not none else 'null' }};
+    var PRESELECTED_INDEX = {{ preselected_index|default(none)|tojson }};
     var IS_AUTHENTICATED = {{ 'true' if current_user.is_authenticated else 'false' }};
     var PENDING_URL = '{{ url_for("pending_transcription") }}';
     var TRIAL_REMAINING_MIN = {{ trial_badge_remaining_min|tojson }};
