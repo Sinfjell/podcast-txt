@@ -77,6 +77,8 @@ svg{display:block}
 .btn-primary:hover{background:var(--accent-hover);color:var(--on-accent)}
 .btn-secondary{background:var(--paper);color:var(--ink);border-color:var(--line-strong)}
 .btn-secondary:hover{background:var(--surface);color:var(--ink)}
+.btn-nav-cta{background:var(--ink);color:var(--paper)}
+.btn-nav-cta:hover{background:var(--ink);color:var(--paper)}
 .btn-tertiary{background:transparent;color:var(--accent);font-weight:600;padding:0 var(--space-4)}
 .btn-tertiary:hover{background:var(--surface);color:var(--accent-hover)}
 .btn-danger{background:var(--paper);color:var(--danger);border-color:var(--danger)}
@@ -219,7 +221,7 @@ select.field{width:100%}
       <a class="nav-link" href="#components">Components</a>
       <a class="nav-link" href="#read">Questions</a>
       <a class="nav-link" href="#login">Log in</a>
-      <a class="btn btn-secondary btn-sm" href="#signup">Sign up</a>
+      <a class="btn btn-nav-cta btn-sm" href="#signup">Sign up</a>
     </nav>
   </div>
 </header>
@@ -335,8 +337,9 @@ select.field{width:100%}
             <button type="button" class="btn btn-tertiary">Manage</button>
             <button type="button" class="btn btn-secondary" disabled>Transcribing</button>
             <button type="button" class="btn btn-danger">Cancel</button>
+            <a class="btn btn-nav-cta btn-sm" href="#signup">Sign up</a>
           </div>
-          <p class="t-small t-muted">One green button per screen. The rest are outline or plain text.</p>
+          <p class="t-small t-muted">One green button per screen. The rest are outline or plain text. The ink-filled "Sign up" is the desktop nav call to action, the one allowed non-accent filled button; in the mobile menu it is the accent button.</p>
         </div>
 
         <div class="group">

@@ -11,8 +11,8 @@
     .buy-modal-scrim.is-open { display: flex; }
     .buy-modal {
         width: 100%; max-width: 420px;
-        background: var(--paper); border: 1px solid var(--line-strong);
-        border-radius: var(--radius); padding: 24px 24px 20px;
+        background: var(--paper); border: 1px solid var(--line);
+        border-radius: var(--radius); padding: 24px;
     }
     .buy-modal-head {
         display: flex; align-items: flex-start; justify-content: space-between;
@@ -25,6 +25,7 @@
     .buy-modal-close {
         background: none; border: 0; color: var(--muted); cursor: pointer;
         font-size: 22px; line-height: 1; min-width: 44px; min-height: 44px; margin: -8px -8px 0 0;
+        border-radius: var(--radius);
     }
     .buy-modal-close:hover { color: var(--ink); }
     .buy-modal-sub {
@@ -36,7 +37,7 @@
         padding: 14px 0; margin-bottom: 8px;
         border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
     }
-    .buy-modal-pack strong { font-size: 18px; letter-spacing: -0.02em; }
+    .buy-modal-pack strong { font-size: 17px; letter-spacing: -0.02em; }
     .buy-modal-foot {
         text-align: center; color: var(--muted); font-size: 12px;
         margin-top: 12px; line-height: 1.45;

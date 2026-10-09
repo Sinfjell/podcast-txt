@@ -163,6 +163,8 @@
         }
         h1, h2, h3, h4 { font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; }
         h3, h4 { font-weight: 700; letter-spacing: -0.015em; }
+        /* Page title scale (DESIGN.md `title`). The home hero sets its own display size. */
+        h1 { font-size: clamp(30px, 4vw, 44px); line-height: 1.05; }
 
         a { color: var(--accent); text-decoration: none; transition: color var(--transition); }
         a:hover { color: var(--accent-hover); }
@@ -177,7 +179,7 @@
             padding: 0 24px;
         }
         .nav-inner {
-            max-width: 800px;
+            max-width: 1120px;
             margin: 0 auto;
             display: flex;
             align-items: center;
@@ -221,13 +223,15 @@
         }
         .nav-links a.nav-balance:hover { background: var(--accent-tint); color: var(--on-accent-tint); }
         .nav-links a.nav-buy { font-weight: 700; }
+        /* The one non-accent filled button (DESIGN.md: button-nav-cta). */
         .nav-links a.nav-cta {
             background: var(--ink);
             color: var(--paper);
+            border: 1px solid var(--ink);
             font-weight: 700;
             padding: 0 18px;
         }
-        .nav-links a.nav-cta:hover { background: var(--ink); color: var(--paper); }
+        .nav-links a.nav-cta:hover { background: var(--ink); color: var(--paper); opacity: 0.88; }
         /* Mobile-only affordances. The desktop bar is deliberately unchanged --
            icons and a home link earn their space in a full-width panel, not in
            a row where the brand already links home. */
@@ -310,7 +314,7 @@
         .card-body { padding: 24px; }
 
         /* Buttons. One accent-filled style (primary/accent); secondary is paper
-           with a strong border (bare .btn, .btn-secondary, .btn-ghost); text-only
+           with a strong border (bare .btn, .btn-secondary); text-only
            is .btn-text. */
         .btn {
             display: inline-flex;
@@ -342,9 +346,7 @@
             color: var(--on-accent);
             border-color: var(--accent-hover);
         }
-        /* Existing templates use .btn-ghost for the bordered secondary button,
-           so it keeps that look; .btn-text is the text-only variant. */
-        .btn-secondary, .btn-ghost { background: var(--paper); color: var(--ink); border-color: var(--line-strong); }
+        .btn-secondary { background: var(--paper); color: var(--ink); border-color: var(--line-strong); }
         .btn-text { background: none; color: var(--accent); border-color: transparent; padding: 0 14px; }
         .btn-text:hover { background: none; color: var(--accent-hover); }
         .btn-sm { min-height: 44px; padding: 0 16px; font-size: 15px; }
@@ -642,12 +644,12 @@
         }
         .cookie-consent[data-open="1"] { display: block; }
         .cookie-consent-inner {
-            max-width: 960px;
+            max-width: 1120px;
             margin: 0 auto;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            gap: 14px;
+            gap: 16px;
             flex-wrap: wrap;
         }
         .cookie-consent-copy {
@@ -673,7 +675,7 @@
             background: var(--paper);
             color: var(--ink);
             border: 1px solid var(--line-strong);
-            font-weight: 500;
+            font-weight: 700;
         }
         .cookie-consent-actions .btn-consent:hover,
         .cookie-consent-actions .btn-consent:focus-visible {
@@ -820,6 +822,7 @@
                 color: var(--on-accent);
                 border: 1px solid var(--accent);
                 border-radius: var(--radius);
+                opacity: 1;
             }
             .nav-links a.nav-cta:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
             .nav-links .nav-sep {

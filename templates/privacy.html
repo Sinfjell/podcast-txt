@@ -4,14 +4,18 @@
 
 {% block content %}
 <style>
-    .privacy { max-width: 600px; margin: 24px auto; }
-    .privacy h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 16px; }
-    .privacy h2 { font-size: 16px; font-weight: 600; margin: 24px 0 8px; }
-    .privacy p, .privacy li { color: var(--muted); font-size: 14px; line-height: 1.7; }
-    .privacy p { margin-bottom: 12px; }
-    .privacy ul { padding-left: 20px; margin-bottom: 12px; }
+    .prose-page { max-width: 68ch; margin: 24px auto 48px; }
+    .prose-page h1 {
+        font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em;
+        line-height: 1.05; margin-bottom: 24px;
+    }
+    .prose-page h2 { font-size: 24px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.2; margin: 40px 0 12px; }
+    .prose-page p, .prose-page li { font-size: 17px; line-height: 1.55; color: var(--ink); }
+    .prose-page p { margin-bottom: 16px; }
+    .prose-page ul { padding-left: 24px; margin-bottom: 16px; }
+    .prose-page li { margin-bottom: 8px; }
 </style>
-<div class="privacy">
+<div class="prose-page">
     <h1>Privacy</h1>
     <p>
         Podskrift is made by Nettsmed (Fjellestad AS), Kristiansand, Norway, which

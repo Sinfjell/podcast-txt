@@ -2,8 +2,8 @@
 {% block title %}History — Podskrift{% endblock %}
 
 {% block content %}
-<div class="flex-between mb-2">
-    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em;">Transcription History</h1>
+<div class="flex-between mb-2" style="flex-wrap: wrap; gap: 8px 16px;">
+    <h1 style="font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em; line-height: 1.05;">Transcription History</h1>
     {% if total_cost > 0 %}
     <span class="text-sm text-muted">Total estimated cost: ~${{ "%.2f"|format(total_cost) }}</span>
     {% endif %}
@@ -13,7 +13,7 @@
     <div class="input-group">
         <input type="search" class="form-input" name="q" value="{{ query }}" maxlength="200"
                placeholder="Search inside your transcripts..." aria-label="Search inside your transcripts">
-        <button type="submit" class="btn btn-ghost">Search</button>
+        <button type="submit" class="btn btn-secondary">Search</button>
     </div>
 </form>
 
@@ -25,26 +25,26 @@
 </p>
 <div class="card">
     {% for m in matches %}
-    <div class="list-item" style="gap: 16px; align-items: flex-start;">
-        <div class="list-item-text" style="min-width: 0; flex: 1;">
-            <a class="list-item-title"
+    <div class="list-item" style="gap: 12px 16px; align-items: flex-start; flex-wrap: wrap;">
+        <div class="list-item-text" style="min-width: 0; flex: 1 1 280px; overflow-wrap: anywhere;">
+            <a class="list-item-title" style="color: var(--ink);"
                href="{{ url_for('transcription_page', task_id=m.id) }}">{{ m.episode_title }}</a>
-            <div class="list-item-sub">
+            <div class="list-item-sub" style="white-space: normal;">
                 {% if m.podcast_name %}{{ m.podcast_name }} · {% endif %}
                 {% if m.when %}{{ m.when.strftime('%Y-%m-%d') }}{% endif %}
                 {% if m.hits %} · {{ m.hits }} hit{{ '' if m.hits == 1 else 's' }}{% endif %}
             </div>
             {% if m.snippet %}
-            <p class="text-sm" style="margin: 6px 0 0; color: var(--muted); line-height: 1.6;">
+            <p class="text-sm" style="margin: 6px 0 0; color: var(--muted); line-height: 1.55;">
                 {# No whitespace around <mark>: the snippet parts carry their own. #}
                 {{ m.snippet[0] }}<mark style="background: var(--accent-tint); color: var(--on-accent-tint);
                     padding: 0 2px; border-radius: var(--radius-sm);">{{ m.snippet[1] }}</mark>{{ m.snippet[2] }}
             </p>
             {% endif %}
         </div>
-        <div class="flex-center" style="gap: 6px; flex-shrink: 0;">
-            <a href="{{ url_for('transcription_page', task_id=m.id) }}" class="btn btn-sm btn-ghost">Open</a>
-            <a href="{{ url_for('download_file', task_id=m.id, file_type='txt') }}" class="btn btn-sm btn-ghost">TXT</a>
+        <div class="flex-center" style="gap: 8px; flex-wrap: wrap;">
+            <a href="{{ url_for('transcription_page', task_id=m.id) }}" class="btn btn-sm btn-secondary">Open</a>
+            <a href="{{ url_for('download_file', task_id=m.id, file_type='txt') }}" class="btn btn-sm btn-secondary">TXT</a>
         </div>
     </div>
     {% else %}
@@ -57,20 +57,20 @@
 <div class="card">
     {% if transcriptions %}
         {% for t in transcriptions %}
-        <div class="list-item" style="gap: 16px;">
-            <div class="list-item-text" style="min-width: 0; flex: 1;">
-                <a class="list-item-title"
+        <div class="list-item" style="gap: 12px 16px; flex-wrap: wrap;">
+            <div class="list-item-text" style="min-width: 0; flex: 1 1 280px; overflow-wrap: anywhere;">
+                <a class="list-item-title" style="color: var(--ink);"
                    href="{{ url_for('transcription_page', task_id=t.id) }}">{{ t.episode_title }}</a>
-                <div class="list-item-sub">
+                <div class="list-item-sub" style="white-space: normal;">
                     {{ (t.completed_at or t.started_at).strftime('%Y-%m-%d %H:%M') }}
                     {% if t.audio_duration %} · {{ (t.audio_duration / 60)|round(1) }} min · ~${{ "%.3f"|format(t.audio_duration / 60 * cost_per_minute) }}{% endif %}
                     {% if t.language %} · {{ display_language(t.language) }}{% endif %}
                 </div>
             </div>
-            <div class="flex-center" style="gap: 6px; flex-shrink: 0;">
-                <button type="button" class="btn btn-sm btn-ghost" onclick="copyTranscript(this, '{{ t.id }}')">Copy</button>
-                <a href="{{ url_for('download_file', task_id=t.id, file_type='txt') }}" class="btn btn-sm btn-ghost">TXT</a>
-                <a href="{{ url_for('download_file', task_id=t.id, file_type='srt') }}" class="btn btn-sm btn-ghost">SRT</a>
+            <div class="flex-center" style="gap: 8px; flex-wrap: wrap;">
+                <button type="button" class="btn btn-sm btn-secondary" onclick="copyTranscript(this, '{{ t.id }}')">Copy</button>
+                <a href="{{ url_for('download_file', task_id=t.id, file_type='txt') }}" class="btn btn-sm btn-secondary">TXT</a>
+                <a href="{{ url_for('download_file', task_id=t.id, file_type='srt') }}" class="btn btn-sm btn-secondary">SRT</a>
             </div>
         </div>
         {% endfor %}

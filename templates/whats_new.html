@@ -6,63 +6,17 @@
 
 {% block content %}
 <style>
-    .whats-new { max-width: 560px; margin: 24px auto; }
+    .whats-new { max-width: 68ch; margin: 24px auto 48px; }
     .whats-new h1 {
-        font-size: clamp(26px, 4vw, 32px);
-        font-weight: 700;
-        letter-spacing: -0.03em;
-        margin-bottom: 8px;
+        font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em;
+        line-height: 1.05; margin-bottom: 16px;
     }
-    .whats-new .intro {
-        color: var(--muted);
-        font-size: 15px;
-        line-height: 1.6;
-        margin-bottom: 28px;
-    }
-    .whats-new-list {
-        list-style: none;
-        margin: 0;
-        padding: 0;
-        border-left: 1px solid var(--line);
-    }
-    .whats-new-item {
-        position: relative;
-        padding: 0 0 28px 20px;
-    }
-    .whats-new-item:last-child { padding-bottom: 0; }
-    .whats-new-item::before {
-        content: '';
-        position: absolute;
-        left: -5px;
-        top: 6px;
-        width: 9px;
-        height: 9px;
-        border-radius: 50%;
-        background: var(--accent);
-        border: 2px solid var(--paper);
-    }
-    .whats-new-date {
-        font-size: 12px;
-        font-weight: 500;
-        color: var(--muted);
-        letter-spacing: 0.02em;
-        margin-bottom: 4px;
-        font-variant-numeric: tabular-nums;
-    }
-    .whats-new-title {
-        font-size: 16px;
-        font-weight: 600;
-        letter-spacing: -0.02em;
-        color: var(--ink);
-        margin-bottom: 6px;
-        line-height: 1.35;
-    }
-    .whats-new-summary {
-        font-size: 14px;
-        color: var(--muted);
-        line-height: 1.65;
-        margin: 0;
-    }
+    .whats-new .intro { color: var(--muted); font-size: 17px; line-height: 1.55; margin-bottom: 40px; }
+    .whats-new-list { list-style: none; margin: 0; padding: 0; }
+    .whats-new-item { padding: 24px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+    .whats-new-date { font-size: 14px; color: var(--muted); margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+    .whats-new-title { font-size: 24px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.2; margin-bottom: 8px; }
+    .whats-new-summary { font-size: 17px; color: var(--ink); line-height: 1.55; margin: 0; }
 </style>
 
 <div class="whats-new">

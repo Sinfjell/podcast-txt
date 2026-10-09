@@ -2,7 +2,7 @@
 {% block title %}My Feeds — Podskrift{% endblock %}
 
 {% block content %}
-<h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">My Feeds</h1>
+<h1 style="font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em; line-height: 1.05; margin-bottom: 24px;">My Feeds</h1>
 
 <div class="card">
     <div class="card-header">
@@ -12,11 +12,11 @@
         <form method="POST" action="{{ url_for('add_feed') }}" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
             <input type="text" class="form-input" name="name" placeholder="Name" required style="flex: 1; min-width: 120px;">
             <input type="url" class="form-input" name="rss_url" placeholder="RSS feed URL" required style="flex: 2; min-width: 200px;">
-            <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); white-space: nowrap;">
+            <label style="display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted); min-height: 44px;">
                 <input type="checkbox" name="email_new_episodes" value="1" checked>
                 Email me when new episodes come out
             </label>
-            <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); white-space: nowrap;">
+            <label style="display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted); min-height: 44px;">
                 <input type="checkbox" name="email_summaries" value="1">
                 Email me a summary of each new episode
             </label>
@@ -32,13 +32,13 @@
     </div>
     {% if feeds %}
         {% for feed in feeds %}
-        <div class="list-item">
-            <div class="list-item-text">
+        <div class="list-item" style="flex-wrap: wrap; gap: 12px;">
+            <div class="list-item-text" style="flex: 1 1 260px; overflow-wrap: anywhere;">
                 <div class="list-item-title">{{ feed.name }}</div>
-                <div class="list-item-sub">{{ feed.rss_url }}</div>
+                <div class="list-item-sub" style="white-space: normal; overflow-wrap: anywhere;">{{ feed.rss_url }}</div>
                 <form method="POST" action="{{ url_for('toggle_feed_email_alerts', feed_id=feed.id) }}"
-                      style="margin-top: 8px;">
-                    <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted);">
+                      style="margin-top: 4px;">
+                    <label style="display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted); min-height: 44px;">
                         <input type="checkbox" name="email_new_episodes" value="1"
                                {% if feed.email_new_episodes %}checked{% endif %}
                                onchange="this.form.submit()">
@@ -46,8 +46,8 @@
                     </label>
                 </form>
                 <form method="POST" action="{{ url_for('toggle_feed_email_summaries', feed_id=feed.id) }}"
-                      style="margin-top: 6px;">
-                    <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted);">
+                      style="margin-top: 0;">
+                    <label style="display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted); min-height: 44px;">
                         <input type="checkbox" name="email_summaries" value="1"
                                {% if feed.email_summaries %}checked{% endif %}
                                onchange="this.form.submit()">
@@ -55,10 +55,10 @@
                     </label>
                 </form>
             </div>
-            <div class="list-item-actions">
-                <a href="{{ url_for('use_feed', feed_id=feed.id) }}" class="btn btn-sm btn-accent">Use</a>
+            <div class="list-item-actions" style="margin-left: 0;">
+                <a href="{{ url_for('use_feed', feed_id=feed.id) }}" class="btn btn-sm btn-secondary">Use</a>
                 <form method="POST" action="{{ url_for('delete_feed', feed_id=feed.id) }}" style="display: inline;">
-                    <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Remove this feed?')">
+                    <button type="submit" class="btn btn-sm btn-danger" aria-label="Remove feed" onclick="return confirm('Remove this feed?')">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                     </button>
                 </form>

@@ -99,6 +99,13 @@ components:
   button-primary-hover:
     backgroundColor: "{colors.accent-hover}"
     textColor: "{colors.on-accent}"
+  button-nav-cta:
+    backgroundColor: "{colors.ink}"
+    textColor: "{colors.paper}"
+    typography: "{typography.control}"
+    rounded: "{rounded.md}"
+    padding: 0 1rem
+    height: 2.75rem
   button-secondary:
     backgroundColor: "{colors.paper}"
     textColor: "{colors.ink}"
@@ -213,12 +220,12 @@ Voice: interface copy is English, plain and short, sentence case, no exclamation
 The design rejects, by name:
 
 - Cream, beige or off-white page backgrounds. Paper is `#FFFFFF`; the only step up is `surface`.
-- Italic titles, numbered section headings, monospace type, pill buttons, gradients, shadows and left-border accent cards.
+- Italic titles, numbered section headings, monospace type (outside `<code>`/`<pre>`), pill buttons, gradients, shadows and left-border accent cards.
 - Green as decoration. If a green thing does not start, mark or advance an action, it is wrong.
 
 It embraces:
 
-- One accent-filled button per screen; every other button is an outline or plain text.
+- One accent-filled button per screen; every other button is an outline or plain text. The one exception is the desktop nav call to action, which is ink-filled (see Components).
 - Separating areas with 1px `line` borders and one step of `surface`, never with elevation.
 - Newsreader reserved for the transcript, so the reading text is visibly different from the interface around it.
 - One motif: sound bars turning into lines of text.
@@ -274,7 +281,7 @@ Two families, both self-hosted woff2 in `static/fonts/` (never Google Fonts at r
 | `label` | Schibsted Grotesk | 12px / 1.2 | 700 | 0.08em | Small caps-free labels, sentence case |
 | `transcript` | Newsreader | 20px / 1.55 | 400 | none | Transcript text only |
 
-Rules: titles are set tight and upright, never italic. Timestamps use `font-variant-numeric: tabular-nums` and `accent`; there is no monospace anywhere. Font sizes are rem in tokens (px shown above for reference at a 16px root). Fluid hero sizing lives in CSS Variables, not in the token value.
+Rules: titles are set tight and upright, never italic. Timestamps use `font-variant-numeric: tabular-nums` and `accent`; monospace is allowed only inside `<code>` and `<pre>` (API samples, keys); everywhere else there is none. Font sizes are rem in tokens (px shown above for reference at a 16px root). Fluid hero sizing lives in CSS Variables, not in the token value.
 
 ## Layout
 
@@ -308,6 +315,7 @@ There is none. No `box-shadow`, no `backdrop-filter`, no gradients. Hierarchy co
 Reference markup for every component is in `design-reference.html`.
 
 - **Buttons.** Primary: `accent` fill, `on-accent` text, 48px tall (56px beside the hero search field), hover `accent-hover`. Secondary: `paper` fill, 1px `line-strong` border, `ink` text. Tertiary: plain `accent` text (hover: `surface` fill). Danger (cancel only): `paper` fill, 1px `danger` border and text. Disabled: `surface` fill, `muted` text, no border. All share `radius-md` and `control` type. Hover always pins `color` as well as background. **One accent-filled button per screen.**
+- **Nav call to action.** The desktop nav "Sign up" link is ink-filled (`ink` background, `paper` text, 44px tall, `radius-md`, hover pins both colours). It is the ONE allowed non-accent filled button and does not count against the one-accent-button rule. In the mobile menu panel the same link is the accent button (`accent` fill, `on-accent` text).
 - **Tabs and search.** Underline tabs: 44px tall, 3px bottom border, `accent` on the active tab and transparent on the others; active text is `ink`, inactive `muted`, state exposed with `aria-pressed`. The search field is 56px tall, `line-strong` border, with its primary button beside it.
 - **Form fields.** Label above (`small`, weight 700), hint above the field in `small`/`muted`, field 48px tall with a 1px `line-strong` border. Invalid state: 2px `danger` border, and above the field an error icon plus the message in `danger` text, linked with `aria-invalid` and `aria-describedby`. Required and optional are both marked.
 - **Episode row.** Title (`body`, 700) over a meta line (`small`, `muted`, `tabular-nums`), a 1px `line` top border, 16px vertical padding, `surface-hover` on hover. Right side: one action, either a primary "Transcribe" button or a "View transcript" link. Only one row on a screen may carry the accent button.
@@ -383,13 +391,13 @@ The tightest text pair is `accent` on `surface-hover` (4.57:1): a timestamp or l
 1. **No cream, beige or off-white page backgrounds.** The page is `paper` (`#FFFFFF`); the only step up is `surface` (`#F4F6F5`). Warm tints such as `#FAF7F2` make the product read as a lifestyle blog.
 2. **No italic titles.** `font-style: italic` is never set on h1, h2 or h3. Titles are upright Schibsted Grotesk 800 with `letter-spacing: -0.035em` (display) or `-0.03em` (title). Italics belong to nothing here.
 3. **No numbered section headings.** Do not write "01 Search", "Step 2" or "1." in front of an h2 or h3. Sections are named by what they are ("How it works", "Pricing").
-4. **No monospace anywhere.** No `font-family: monospace`, no Courier, no `code` styling for timestamps. Timestamps are Schibsted Grotesk 700 with `font-variant-numeric: tabular-nums` in `accent`.
+4. **No monospace outside `<code>` and `<pre>`.** A monospace stack is allowed only inside `<code>`/`<pre>` (API samples, keys, the only monospace in the product); never on timestamps, labels or UI text. Timestamps are Schibsted Grotesk 700 with `font-variant-numeric: tabular-nums` in `accent`.
 5. **No pill buttons or pill badges.** `border-radius: 9999px` and `border-radius: 999px` are banned. Every control, card and alert uses `radius-md` (8px); only the progress bar and thumbnails use `radius-sm` (4px).
 6. **No gradients.** No `linear-gradient`, `radial-gradient` or mesh backgrounds, including on the hero and on `accent` fills. Use the flat token.
 7. **No shadows.** No `box-shadow`, `drop-shadow` or `text-shadow`. Separate areas with a 1px `line` border or a step of `surface`.
 8. **No left-border accent cards.** `border-left: 4px solid` on an alert or card is banned. Alerts are a tint fill with an icon and text.
 9. **No emoji.** Not in copy, buttons, empty states or alerts. Icons are inline SVG with a 2px stroke, round caps, in `ink` or `accent`.
-10. **One accent-filled button per screen.** A second `background: var(--accent)` button on the same screen is wrong; demote it to a `line-strong` outline or plain text. Cancel is `danger` outline, never filled.
+10. **One accent-filled button per screen.** The desktop nav call to action is the sole non-accent filled button (ink fill, paper text); in the mobile menu panel it becomes the accent button. A second `background: var(--accent)` button on the same screen is wrong; demote it to a `line-strong` outline or plain text. Cancel is `danger` outline, never filled.
 11. **Newsreader only for transcript text.** `font-family: Newsreader` appears on `.transcript` text and nowhere else, not in headings, hero copy, buttons or alerts.
 12. **Never hardcode white text on accent.** Use `color: var(--on-accent)`; `#FFFFFF` on `accent` becomes 1.92:1 in dark where `accent` is `#34D399`.
 13. **No Google Fonts at runtime.** `fonts.googleapis.com` and `fonts.gstatic.com` are not requested; both families are served from `static/fonts/`.
@@ -563,7 +571,9 @@ Variable names equal the token names. The Flask app keeps them in `templates/bas
 | 2026-10-09 | Validator: git-tracking check fails until both files are committed | The check requires `DESIGN.md` and `design-reference.html` to be tracked; they are intentionally uncommitted when delivered. Clears on commit. |
 | 2026-10-09 | Contrast and token-override tables use Norwegian column names (foreground/background and light/dark in the validator's own words) | `validate.sh` finds the tables by these exact header words; prose and everything else is English. |
 | 2026-10-09 | Prototype drift: 15px nav/compact-control/alert text, 19-32px headings and 22-30px figures are not in the type scale | `tokens.json` defines nine styles and these sizes are not among them. The reference maps them to the nearest token (`control` 16px, `body` 17px, `heading` 24px). Templates should do the same until a decision adds a style. |
-| 2026-10-09 | Prototype drift: desktop nav "Sign up" is an ink-filled button in the prototypes | Not in the token usage notes (accent button, line-strong outline or plain text only). The reference renders it as a secondary outline button so the page keeps one accent-filled button. |
+| 2026-10-09 | Prototype drift: desktop nav "Sign up" is an ink-filled button in the prototypes | Superseded by the next row. |
+| 2026-10-09 | Decided: the desktop nav call to action is ink-filled (`--ink` background, `--paper` text), the ONE allowed non-accent filled button; in the mobile menu panel the same link is the accent button | Matches the prototypes and keeps the page's single accent-filled button for the page action. Replaces the earlier outline rendering. `design-reference.html` nav updated. |
+| 2026-10-09 | Decided: monospace is allowed only inside `<code>` and `<pre>` | API docs and key display need a fixed-width face; timestamps and all UI text stay Schibsted Grotesk. |
 | 2026-10-09 | Component paddings snapped to the spacing scale (button 22px to 24px, search 18px to 16px, alert 14px to 12px) | The prototypes use 22/18/14px, which are not spacing tokens. The scale wins. |
 | 2026-10-09 | Prototype drift: transcript 19px in `Komponenter`, 20px elsewhere; cover thumbnail radius 6px | Token file says 20px and `radius-sm` 4px; the tokens win. |
 | 2026-10-09 | Open: PNG icons and `og-image.png` still need regenerating | Predate the redesign. |

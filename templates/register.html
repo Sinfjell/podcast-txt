@@ -3,60 +3,56 @@
 
 {% block content %}
 <style>
-    .register-wrap { max-width: 440px; margin: 40px auto; }
+    .register-wrap { max-width: 420px; margin: 24px auto 48px; }
+    .auth-title {
+        font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em;
+        line-height: 1.05; margin-bottom: 16px;
+    }
     .register-episode {
-        display: flex; gap: 14px; align-items: flex-start;
-        padding: 14px; margin-bottom: 20px;
+        display: flex; gap: 16px; align-items: flex-start;
+        padding: 16px; margin-bottom: 24px;
         background: var(--surface); border: 1px solid var(--line);
         border-radius: var(--radius);
     }
     .register-episode img {
-        width: 56px; height: 56px; border-radius: 8px; object-fit: cover;
+        width: 56px; height: 56px; border-radius: var(--radius-sm); object-fit: cover;
         flex-shrink: 0; background: var(--line);
     }
     .register-episode-art {
-        width: 56px; height: 56px; border-radius: 8px; flex-shrink: 0;
+        width: 56px; height: 56px; border-radius: var(--radius-sm); flex-shrink: 0;
         background: var(--accent-tint);
         display: flex; align-items: center; justify-content: center;
         color: var(--on-accent-tint); font-size: 20px; font-weight: 700;
     }
+    .register-episode-body { min-width: 0; overflow-wrap: anywhere; }
     .register-episode-title {
-        font-weight: 600; font-size: 14px; line-height: 1.35;
+        font-weight: 700; font-size: 15px; line-height: 1.35;
         display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
         overflow: hidden;
     }
-    .register-episode-meta { color: var(--muted); font-size: 12.5px; margin-top: 4px; line-height: 1.4; }
-    .register-bullets { list-style: none; margin: 0 0 18px; padding: 0; }
+    .register-episode-meta { color: var(--muted); font-size: 14px; margin-top: 4px; line-height: 1.4; }
+    .register-bullets { list-style: none; margin: 0 0 24px; padding: 0; }
     .register-bullets li {
-        position: relative; padding: 5px 0 5px 22px;
-        font-size: 13.5px; color: var(--muted); line-height: 1.45;
+        position: relative; padding: 4px 0 4px 20px;
+        font-size: 15px; color: var(--muted); line-height: 1.5;
     }
     .register-bullets li::before {
-        content: ''; position: absolute; left: 0; top: 11px;
-        width: 12px; height: 12px; border-radius: 50%;
-        background: var(--accent-tint); border: 1.5px solid var(--accent);
-        box-sizing: border-box;
-    }
-    .register-bullets li::after {
-        content: ''; position: absolute; left: 3px; top: 14px;
-        width: 6px; height: 3px; border-left: 1.5px solid var(--accent);
-        border-bottom: 1.5px solid var(--accent);
-        transform: rotate(-45deg);
+        content: ''; position: absolute; left: 0; top: 13px;
+        width: 8px; height: 8px; border-radius: 50%;
+        background: var(--accent);
     }
     .pw-wrap { position: relative; }
-    .pw-wrap .form-input { padding-right: 44px; }
+    .pw-wrap .form-input { padding-right: 72px; }
     .pw-toggle {
-        position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
-        background: none; border: 0; color: var(--muted); cursor: pointer;
-        padding: 6px; font-size: 12px; font-weight: 500;
+        position: absolute; right: 0; top: 0; bottom: 0; min-width: 64px;
+        background: none; border: 0; color: var(--accent); cursor: pointer;
+        padding: 0 12px; font-size: 15px; font-weight: 700; font-family: inherit;
     }
-    .pw-toggle:hover { color: var(--ink); }
-    .form-error {
-        font-size: 12.5px; color: var(--danger); margin-top: 6px;
-        display: none;
-    }
+    .pw-toggle:hover { color: var(--accent-hover); }
+    .form-error { font-size: 14px; color: var(--danger); margin-top: 8px; display: none; }
     .form-error.visible { display: block; }
-    .form-input.invalid { border-color: var(--danger); }
+    .form-input.invalid { border: 2px solid var(--danger); }
+    .auth-links { margin-top: 24px; font-size: 15px; color: var(--muted); }
     .btn-spinner {
         display: inline-block; width: 12px; height: 12px; margin-right: 8px;
         border: 2px solid currentColor; border-right-color: transparent;
@@ -66,7 +62,7 @@
     @keyframes regSpin { to { transform: rotate(360deg); } }
 </style>
 <div class="register-wrap">
-    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 8px; line-height: 1.25;">
+    <h1 class="auth-title">
         {% if pending %}
         Create a free account to get this transcript
         {% elif trial_minutes %}
@@ -76,11 +72,11 @@
         {% endif %}
     </h1>
     {% if not pending %}
-    <p class="text-muted text-sm" style="margin-bottom: 20px;">
+    <p class="text-muted" style="margin-bottom: 24px;">
         Sign up takes about 20 seconds. No card required.
     </p>
     {% else %}
-    <p class="text-muted text-sm" style="margin-bottom: 16px;">
+    <p class="text-muted" style="margin-bottom: 24px;">
         Your episode is ready — it starts right after you sign up.
     </p>
     {% endif %}
@@ -92,7 +88,7 @@
         {% else %}
         <div class="register-episode-art" aria-hidden="true">P</div>
         {% endif %}
-        <div style="min-width: 0;">
+        <div class="register-episode-body">
             {% if pending.podcast_name %}
             <div class="register-episode-meta" style="margin-top: 0; margin-bottom: 2px;">{{ pending.podcast_name }}</div>
             {% endif %}
@@ -117,9 +113,7 @@
         <li>Download .txt and .srt when it finishes</li>
     </ul>
 
-    <div class="card">
-        <div class="card-body">
-            <form method="POST" action="{{ url_for('register', next=next) if next else url_for('register') }}"
+    <form method="POST" action="{{ url_for('register', next=next) if next else url_for('register') }}"
                   id="registerForm" novalidate>
                 {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
                 <div class="form-group">
@@ -139,14 +133,11 @@
                     <p class="form-error" id="passwordError" role="alert">At least 8 characters</p>
                 </div>
                 <button type="submit" class="btn btn-primary w-full" id="registerSubmit"
-                        style="justify-content: center;"
                         data-label="{% if pending %}Create account &amp; start transcript{% else %}Create account{% endif %}">
                     {% if pending %}Create account &amp; start transcript{% else %}Create account{% endif %}
                 </button>
-            </form>
-        </div>
-    </div>
-    <p class="text-center text-muted mt-2 text-sm">
+    </form>
+    <p class="auth-links">
         Already have an account?
         <a href="{{ url_for('login', next=next) if next else url_for('login') }}">Log in</a>
     </p>
