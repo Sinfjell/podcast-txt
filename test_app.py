@@ -3171,8 +3171,9 @@ def test_the_mobile_menu_extras_are_hidden_on_desktop(trial_on):
 def test_the_logged_in_menu_offers_the_account_pages(trial_on):
     uid = _make_user('menu@test.com')
     body = _login(uid).get('/').data.decode()
-    for label in ('New transcript', 'Feeds', 'History', 'Settings', 'Log out'):
+    for label in ('New transcript', 'History', 'Settings', 'Log out'):
         assert label in body, f'{label} missing from the menu'
+    assert '>Feeds<' not in body and 'My Feeds' not in body
     assert 'nav-sep' in body, 'log out is not separated from the rest'
 
 def test_cancelling_cannot_overwrite_a_finished_transcript(trial_on, monkeypatch):
