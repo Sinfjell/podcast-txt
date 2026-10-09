@@ -312,12 +312,61 @@ def trial_estimate_seconds(duration_min):
     return max(60, int((duration_min or 0) * 60) or TRIAL_UNKNOWN_ESTIMATE_SECONDS)
 
 
+def encode_partial_task_meta(partial_seconds, episode_seconds):
+    """Serialize partial-preview metadata into the error_message column."""
+    import json as _json
+    return PARTIAL_META_MARKER + _json.dumps({
+        'partial_seconds': int(partial_seconds),
+        'episode_seconds': int(max(partial_seconds, episode_seconds)),
+    }, separators=(',', ':'))
+
+
+def task_partial_meta(task):
+    """Return {partial_seconds, episode_seconds} for a partial preview, or None."""
+    import json as _json
+    if task is None:
+        return None
+    raw = getattr(task, 'error_message', None) or ''
+    if not isinstance(raw, str) or not raw.startswith(PARTIAL_META_MARKER):
+        return None
+    try:
+        data = _json.loads(raw[len(PARTIAL_META_MARKER):])
+        partial_seconds = int(data['partial_seconds'])
+        episode_seconds = int(data['episode_seconds'])
+    except (TypeError, ValueError, KeyError, _json.JSONDecodeError):
+        return None
+    if partial_seconds <= 0 or episode_seconds <= 0:
+        return None
+    return {
+        'partial_seconds': partial_seconds,
+        'episode_seconds': max(partial_seconds, episode_seconds),
+    }
+
+
+def task_is_partial(task):
+    return task_partial_meta(task) is not None
+
+
+def partial_minutes_pair(meta):
+    """(partial_minutes, episode_minutes) display ints from partial meta."""
+    n = max(1, int(math.ceil(meta['partial_seconds'] / 60.0)))
+    m = max(n, int(math.ceil(meta['episode_seconds'] / 60.0)))
+    return n, m
+
+
+def partial_transcript_note(meta):
+    """Short plain-text note for copy/download of a partial preview."""
+    n, m = partial_minutes_pair(meta)
+    return f'Free preview: first {n} minutes of {m}.'
+
+
 def episode_needs_own_key(duration_min, remaining_minutes, paid_minutes=0):
-    """True when a platform user cannot cover this episode on free+paid minutes.
+    """True when a platform user cannot start this episode without buying/BYOK.
 
     No estimate → no badge. Own-key users pass remaining_minutes=None.
-    Episodes over the free per-episode cap need paid minutes (or BYOK) covering
-    the full length — free trial alone cannot take them.
+    When free trial alone cannot cover the full length but enough remains for a
+    partial preview (and there is no paid balance), returns False — the start
+    path will enqueue a free preview instead of a paywall.
     """
     if duration_min is None or remaining_minutes is None:
         return False
@@ -331,8 +380,17 @@ def episode_needs_own_key(duration_min, remaining_minutes, paid_minutes=0):
     paid_sec = max(0, int(paid_minutes or 0)) * 60
     free_sec = max(0, int(remaining_minutes)) * 60
     if TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS:
-        return estimate > paid_sec
-    return estimate > free_sec + paid_sec
+        if estimate <= paid_sec:
+            return False
+        # Over the free per-episode cap: partial preview only when the episode
+        # is also longer than remaining free trial (same gate as enqueue).
+        if (paid_sec <= 0 and free_sec >= TRIAL_PARTIAL_MIN_SECONDS
+                and estimate > free_sec):
+            return False
+        return True
+    if estimate <= free_sec + paid_sec:
+        return False
+    return not (paid_sec <= 0 and free_sec >= TRIAL_PARTIAL_MIN_SECONDS)
 
 
 def trial_badge_remaining_minutes():
@@ -636,14 +694,24 @@ TRIAL_GLOBAL_SECONDS = _env_minutes('TRIAL_GLOBAL_MINUTES', 6000) * 60
 #: What to reserve when the feed publishes no itunes:duration. Reconciled
 #: against the real duration after download, before a single Whisper call.
 TRIAL_UNKNOWN_ESTIMATE_SECONDS = _env_minutes('TRIAL_UNKNOWN_ESTIMATE_MINUTES', 30) * 60
-#: Longest single episode the trial will take on. Default tracks TRIAL_MINUTES
-#: (legacy grant), not NEW_USER_TRIAL_MINUTES: a 60-minute new account that
-#: picks a longer episode hits the remaining-balance paywall, not this cap.
+#: Longest single episode the trial will take on as a *full* free job. Default
+#: tracks TRIAL_MINUTES (legacy grant), not NEW_USER_TRIAL_MINUTES. A shorter
+#: remaining balance on a longer episode can still start a partial preview
+#: (see TRIAL_PARTIAL_MIN_SECONDS) instead of this hard refusal.
 #: Set the env var explicitly if you want them different.
 TRIAL_MAX_EPISODE_SECONDS = _env_minutes(
     'TRIAL_MAX_EPISODE_MINUTES', TRIAL_DEFAULT_SECONDS // 60) * 60
+#: Minimum remaining free trial required to start a partial preview when the
+#: episode is longer than the balance. Below this, show the paywall instead of
+#: a tiny stub transcript.
+TRIAL_PARTIAL_MIN_SECONDS = _env_minutes('TRIAL_PARTIAL_MIN_MINUTES', 5) * 60
 #: Kill switch. Set TRIAL_ENABLED=0 to stop handing out our key entirely.
 TRIAL_ENABLED = os.getenv('TRIAL_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+
+#: Stored in TranscriptionTask.error_message while status is not an error, so a
+#: partial preview needs no schema migration. Agent payloads only expose
+#: error_message when status == 'error', so this stays out of the API.
+PARTIAL_META_MARKER = 'partial_preview:'
 
 # ---------------------------------------------------------------------------
 # Stripe credit pack (optional; unset keys hide Buy and skip webhook wiring)
@@ -1064,7 +1132,9 @@ def trial_reconcile_task(task_id, actual_seconds):
 
     Runs after the download but BEFORE the first Whisper call, so an episode
     that turns out longer than the feed claimed costs us bandwidth, never API
-    spend. Raises TrialExhausted when the real length will not fit.
+    spend. Raises TrialExhausted when the real length will not fit — except for
+    partial-preview jobs (and trial-only unknown-duration overruns), which
+    return ``'trim'`` so the caller shortens the file to the reservation.
 
     Charge order: free trial first, then paid. Episodes over the free
     per-episode cap must be covered by paid minutes (or BYOK) — they do not
@@ -1072,25 +1142,28 @@ def trial_reconcile_task(task_id, actual_seconds):
     """
     task = db.session.get(TranscriptionTask, task_id)
     if not task or task.trial_settled:
-        return
+        return None
     trial_reserved = int(task.trial_seconds_charged or 0)
     paid_reserved = int(task.paid_seconds_charged or 0)
     if trial_reserved <= 0 and paid_reserved <= 0:
         # NULL/0 on both is an own-key task, nothing metered. Settled means the
         # sweeper got here first -- re-opening the charge would bill the user
         # for an episode that goes on to send nothing.
-        return
+        return None
     total_reserved = trial_reserved + paid_reserved
     actual = int(math.ceil(max(0.0, actual_seconds or 0.0)))
     user_id = task.user_id
     over_free_cap = bool(
         TRIAL_MAX_EPISODE_SECONDS and actual > TRIAL_MAX_EPISODE_SECONDS)
+    is_partial = task_is_partial(task)
 
     if over_free_cap and paid_reserved <= 0 and trial_reserved > 0:
+        # Partial previews intentionally reserve only N minutes of a longer
+        # episode — do not try to switch the whole thing onto paid credits.
+        if is_partial:
+            return 'trim'
         # Started as a free-trial job; real audio exceeds the free per-episode
-        # cap. Paid credits can still save it if they cover the full length;
-        # otherwise refuse without mutating the reservation — the worker's
-        # refund settles, matching the pre-credits behaviour.
+        # cap. Paid credits can still save it if they cover the full length.
         #
         # Critical order: debit paid WHILE still holding the trial reservation.
         # Releasing trial first, then failing the paid debit, then re-reserving
@@ -1107,30 +1180,43 @@ def trial_reconcile_task(task_id, actual_seconds):
             f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
             f'or add your own OpenAI API key (about ${cost} at OpenAI\'s rate).'
         )
-        if paid_balance_seconds(owner) < actual:
-            raise TrialExhausted(refuse_msg, scope='episode_length')
-        before_trial, before_paid = _platform_remaining_seconds(user_id)
-        if not paid_reserve(user_id, actual):
-            # Race: paid balance moved after the read. Keep the trial charge.
-            raise TrialExhausted(refuse_msg, scope='episode_length')
-        if not _claim_task_platform_charges(
-                task_id, trial_reserved, 0, 0, actual):
-            # Someone else settled (or the charge moved). Hand the paid debit
-            # back; the trial reservation on the user balance is still intact
-            # and still matches trial_seconds_charged on the row.
-            paid_release(user_id, actual)
-            raise TrialExhausted(refuse_msg, scope='episode_length')
-        # Paid is now on the task; only now release the free-trial reservation.
-        trial_release(user_id, trial_reserved)
-        _capture_minutes_exhausted_if_depleted(
-            user_id, 'reconcile', before_trial, before_paid)
-        return
+        if paid_balance_seconds(owner) >= actual:
+            before_trial, before_paid = _platform_remaining_seconds(user_id)
+            if not paid_reserve(user_id, actual):
+                # Race: paid balance moved after the read. Keep the trial charge.
+                raise TrialExhausted(refuse_msg, scope='episode_length')
+            if not _claim_task_platform_charges(
+                    task_id, trial_reserved, 0, 0, actual):
+                # Someone else settled (or the charge moved). Hand the paid debit
+                # back; the trial reservation on the user balance is still intact
+                # and still matches trial_seconds_charged on the row.
+                paid_release(user_id, actual)
+                raise TrialExhausted(refuse_msg, scope='episode_length')
+            # Paid is now on the task; only now release the free-trial reservation.
+            trial_release(user_id, trial_reserved)
+            _capture_minutes_exhausted_if_depleted(
+                user_id, 'reconcile', before_trial, before_paid)
+            return None
+        # No paid cover: trim to the reservation (unknown / under-claimed
+        # duration) rather than failing after the download already happened.
+        task.error_message = encode_partial_task_meta(total_reserved, actual)
+        db.session.commit()
+        return 'trim'
 
     if actual > total_reserved:
         extra = actual - total_reserved
         before_trial, before_paid = _platform_remaining_seconds(user_id)
         split = platform_reserve(user_id, extra, paid_only=over_free_cap)
         if split is None:
+            # Partial job, or trial-only unknown-duration overrun: keep the
+            # reservation and let the worker trim audio to it.
+            if is_partial or (paid_reserved <= 0 and trial_reserved > 0
+                              and not over_free_cap):
+                if not is_partial:
+                    task.error_message = encode_partial_task_meta(
+                        total_reserved, actual)
+                    db.session.commit()
+                return 'trim'
             owner = db.session.get(User, user_id)
             estimate_min = actual // 60
             _, _, remaining = trial_status(owner) if owner else (0, 0, 0)
@@ -1162,7 +1248,8 @@ def trial_reconcile_task(task_id, actual_seconds):
         else:
             _capture_minutes_exhausted_if_depleted(
                 user_id, 'reconcile', before_trial, before_paid)
-    elif actual < total_reserved:
+        return None
+    if actual < total_reserved:
         # Shrink paid first (LIFO), then trial — reverse of charge order.
         shrink = total_reserved - actual
         new_paid = max(0, paid_reserved - shrink)
@@ -1172,6 +1259,14 @@ def trial_reconcile_task(task_id, actual_seconds):
         if _claim_task_platform_charges(
                 task_id, trial_reserved, paid_reserved, new_trial, new_paid):
             platform_release(user_id, shrink_trial, shrink_paid)
+        # Keep partial meta in sync with the shorter reservation.
+        if is_partial:
+            meta = task_partial_meta(task)
+            if meta:
+                task.error_message = encode_partial_task_meta(
+                    new_trial + new_paid, meta['episode_seconds'])
+                db.session.commit()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1745,6 +1840,71 @@ def _ffmpeg_error(message, stderr=b''):
     return RuntimeError(message)
 
 
+def trim_audio_file(audio_file, max_seconds):
+    """Rewrite `audio_file` to the first `max_seconds` of audio via ffmpeg.
+
+    Used for partial trial previews (and unknown-duration overruns) so Whisper
+    never sees more audio than we reserved. Prefers stream-copy; falls back to
+    a light re-encode when the container rejects copy. The later
+    prepare_audio_for_whisper() pass still re-encodes for Whisper either way.
+    """
+    max_seconds = max(1, int(math.ceil(float(max_seconds))))
+    if shutil.which('ffmpeg') is None:
+        raise _ffmpeg_error(
+            'Audio processing is unavailable on the server right now. '
+            'Please try again later, or contact support if it persists.')
+
+    tmp_path = f'{audio_file}.trimtmp.mp3'
+
+    def _run(cmd):
+        try:
+            return subprocess.run(
+                cmd, capture_output=True, timeout=FFMPEG_TIMEOUT_SECONDS)
+        except FileNotFoundError:
+            raise _ffmpeg_error(
+                'Audio processing is unavailable on the server right now. '
+                'Please try again later, or contact support if it persists.')
+        except subprocess.TimeoutExpired:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise _ffmpeg_error(
+                'This episode took too long to process. Please try a shorter one.')
+
+    copy = _run([
+        'nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y',
+        '-i', audio_file, '-t', str(max_seconds),
+        '-c', 'copy', '-vn', tmp_path,
+    ])
+    if copy.returncode != 0 or not os.path.exists(tmp_path) or os.path.getsize(tmp_path) < MIN_PART_BYTES:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        encoded = _run([
+            'nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y',
+            '-i', audio_file, '-t', str(max_seconds),
+            '-vn', '-ac', '1', '-ar', str(WHISPER_SAMPLE_RATE),
+            '-b:a', f'{WHISPER_AUDIO_BITRATE_KBPS}k', '-threads', '1',
+            tmp_path,
+        ])
+        if encoded.returncode != 0 or not os.path.exists(tmp_path):
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise _ffmpeg_error(
+                'This audio file could not be processed. It may be corrupt or in an '
+                'unsupported format.', encoded.stderr if encoded.returncode else copy.stderr)
+
+    os.replace(tmp_path, audio_file)
+    return audio_file
+
+
 def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
     """Re-encode to 16 kHz mono MP3, split into hour-long parts if still large.
 
@@ -1874,10 +2034,57 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
     measured_duration = probe_audio_duration(audio_file)
     billable_duration = (measured_duration if measured_duration is not None
                          else estimate_audio_duration(audio_file))
+    full_episode_seconds = billable_duration
+
+    task_row = db.session.get(TranscriptionTask, task_id)
+    partial_meta = task_partial_meta(task_row) if task_row else None
+    reserved_seconds = 0
+    if task_row is not None:
+        reserved_seconds = (
+            int(task_row.trial_seconds_charged or 0)
+            + int(task_row.paid_seconds_charged or 0)
+        )
+
+    # Partial preview: never send more audio than we reserved. Trim before
+    # reconcile so billing matches the file Whisper will see.
+    if partial_meta and reserved_seconds > 0 and billable_duration > reserved_seconds:
+        # Remember the real length for the result-page "first N of M" copy.
+        task_row.error_message = encode_partial_task_meta(
+            reserved_seconds, max(full_episode_seconds, partial_meta['episode_seconds']))
+        db.session.commit()
+        trim_audio_file(audio_file, reserved_seconds)
+        measured_duration = probe_audio_duration(audio_file)
+        billable_duration = (
+            measured_duration if measured_duration is not None
+            else float(reserved_seconds)
+        )
 
     # Last point at which refusing is still free: everything below this line
-    # bills OpenAI.
-    trial_reconcile_task(task_id, billable_duration)
+    # bills OpenAI. May return 'trim' for unknown-duration overruns that we
+    # promote to a partial preview instead of failing.
+    reconcile_action = trial_reconcile_task(task_id, billable_duration)
+    if reconcile_action == 'trim':
+        task_row = db.session.get(TranscriptionTask, task_id)
+        reserved_seconds = 0
+        if task_row is not None:
+            reserved_seconds = (
+                int(task_row.trial_seconds_charged or 0)
+                + int(task_row.paid_seconds_charged or 0)
+            )
+            meta = task_partial_meta(task_row)
+            if meta is None and reserved_seconds > 0:
+                task_row.error_message = encode_partial_task_meta(
+                    reserved_seconds, full_episode_seconds)
+                db.session.commit()
+        if reserved_seconds > 0 and billable_duration > reserved_seconds:
+            trim_audio_file(audio_file, reserved_seconds)
+            measured_duration = probe_audio_duration(audio_file)
+            billable_duration = (
+                measured_duration if measured_duration is not None
+                else float(reserved_seconds)
+            )
+            # Shrink the charge to the trimmed length (idempotent if already matched).
+            trial_reconcile_task(task_id, billable_duration)
 
     if not _update_task(
         task_id,
@@ -4003,12 +4210,14 @@ def _find_existing_web_task(user_id, source_audio_url):
     """Return a same-user task for this audio that is still live or finished.
 
     Error/cancelled tasks are intentionally omitted so the user can re-run.
-    Used only on the web path to avoid double-reserving trial minutes when
-    someone restarts an episode that is already queued, running, or done.
+    Completed *partial* previews are also omitted so buying minutes can start
+    a full run of the same source_audio_url. Used only on the web path to
+    avoid double-reserving trial minutes when someone restarts an episode
+    that is already queued, running, or done.
     """
     if not source_audio_url:
         return None
-    return (
+    task = (
         TranscriptionTask.query
         .filter(
             TranscriptionTask.user_id == user_id,
@@ -4018,6 +4227,9 @@ def _find_existing_web_task(user_id, source_audio_url):
         .order_by(TranscriptionTask.started_at.desc())
         .first()
     )
+    if task is not None and task.status == 'completed' and task_is_partial(task):
+        return None
+    return task
 
 
 def _completed_transcript_count(user_id):
@@ -4119,6 +4331,7 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
         # corrects it against the real audio before anything reaches Whisper.
         trial_charge = None
         paid_charge = None
+        partial_job = False
         if key_source == 'trial':
             # Floored at a minute: a zero reservation would quietly make the
             # task look unmetered (NULL/0 charges).
@@ -4127,38 +4340,74 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
             over_free_cap = bool(
                 TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS)
             before_trial, before_paid = _platform_remaining_seconds(user_id)
-            if over_free_cap:
-                # Free trial must not cover over-long episodes; paid credits can.
-                split = platform_reserve(user_id, estimate, paid_only=True)
+            paid_bal = before_paid
+            can_cover_full = (
+                (paid_bal >= estimate) if over_free_cap
+                else (before_trial + paid_bal) >= estimate
+            )
+
+            if can_cover_full:
+                if over_free_cap:
+                    # Full free jobs must not cover over-long episodes; paid can.
+                    split = platform_reserve(user_id, estimate, paid_only=True)
+                else:
+                    split = platform_reserve(user_id, estimate)
                 if split is None:
+                    # Race with another worker — fall through to refusal below.
+                    can_cover_full = False
+                else:
+                    trial_charge, paid_charge = split
+                    _capture_minutes_exhausted_if_depleted(
+                        user_id, source, before_trial, before_paid)
+
+            if trial_charge is None and paid_charge is None:
+                # Partial free preview only when the episode is longer than the
+                # account's remaining trial (not when the per-episode max is the
+                # sole blocker — that stays the episode_length paywall).
+                global_rem = max(0, TRIAL_GLOBAL_SECONDS - trial_global_used_seconds())
+                partial_n = min(before_trial, global_rem)
+                episode_exceeds_remaining = estimate > before_trial
+                if (paid_bal <= 0
+                        and episode_exceeds_remaining
+                        and partial_n >= TRIAL_PARTIAL_MIN_SECONDS
+                        and trial_reserve(user_id, partial_n)):
+                    trial_charge, paid_charge = partial_n, 0
+                    partial_job = True
+                    ph_props['partial'] = True
+                    ph_props['partial_minutes'] = partial_n // 60
+                    ph_props['episode_minutes'] = estimate_min
+                    _capture_minutes_exhausted_if_depleted(
+                        user_id, source, before_trial, before_paid)
+                else:
                     _, _, remaining = trial_status(user)
-                    _capture_trial_limit_hit(
-                        user_id, 'episode_length', 'start', source,
-                        estimate_min=estimate_min, remaining_min=remaining // 60)
-                    cost = openai_whisper_cost_usd(estimate_min)
-                    payload = {
-                        'error': (
-                            f'This episode is {estimate_min} minutes — too long for the '
-                            f'free trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). '
-                            f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
-                            f'or add your own OpenAI API key (about ${cost} at '
-                            f'OpenAI\'s rate).'
-                        ),
-                    }
-                    payload.update(_minutes_limit_actions(
-                        user_id, 'enqueue_episode_length', reason='episode_too_long'))
-                    return payload, 402
-                trial_charge, paid_charge = split
-                _capture_minutes_exhausted_if_depleted(
-                    user_id, source, before_trial, before_paid)
-            else:
-                split = platform_reserve(user_id, estimate)
-                if split is None:
-                    _, _, remaining = trial_status(user)
+                    if over_free_cap and not (
+                            paid_bal <= 0 and episode_exceeds_remaining
+                            and before_trial >= TRIAL_PARTIAL_MIN_SECONDS):
+                        scope = 'episode_length'
+                        _capture_trial_limit_hit(
+                            user_id, scope, 'start', source,
+                            estimate_min=estimate_min, remaining_min=remaining // 60)
+                        cost = openai_whisper_cost_usd(estimate_min)
+                        payload = {
+                            'error': (
+                                f'This episode is {estimate_min} minutes — too long for the '
+                                f'free trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). '
+                                f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
+                                f'or add your own OpenAI API key (about ${cost} at '
+                                f'OpenAI\'s rate).'
+                            ),
+                        }
+                        payload.update(_minutes_limit_actions(
+                            user_id, 'enqueue_episode_length', reason='episode_too_long'))
+                        return payload, 402
+
                     scope = trial_refusal_scope(user, estimate)
-                    # If free trial still has room but paid+trial couldn't cover,
-                    # the global ceiling ate the free path — keep that scope.
                     if remaining >= estimate and paid_balance_seconds(user) <= 0:
+                        scope = 'global'
+                    # Global pool blocked a partial that the account could afford.
+                    if (paid_bal <= 0 and episode_exceeds_remaining
+                            and before_trial >= TRIAL_PARTIAL_MIN_SECONDS
+                            and global_rem < TRIAL_PARTIAL_MIN_SECONDS):
                         scope = 'global'
                     _capture_trial_limit_hit(
                         user_id, scope, 'start', source,
@@ -4185,8 +4434,6 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                         else:
                             paywall_reason = 'low_balance'
                     else:
-                        # The user still has room; the service as a whole does not.
-                        # Saying "you have 60 minutes left" here would contradict itself.
                         paywall_reason = 'global_cap'
                         if stripe_checkout_enabled():
                             message = (
@@ -4204,9 +4451,6 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                     payload.update(_minutes_limit_actions(
                         user_id, 'enqueue', reason=paywall_reason))
                     return payload, 402
-                trial_charge, paid_charge = split
-                _capture_minutes_exhausted_if_depleted(
-                    user_id, source, before_trial, before_paid)
 
         task_id = str(uuid.uuid4())
         try:
@@ -4223,11 +4467,19 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                 episode_published=meta.get('published'),
                 source_audio_url=audio_url,
                 # Feed duration is the best ETA source we have, and it is available
-                # before a single byte is downloaded.
-                audio_duration=(meta['duration_min'] * 60) if meta.get('duration_min') else None,
+                # before a single byte is downloaded. For partials, store the
+                # reserved preview length so the progress ETA matches the work.
+                audio_duration=(
+                    float(trial_charge) if partial_job and trial_charge
+                    else ((meta['duration_min'] * 60) if meta.get('duration_min') else None)
+                ),
                 language=language or None,
                 trial_seconds_charged=trial_charge,
                 paid_seconds_charged=paid_charge,
+                error_message=(
+                    encode_partial_task_meta(trial_charge, estimate)
+                    if partial_job and trial_charge else None
+                ),
             )
             db.session.add(task)
             db.session.commit()
@@ -4329,6 +4581,12 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                                 # Incl. this completion (status is already completed).
                                 done_props['nth_transcript'] = (
                                     _completed_transcript_count(user_id))
+                                meta = task_partial_meta(finished)
+                                if meta:
+                                    n_min, m_min = partial_minutes_pair(meta)
+                                    done_props['partial'] = True
+                                    done_props['partial_minutes'] = n_min
+                                    done_props['episode_minutes'] = m_min
                             product_analytics.capture(
                                 'transcript_completed', user_id, done_props)
                         except Exception:  # noqa: BLE001
@@ -4724,6 +4982,33 @@ def get_status(task_id):
         if task.language:
             # Display name for UI; old rows with names still look fine.
             result['language'] = display_language(task.language)
+        partial = task_partial_meta(task)
+        if partial:
+            n_min, m_min = partial_minutes_pair(partial)
+            result['partial'] = True
+            result['partial_minutes'] = n_min
+            result['episode_minutes'] = m_min
+            result['partial_note'] = partial_transcript_note(partial)
+            # Enough for the result page to offer Buy / finish-full without
+            # another round trip. duration_min is the full episode when known.
+            result['finish'] = {
+                'audio_url': task.source_audio_url or '',
+                'episode_title': task.episode_title or 'Episode',
+                'podcast_name': task.podcast_name or '',
+                'artwork': task.artwork_url or '',
+                'published': task.episode_published or '',
+                'rss_url': task.rss_url or '',
+                'duration_min': str(m_min),
+                'language': normalize_language_code(task.language) or '',
+            }
+            trial_left, paid_left = _platform_remaining_seconds(task.user_id)
+            result['paid_remaining_min'] = paid_left // 60
+            result['trial_remaining_min'] = trial_left // 60
+            result['can_finish_full'] = paid_left > 0 or bool(
+                getattr(current_user, 'openai_api_key', None))
+            if stripe_checkout_enabled():
+                result['buy_available'] = True
+                result['buy_label'] = CREDIT_PACK_LABEL
 
     return jsonify(result)
 
@@ -4839,9 +5124,14 @@ def download_file(task_id, file_type):
         return "File not found", 404
 
     safe_title = safe_download_basename(task.episode_title)
+    partial = task_partial_meta(task) if task.status == 'completed' else None
+    note = partial_transcript_note(partial) if partial else ''
 
     if file_type == 'txt':
-        content = (task.transcript_text or '').encode('utf-8')
+        body = task.transcript_text or ''
+        if note:
+            body = f'{note}\n\n{body}' if body else note
+        content = body.encode('utf-8')
         return send_file(
             BytesIO(content),
             as_attachment=True,
@@ -4849,17 +5139,36 @@ def download_file(task_id, file_type):
             mimetype='text/plain',
         )
     elif file_type == 'srt':
+        lines = []
+        index = 1
+        if note:
+            lines.extend([
+                f'{index}',
+                '00:00:00,000 --> 00:00:00,500',
+                note,
+                '',
+            ])
+            index += 1
         if task.segments_json:
-            segments = _json.loads(task.segments_json)
-            lines = []
-            for i, seg in enumerate(segments, 1):
-                lines.append(f"{i}")
-                lines.append(f"{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}")
-                lines.append(seg['text'].strip())
+            try:
+                segments = _json.loads(task.segments_json)
+            except (_json.JSONDecodeError, TypeError):
+                segments = []
+            for seg in segments:
+                lines.append(f"{index}")
+                lines.append(
+                    f"{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}")
+                lines.append((seg.get('text') or '').strip())
                 lines.append('')
-            content = '\n'.join(lines).encode('utf-8')
+                index += 1
         else:
-            content = f"1\n00:00:00,000 --> 00:00:01,000\n{task.transcript_text or ''}".encode('utf-8')
+            lines.extend([
+                f'{index}',
+                '00:00:00,500 --> 00:00:01,500' if note else '00:00:00,000 --> 00:00:01,000',
+                task.transcript_text or '',
+                '',
+            ])
+        content = '\n'.join(lines).encode('utf-8')
         return send_file(
             BytesIO(content),
             as_attachment=True,
@@ -5970,11 +6279,15 @@ def faq_entries():
             if stripe_checkout_enabled() else ''
         )
         free = (f'New accounts get {minutes} minutes of audio free'
-                f'{hours_bit}. For longer episodes, or once the '
-                f'trial is used up, add your own OpenAI API key: a 90-minute '
-                f'episode costs about {cost_90} at OpenAI\'s rate.{pack_bit}')
-        need_key = ('Not to start. The free trial runs on ours. Add your own key when the '
-                    'trial runs out and there is no limit beyond what you spend at OpenAI.')
+                f'{hours_bit}. Longer episodes still start free — you get the '
+                f'first {minutes} minutes as a preview, then buy minutes or add '
+                f'your own OpenAI API key to finish (a 90-minute episode costs '
+                f'about {cost_90} at OpenAI\'s rate). Once the trial is used up, '
+                f'the same options apply.{pack_bit}')
+        need_key = ('Not to start. The free trial runs on ours, including a free '
+                    'preview of the first stretch of a longer episode. Add your own '
+                    'key when the trial runs out and there is no limit beyond what '
+                    'you spend at OpenAI.')
     else:
         pack_bit = (
             f' Or buy a one-time pack: ${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for '

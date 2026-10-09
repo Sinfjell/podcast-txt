@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "partial-trial-preview",
+      "date": "2026-10-09",
+      "title": "Long episodes start with a free preview",
+      "summary": "If an episode is longer than your remaining free minutes, Podskrift transcribes the first stretch for free (60 minutes for new accounts), then lets you buy minutes to finish the rest. Paid balance or your own OpenAI key still runs the full episode."
+    },
+    {
       "id": "clearer-missing-episode-audio",
       "date": "2026-10-09",
       "title": "Clearer error when an episode’s audio is gone",
