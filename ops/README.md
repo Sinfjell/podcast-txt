@@ -16,15 +16,38 @@ Lookup, writes ~150 shows. Live pages never call Apple at request time.
 ## Production deploy (GitHub Actions)
 
 On every push to `main` (merge or direct), [.github/workflows/deploy.yml](../.github/workflows/deploy.yml)
-SSHs into the Hetzner/Plesk host and runs the same steps as today's manual
-deploy: `git fetch` / `checkout main` / `pull --ff-only`, then
-`systemctl restart podskrift`, asserts the unit is active, and prints the
-short HEAD SHA. Manual re-run: Actions → **Deploy production** →
-**Run workflow**.
+SSHs into the Hetzner/Plesk host and runs:
+
+1. `git fetch` / `checkout main` / `pull --ff-only`
+2. **Deploy drain** — `ops/drain-in-flight.sh` polls
+   `http://127.0.0.1:5002/internal/in-flight` until there are no
+   queued/running transcriptions, or until **20 minutes** elapse (then
+   proceeds anyway so the Actions job stays inside its 30-minute timeout)
+3. `systemctl restart podskrift`, asserts the unit is active, prints HEAD
+
+New jobs keep being accepted during the drain; anything still mid-flight when
+the process exits is **re-queued once on boot** (same task id and trial/paid
+reservation — no double charge). A second failure after that resume shows a
+clear “server restarted” message instead of blaming the audio file.
+
+Manual re-run: Actions → **Deploy production** → **Run workflow**.
 
 No `pip install` — same as the current pull+restart. If a change needs new
 Python deps, install them on the host once (as the app user / into `.venv`)
 before or right after that deploy; see Sentry / PostHog install notes below.
+
+### Gunicorn graceful shutdown
+
+Production should use [gunicorn.conf.py](../gunicorn.conf.py) (`graceful_timeout
+= 120`, `post_worker_init` chains our shutdown flag onto gunicorn’s SIGTERM
+handler) and a matching systemd `TimeoutStopSec`. That lets workers finish
+current HTTP requests while transcription threads stop at safe points (between
+download chunks / Whisper parts) instead of mid-ffmpeg with a corrupt-file
+error.
+
+See [ops/podskrift.service.example](podskrift.service.example). Apply on the
+host once if the live unit still uses bare CLI flags without `-c gunicorn.conf.py`,
+then `systemctl daemon-reload`.
 
 ### GitHub secrets (Settings → Secrets and variables → Actions)
 
@@ -39,18 +62,30 @@ A failed SSH, non-ff pull, or inactive unit fails the job red.
 
 ### Rollback
 
-On the server, check out the previous good SHA and restart:
+On the server, check out the previous good SHA and restart (drain first so you
+do not cut a live job):
 
 ```bash
 cd /var/www/vhosts/podskrift.nettsmed.dev/app
 git fetch origin
 git checkout <previous-good-sha>
+PODSKRIFT_DRAIN_MAX_WAIT_SEC=1200 ops/drain-in-flight.sh
 systemctl restart podskrift
 systemctl is-active podskrift
 git rev-parse --short HEAD
 ```
 
 To return to tracking `main` afterward: `git checkout main && git pull --ff-only`.
+
+### Drain without deploying
+
+```bash
+cd /var/www/vhosts/podskrift.nettsmed.dev/app
+ops/drain-in-flight.sh
+# or: curl -sS http://127.0.0.1:5002/internal/in-flight
+```
+
+`/internal/in-flight` answers only on loopback (`127.0.0.1` / `::1`).
 
 ## Transactional email (Mailgun EU)
 

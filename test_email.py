@@ -24,6 +24,7 @@ os.environ.setdefault('SENTRY_DSN', '')
 os.environ.setdefault('POSTHOG_KEY', '')
 os.environ.setdefault('POSTHOG_HOST', '')
 os.environ.setdefault('PODSKRIFT_DISABLE_WATCHDOG', '1')
+os.environ.setdefault('PODSKRIFT_DISABLE_SHUTDOWN_HANDLERS', '1')
 os.environ['EMAIL_ENABLED'] = '0'
 os.environ.pop('MAILGUN_API_KEY', None)
 os.environ.pop('MAILGUN_DOMAIN', None)
@@ -76,7 +77,7 @@ def test_mail_noop_when_disabled(monkeypatch):
     monkeypatch.setenv('EMAIL_ENABLED', '0')
     with mock.patch.object(mailer.requests, 'post') as post:
         assert mailer.send_email(
-            to='a@b.com', subject='Hi', text='body', kind='t') is False
+            to='a@b.com', subject='Hi', text='body', kind='t') == mailer.SEND_FAILED
         post.assert_not_called()
 
 
@@ -85,7 +86,7 @@ def test_mail_noop_when_misconfigured(monkeypatch):
     monkeypatch.delenv('MAILGUN_API_KEY', raising=False)
     with mock.patch.object(mailer.requests, 'post') as post:
         assert mailer.send_email(
-            to='a@b.com', subject='Hi', text='body', kind='t') is False
+            to='a@b.com', subject='Hi', text='body', kind='t') == mailer.SEND_FAILED
         post.assert_not_called()
 
 
@@ -100,7 +101,7 @@ def test_mail_posts_to_eu_endpoint(monkeypatch):
             headers={'List-Unsubscribe': '<https://x>'},
             tags=['transcript_ready'],
             kind='transcript_ready',
-        ) is True
+        ) == mailer.SEND_SENT
     assert post.call_count == 1
     args, kwargs = post.call_args
     assert args[0] == 'https://api.eu.mailgun.net/v3/podskrift.com/messages'
@@ -123,7 +124,8 @@ def test_mail_domain_defaults_to_root(monkeypatch):
     assert mailer.mailgun_domain() == 'podskrift.com'
     fake = mock.Mock(status_code=200, text='ok')
     with mock.patch.object(mailer.requests, 'post', return_value=fake) as post:
-        assert mailer.send_email(to='a@b.com', subject='Hi', text='x', kind='t')
+        assert mailer.send_email(
+            to='a@b.com', subject='Hi', text='x', kind='t') == mailer.SEND_SENT
     assert post.call_args[0][0].endswith('/v3/podskrift.com/messages')
 
 
@@ -137,7 +139,7 @@ def test_mail_retries_5xx_then_succeeds(monkeypatch):
                 to='a@b.com', subject='Hi', text='x', kind='t',
                 max_attempts=3,
                 idempotency_key='stable-key-1',
-            ) is True
+            ) == mailer.SEND_SENT
     assert post.call_count == 2
     msg_ids = [
         dict(c.kwargs['data']).get('h:Message-Id') for c in post.call_args_list
@@ -155,7 +157,7 @@ def test_mail_does_not_retry_ambiguous_transport_errors(monkeypatch):
             assert mailer.send_email(
                 to='a@b.com', subject='Hi', text='x', kind='t',
                 max_attempts=3,
-            ) is False
+            ) == mailer.SEND_AMBIGUOUS
     assert post.call_count == 1
     sleep.assert_not_called()
 
@@ -168,10 +170,10 @@ def test_mail_4xx_warning_no_pii_sentry_once(monkeypatch, sentry_events, caplog)
         with mock.patch.object(mailer.requests, 'post', return_value=bad):
             assert mailer.send_email(
                 to='secret@pii.example', subject='Hi', text='x', kind='t',
-            ) is False
+            ) == mailer.SEND_FAILED
             assert mailer.send_email(
                 to='other@pii.example', subject='Hi', text='x', kind='t',
-            ) is False
+            ) == mailer.SEND_FAILED
     joined = ' '.join(r.getMessage() for r in caplog.records)
     assert 'secret@pii.example' not in joined
     assert 'other@pii.example' not in joined
@@ -189,10 +191,10 @@ def test_mail_sentry_once_per_kind(monkeypatch, sentry_events):
         with mock.patch.object(mailer.time, 'sleep'):
             assert mailer.send_email(
                 to='a@b.com', subject='Hi', text='x', kind='t',
-                max_attempts=2) is False
+                max_attempts=2) == mailer.SEND_FAILED
             assert mailer.send_email(
                 to='b@b.com', subject='Hi', text='x', kind='t',
-                max_attempts=2) is False
+                max_attempts=2) == mailer.SEND_FAILED
     kinds = [e.get('tags', {}).get('mail.kind') for e in sentry_events]
     assert kinds.count('http_500') == 1
 
@@ -798,7 +800,7 @@ def test_partial_preview_email_wording(monkeypatch):
 def test_changelog_hides_email_keeps_user_visible_first():
     entries = A.load_changelog_entries()
     ids = [e['id'] for e in entries]
-    assert ids[0] == 'unsubscribe-confirm-click'
+    assert 'resume-after-deploy' in ids  # order is owned by test_whats_new_page_renders_changelog_entries
     assert 'partial-preview-minutes-wording' in ids
     assert 'partial-trial-preview' in ids
     assert 'email-alerts-coming-soon' not in set(ids)
@@ -932,3 +934,112 @@ def test_transcript_ready_scheduled_off_worker_path(monkeypatch):
         A._schedule_transcript_ready_email('sched-task', uid)
         assert post.call_count == 1
     assert any(n and n.startswith('transcript-ready-') for n in started)
+
+
+# ---------------------------------------------------------------------------
+# Alert poller: baseline ordering + digest timeout claim keep
+# ---------------------------------------------------------------------------
+
+SAMPLE_FEED_OLDEST_FIRST = b"""<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>Oldest First Show</title>
+    <item>
+      <title>Episode 1</title>
+      <guid>guid-old-1</guid>
+      <pubDate>Sun, 01 Jan 2023 12:00:00 GMT</pubDate>
+      <enclosure url="https://cdn.example.com/1.mp3" type="audio/mpeg"/>
+    </item>
+    <item>
+      <title>Episode 2</title>
+      <guid>guid-old-2</guid>
+      <pubDate>Mon, 01 Jan 2024 12:00:00 GMT</pubDate>
+      <enclosure url="https://cdn.example.com/2.mp3" type="audio/mpeg"/>
+    </item>
+    <item>
+      <title>Episode 3</title>
+      <guid>guid-old-3</guid>
+      <pubDate>Tue, 01 Jan 2025 12:00:00 GMT</pubDate>
+      <enclosure url="https://cdn.example.com/3.mp3" type="audio/mpeg"/>
+    </item>
+  </channel>
+</rss>
+"""
+
+
+def test_baseline_from_episodes_uses_newest_publish_date():
+    """Oldest-first feeds must not watermark on items[0] (the oldest)."""
+    episodes = episode_alerts.parse_feed_episodes(SAMPLE_FEED_OLDEST_FIRST)
+    assert episodes[0]['guid'] == 'guid-old-1'
+    guid, ts = episode_alerts.baseline_from_episodes(episodes)
+    assert guid == 'guid-old-3'
+    assert ts == episodes[-1]['published_ts']
+
+
+def test_oldest_first_feed_baselines_without_flood(monkeypatch):
+    _enable_mail(monkeypatch)
+    _isolate_alert_feeds()
+    uid = _make_user('oldest-first@test.com')
+    with A.app.app_context():
+        A.db.session.add(A.SavedFeed(
+            user_id=uid, name='OF', rss_url='https://feeds.example.com/of.xml',
+            email_new_episodes=True,
+        ))
+        A.db.session.commit()
+
+    with mock.patch.object(mailer.requests, 'post') as post:
+        stats = episode_alerts.run_new_episode_poll(
+            app=A.app, db=A.db, User=A.User, SavedFeed=A.SavedFeed,
+            EmailSentLog=A.EmailSentLog,
+            fetch_feed=lambda url: SAMPLE_FEED_OLDEST_FIRST,
+            public_base_url='https://podskrift.com',
+            secret_key=A.app.secret_key,
+        )
+    assert stats['baselines_set'] == 1
+    assert stats['emails_sent'] == 0
+    post.assert_not_called()
+    with A.app.app_context():
+        feed = A.SavedFeed.query.filter_by(user_id=uid).one()
+        assert feed.alerts_initialized is True
+        assert feed.last_seen_episode_guid == 'guid-old-3'
+
+
+def test_digest_send_timeout_keeps_sent_log_claims(monkeypatch):
+    """Ambiguous Mailgun timeout must not release claims (no duplicate digest)."""
+    _enable_mail(monkeypatch)
+    _isolate_alert_feeds()
+    uid = _make_user('digest-timeout@test.com')
+    with A.app.app_context():
+        feed = A.SavedFeed(
+            user_id=uid, name='Demo', rss_url='https://feeds.example.com/to.xml',
+            email_new_episodes=True, alerts_initialized=True,
+            last_seen_episode_guid='guid-2',
+            last_seen_published_ts=1704110400.0,
+        )
+        A.db.session.add(feed)
+        A.db.session.commit()
+
+    with mock.patch.object(
+        mailer.requests, 'post',
+        side_effect=mailer.requests.Timeout('slow'),
+    ):
+        stats = episode_alerts.run_new_episode_poll(
+            app=A.app, db=A.db, User=A.User, SavedFeed=A.SavedFeed,
+            EmailSentLog=A.EmailSentLog,
+            fetch_feed=lambda url: SAMPLE_FEED_V2,
+            public_base_url='https://podskrift.com',
+            secret_key=A.app.secret_key,
+        )
+    assert stats['emails_sent'] == 0
+    with A.app.app_context():
+        claims = A.EmailSentLog.query.filter_by(user_id=uid).count()
+        assert claims >= 1, 'timeout must keep the sent-log claim'
+        # Second poll must not re-send / re-claim the same episode.
+        stats2 = episode_alerts.run_new_episode_poll(
+            app=A.app, db=A.db, User=A.User, SavedFeed=A.SavedFeed,
+            EmailSentLog=A.EmailSentLog,
+            fetch_feed=lambda url: SAMPLE_FEED_V2,
+            public_base_url='https://podskrift.com',
+            secret_key=A.app.secret_key,
+        )
+    assert stats2['emails_sent'] == 0
