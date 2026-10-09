@@ -8,6 +8,9 @@ actions in v1; all routes are GET.
 from __future__ import annotations
 
 import os
+import re
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
@@ -24,6 +27,29 @@ _DEFAULT_ADMIN_EMAILS = 'sindrefjelle@gmail.com'
 # Page sizes for dashboard tables.
 USERS_PAGE_SIZE = 25
 TASKS_PAGE_SIZE = 25
+
+# Stripe revenue panel (server-side only; never break /admin on failure).
+STRIPE_ADMIN_TIMEOUT_SEC = 8
+STRIPE_ADMIN_CACHE_TTL_SEC = 300
+STRIPE_ADMIN_BT_MAX = 5000
+STRIPE_ADMIN_PAYOUT_LIMIT = 20
+STRIPE_ADMIN_WEEKLY_WEEKS = 16
+# Balance-transaction types that count toward revenue (exclude payouts).
+_REVENUE_BT_TYPES = frozenset({
+    'charge', 'payment', 'payment_refund', 'refund', 'adjustment',
+    'stripe_fee', 'tax', 'tax_fee', 'application_fee', 'application_fee_refund',
+    'reserve_transaction', 'reserved_funds', 'fee',
+})
+_CHARGE_BT_TYPES = frozenset({'charge', 'payment'})
+_REFUND_BT_TYPES = frozenset({'refund', 'payment_refund'})
+_PERMISSION_RE = re.compile(
+    r"(?:Having the |requires the |missing (?:the )?)['\"]?([a-z0-9_.]+)['\"]?"
+    r"(?: permission)?",
+    re.IGNORECASE,
+)
+
+_stripe_revenue_cache = {'expires_at': 0.0, 'payload': None}
+_stripe_revenue_lock = threading.Lock()
 
 
 def admin_emails():
@@ -623,6 +649,495 @@ def user_detail(db, user_id, trial_default_seconds):
     }
 
 
+# ---------------------------------------------------------------------------
+# Stripe revenue & payouts (live mode via STRIPE_SECRET_KEY; cached ~5 min)
+# ---------------------------------------------------------------------------
+
+def _stripe_obj_get(obj, key, default=None):
+    """Read a field from a Stripe SDK object or plain dict."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _stripe_to_dict(obj):
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, 'to_dict'):
+        try:
+            return obj.to_dict()
+        except Exception:  # noqa: BLE001
+            pass
+    return {}
+
+
+def format_stripe_money(amount_cents, currency):
+    """Format Stripe's integer minor units for display (USD/EUR/… ÷ 100)."""
+    if amount_cents is None:
+        return '—'
+    cur = (currency or '').lower() or 'usd'
+    # Stripe zero-decimal currencies (subset we might see).
+    zero_decimal = {
+        'bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga', 'pyg', 'rwf',
+        'ugx', 'vnd', 'vuv', 'xaf', 'xof', 'xpf',
+    }
+    try:
+        n = int(amount_cents)
+    except (TypeError, ValueError):
+        return '—'
+    sign = '-' if n < 0 else ''
+    n = abs(n)
+    if cur in zero_decimal:
+        major = float(n)
+        decimals = 0
+    else:
+        major = n / 100.0
+        decimals = 2
+    symbol = {'usd': '$', 'eur': '€', 'gbp': '£', 'nok': 'kr '}.get(cur, cur.upper() + ' ')
+    if decimals == 0:
+        body = f'{major:,.0f}'
+    else:
+        body = f'{major:,.{decimals}f}'
+    if symbol.endswith(' '):
+        return f'{sign}{symbol}{body}'
+    return f'{sign}{symbol}{body}'
+
+
+def _format_oslo_unix(ts):
+    if ts is None:
+        return '—'
+    try:
+        dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return '—'
+    return format_oslo(dt, '%Y-%m-%d %H:%M')
+
+
+def _format_oslo_unix_date(ts):
+    if ts is None:
+        return '—'
+    try:
+        dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return '—'
+    return format_oslo(dt, '%Y-%m-%d')
+
+
+def describe_stripe_admin_error(exc):
+    """Human-readable Stripe failure for the admin panel (never includes secrets)."""
+    if exc is None:
+        return 'unknown error'
+    name = type(exc).__name__
+    msg = str(exc) or ''
+    # Strip anything that looks like a secret key fragment.
+    msg = re.sub(r'sk[_-](?:live|test)?[_-]?\w+', '[redacted]', msg)
+    msg = re.sub(r'rk[_-](?:live|test)?[_-]?\w+', '[redacted]', msg)
+
+    import app as app_module
+    stripe_mod = getattr(app_module, 'stripe', None)
+    perm_cls = getattr(stripe_mod, 'PermissionError', None) if stripe_mod else None
+    auth_cls = getattr(stripe_mod, 'AuthenticationError', None) if stripe_mod else None
+    conn_cls = getattr(stripe_mod, 'APIConnectionError', None) if stripe_mod else None
+
+    if perm_cls and isinstance(exc, perm_cls):
+        perms = _PERMISSION_RE.findall(msg)
+        # Prefer Stripe's rak_* / permission-looking tokens.
+        rak = [p for p in perms if 'rak_' in p or p.endswith('_read')
+               or p.endswith('_write') or 'permission' in p.lower()]
+        if not rak:
+            rak = [p for p in perms if p.startswith('rak_') or '_' in p]
+        if rak:
+            # Deduplicate, keep order.
+            seen = []
+            for p in rak:
+                if p not in seen:
+                    seen.append(p)
+            return (
+                'API key lacks permission: ' + ', '.join(seen)
+                + '. Grant balance/payouts/balance_transactions read on the '
+                'restricted key (or use a secret key with those scopes).'
+            )
+        return (
+            'API key lacks permission to read balance/payouts/'
+            'balance_transactions. ' + (msg[:200] if msg else '')
+        ).strip()
+    if auth_cls and isinstance(exc, auth_cls):
+        return 'Stripe authentication failed (invalid or revoked API key).'
+    if conn_cls and isinstance(exc, conn_cls):
+        return 'Stripe network error or timeout.'
+    if name == 'PermissionError' or 'permission' in msg.lower():
+        perms = _PERMISSION_RE.findall(msg)
+        if perms:
+            return 'API key lacks permission: ' + ', '.join(dict.fromkeys(perms))
+    short = msg.strip().split('\n')[0][:240] if msg else name
+    return f'{name}: {short}' if short and short != name else name
+
+
+def admin_stripe_client():
+    """Short-timeout StripeClient using app.STRIPE_SECRET_KEY. None if unset."""
+    import app as app_module
+    key = (getattr(app_module, 'STRIPE_SECRET_KEY', None) or '').strip()
+    stripe_mod = getattr(app_module, 'stripe', None)
+    if not key or stripe_mod is None:
+        return None
+    try:
+        from stripe._http_client import RequestsClient
+    except Exception:  # noqa: BLE001
+        RequestsClient = None
+    version = getattr(app_module, 'STRIPE_API_VERSION', None) or None
+    try:
+        kwargs = {'max_network_retries': 0}
+        if version:
+            kwargs['stripe_version'] = version
+        if RequestsClient is not None:
+            kwargs['http_client'] = RequestsClient(timeout=STRIPE_ADMIN_TIMEOUT_SEC)
+        return stripe_mod.StripeClient(key, **kwargs)
+    except TypeError:
+        # Fake StripeClient in tests may not accept http_client / retries.
+        try:
+            if version:
+                return stripe_mod.StripeClient(key, stripe_version=version)
+            return stripe_mod.StripeClient(key)
+        except Exception:  # noqa: BLE001
+            return None
+
+
+def clear_stripe_revenue_cache():
+    """Test helper: drop the in-process Stripe revenue cache."""
+    with _stripe_revenue_lock:
+        _stripe_revenue_cache['expires_at'] = 0.0
+        _stripe_revenue_cache['payload'] = None
+
+
+def _empty_money_bucket():
+    return {
+        'gross_charges': 0,
+        'stripe_fees': 0,
+        'refunds': 0,
+        'tax': 0,
+        'other_fee_details': 0,
+        'net': 0,
+    }
+
+
+def _accumulate_bt(bucket, bt):
+    """Fold one balance_transaction into a money bucket (minor units)."""
+    btype = (_stripe_obj_get(bt, 'type') or '').strip()
+    amount = int(_stripe_obj_get(bt, 'amount') or 0)
+    fee = int(_stripe_obj_get(bt, 'fee') or 0)
+    net = int(_stripe_obj_get(bt, 'net') or 0)
+
+    if btype in _CHARGE_BT_TYPES and amount > 0:
+        bucket['gross_charges'] += amount
+    if btype in _REFUND_BT_TYPES:
+        # Refunds are negative amounts; store as positive outflow for display.
+        bucket['refunds'] += abs(amount)
+
+    fee_details = _stripe_obj_get(bt, 'fee_details') or []
+    if fee_details:
+        for fd in fee_details:
+            fd_type = (_stripe_obj_get(fd, 'type') or '').strip()
+            fd_amt = int(_stripe_obj_get(fd, 'amount') or 0)
+            if fd_type == 'stripe_fee':
+                bucket['stripe_fees'] += fd_amt
+            elif fd_type == 'tax':
+                bucket['tax'] += fd_amt
+            elif fd_type:
+                bucket['other_fee_details'] += fd_amt
+    elif fee and btype in _CHARGE_BT_TYPES:
+        # No breakdown — attribute the fee line as Stripe reports it on the BT.
+        bucket['stripe_fees'] += fee
+
+    if btype == 'stripe_fee':
+        # Standalone fee rows: amount is typically negative.
+        bucket['stripe_fees'] += abs(amount)
+    if btype in ('tax', 'tax_fee'):
+        bucket['tax'] += abs(amount)
+
+    if btype in _REVENUE_BT_TYPES or btype in _CHARGE_BT_TYPES or btype in _REFUND_BT_TYPES:
+        bucket['net'] += net
+
+
+def _payout_destination_last4(payout):
+    dest = _stripe_obj_get(payout, 'destination')
+    if dest is None:
+        return None
+    if isinstance(dest, str):
+        # Unexpanded id — never echo full bank account ids into HTML.
+        return None
+    last4 = _stripe_obj_get(dest, 'last4')
+    if last4:
+        return str(last4)
+    # Nested external account dict
+    d = _stripe_to_dict(dest)
+    last4 = d.get('last4')
+    return str(last4) if last4 else None
+
+
+def _oslo_week_start(d):
+    """Monday date for the Oslo calendar week containing *d* (date or datetime)."""
+    if isinstance(d, datetime):
+        d = d.astimezone(ADMIN_TZ).date()
+    return d - timedelta(days=d.weekday())
+
+
+def fetch_stripe_revenue_uncached():
+    """Hit Stripe for balance, payouts, and balance_transactions. Never raises."""
+    client = admin_stripe_client()
+    if client is None:
+        return {
+            'ok': False,
+            'error': 'Stripe unavailable: STRIPE_SECRET_KEY not configured '
+                     '(or stripe package missing).',
+            'cached': False,
+            'fetched_at_oslo': format_oslo(datetime.now(timezone.utc)),
+        }
+
+    try:
+        balance = client.v1.balance.retrieve(
+            options={'max_network_retries': 0},
+        )
+    except TypeError:
+        try:
+            balance = client.v1.balance.retrieve()
+        except Exception as exc:  # noqa: BLE001
+            return {
+                'ok': False,
+                'error': 'Stripe unavailable: ' + describe_stripe_admin_error(exc),
+                'cached': False,
+                'fetched_at_oslo': format_oslo(datetime.now(timezone.utc)),
+            }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            'ok': False,
+            'error': 'Stripe unavailable: ' + describe_stripe_admin_error(exc),
+            'cached': False,
+            'fetched_at_oslo': format_oslo(datetime.now(timezone.utc)),
+        }
+
+    try:
+        try:
+            payout_list = client.v1.payouts.list(
+                params={
+                    'limit': STRIPE_ADMIN_PAYOUT_LIMIT,
+                    'expand': ['data.destination'],
+                },
+                options={'max_network_retries': 0},
+            )
+        except TypeError:
+            payout_list = client.v1.payouts.list(
+                params={
+                    'limit': STRIPE_ADMIN_PAYOUT_LIMIT,
+                    'expand': ['data.destination'],
+                },
+            )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            'ok': False,
+            'error': 'Stripe unavailable: ' + describe_stripe_admin_error(exc),
+            'cached': False,
+            'fetched_at_oslo': format_oslo(datetime.now(timezone.utc)),
+            'partial': 'balance',
+        }
+
+    # Balance transactions — paginate once; bucket into 7d / 30d / all.
+    now = datetime.now(timezone.utc)
+    cutoff_7d = int((now - timedelta(days=7)).timestamp())
+    cutoff_30d = int((now - timedelta(days=30)).timestamp())
+    week_labels = []
+    now_oslo = datetime.now(ADMIN_TZ)
+    this_monday = _oslo_week_start(now_oslo.date())
+    for i in range(STRIPE_ADMIN_WEEKLY_WEEKS - 1, -1, -1):
+        week_labels.append((this_monday - timedelta(weeks=i)).isoformat())
+
+    summaries = {
+        '7d': {},
+        '30d': {},
+        'all': {},
+    }
+    weekly_by_currency = {}  # currency -> {week_label: net}
+    bt_count = 0
+    bt_truncated = False
+
+    try:
+        try:
+            bt_page = client.v1.balance_transactions.list(
+                params={'limit': 100},
+                options={'max_network_retries': 0},
+            )
+        except TypeError:
+            bt_page = client.v1.balance_transactions.list(params={'limit': 100})
+
+        def _iter_bts(page):
+            if hasattr(page, 'auto_paging_iter'):
+                yield from page.auto_paging_iter()
+                return
+            data = _stripe_obj_get(page, 'data') or []
+            for item in data:
+                yield item
+
+        for bt in _iter_bts(bt_page):
+            bt_count += 1
+            if bt_count > STRIPE_ADMIN_BT_MAX:
+                bt_truncated = True
+                break
+            currency = (_stripe_obj_get(bt, 'currency') or 'usd').lower()
+            created = int(_stripe_obj_get(bt, 'created') or 0)
+            btype = (_stripe_obj_get(bt, 'type') or '').strip()
+            net = int(_stripe_obj_get(bt, 'net') or 0)
+
+            for window, cutoff in (('all', 0), ('30d', cutoff_30d), ('7d', cutoff_7d)):
+                if window != 'all' and created < cutoff:
+                    continue
+                bucket = summaries[window].setdefault(currency, _empty_money_bucket())
+                _accumulate_bt(bucket, bt)
+
+            if btype in _REVENUE_BT_TYPES or btype in _CHARGE_BT_TYPES or btype in _REFUND_BT_TYPES:
+                try:
+                    local = datetime.fromtimestamp(created, tz=timezone.utc).astimezone(ADMIN_TZ)
+                    wlabel = _oslo_week_start(local.date()).isoformat()
+                except (TypeError, ValueError, OSError):
+                    wlabel = None
+                if wlabel and wlabel in week_labels:
+                    weekly_by_currency.setdefault(currency, {})
+                    weekly_by_currency[currency][wlabel] = (
+                        weekly_by_currency[currency].get(wlabel, 0) + net
+                    )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            'ok': False,
+            'error': 'Stripe unavailable: ' + describe_stripe_admin_error(exc),
+            'cached': False,
+            'fetched_at_oslo': format_oslo(datetime.now(timezone.utc)),
+            'partial': 'balance_payouts',
+        }
+
+    # Prefer the currency with the most gross (usually usd for Podskrift).
+    primary = 'usd'
+    all_map = summaries['all']
+    if all_map:
+        primary = max(all_map.keys(), key=lambda c: all_map[c]['gross_charges'])
+    elif _stripe_obj_get(balance, 'available'):
+        avail = _stripe_obj_get(balance, 'available') or []
+        if avail:
+            primary = (_stripe_obj_get(avail[0], 'currency') or 'usd').lower()
+
+    def _money_rows(window):
+        rows = []
+        for cur, b in sorted(summaries[window].items()):
+            rows.append({
+                'currency': cur,
+                'gross_charges': b['gross_charges'],
+                'gross_charges_fmt': format_stripe_money(b['gross_charges'], cur),
+                'stripe_fees': b['stripe_fees'],
+                'stripe_fees_fmt': format_stripe_money(b['stripe_fees'], cur),
+                'refunds': b['refunds'],
+                'refunds_fmt': format_stripe_money(b['refunds'], cur),
+                'tax': b['tax'],
+                'tax_fmt': format_stripe_money(b['tax'], cur),
+                'other_fee_details': b['other_fee_details'],
+                'other_fee_details_fmt': format_stripe_money(
+                    b['other_fee_details'], cur),
+                'net': b['net'],
+                'net_fmt': format_stripe_money(b['net'], cur),
+                'has_tax': b['tax'] != 0,
+                'has_other_fees': b['other_fee_details'] != 0,
+            })
+        return rows
+
+    available = []
+    for entry in (_stripe_obj_get(balance, 'available') or []):
+        cur = (_stripe_obj_get(entry, 'currency') or '').lower()
+        amt = int(_stripe_obj_get(entry, 'amount') or 0)
+        available.append({
+            'currency': cur,
+            'amount': amt,
+            'amount_fmt': format_stripe_money(amt, cur),
+        })
+    pending = []
+    for entry in (_stripe_obj_get(balance, 'pending') or []):
+        cur = (_stripe_obj_get(entry, 'currency') or '').lower()
+        amt = int(_stripe_obj_get(entry, 'amount') or 0)
+        pending.append({
+            'currency': cur,
+            'amount': amt,
+            'amount_fmt': format_stripe_money(amt, cur),
+        })
+
+    payouts = []
+    for p in (_stripe_obj_get(payout_list, 'data') or []):
+        status = (_stripe_obj_get(p, 'status') or '').strip()
+        cur = (_stripe_obj_get(p, 'currency') or '').lower()
+        amt = int(_stripe_obj_get(p, 'amount') or 0)
+        highlight = status in ('pending', 'in_transit')
+        payouts.append({
+            'id': _stripe_obj_get(p, 'id') or '',
+            'amount': amt,
+            'amount_fmt': format_stripe_money(amt, cur),
+            'currency': cur,
+            'status': status or '—',
+            'created_oslo': _format_oslo_unix(_stripe_obj_get(p, 'created')),
+            'arrival_oslo': _format_oslo_unix_date(_stripe_obj_get(p, 'arrival_date')),
+            'destination_last4': _payout_destination_last4(p),
+            'highlight': highlight,
+        })
+
+    weekly_map = weekly_by_currency.get(primary, {})
+    weekly = {
+        'currency': primary,
+        'labels': week_labels,
+        'values_cents': [int(weekly_map.get(lab, 0)) for lab in week_labels],
+        'values': [
+            round(int(weekly_map.get(lab, 0)) / 100.0, 2) for lab in week_labels
+        ],
+    }
+
+    livemode = bool(_stripe_obj_get(balance, 'livemode'))
+    return {
+        'ok': True,
+        'error': None,
+        'cached': False,
+        'livemode': livemode,
+        'fetched_at_oslo': format_oslo(datetime.now(timezone.utc)),
+        'balance': {'available': available, 'pending': pending},
+        'payouts': payouts,
+        'summaries': {
+            '7d': _money_rows('7d'),
+            '30d': _money_rows('30d'),
+            'all': _money_rows('all'),
+        },
+        'weekly_net': weekly,
+        'bt_count': bt_count if not bt_truncated else STRIPE_ADMIN_BT_MAX,
+        'bt_truncated': bt_truncated,
+        'primary_currency': primary,
+    }
+
+
+def collect_stripe_revenue(force_refresh=False):
+    """Cached Stripe revenue payload for the admin dashboard."""
+    now = time.monotonic()
+    with _stripe_revenue_lock:
+        cached = _stripe_revenue_cache.get('payload')
+        expires = float(_stripe_revenue_cache.get('expires_at') or 0)
+        if not force_refresh and cached is not None and now < expires:
+            out = dict(cached)
+            out['cached'] = True
+            return out
+
+    payload = fetch_stripe_revenue_uncached()
+    # Cache successes and soft failures alike so a bad key cannot hammer Stripe.
+    with _stripe_revenue_lock:
+        _stripe_revenue_cache['payload'] = payload
+        _stripe_revenue_cache['expires_at'] = time.monotonic() + STRIPE_ADMIN_CACHE_TTL_SEC
+    out = dict(payload)
+    out['cached'] = False
+    return out
+
+
 @admin_bp.before_request
 def _admin_gate():
     """Every /admin/* path 404s unless the session user is allowlisted."""
@@ -667,6 +1182,18 @@ def dashboard():
         db,
         page=request.args.get('tasks_page', 1),
     )
+    # Stripe is best-effort: failures become an error box, never a 500.
+    try:
+        stripe_revenue = collect_stripe_revenue()
+    except Exception as exc:  # noqa: BLE001
+        current_app.logger.exception('admin Stripe revenue panel failed')
+        stripe_revenue = {
+            'ok': False,
+            'error': 'Stripe unavailable: unexpected error ('
+                     + type(exc).__name__ + ')',
+            'cached': False,
+            'fetched_at_oslo': format_oslo(datetime.now(timezone.utc)),
+        }
     return render_template(
         'admin/dashboard.html',
         kpis=kpis,
@@ -674,6 +1201,7 @@ def dashboard():
         users_table=users,
         tasks_table=tasks,
         trial_default_minutes=trial_default // 60,
+        stripe_revenue=stripe_revenue,
     )
 
 

@@ -5,13 +5,13 @@
 {% set listen_event = listen_analytics_event or 'shared_listen_clicked' %}
 <style>
     .listen-block {
-        margin: 0 0 16px; padding: 14px 14px 12px;
-        border: 1px solid var(--border); border-radius: var(--radius);
+        margin: 0 0 16px; padding: 16px;
+        border: 1px solid var(--line); border-radius: var(--radius);
         background: var(--surface);
     }
     .listen-block h2 {
         font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
-        margin: 0 0 10px;
+        margin: 0 0 12px;
     }
     .listen-list {
         list-style: none; margin: 0; padding: 0;
@@ -19,14 +19,14 @@
     }
     .listen-list a.listen-link {
         display: flex; align-items: center; gap: 10px;
-        padding: 10px 12px; border-radius: var(--radius-sm);
-        border: 1px solid var(--border); background: var(--bg);
-        color: var(--text); text-decoration: none; font-size: 14px;
-        font-weight: 600; line-height: 1.3;
+        min-height: 44px; padding: 0 14px; border-radius: var(--radius);
+        border: 1px solid var(--line-strong); background: var(--paper);
+        color: var(--ink); text-decoration: none; font-size: 15px;
+        font-weight: 700; line-height: 1.3;
         transition: border-color var(--transition), background var(--transition);
     }
     .listen-list a.listen-link:hover {
-        border-color: var(--accent-border); background: var(--accent-bg);
+        background: var(--surface-hover);
     }
     .listen-icon {
         width: 22px; height: 22px; flex-shrink: 0; color: var(--muted);
@@ -34,9 +34,6 @@
     .listen-audio {
         margin-top: 4px; width: 100%;
         max-height: 40px;
-    }
-    @media (max-width: 560px) {
-        .listen-list a.listen-link { font-size: 13.5px; }
     }
 </style>
 <section class="listen-block" aria-label="Listen to this episode">

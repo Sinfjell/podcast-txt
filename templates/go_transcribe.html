@@ -2,14 +2,14 @@
 {% block title %}Transcribe — {{ episode_title }} — Podskrift{% endblock %}
 
 {% block content %}
-<div style="max-width: 520px; margin: 32px auto;">
-    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 8px;">
+<div style="max-width: 68ch; margin: 32px auto; font-size: 17px; line-height: 1.55;">
+    <h1 style="font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em; line-height: 1.05; margin-bottom: 12px;">
         Transcribe this episode
     </h1>
     {% if podcast_name %}
-    <p style="color: var(--muted); font-size: 14px; margin-bottom: 8px;">{{ podcast_name }}</p>
+    <p style="color: var(--muted); font-size: 15px; margin-bottom: 8px;">{{ podcast_name }}</p>
     {% endif %}
-    <p style="font-size: 17px; margin-bottom: 24px;">{{ episode_title }}</p>
+    <p style="font-size: 17px; font-weight: 700; margin-bottom: 24px; overflow-wrap: anywhere;">{{ episode_title }}</p>
 
     <form method="POST" action="{{ url_for('start_transcription') }}" id="goTranscribeForm">
         <input type="hidden" name="audio_url" value="{{ audio_url }}">

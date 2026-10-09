@@ -4,36 +4,96 @@
 {% block meta_description %}Paste a Spotify episode link or search any podcast, and get the full transcript as text and .srt. {{ language_count }} languages, powered by OpenAI Whisper.{% if trial_minutes %} First {{ trial_minutes }} minutes free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.{% endif %}{% endblock %}
 {% block og_title %}Spotify & podcast transcripts — Podskrift{% endblock %}
 {% block og_description %}Paste a Spotify link or search any podcast — get the full transcript.{% if trial_minutes %} First {{ trial_minutes }} minutes free.{% endif %}{% endblock %}
+{% block container_class %}container-wide{% endblock %}
+
+{% block head_links %}
+<style>
+    /* Home page. Sound bars turn into lines of text (DESIGN.md, Motion / Texture). */
+    .hp-hero { display: flex; flex-wrap: wrap; gap: 48px; align-items: flex-start; padding: 24px 0 72px; }
+    .hp-main { flex: 1 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 24px; }
+    .hp-title { font-size: clamp(40px, 6vw, 64px); font-weight: 800; letter-spacing: -0.035em; line-height: 1.02; }
+    .hp-sub { font-size: 19px; line-height: 1.5; color: var(--muted); max-width: 520px; }
+    .hp-price-line { font-size: 15px; font-weight: 600; line-height: 1.4; color: var(--ink); margin-top: -4px; font-variant-numeric: tabular-nums; }
+    .hp-note { font-size: 14px; line-height: 1.5; color: var(--muted); max-width: 520px; margin-top: -8px; }
+    .hp-search-title { font-size: 17px; font-weight: 700; letter-spacing: 0; line-height: 1.3; margin-bottom: 8px; }
+    .hp-search .tabs { margin-bottom: 12px; }
+    .hp-row { display: flex; flex-wrap: wrap; gap: 12px; }
+    .hp-row .form-input { flex: 1 1 260px; min-width: 0; width: auto; }
+    .hp-row .btn { flex: 0 0 auto; }
+    .hp-rss { border-top: 1px solid var(--line); padding-top: 24px; }
+
+    .hp-sample { flex: 1 1 400px; min-width: 0; background: var(--surface); border-radius: var(--radius);
+                 padding: 24px; display: flex; flex-direction: column; gap: 20px; }
+    .hp-sample svg { width: 100%; height: auto; }
+    .hp-line { display: flex; gap: 16px; }
+    .hp-line .timestamp { flex: none; width: 48px; padding-top: 5px; }
+    .hp-line p { font-family: var(--font-serif); font-size: 20px; line-height: 1.55; }
+    .hp-sample-note { font-size: 14px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 16px; }
+
+    .hp-section { border-top: 1px solid var(--line); padding: 72px 0; display: flex; flex-direction: column; gap: 32px; }
+    .hp-section h2 { font-size: 24px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.2; }
+    .hp-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 32px; }
+    .hp-step { display: flex; flex-direction: column; gap: 8px; border-top: 3px solid var(--ink); padding-top: 16px; }
+    .hp-step h3 { font-size: 19px; }
+    .hp-step p { font-size: 15px; color: var(--muted); }
+
+    .hp-plans { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+    .hp-plan { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 24px;
+               background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); }
+    .hp-plan-pack { border-color: var(--line-strong); }
+    .hp-plan-label { font-size: 14px; font-weight: 700; color: var(--muted); }
+    .hp-plan-figure { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.15; }
+    .hp-plan p { font-size: 15px; color: var(--muted); }
+    .hp-plan form, .hp-plan .btn { margin-top: 8px; }
+    .hp-cta { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; }
+    .hp-cta p { flex: 1 1 320px; font-size: 15px; color: var(--muted); }
+    .hp-cta-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+
+    .hp-faq { max-width: 760px; margin: 0 auto; width: 100%; }
+    .hp-faq details { border-top: 1px solid var(--line); }
+    .hp-faq details:last-child { border-bottom: 1px solid var(--line); }
+    .hp-faq summary { cursor: pointer; display: flex; align-items: center; min-height: 52px; padding: 4px 0;
+                      font-size: 17px; font-weight: 700; }
+    .hp-faq details p { margin: 0 0 16px; color: var(--muted); }
+
+    .hp-wave rect { transform-box: fill-box; transform-origin: center; animation: hp-bar 1.1s ease-in-out infinite alternate; }
+    .hp-wave rect:nth-child(3n) { animation-delay: -.35s; }
+    .hp-wave rect:nth-child(3n+1) { animation-delay: -.7s; }
+    .hp-wave rect:nth-child(4n) { animation-duration: .8s; }
+    .hp-lines rect { transform-box: fill-box; transform-origin: left center; animation: hp-line 5s ease-out infinite backwards; }
+    .hp-lines rect:nth-child(2) { animation-delay: .45s; }
+    .hp-lines rect:nth-child(3) { animation-delay: .9s; }
+    .hp-say { animation: hp-say .6s ease-out .6s backwards; }
+    .hp-say2 { animation-delay: 1.5s; }
+    @keyframes hp-bar { from { transform: scaleY(.35); } to { transform: scaleY(1); } }
+    @keyframes hp-line {
+        0% { transform: scaleX(0); opacity: 1; }
+        30% { transform: scaleX(1); opacity: 1; }
+        88% { transform: scaleX(1); opacity: 1; }
+        100% { transform: scaleX(1); opacity: 0; }
+    }
+    @keyframes hp-say { from { opacity: 0; transform: translateY(6px); } }
+    @media (prefers-reduced-motion: reduce) {
+        .hp-wave rect, .hp-lines rect, .hp-say { animation: none; }
+    }
+    @media (max-width: 640px) {
+        .hp-hero { gap: 32px; padding-bottom: 48px; }
+        .hp-section { padding: 48px 0; }
+    }
+</style>
+{% endblock %}
 
 {% block content %}
-<!-- Hero -->
-<div style="margin-bottom: 32px;">
-    <h1 style="font-size: clamp(28px, 5vw, 40px); font-weight: 700; letter-spacing: -0.04em; line-height: 1.15;">
-        Get the transcript of any podcast episode
-        <span style="color: var(--accent-bright);">— even on Spotify</span>
-    </h1>
-    <p style="color: var(--muted); font-size: 16px; margin-top: 10px; max-width: 520px; line-height: 1.6;">
-        Paste a Spotify episode link, or search by podcast name. You get the full text and an .srt file in a few minutes.
-    </p>
-    {# Signup-trial marketing — anonymous only. Logged-in users have their own
-       grant (often 180 for legacy accounts) and a balance banner below. #}
-    {% if trial_minutes and not current_user.is_authenticated %}
-    <p style="color: var(--muted); font-size: 14px; margin-top: 6px; max-width: 520px; line-height: 1.5;">
-        First {{ trial_minutes }} minutes of audio free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} — longer episodes get that as a free preview. No card, no OpenAI key needed to start.
-    </p>
-    {% endif %}
-</div>
-
 {% if trial and not trial.on_own_key %}
 {% if first_run and not trial.exhausted and not trial.low_balance %}
-<div class="alert alert-info" style="margin-bottom: 16px;">
+<div class="alert alert-info">
     <span>
         Your <strong>{{ trial.remaining_minutes }} free minutes</strong> are ready.
         Start your first transcript below — no card needed.
     </span>
 </div>
 {% else %}
-<div class="alert alert-{% if trial.exhausted %}warning{% elif trial.low_balance %}warning{% else %}info{% endif %}" style="margin-bottom: 16px;">
+<div class="alert alert-{% if trial.exhausted %}warning{% elif trial.low_balance %}warning{% else %}info{% endif %}">
     {# One span, not loose inline nodes: .alert is display:flex, so each text
        node and link became its own unwrappable flex item and the sentence
        rendered as broken columns on a narrow screen. #}
@@ -60,7 +120,7 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="source" value="home_banner">
             <input type="hidden" name="ph_sid" value="">
-            <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
+            <button type="submit" class="btn btn-sm btn-secondary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
         </form>
         <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
         or
@@ -74,7 +134,7 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="source" value="home_low_balance">
             <input type="hidden" name="ph_sid" value="">
-            <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">Buy minutes</button>
+            <button type="submit" class="btn btn-sm btn-secondary" style="margin: 0 6px;">Buy minutes</button>
         </form>
         <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
         or
@@ -90,7 +150,7 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="source" value="home_banner">
             <input type="hidden" name="ph_sid" value="">
-            <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
+            <button type="submit" class="btn btn-sm btn-secondary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
         </form>
         <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
         or
@@ -103,115 +163,203 @@
 {% endif %}
 {% endif %}
 
-{% if first_run and current_user.is_authenticated %}
-<div style="margin-bottom: 16px;">
-    <h2 style="font-size: 20px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 4px;">
-        Start your first transcript
-    </h2>
-    <p class="text-muted text-sm">Paste a Spotify link or search a show — your episode starts in one click.</p>
-</div>
-{% endif %}
+<!-- Hero -->
+<section class="hp-hero">
+    <div class="hp-main">
+        <h1 class="hp-title">Get the transcript of any podcast episode — even on Spotify</h1>
+        {% if not current_user.is_authenticated %}
+        <p class="hp-price-line" data-testid="hero-price-line">{% if trial_minutes %}{{ trial_minutes }} min free · then {% endif %}${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min</p>
+        {% endif %}
+        <p class="hp-sub">
+            Paste a Spotify episode link, or search by podcast name. You get the full text and an .srt file in a few minutes.
+        </p>
+        {# Signup-trial marketing — anonymous only. Logged-in users have their own
+           grant (often 180 for legacy accounts) and a balance banner above. #}
+        {% if trial_minutes and not current_user.is_authenticated %}
+        <p class="hp-note">
+            First {{ trial_minutes }} minutes of audio free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} — longer episodes get that as a free preview. No card, no OpenAI key needed to start.
+        </p>
+        {% endif %}
+
+        {% if first_run and current_user.is_authenticated %}
+        <div>
+            <h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.015em; margin-bottom: 4px;">
+                Start your first transcript
+            </h2>
+            <p class="text-muted text-sm">Paste a Spotify link or search a show — your episode starts in one click.</p>
+        </div>
+        {% endif %}
+
+        <!-- Search -->
+        <div class="hp-search">
+            <h2 class="hp-search-title">Paste a Spotify link or search a podcast</h2>
+            <div class="tabs" id="searchTabs">
+                <button type="button" class="tab active" data-type="show" aria-pressed="true">Podcasts</button>
+                <button type="button" class="tab" data-type="episode" aria-pressed="false">Episodes</button>
+            </div>
+            <div class="hp-row">
+                <input type="text" class="form-input form-input-lg" id="podcastSearch"
+                       aria-label="Spotify episode link or podcast name" aria-describedby="searchHint"
+                       enterkeyhint="search"
+                       placeholder="Spotify link or podcast name" autocomplete="off"
+                       {% if first_run and current_user.is_authenticated %}autofocus{% endif %}>
+                <button class="btn btn-primary btn-lg" type="button" id="searchBtn">Search</button>
+            </div>
+            <p class="form-hint" id="searchHint">
+                Works with open.spotify.com/episode/… links and any public podcast. Spotify-exclusive shows can't be transcribed.
+            </p>
+            <div id="episodeLangRow" class="hidden" style="margin-top: 12px;">
+                <label class="form-label" for="searchLanguage">Spoken language</label>
+                <select class="form-input" id="searchLanguage" style="max-width: 220px;">
+                    {% for code, label in languages %}
+                    <option value="{{ code }}">{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div id="searchResults"></div>
+            {# Anonymous: advertised new-signup grant. Logged-in trial users: their
+               own limit (+ remaining) so a 180-min legacy account is never told
+               "60 in total" next to a correct balance banner. Own-key users: hide. #}
+            {% if current_user.is_authenticated and trial and not trial.on_own_key %}
+            <p class="form-hint" style="margin-top: 12px;">
+                The free trial covers {{ trial.limit_minutes }} minutes of audio in total{% if trial.limit_minutes >= 120 %} (about {{ trial.limit_minutes // 60 }} hours){% endif %}{% if not trial.exhausted %} — {{ trial.remaining_minutes }} left{% endif %}.
+                Longer episodes get a free preview of your remaining minutes; buy a pack or add your own key to finish.
+                {% if stripe_buy_enabled %}
+                One-time pack: ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (VAT included).
+                A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
+                {% else %}
+                A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
+                {% endif %}
+                <a href="{{ url_for('pricing') }}">See pricing</a>.
+            </p>
+            {% elif trial_minutes and not current_user.is_authenticated %}
+            <p class="form-hint" style="margin-top: 12px;">
+                The free trial covers {{ trial_minutes }} minutes of audio in total{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.
+                Longer episodes still start free — you get the first {{ trial_minutes }} minutes, then buy minutes or add your own key to finish.
+                {% if stripe_buy_enabled %}
+                One-time pack: ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (VAT included).
+                A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
+                {% else %}
+                A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
+                {% endif %}
+                <a href="{{ url_for('pricing') }}">See pricing</a>.
+            </p>
+            {% endif %}
+        </div>
+
+        <!-- RSS URL -->
+        <div class="hp-rss">
+            <h2 class="hp-search-title"><label for="rss_url">Or paste an RSS feed URL</label></h2>
+            <form method="POST" action="{{ url_for('parse_rss') }}">
+                <div class="hp-row">
+                    <input type="url" class="form-input" id="rss_url" name="rss_url"
+                           aria-label="Podcast RSS feed URL" enterkeyhint="go"
+                           placeholder="https://feeds.example.com/podcast/rss" required>
+                    <button type="submit" class="btn btn-secondary">Get Episodes</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="hp-sample" aria-label="Example transcript">
+        <svg viewBox="0 0 520 48" role="img" aria-label="Sound wave turning into lines of text"><g class="hp-wave" fill="var(--ink)"><rect x="0" y="20" width="4" height="8" rx="2"/><rect x="10" y="17" width="4" height="14" rx="2"/><rect x="20" y="13" width="4" height="22" rx="2"/><rect x="30" y="7" width="4" height="34" rx="2"/><rect x="40" y="15" width="4" height="18" rx="2"/><rect x="50" y="10" width="4" height="28" rx="2"/><rect x="60" y="4" width="4" height="40" rx="2"/><rect x="70" y="12" width="4" height="24" rx="2"/><rect x="80" y="18" width="4" height="12" rx="2"/><rect x="90" y="9" width="4" height="30" rx="2"/><rect x="100" y="2" width="4" height="44" rx="2"/><rect x="110" y="11" width="4" height="26" rx="2"/><rect x="120" y="16" width="4" height="16" rx="2"/><rect x="130" y="6" width="4" height="36" rx="2"/><rect x="140" y="13" width="4" height="22" rx="2"/><rect x="150" y="19" width="4" height="10" rx="2"/><rect x="160" y="10" width="4" height="28" rx="2"/><rect x="170" y="5" width="4" height="38" rx="2"/><rect x="180" y="14" width="4" height="20" rx="2"/><rect x="190" y="17" width="4" height="14" rx="2"/><rect x="200" y="12" width="4" height="24" rx="2"/><rect x="210" y="18" width="4" height="12" rx="2"/><rect x="220" y="20" width="4" height="8" rx="2"/><rect x="230" y="21" width="4" height="6" rx="2"/></g><g class="hp-lines" fill="var(--accent)"><rect x="256" y="8" width="264" height="4" rx="2"/><rect x="256" y="22" width="264" height="4" rx="2"/><rect x="256" y="36" width="168" height="4" rx="2"/></g></svg>
+        <div class="hp-line hp-say"><span class="timestamp">00:14</span><p>Welcome back. Today we are talking about why a written version of a conversation is often more useful than the recording.</p></div>
+        <div class="hp-line hp-say hp-say2"><span class="timestamp">00:31</span><p>You can search it, quote it and skim it. None of that works with audio.</p></div>
+        <p class="hp-sample-note">Download as .txt or as .srt subtitles with timestamps.</p>
+    </div>
+</section>
 
 <!-- Saved feeds quick access -->
 {% if current_user.is_authenticated and saved_feeds %}
-<div class="card" style="margin-bottom: 16px;">
+<div class="card" style="margin-bottom: 48px;">
     <div class="card-header">
         <h2>Saved Feeds</h2>
-        <a href="{{ url_for('feeds') }}" class="btn btn-sm btn-ghost">Manage</a>
+        <a href="{{ url_for('feeds') }}" class="btn btn-sm btn-secondary">Manage</a>
     </div>
     {% for feed in saved_feeds %}
-    <a href="{{ url_for('use_feed', feed_id=feed.id) }}" class="list-item" style="text-decoration: none; color: var(--text);">
+    <a href="{{ url_for('use_feed', feed_id=feed.id) }}" class="list-item" style="text-decoration: none; color: var(--ink);">
         <div class="list-item-text">
             <div class="list-item-title">{{ feed.name }}</div>
         </div>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--muted);"><polyline points="9 18 15 12 9 6"/></svg>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--muted);" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
     </a>
     {% endfor %}
 </div>
 {% endif %}
 
-<!-- Search -->
-<div class="card">
-    <div class="card-header">
-        <h2>Paste a Spotify link or search a podcast</h2>
+<section class="hp-section" aria-labelledby="howHeading">
+    <h2 id="howHeading">How it works</h2>
+    <div class="hp-steps">
+        <div class="hp-step">
+            <h3>Search</h3>
+            <p>Paste a Spotify episode link — or search by podcast name.</p>
+        </div>
+        <div class="hp-step">
+            <h3>Transcribe</h3>
+            <p>
+                {% if trial_minutes %}
+                Create a free account and press Transcribe. Your first {{ trial_minutes }} minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} run on our key — including a free preview of longer episodes.
+                {% else %}
+                Create a free account, add your OpenAI key, and press Transcribe.
+                {% endif %}
+            </p>
+        </div>
+        <div class="hp-step">
+            <h3>Watch it run</h3>
+            <p>It keeps running if you close the page.</p>
+        </div>
+        <div class="hp-step">
+            <h3>Download</h3>
+            <p>Read, copy or download the transcript (.txt or .srt).</p>
+        </div>
     </div>
-    <div class="card-body">
-        <div class="tabs" id="searchTabs">
-            <button type="button" class="tab active" data-type="show">Podcasts</button>
-            <button type="button" class="tab" data-type="episode">Episodes</button>
-        </div>
-        <div class="input-group">
-            <input type="text" class="form-input form-input-lg" id="podcastSearch"
-                   aria-label="Spotify episode link or podcast name" aria-describedby="searchHint"
-                   enterkeyhint="search"
-                   placeholder="https://open.spotify.com/episode/…  or  podcast name" autocomplete="off"
-                   {% if first_run and current_user.is_authenticated %}autofocus{% endif %}>
-            <button class="btn btn-primary" type="button" id="searchBtn">Search</button>
-        </div>
-        <p class="form-hint" id="searchHint">
-            Works with open.spotify.com/episode/… links and any public podcast. Spotify-exclusive shows can't be transcribed.
-        </p>
-        <div id="episodeLangRow" class="hidden" style="margin-top: 12px;">
-            <label class="form-label" for="searchLanguage">Spoken language</label>
-            <select class="form-input" id="searchLanguage" style="max-width: 220px;">
-                {% for code, label in languages %}
-                <option value="{{ code }}">{{ label }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div id="searchResults"></div>
-        {# Anonymous: advertised new-signup grant. Logged-in trial users: their
-           own limit (+ remaining) so a 180-min legacy account is never told
-           "60 in total" next to a correct balance banner. Own-key users: hide. #}
-        {% if current_user.is_authenticated and trial and not trial.on_own_key %}
-        <p class="form-hint" style="margin-top: 12px;">
-            The free trial covers {{ trial.limit_minutes }} minutes of audio in total{% if trial.limit_minutes >= 120 %} (about {{ trial.limit_minutes // 60 }} hours){% endif %}{% if not trial.exhausted %} — {{ trial.remaining_minutes }} left{% endif %}.
-            Longer episodes get a free preview of your remaining minutes; buy a pack or add your own key to finish.
-            {% if stripe_buy_enabled %}
-            One-time pack: ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (VAT included).
-            A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
-            {% else %}
-            A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
-            {% endif %}
-            <a href="{{ url_for('pricing') }}">See pricing</a>.
-        </p>
-        {% elif trial_minutes and not current_user.is_authenticated %}
-        <p class="form-hint" style="margin-top: 12px;">
-            The free trial covers {{ trial_minutes }} minutes of audio in total{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.
-            Longer episodes still start free — you get the first {{ trial_minutes }} minutes, then buy minutes or add your own key to finish.
-            {% if stripe_buy_enabled %}
-            One-time pack: ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (VAT included).
-            A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
-            {% else %}
-            A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
-            {% endif %}
-            <a href="{{ url_for('pricing') }}">See pricing</a>.
-        </p>
-        {% endif %}
-    </div>
-</div>
+</section>
 
-<!-- RSS URL -->
-<div class="card">
-    <div class="card-header">
-        <h2>Or paste an RSS feed URL</h2>
+{# Three ways to use it. The trial card follows the conditions the page already
+   used: anonymous visitors see the advertised grant; logged-in users only see it
+   while their own trial is neither used up nor replaced by their own key. #}
+{% set show_trial_card = (trial_minutes and not current_user.is_authenticated)
+    or (current_user.is_authenticated and trial and not trial.on_own_key and not trial.exhausted) %}
+<section class="hp-section" id="pricing" aria-labelledby="pricingHeading">
+    <div>
+        <h2 id="pricingHeading">Pay for minutes, not months</h2>
+        <p class="text-muted" style="margin-top: 8px;">There is no subscription.</p>
     </div>
-    <div class="card-body">
-        <form method="POST" action="{{ url_for('parse_rss') }}">
-            <div class="input-group">
-                <input type="url" class="form-input" id="rss_url" name="rss_url"
-                       aria-label="Podcast RSS feed URL" enterkeyhint="go"
-                       placeholder="https://feeds.example.com/podcast/rss" required>
-                <button type="submit" class="btn btn-ghost">Get Episodes</button>
+    <div class="hp-plans">
+        {% if show_trial_card %}
+        <div class="hp-plan">
+            <div class="hp-plan-label">Free trial</div>
+            <div class="hp-plan-figure">
+                {% if current_user.is_authenticated %}{{ trial.limit_minutes }}{% else %}{{ trial_minutes }}{% endif %} minutes
             </div>
-        </form>
+            <p>No card, no OpenAI key needed to start. Longer episodes get the free minutes as a preview.</p>
+        </div>
+        {% endif %}
+        {% if stripe_buy_enabled %}
+        <div class="hp-plan hp-plan-pack">
+            <div class="hp-plan-label">Credit pack</div>
+            <div class="hp-plan-figure">{{ credit_pack_minutes }} minutes for ${{ credit_pack_price_usd }}</div>
+            <p>One-time purchase, VAT included. Nothing to set up at OpenAI.</p>
+            {% if current_user.is_authenticated and trial and not trial.on_own_key and not first_run %}
+            <form method="POST" action="{{ url_for('billing_checkout') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="source" value="home_pricing">
+                <input type="hidden" name="cancel_url" value="{{ url_for('index') }}">
+                <input type="hidden" name="ph_sid" value="">
+                <button type="submit" class="btn btn-secondary">{{ credit_pack_label }}</button>
+            </form>
+            {% endif %}
+        </div>
+        {% endif %}
+        <div class="hp-plan">
+            <div class="hp-plan-label">Your own OpenAI key</div>
+            <div class="hp-plan-figure">About ${{ openai_hourly_cost }} per hour</div>
+            <p>Paid to OpenAI directly at their rate. Nothing is metered by us.</p>
+        </div>
     </div>
-</div>
-
-{% if not current_user.is_authenticated %}
-<div class="card" style="margin-top: 16px;">
-    <div class="card-body text-center" style="padding: 32px 20px;">
-        <p class="text-muted mb-1">
+    {% if not current_user.is_authenticated %}
+    <div class="hp-cta">
+        <p>
             {% if trial_minutes %}
             Free account, {{ trial_minutes }} free minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.
             {% if stripe_buy_enabled %}
@@ -232,54 +380,29 @@
             {% endif %}
             <a href="{{ url_for('pricing') }}">Pricing</a>.
         </p>
-        <div class="flex-center" style="gap: 12px; justify-content: center; margin-top: 12px;">
-            <a href="{{ url_for('register') }}" class="btn btn-accent">Create free account</a>
-            <a href="{{ url_for('login') }}" class="btn btn-ghost">Log in</a>
+        <div class="hp-cta-actions">
+            <a href="{{ url_for('register') }}" class="btn btn-secondary">Create free account</a>
+            <a href="{{ url_for('login') }}" class="btn btn-text">Log in</a>
         </div>
     </div>
-</div>
-{% endif %}
-
-<div class="mt-3" style="padding: 0 4px;">
-    <p class="section-label">How it works</p>
-    <div class="grid grid-2" style="gap: 8px;">
-        <div style="font-size: 13.5px; color: var(--muted); padding: 8px 0;">
-            <span style="color: var(--accent-bright); font-weight: 600;">1.</span>
-            Paste a Spotify episode link — or search by podcast name.
-        </div>
-        <div style="font-size: 13.5px; color: var(--muted); padding: 8px 0;">
-            <span style="color: var(--accent-bright); font-weight: 600;">2.</span>
-            {% if trial_minutes %}
-            Create a free account and press Transcribe. Your first {{ trial_minutes }} minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} run on our key — including a free preview of longer episodes.
-            {% else %}
-            Create a free account, add your OpenAI key, and press Transcribe.
-            {% endif %}
-        </div>
-        <div style="font-size: 13.5px; color: var(--muted); padding: 8px 0;">
-            <span style="color: var(--accent-bright); font-weight: 600;">3.</span>
-            Read, copy or download the transcript (.txt or .srt). It keeps running if you close the page.
-        </div>
-    </div>
-</div>
+    {% endif %}
+</section>
 
 {% if faq %}
-<section class="mt-3" style="padding: 0 4px;" aria-labelledby="faqHeading">
-    <h2 class="section-label" id="faqHeading">Questions</h2>
-    <div style="border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden;">
+<section class="hp-section" id="faq" aria-labelledby="faqHeading">
+    <div class="hp-faq">
+        <h2 id="faqHeading" style="margin-bottom: 24px;">Questions</h2>
         {% for question, answer in faq %}
-        <details style="border-bottom: 1px solid var(--border);"{% if text_lang(question) %} lang="{{ text_lang(question) }}"{% endif %}>
-            <summary style="padding: 14px 16px; cursor: pointer; font-size: 14px; font-weight: 600;">
-                {{ question }}
-            </summary>
-            <p style="padding: 0 16px 14px; margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.7;">
-                {{ answer }}
-            </p>
+        <details{% if text_lang(question) %} lang="{{ text_lang(question) }}"{% endif %}>
+            <summary>{{ question }}</summary>
+            <p>{{ answer }}</p>
         </details>
         {% endfor %}
     </div>
 </section>
 {% endif %}
 {% endblock %}
+
 
 {% block scripts %}
 <script>
@@ -386,7 +509,7 @@
     var lastEpisodeForBuy = { duration: null, title: '' };
 
     function setError(text, actionUrl, actionLabel, buyAvailable, paywallReason) {        clearResults();
-        resultsDiv.style.color = 'var(--error)';
+        resultsDiv.style.color = 'var(--danger)';
         resultsDiv.style.padding = '12px 0';
         var wrap = document.createElement('div');
         wrap.style.lineHeight = '1.6';
@@ -401,7 +524,7 @@
         if (showBuy && STRIPE_BUY) {
             var buyBtn = document.createElement('button');
             buyBtn.type = 'button';
-            buyBtn.className = 'btn btn-sm btn-primary';
+            buyBtn.className = 'btn btn-sm btn-secondary';
             buyBtn.textContent = BUY_LABEL;
             buyBtn.addEventListener('click', function() {
                 postBuyForm('home_error', lastEpisodeForBuy.duration, lastEpisodeForBuy.title);
@@ -424,7 +547,7 @@
         var link = document.createElement('a');
         link.href = keyUrl;
         link.textContent = keyLabel;
-        link.className = 'btn btn-sm btn-ghost';
+        link.className = 'btn btn-sm btn-secondary';
         actions.appendChild(link);
         resultsDiv.appendChild(actions);
     }
@@ -561,7 +684,7 @@
                 })
                 .catch(function() {
                     badge.textContent = 'Transcribe';
-                    setMessage('Could not start transcription.', 'var(--error)');
+                    setMessage('Could not start transcription.', 'var(--danger)');
                 });
         });
 
@@ -571,7 +694,7 @@
     function renderList(results) {
         var list = document.createElement('div');
         list.style.marginTop = '12px';
-        list.style.border = '1px solid var(--border)';
+        list.style.border = '1px solid var(--line)';
         list.style.borderRadius = 'var(--radius)';
         list.style.overflow = 'hidden';
         results.forEach(function(item) { list.appendChild(buildRow(item)); });
@@ -660,9 +783,9 @@
         notice.className = 'search-notice';
         notice.setAttribute('role', 'status');
         notice.textContent = text;
-        notice.style.color = 'var(--error)';
+        notice.style.color = 'var(--danger)';
         notice.style.margin = '0 0 10px';
-        notice.style.fontSize = '13.5px';
+        notice.style.fontSize = '14px';
         notice.style.lineHeight = '1.55';
         resultsDiv.appendChild(notice);
     }
@@ -673,7 +796,7 @@
         tip.className = 'search-show-hint';
         tip.style.margin = '0 0 10px';
         tip.style.color = 'var(--muted)';
-        tip.style.fontSize = '13.5px';
+        tip.style.fontSize = '14px';
         tip.style.lineHeight = '1.55';
         tip.appendChild(document.createTextNode('Or '));
         var btn = document.createElement('button');
@@ -682,7 +805,7 @@
         btn.style.background = 'none';
         btn.style.border = 'none';
         btn.style.padding = '0';
-        btn.style.color = 'var(--accent, var(--link, #0b57d0))';
+        btn.style.color = 'var(--accent)';
         btn.style.cursor = 'pointer';
         btn.style.font = 'inherit';
         btn.style.textDecoration = 'underline';
@@ -692,6 +815,7 @@
             searchType = 'show';
             tabs.querySelectorAll('.tab').forEach(function(t) {
                 t.classList.toggle('active', t.dataset.type === 'show');
+                t.setAttribute('aria-pressed', t.dataset.type === 'show' ? 'true' : 'false');
             });
             langRow.classList.add('hidden');
             doSearch();
@@ -731,14 +855,14 @@
         if (opts.errorText) {
             var err = document.createElement('p');
             err.textContent = opts.errorText;
-            err.style.color = 'var(--error)';
+            err.style.color = 'var(--danger)';
             err.style.margin = '0 0 8px';
             wrap.appendChild(err);
         }
         var tip = document.createElement('p');
         tip.style.margin = '0';
         tip.style.color = 'var(--muted)';
-        tip.style.fontSize = '13.5px';
+        tip.style.fontSize = '14px';
         tip.style.lineHeight = '1.55';
         var inputType = opts.inputType || detectInputType(opts.query);
         tip.appendChild(document.createTextNode(emptyStateTipText(inputType)));
@@ -943,8 +1067,12 @@
     tabs.addEventListener('click', function(e) {
         var tab = e.target.closest('.tab');
         if (!tab) return;
-        tabs.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+        tabs.querySelectorAll('.tab').forEach(function(t) {
+            t.classList.remove('active');
+            t.setAttribute('aria-pressed', 'false');
+        });
         tab.classList.add('active');
+        tab.setAttribute('aria-pressed', 'true');
         searchType = tab.dataset.type;
         // The picker only means anything on the episode tab, which transcribes directly
         langRow.classList.toggle('hidden', searchType !== 'episode');

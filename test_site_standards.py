@@ -159,7 +159,7 @@ def test_favicons_and_manifest(client):
 
 def test_head_has_icons_theme_and_og_image(client):
     body = client.get('/').get_data(as_text=True)
-    assert '<meta name="color-scheme" content="dark">' in body
+    assert '<meta name="color-scheme" content="light dark">' in body
     assert '<meta name="theme-color"' in body
     assert 'rel="apple-touch-icon"' in body and 'rel="manifest"' in body
     assert re.search(r'property="og:image" content="[^"]+og-image\.png\?v=', body)
@@ -178,9 +178,9 @@ def test_security_txt_is_valid(client):
     assert m
 
 
-def test_change_password_points_at_settings(client):
+def test_change_password_points_at_forgot_password(client):
     r = client.get('/.well-known/change-password')
-    assert r.status_code == 302 and r.headers['Location'].endswith('/settings')
+    assert r.status_code == 302 and r.headers['Location'].endswith('/forgot-password')
 
 
 def test_api_catalog_is_a_linkset(client):

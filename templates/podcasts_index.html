@@ -6,69 +6,71 @@
 
 {% block content %}
 <style>
-    .shows-index { max-width: 720px; margin: 24px auto; }
+    .shows-index { max-width: 720px; margin: 24px auto; font-size: 17px; line-height: 1.55; }
     .shows-index h1 {
-        font-size: clamp(26px, 4vw, 34px);
-        font-weight: 700;
+        font-size: clamp(30px, 4vw, 44px);
+        font-weight: 800;
         letter-spacing: -0.03em;
-        margin-bottom: 8px;
+        line-height: 1.05;
+        margin-bottom: 12px;
     }
     .shows-index .intro {
         color: var(--muted);
-        font-size: 15px;
-        line-height: 1.6;
+        font-size: 17px;
+        line-height: 1.55;
         margin-bottom: 28px;
     }
     .shows-letters {
         display: flex;
         flex-wrap: wrap;
-        gap: 6px;
+        gap: 8px;
         margin-bottom: 28px;
     }
     .shows-letters a {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        min-width: 32px;
-        height: 32px;
+        min-width: 44px;
+        height: 44px;
         padding: 0 8px;
-        border: 1px solid var(--border);
-        border-radius: var(--radius-sm);
-        color: var(--muted);
-        font-size: 13px;
-        font-weight: 600;
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius);
+        color: var(--ink);
+        font-size: 15px;
+        font-weight: 700;
     }
-    .shows-letters a:hover { color: var(--text); border-color: var(--border-light); }
+    .shows-letters a:hover { background: var(--surface-hover); }
     .shows-letters a.is-active {
-        color: var(--accent-bright);
-        border-color: var(--accent-border);
-        background: var(--accent-bg);
+        color: var(--on-accent-tint);
+        border-color: var(--accent);
+        background: var(--accent-tint);
     }
     .shows-letter-block { margin-bottom: 28px; }
     .shows-letter-block h2 {
-        font-size: 13px;
-        font-weight: 600;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: var(--muted);
-        margin-bottom: 10px;
-        padding-bottom: 6px;
-        border-bottom: 1px solid var(--border);
+        font-size: 24px;
+        font-weight: 700;
+        letter-spacing: -0.015em;
+        line-height: 1.2;
+        color: var(--ink);
+        margin-bottom: 4px;
     }
     .shows-list { list-style: none; margin: 0; padding: 0; }
     .shows-list li { margin: 0; }
     .shows-list a {
         display: block;
-        padding: 10px 0;
-        color: var(--text);
-        border-bottom: 1px solid var(--border);
-        font-size: 15px;
-        font-weight: 500;
+        padding: 12px 0;
+        min-height: 44px;
+        color: var(--ink);
+        border-top: 1px solid var(--line);
+        font-size: 17px;
+        font-weight: 700;
+        overflow-wrap: anywhere;
     }
-    .shows-list a:hover { color: var(--accent-bright); }
+    .shows-list li:last-child a { border-bottom: 1px solid var(--line); }
+    .shows-list a:hover { background: var(--surface-hover); }
     .shows-list .author {
         display: block;
-        font-size: 12.5px;
+        font-size: 14px;
         font-weight: 400;
         color: var(--muted);
         margin-top: 2px;
@@ -76,10 +78,10 @@
     .shows-cta {
         margin-top: 32px;
         padding: 18px 0 0;
-        border-top: 1px solid var(--border);
+        border-top: 1px solid var(--line);
         color: var(--muted);
-        font-size: 14px;
-        line-height: 1.6;
+        font-size: 15px;
+        line-height: 1.55;
     }
 </style>
 

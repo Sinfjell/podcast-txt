@@ -2,19 +2,18 @@
 {% block title %}{% if paid_ready %}+{{ credit_pack_minutes }} minutes{% else %}Payment{% endif %} — Podskrift{% endblock %}
 
 {% block content %}
-<div style="max-width: 480px; margin: 56px auto; text-align: center;">
+<div style="max-width: 480px; margin: 56px auto; padding: 32px 24px; text-align: center;
+            background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius);">
     {% if paid_ready %}
-    <p style="display: inline-block; padding: 4px 12px; border-radius: 999px;
-              background: var(--accent-bg); border: 1px solid var(--accent-border);
-              color: var(--accent-bright); font-size: 12.5px; font-weight: 600;
-              margin-bottom: 16px;">Payment received</p>
-    <h1 style="font-size: 28px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 10px;">
+    <p class="alert alert-info" role="status" style="display: inline-flex; gap: 8px; justify-content: center; padding: 8px 16px; font-size: 14px; font-weight: 700;
+              margin-bottom: 16px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>Payment received</p>
+    <h1 style="font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em; line-height: 1.05; margin-bottom: 12px;">
         +{{ credit_pack_minutes }} minutes added
     </h1>
-    <p style="color: var(--muted); font-size: 15px; line-height: 1.6; margin-bottom: 28px;">
-        Balance: <strong style="color: var(--text);">{{ balance_minutes }} min</strong>
+    <p style="color: var(--muted); font-size: 17px; line-height: 1.55; margin-bottom: 28px;">
+        Balance: <strong style="color: var(--ink);">{{ balance_minutes }} min</strong>
         {% if paid_minutes is not none and paid_minutes != balance_minutes %}
-        <span style="opacity: 0.75;">({{ paid_minutes }} paid)</span>
+        <span>({{ paid_minutes }} paid)</span>
         {% endif %}
     </p>
     {% if pending_episode and pending_episode.title %}
@@ -29,29 +28,29 @@
         Start a transcript
     </a>
     {% endif %}
-    <a href="{{ url_for('settings') }}#credits" class="btn btn-ghost" style="margin-top: 4px;">Settings</a>
+    <a href="{{ url_for('settings') }}#credits" class="btn btn-text">Settings</a>
     {% elif pending %}
-    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 12px;">
+    <h1 style="font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em; line-height: 1.05; margin-bottom: 12px;">
         Thanks — almost there
     </h1>
-    <p style="color: var(--muted); font-size: 15px; line-height: 1.6; margin-bottom: 24px;">
+    <p style="color: var(--muted); font-size: 17px; line-height: 1.55; margin-bottom: 24px;">
         Minutes are on the way. Some payment methods take a moment to clear;
         we will add them when Stripe confirms payment.
     </p>
     <a href="{{ url_for('settings') }}#credits" class="btn btn-primary">View balance</a>
-    <a href="{{ return_to or url_for('index') }}" class="btn btn-ghost" style="margin-left: 8px;">Transcribe</a>
+    <a href="{{ return_to or url_for('index') }}" class="btn btn-text">Transcribe</a>
     {% else %}
-    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 12px;">
+    <h1 style="font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em; line-height: 1.05; margin-bottom: 12px;">
         Thanks — almost there
     </h1>
-    <p style="color: var(--muted); font-size: 15px; line-height: 1.6; margin-bottom: 24px;">
+    <p style="color: var(--muted); font-size: 17px; line-height: 1.55; margin-bottom: 24px;">
         Minutes are being added to your account. This usually takes a few seconds.
         {% if balance_minutes is not none %}
         Current balance: {{ balance_minutes }} min.
         {% endif %}
     </p>
     <a href="{{ url_for('settings') }}#credits" class="btn btn-primary">View balance</a>
-    <a href="{{ return_to or url_for('index') }}" class="btn btn-ghost" style="margin-left: 8px;">Transcribe</a>
+    <a href="{{ return_to or url_for('index') }}" class="btn btn-text">Transcribe</a>
     {% endif %}
 </div>
 {% endblock %}

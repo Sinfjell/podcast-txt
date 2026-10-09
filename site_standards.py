@@ -30,7 +30,9 @@ _CFG = {
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 
-THEME_COLOR = '#080808'
+THEME_COLOR = '#FFFFFF'
+#: Dark-scheme variant of the browser chrome colour (the design system's dark paper).
+THEME_COLOR_DARK = '#0A0F0D'
 SITE_NAME = 'Podskrift'
 SITE_DESCRIPTION = ('Transcribe any podcast or Spotify episode to text and .srt '
                     'subtitles with OpenAI Whisper, in 28 languages.')
@@ -311,8 +313,8 @@ def security_txt():
 
 @bp.route('/.well-known/change-password')
 def change_password():
-    """Password managers land here. Password changes live under Settings."""
-    return redirect(url_for('settings'), code=302)
+    """Password managers land here. Self-serve reset is /forgot-password."""
+    return redirect(url_for('forgot_password'), code=302)
 
 
 @bp.route('/.well-known/api-catalog')
@@ -513,6 +515,7 @@ def inject_template_helpers():
         'asset_url': asset_url,
         'text_lang': text_lang,
         'theme_color': THEME_COLOR,
+        'theme_color_dark': THEME_COLOR_DARK,
     }
 
 

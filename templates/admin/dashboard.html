@@ -14,9 +14,9 @@
         justify-content: space-between; gap: 8px 16px; margin-bottom: 20px;
     }
     .admin-header h1 {
-        font-size: 24px; font-weight: 700; letter-spacing: -0.03em;
+        font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em; line-height: 1.05;
     }
-    .admin-meta { color: var(--muted); font-size: 13px; }
+    .admin-meta { color: var(--muted); font-size: 14px; }
     .kpi-grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
@@ -25,35 +25,34 @@
     }
     .kpi {
         background: var(--surface);
-        border: 1px solid var(--border);
+        border: 1px solid var(--line);
         border-radius: var(--radius);
         padding: 14px 14px 12px;
     }
     .kpi-label {
-        font-size: 11px; font-weight: 500; color: var(--muted);
-        text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px;
+        font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 4px;
     }
     .kpi-value {
-        font-size: 22px; font-weight: 700; letter-spacing: -0.03em;
+        font-size: 24px; font-weight: 700; letter-spacing: -0.015em;
         font-variant-numeric: tabular-nums; line-height: 1.2;
     }
     .kpi-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
     .admin-section { margin-bottom: 32px; }
     .admin-section h2 {
-        font-size: 16px; font-weight: 600; margin-bottom: 12px;
-        letter-spacing: -0.02em;
+        font-size: 24px; font-weight: 700; margin-bottom: 12px;
+        letter-spacing: -0.015em; line-height: 1.2;
     }
     .chart-toolbar {
         display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap;
     }
     .chart-toolbar button {
-        background: var(--surface); border: 1px solid var(--border);
-        color: var(--muted); font: inherit; font-size: 13px;
-        padding: 5px 12px; border-radius: var(--radius-sm); cursor: pointer;
+        background: var(--surface); border: 1px solid var(--line);
+        color: var(--ink); font: inherit; font-size: 14px;
+        min-height: 44px; padding: 0 16px; border-radius: var(--radius); cursor: pointer;
     }
     .chart-toolbar button.active {
-        color: var(--accent-bright); border-color: var(--accent-border);
-        background: var(--accent-bg);
+        color: var(--on-accent-tint); border-color: var(--accent);
+        background: var(--accent-tint);
     }
     .chart-grid {
         display: grid;
@@ -64,61 +63,103 @@
         .chart-grid { grid-template-columns: 1fr; }
     }
     .chart-card {
-        background: var(--surface); border: 1px solid var(--border);
+        background: var(--surface); border: 1px solid var(--line);
         border-radius: var(--radius); padding: 14px;
     }
     .chart-card h3 {
-        font-size: 13px; font-weight: 500; color: var(--muted);
+        font-size: 14px; font-weight: 700; color: var(--muted);
         margin-bottom: 8px;
     }
     .chart-card canvas { width: 100% !important; max-height: 220px; }
     .admin-table-wrap {
-        overflow-x: auto; border: 1px solid var(--border);
+        overflow-x: auto; border: 1px solid var(--line);
         border-radius: var(--radius); background: var(--surface);
     }
     table.admin-table {
-        width: 100%; border-collapse: collapse; font-size: 13px;
+        width: 100%; border-collapse: collapse; font-size: 14px;
     }
     table.admin-table th, table.admin-table td {
         text-align: left; padding: 9px 12px;
-        border-bottom: 1px solid var(--border);
+        border-bottom: 1px solid var(--line);
         white-space: nowrap;
     }
     table.admin-table th {
-        color: var(--muted); font-weight: 500; font-size: 11px;
-        text-transform: uppercase; letter-spacing: 0.04em;
+        color: var(--muted); font-weight: 700; font-size: 12px;
     }
     table.admin-table tr:last-child td { border-bottom: 0; }
-    table.admin-table a { color: var(--accent-bright); }
+    table.admin-table a { color: var(--accent); }
     .status-pill {
-        display: inline-block; font-size: 11px; font-weight: 500;
-        padding: 2px 7px; border-radius: 4px;
-        background: var(--border); color: var(--muted);
+        display: inline-block; font-size: 12px; font-weight: 700;
+        padding: 2px 8px; border-radius: var(--radius-sm);
+        background: var(--surface-hover); color: var(--ink);
     }
-    .status-pill.completed { background: var(--accent-bg); color: var(--accent-bright); }
-    .status-pill.error { background: var(--error-bg); color: var(--error); }
-    .status-pill.cancelled { background: var(--warning-bg); color: var(--warning); }
+    .status-pill.completed { background: var(--accent-tint); color: var(--on-accent-tint); }
+    .status-pill.error { background: var(--danger-tint); color: var(--on-danger-tint); }
+    .status-pill.cancelled { background: var(--warning-tint); color: var(--on-warning-tint); }
     .pager {
         display: flex; gap: 8px; align-items: center; margin-top: 10px;
-        font-size: 13px; color: var(--muted); flex-wrap: wrap;
+        font-size: 14px; color: var(--muted); flex-wrap: wrap;
     }
     .search-row {
         display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap;
     }
     .search-row input {
         flex: 1; min-width: 180px; max-width: 320px;
-        background: var(--surface); border: 1px solid var(--border);
-        color: var(--text); border-radius: var(--radius-sm);
-        padding: 8px 12px; font: inherit; font-size: 14px;
+        background: var(--surface); border: 1px solid var(--line-strong);
+        color: var(--ink); border-radius: var(--radius);
+        min-height: 44px; padding: 0 12px; font: inherit; font-size: 16px;
     }
     .search-row button, .pager a {
-        background: var(--surface); border: 1px solid var(--border);
-        color: var(--text); font: inherit; font-size: 13px;
-        padding: 7px 12px; border-radius: var(--radius-sm);
+        background: var(--surface); border: 1px solid var(--line-strong);
+        color: var(--ink); font: inherit; font-size: 14px;
+        min-height: 44px; display: inline-flex; align-items: center;
+        padding: 0 16px; border-radius: var(--radius);
         text-decoration: none; cursor: pointer;
     }
-    .pager a:hover, .search-row button:hover { border-color: var(--border-light); }
-    .pager .disabled { opacity: 0.4; pointer-events: none; }
+    .pager a:hover, .search-row button:hover { background: var(--surface-hover); color: var(--ink); }
+    .pager .disabled { color: var(--muted); pointer-events: none; }
+    .stripe-error {
+        background: var(--danger-tint); border: 1px solid var(--danger);
+        color: var(--on-danger-tint); border-radius: var(--radius);
+        padding: 12px 14px; font-size: 13px; margin-bottom: 14px;
+    }
+    .stripe-meta { font-size: 12px; color: var(--muted); margin: -6px 0 12px; }
+    .balance-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+        gap: 10px; margin-bottom: 16px;
+    }
+    .money-summary-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px; margin-bottom: 16px;
+    }
+    @media (max-width: 720px) {
+        .money-summary-grid { grid-template-columns: 1fr; }
+    }
+    .money-card {
+        background: var(--surface); border: 1px solid var(--line);
+        border-radius: var(--radius); padding: 12px 14px;
+    }
+    .money-card h3 {
+        font-size: 12px; font-weight: 500; color: var(--muted);
+        text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 8px;
+    }
+    .money-row {
+        display: flex; justify-content: space-between; gap: 8px;
+        font-size: 13px; padding: 3px 0;
+        font-variant-numeric: tabular-nums;
+    }
+    .money-row .label { color: var(--muted); }
+    .money-row.net { font-weight: 600; border-top: 1px solid var(--line); margin-top: 4px; padding-top: 6px; }
+    tr.payout-highlight td { background: var(--accent-tint); }
+    .status-pill.paid { background: var(--accent-tint); color: var(--on-accent-tint); }
+    .status-pill.pending, .status-pill.in_transit {
+        background: var(--warning-tint); color: var(--on-warning-tint);
+    }
+    .status-pill.failed, .status-pill.canceled {
+        background: var(--danger-tint); color: var(--on-danger-tint);
+    }
 </style>
 
 <div class="admin-wrap ph-no-capture">
@@ -182,6 +223,111 @@
             <div class="kpi-sub">feeds opted in</div>
         </div>
     </div>
+
+    <section class="admin-section" id="adminStripeRevenue">
+        <h2>Revenue &amp; payouts</h2>
+        {% if not stripe_revenue.ok %}
+        <div class="stripe-error" role="alert" data-stripe="error">
+            {{ stripe_revenue.error or 'Stripe unavailable.' }}
+        </div>
+        {% else %}
+        <p class="stripe-meta" data-stripe="meta">
+            Stripe {% if stripe_revenue.livemode %}live{% else %}test{% endif %}
+            · fetched {{ stripe_revenue.fetched_at_oslo }}
+            {% if stripe_revenue.cached %}· cached{% endif %}
+            {% if stripe_revenue.bt_truncated %}
+            · summary based on latest {{ stripe_revenue.bt_count }} balance transactions
+            {% endif %}
+            · Managed Payments MoR — tax/fee lines as Stripe reports them
+        </p>
+        <div class="balance-grid" data-stripe="balance">
+            <div class="kpi">
+                <div class="kpi-label">Available</div>
+                {% for b in stripe_revenue.balance.available %}
+                <div class="kpi-value" style="font-size: 18px;">{{ b.amount_fmt }}</div>
+                <div class="kpi-sub">{{ b.currency|upper }}</div>
+                {% else %}
+                <div class="kpi-value" style="font-size: 18px;">—</div>
+                {% endfor %}
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">Pending</div>
+                {% for b in stripe_revenue.balance.pending %}
+                <div class="kpi-value" style="font-size: 18px;">{{ b.amount_fmt }}</div>
+                <div class="kpi-sub">{{ b.currency|upper }}</div>
+                {% else %}
+                <div class="kpi-value" style="font-size: 18px;">—</div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <h3 style="font-size: 13px; font-weight: 500; color: var(--muted); margin: 0 0 8px;">
+            Money summary (balance transactions)
+        </h3>
+        <div class="money-summary-grid" data-stripe="summaries">
+            {% for key, title in [('7d', 'Last 7 days'), ('30d', 'Last 30 days'), ('all', 'All time')] %}
+            <div class="money-card">
+                <h3>{{ title }}</h3>
+                {% set rows = stripe_revenue.summaries[key] %}
+                {% if rows %}
+                    {% for r in rows %}
+                    {% if rows|length > 1 %}
+                    <div class="money-row"><span class="label">Currency</span><span>{{ r.currency|upper }}</span></div>
+                    {% endif %}
+                    <div class="money-row"><span class="label">Gross charges</span><span>{{ r.gross_charges_fmt }}</span></div>
+                    <div class="money-row"><span class="label">Stripe fees</span><span>−{{ r.stripe_fees_fmt }}</span></div>
+                    <div class="money-row"><span class="label">Refunds</span><span>−{{ r.refunds_fmt }}</span></div>
+                    {% if r.has_tax %}
+                    <div class="money-row"><span class="label">Tax</span><span>−{{ r.tax_fmt }}</span></div>
+                    {% endif %}
+                    {% if r.has_other_fees %}
+                    <div class="money-row"><span class="label">Other fees</span><span>−{{ r.other_fee_details_fmt }}</span></div>
+                    {% endif %}
+                    <div class="money-row net"><span class="label">Net</span><span>{{ r.net_fmt }}</span></div>
+                    {% endfor %}
+                {% else %}
+                    <div class="money-row"><span class="label">No balance transactions</span><span>—</span></div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+
+        <h3 style="font-size: 13px; font-weight: 500; color: var(--muted); margin: 0 0 8px;">
+            Payouts (last {{ stripe_revenue.payouts|length }})
+        </h3>
+        <div class="admin-table-wrap" data-stripe="payouts">
+            <table class="admin-table">
+                <thead>
+                    <tr>
+                        <th>Amount</th>
+                        <th>Status</th>
+                        <th>Created</th>
+                        <th>Arrival</th>
+                        <th>Bank</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for p in stripe_revenue.payouts %}
+                    <tr class="{{ 'payout-highlight' if p.highlight }}">
+                        <td>{{ p.amount_fmt }} <span style="color: var(--muted);">{{ p.currency|upper }}</span></td>
+                        <td><span class="status-pill {{ p.status }}">{{ p.status }}</span></td>
+                        <td>{{ p.created_oslo }}</td>
+                        <td>{{ p.arrival_oslo }}</td>
+                        <td>{% if p.destination_last4 %}•••• {{ p.destination_last4 }}{% else %}—{% endif %}</td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="5" style="color: var(--muted);">No payouts yet.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="chart-card" style="margin-top: 16px;" data-stripe="weekly-chart">
+            <h3>Net revenue per week ({{ stripe_revenue.weekly_net.currency|upper }})</h3>
+            <canvas id="chartStripeWeekly" height="180"></canvas>
+        </div>
+        {% endif %}
+    </section>
 
     <section class="admin-section">
         <div class="flex-between" style="align-items: center; margin-bottom: 4px;">
@@ -325,21 +471,63 @@
 </div>
 
 <script type="application/json" id="adminChartData">{{ charts | tojson }}</script>
+{% if stripe_revenue.ok %}
+<script type="application/json" id="adminStripeWeekly">{{ stripe_revenue.weekly_net | tojson }}</script>
+{% endif %}
 {# Self-hosted (CSP script-src 'self'); Chart.js 4.4.7, MIT, see static/vendor/chart.js-LICENSE.md #}
 <script src="{{ url_for('static', filename='vendor/chart-4.4.7.umd.min.js') }}"></script>
 <script>
 (function () {
+    var weeklyEl = document.getElementById('adminStripeWeekly');
+    if (weeklyEl && typeof Chart !== 'undefined') {
+        try {
+            var weekly = JSON.parse(weeklyEl.textContent);
+            var wctx = document.getElementById('chartStripeWeekly');
+            if (wctx) {
+                new Chart(wctx, {
+                    type: 'bar',
+                    data: {
+                        labels: weekly.labels,
+                        datasets: [{
+                            data: weekly.values,
+                            backgroundColor: 'rgba(16, 185, 129, 0.55)',
+                            borderRadius: 4,
+                        }],
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            x: {
+                                ticks: { color: '#808080', maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 10 } },
+                                grid: { color: '#1f1f1f' },
+                            },
+                            y: {
+                                beginAtZero: true,
+                                ticks: { color: '#808080', font: { size: 10 } },
+                                grid: { color: '#1f1f1f' },
+                            },
+                        },
+                    },
+                });
+            }
+        } catch (e) { /* ignore chart parse errors */ }
+    }
+
     var dataEl = document.getElementById('adminChartData');
     if (!dataEl || typeof Chart === 'undefined') return;
     var data = JSON.parse(dataEl.textContent);
     var charts = {};
+    var css = getComputedStyle(document.documentElement);
+    function token(name) { return css.getPropertyValue(name).trim(); }
     var palette = {
-        grid: '#1f1f1f',
-        text: '#808080',
-        line: '#10b981',
-        fill: 'rgba(16, 185, 129, 0.12)',
-        fail: '#f87171',
-        funnel: ['#10b981', '#34d399', '#6ee7b7'],
+        grid: token('--line'),
+        text: token('--muted'),
+        line: token('--accent'),
+        fill: token('--accent-tint'),
+        fail: token('--danger'),
+        funnel: [token('--accent'), token('--accent-hover'), token('--muted')],
     };
 
     function baseOpts() {
@@ -349,12 +537,12 @@
             plugins: { legend: { display: false } },
             scales: {
                 x: {
-                    ticks: { color: palette.text, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 10 } },
+                    ticks: { color: palette.text, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 12 } },
                     grid: { color: palette.grid },
                 },
                 y: {
                     beginAtZero: true,
-                    ticks: { color: palette.text, precision: 0, font: { size: 10 } },
+                    ticks: { color: palette.text, precision: 0, font: { size: 12 } },
                     grid: { color: palette.grid },
                 },
             },

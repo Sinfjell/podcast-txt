@@ -13,6 +13,9 @@ class User(UserMixin, db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(255), unique=True, nullable=False)
+    # All accounts today are email+password; there is no OAuth/magic-link path.
+    # password_reset still calls set_password() so a future passwordless signup
+    # can gain a password the same way.
     password_hash = db.Column(db.String(255), nullable=False)
     openai_api_key = db.Column(db.String(255), nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
@@ -45,22 +48,52 @@ class User(UserMixin, db.Model):
                                        server_default='1')
     email_unsubscribed_at = db.Column(db.DateTime, nullable=True)
 
+    # Bumped on password reset so Flask-Login sessions (and remember cookies)
+    # that still carry the old version stop loading the user.
+    session_version = db.Column(db.Integer, nullable=False, default=0,
+                                server_default='0')
+
     feeds = db.relationship('SavedFeed', backref='user', lazy=True, cascade='all, delete-orphan')
     tasks = db.relationship('TranscriptionTask', backref='user', lazy=True, cascade='all, delete-orphan')
     credit_purchases = db.relationship('CreditPurchase', backref='user', lazy=True,
                                        cascade='all, delete-orphan')
     transcript_shares = db.relationship('TranscriptShare', backref='user', lazy=True,
                                         cascade='all, delete-orphan')
+    password_reset_tokens = db.relationship(
+        'PasswordResetToken', backref='user', lazy=True, cascade='all, delete-orphan')
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
 
     def check_password(self, password):
+        if not self.password_hash:
+            return False
         return check_password_hash(self.password_hash, password)
+
+    def get_id(self):
+        """Flask-Login id including session_version for logout-on-password-change."""
+        ver = int(getattr(self, 'session_version', 0) or 0)
+        return f'{self.id}:{ver}'
 
     @property
     def has_api_key(self):
         return bool(self.api_key_hash)
+
+
+class PasswordResetToken(db.Model):
+    """One-time password-reset link. Store only the SHA-256 of the secret.
+
+    Plaintext token lives in the email URL only. used_at marks both successful
+    consumption and supersession by a newer request.
+    """
+    __tablename__ = 'password_reset_tokens'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    token_hash = db.Column(db.String(64), nullable=False, unique=True)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    used_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 class SavedFeed(db.Model):
@@ -337,6 +370,15 @@ USER_COLUMN_MIGRATIONS = {
     'api_key_created_at': 'DATETIME',
     'email_transcript_ready': 'BOOLEAN NOT NULL DEFAULT 1',
     'email_unsubscribed_at': 'DATETIME',
+    'session_version': 'INTEGER NOT NULL DEFAULT 0',
+}
+
+#: Additive columns for password_reset_tokens. Applied by
+#: ensure_password_reset_tokens_table AFTER the table exists; indexes that
+#: mention a column are created only after that column is present.
+PASSWORD_RESET_TOKEN_COLUMN_MIGRATIONS = {
+    'used_at': 'DATETIME',
+    'created_at': 'DATETIME',
 }
 
 #: Additive columns for saved_feeds (new-episode email alerts + summary email).
