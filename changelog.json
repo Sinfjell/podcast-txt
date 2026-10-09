@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "show-landing-pages",
+      "date": "2026-10-09",
+      "title": "Transcript pages for popular podcasts",
+      "summary": "Browse /podcasts for show pages with recent episodes and a one-click Transcribe button. Built for “transcript of [show]” searches — pages never publish transcript text."
+    },
+    {
       "id": "public-share-links",
       "date": "2026-10-09",
       "title": "Share a transcript with a private link",
