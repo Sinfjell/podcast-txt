@@ -6551,6 +6551,38 @@ def test_homepage_copy_leads_with_spotify(trial_on):
     assert f'${A.openai_whisper_cost_usd(60):.2f}' in body
 
 
+def test_homepage_anon_sees_new_signup_trial_copy(trial_on):
+    """Logged-out visitors get the advertised new-account grant (60)."""
+    grant = A.NEW_USER_TRIAL_SECONDS // 60
+    body = A.app.test_client().get('/').data.decode()
+    assert f'First {grant} minutes of audio free' in body
+    assert f'covers {grant} minutes of audio in total' in body
+
+
+def test_homepage_logged_in_60_min_user_sees_own_trial_copy(trial_on):
+    """A new 60-minute account sees its own limit, not a mismatched figure."""
+    grant = A.NEW_USER_TRIAL_SECONDS // 60
+    uid = _make_user('home-trial-60@test.com', limit=A.NEW_USER_TRIAL_SECONDS, used=0)
+    body = _login(uid).get('/').data.decode()
+    # Signup hero is for anonymous visitors only.
+    assert f'First {grant} minutes of audio free' not in body
+    assert f'covers {grant} minutes of audio in total' in body
+    assert f'— {grant} left' in body
+    assert 'covers 180 minutes of audio in total' not in body
+
+
+def test_homepage_logged_in_legacy_180_min_user_sees_own_trial_copy(trial_on):
+    """Legacy 180-minute grants must not be told the signup trial is 60 total."""
+    uid = _make_user('home-trial-180@test.com', limit=180 * 60, used=0)
+    body = _login(uid).get('/').data.decode()
+    assert 'First 60 minutes of audio free' not in body
+    assert 'covers 60 minutes of audio in total' not in body
+    assert 'covers 180 minutes of audio in total' in body
+    assert '— 180 left' in body
+    # Balance banner still reflects the same remaining grant.
+    assert '180 free minutes' in body or '180 minutes' in body
+
+
 def test_register_helper_text_mentions_free_minutes(trial_on):
     body = A.app.test_client().get('/register').data.decode()
     assert f'{A.NEW_USER_TRIAL_SECONDS // 60} free minutes' in body
