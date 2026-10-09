@@ -273,9 +273,8 @@ def test_public_pages_have_one_h1(client, path):
 def test_home_inputs_are_labelled(client):
     body = client.get('/').get_data(as_text=True)
     assert re.search(r'id="podcastSearch"[^>]*aria-label=', body, re.S)
-    assert re.search(r'id="rss_url"[^>]*aria-label=', body, re.S) or \
-        re.search(r'aria-label="[^"]+"[^>]*id="rss_url"', body, re.S) or \
-        'aria-label="Podcast RSS feed URL"' in body
+    # RSS links go in the main box; there is no separate RSS input any more.
+    assert 'id="rss_url"' not in body
 
 
 def test_norwegian_faq_entry_is_marked(client):

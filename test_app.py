@@ -12757,3 +12757,54 @@ def test_cookie_banner_copy_is_generic_and_privacy_names_processor(monkeypatch):
     assert 'anonymous, cookie-free usage statistics' in ' '.join(banner.split())
     priv = A.app.test_client().get('/privacy').data.decode()
     assert 'PostHog' in priv
+
+
+def test_home_has_no_separate_rss_control():
+    """RSS stays supported, but only through the main search/paste box."""
+    body = A.app.test_client().get('/').get_data(as_text=True)
+    assert 'id="podcastSearch"' in body
+    assert 'id="rss_url"' not in body
+    assert 'class="hp-rss"' not in body
+    assert 'Or paste an RSS feed URL' not in body
+    assert 'Get Episodes' not in body
+    # Low-key hint that RSS links work in the main box.
+    assert 'RSS feed links work too' in body
+
+
+def _home_rss_hint_re():
+    src = open('templates/index.html').read()
+    m = re.search(r"var RSS_HINT_RE = /(.+)/i;", src)
+    assert m, 'RSS_HINT_RE missing from index.html'
+    return re.compile(m.group(1), re.I)
+
+
+@pytest.mark.parametrize('url', [
+    'https://feeds.megaphone.fm/abc123',
+    'https://anchor.fm/s/1234/podcast/rss',
+    'https://example.com/feed/podcast',
+    'https://example.com/podcast.xml',
+    'https://www.omnycontent.com/d/playlist/x/y/z/podcast.rss',
+])
+def test_main_box_classifies_pasted_rss_urls_as_feeds(url):
+    assert _home_rss_hint_re().search(url)
+
+
+def test_main_box_posts_pasted_feed_urls_to_parse_rss():
+    src = open('templates/index.html').read()
+    i = src.index('function doSearch()')
+    body = src[i:i + 4000]
+    assert "inputType === 'rss_feed'" in body
+    # Unrecognised http(s) URLs are tried as feeds instead of a name search.
+    assert "inputType === 'other'" in body
+    assert 'postForm(PARSE_RSS_URL, { rss_url: query })' in body
+
+
+def test_pasted_rss_url_resolves_episodes(monkeypatch):
+    monkeypatch.setattr(
+        A, 'get_episodes_from_rss',
+        lambda url, *, timeout=None: (_fixture_episodes(), None))
+    resp = A.app.test_client().post('/parse_rss', data={
+        'rss_url': 'https://feeds.example.com/fixture.xml',
+    })
+    assert resp.status_code == 200
+    assert 'Episode One: Hello' in resp.get_data(as_text=True)

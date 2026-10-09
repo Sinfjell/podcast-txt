@@ -20,7 +20,6 @@
     .hp-row { display: flex; flex-wrap: wrap; gap: 12px; }
     .hp-row .form-input { flex: 1 1 260px; min-width: 0; width: auto; }
     .hp-row .btn { flex: 0 0 auto; }
-    .hp-rss { border-top: 1px solid var(--line); padding-top: 24px; }
 
     .hp-sample { flex: 1 1 400px; min-width: 0; background: var(--surface); border-radius: var(--radius);
                  padding: 24px; display: flex; flex-direction: column; gap: 20px; }
@@ -206,7 +205,7 @@
                 <button class="btn btn-primary btn-lg" type="button" id="searchBtn">Search</button>
             </div>
             <p class="form-hint" id="searchHint">
-                Works with open.spotify.com/episode/… links and any public podcast. Spotify-exclusive shows can't be transcribed.
+                Works with open.spotify.com/episode/… links and any public podcast. Apple Podcasts and RSS feed links work too. Spotify-exclusive shows can't be transcribed.
             </p>
             <div id="episodeLangRow" class="hidden" style="margin-top: 12px;">
                 <label class="form-label" for="searchLanguage">Spoken language</label>
@@ -245,19 +244,6 @@
                 <a href="{{ url_for('pricing') }}">See pricing</a>.
             </p>
             {% endif %}
-        </div>
-
-        <!-- RSS URL -->
-        <div class="hp-rss">
-            <h2 class="hp-search-title"><label for="rss_url">Or paste an RSS feed URL</label></h2>
-            <form method="POST" action="{{ url_for('parse_rss') }}">
-                <div class="hp-row">
-                    <input type="url" class="form-input" id="rss_url" name="rss_url"
-                           aria-label="Podcast RSS feed URL" enterkeyhint="go"
-                           placeholder="https://feeds.example.com/podcast/rss" required>
-                    <button type="submit" class="btn btn-secondary">Get Episodes</button>
-                </div>
-            </form>
         </div>
     </div>
 
@@ -691,7 +677,7 @@
     var APPLE_RE = /podcasts\.apple\.com/i;
     var YOUTUBE_RE = /(youtube\.com|youtu\.be)\//i;
     var AUDIO_EXT_RE = /\.(mp3|m4a|wav|aac|ogg|mp4|mpeg)(\?|#|$)/i;
-    var RSS_HINT_RE = /(\/feed\b|\/rss\b|\.xml(\?|#|$)|feeds?\.)/i;
+    var RSS_HINT_RE = /(\/feed\b|\/rss\b|\.(xml|rss)(\?|#|$)|feeds?\.)/i;
     var RSS_HELP_URL = {{ url_for('rss_help')|tojson }};
     var FIRST_HTTP_URL_RE = /https?:\/\/[^\s"'<>]+/i;
     var SPOTIFY_EMBED_URL_RE = /^(https?:\/\/open\.spotify\.com)\/embed\/(episode|show)\/([A-Za-z0-9]{22})/i;
@@ -1005,7 +991,10 @@
             showDirectAudioRow(query);
             return;
         }
-        if (inputType === 'rss_feed') {
+        // The home page has no separate RSS box any more: any other pasted
+        // http(s) URL is tried as a feed. Podcast search can't match a URL, and
+        // parse_rss flashes a plain error if it isn't one.
+        if (inputType === 'rss_feed' || (inputType === 'other' && /^https?:\/\//i.test(query))) {
             trackSearch(query, 1, false);
             postForm(PARSE_RSS_URL, { rss_url: query });
             return;
