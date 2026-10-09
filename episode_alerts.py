@@ -189,8 +189,14 @@ def run_new_episode_poll(
     fetch_feed: Callable[[str], Optional[bytes]],
     public_base_url: str,
     secret_key: str,
+    SummaryEmailJob=None,
+    enqueue_summary_jobs: Optional[Callable] = None,
 ) -> dict[str, int]:
-    """Scan followed feeds and send digests. Returns counters for the CLI log."""
+    """Scan followed feeds and send digests. Returns counters for the CLI log.
+
+    Additive optional args: when SUMMARY_EMAIL_ENABLED, also consider feeds
+    with email_summaries and enqueue one shared summary job per new episode.
+    """
     stats = {
         'feeds_considered': 0,
         'feeds_fetched': 0,
@@ -198,6 +204,7 @@ def run_new_episode_poll(
         'emails_sent': 0,
         'episodes_announced': 0,
         'skipped_disabled': 0,
+        'summary_jobs_enqueued': 0,
     }
     email_on = mailer.mail_ready()
     if not email_on:
@@ -206,9 +213,14 @@ def run_new_episode_poll(
         )
 
     with app.app_context():
+        # Plain alerts OR summary-email opt-in (union). Watermarks are shared.
+        from sqlalchemy import or_ as sa_or_
         feeds = (
             SavedFeed.query
-            .filter(SavedFeed.email_new_episodes.is_(True))
+            .filter(sa_or_(
+                SavedFeed.email_new_episodes.is_(True),
+                SavedFeed.email_summaries.is_(True),
+            ))
             .order_by(SavedFeed.id.asc())
             .all()
         )
@@ -240,6 +252,8 @@ def run_new_episode_poll(
         advance_now: set[int] = set()
         # Feeds that advance only after a successful digest that mentioned them.
         advance_after_send: set[int] = set()
+        # rss_url -> fresh episodes for summary-email enqueue (once per URL).
+        summary_fresh_by_url: dict[str, list[dict]] = {}
 
         for rss_url, group in by_url.items():
             episodes = parsed_by_url.get(rss_url)
@@ -263,14 +277,29 @@ def run_new_episode_poll(
                     advance_now.add(feed.id)
                     continue
 
-                user = db.session.get(User, feed.user_id)
+                # Summary-email enqueue (additive): one job per episode URL.
                 if (
-                    not email_on
-                    or user is None
-                    or not email_notify.user_wants_feed_alerts(user, feed)
+                    getattr(feed, 'email_summaries', False)
+                    and enqueue_summary_jobs is not None
+                    and SummaryEmailJob is not None
                 ):
-                    stats['skipped_disabled'] += 1
-                    advance_now.add(feed.id)
+                    summary_fresh_by_url.setdefault(rss_url, fresh)
+
+                user = db.session.get(User, feed.user_id)
+                wants_alert = (
+                    bool(getattr(feed, 'email_new_episodes', False))
+                    and email_on
+                    and user is not None
+                    and email_notify.user_wants_feed_alerts(user, feed)
+                )
+                if not wants_alert:
+                    # Summary-only feeds still need watermarks advanced after
+                    # enqueue; plain-alert skip path advances immediately.
+                    if getattr(feed, 'email_summaries', False):
+                        advance_now.add(feed.id)
+                    else:
+                        stats['skipped_disabled'] += 1
+                        advance_now.add(feed.id)
                     continue
 
                 claimed = 0
@@ -299,6 +328,18 @@ def run_new_episode_poll(
                     advance_after_send.add(feed.id)
                 else:
                     advance_now.add(feed.id)
+
+        if enqueue_summary_jobs is not None and SummaryEmailJob is not None:
+            for rss_url, fresh in summary_fresh_by_url.items():
+                try:
+                    n = enqueue_summary_jobs(
+                        db, SummaryEmailJob,
+                        rss_url=rss_url, episodes=fresh[:MAX_EPISODES_PER_DIGEST],
+                    )
+                    stats['summary_jobs_enqueued'] += int(n or 0)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        'summary-email enqueue failed for %s', rss_url[:120])
 
         for feed_id in advance_now:
             set_feed_watermark(feeds_by_id[feed_id], episodes_for_feed[feed_id])

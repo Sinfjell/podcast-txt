@@ -16,6 +16,10 @@
                 <input type="checkbox" name="email_new_episodes" value="1" checked>
                 Email me when new episodes come out
             </label>
+            <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); white-space: nowrap;">
+                <input type="checkbox" name="email_summaries" value="1">
+                Email me a summary of each new episode
+            </label>
             <button type="submit" class="btn btn-primary">Save</button>
         </form>
     </div>
@@ -39,6 +43,15 @@
                                {% if feed.email_new_episodes %}checked{% endif %}
                                onchange="this.form.submit()">
                         Email me when new episodes come out
+                    </label>
+                </form>
+                <form method="POST" action="{{ url_for('toggle_feed_email_summaries', feed_id=feed.id) }}"
+                      style="margin-top: 6px;">
+                    <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted);">
+                        <input type="checkbox" name="email_summaries" value="1"
+                               {% if feed.email_summaries %}checked{% endif %}
+                               onchange="this.form.submit()">
+                        Email me a summary of each new episode
                     </label>
                 </form>
             </div>
