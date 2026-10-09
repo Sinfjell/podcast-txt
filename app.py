@@ -8167,7 +8167,22 @@ def run_new_episode_alerts_poll():
 
 
 with app.app_context():
-    db.create_all()
+    # create_all is check-then-create. Two gunicorn workers (and the suite's
+    # cross-process reservation test) can both see email_sent_log as absent
+    # and the loser dies on "already exists" — same hole credit_purchases had
+    # before ensure_* used IF NOT EXISTS. Tolerate that race; the ensure_*
+    # helpers below still make the Stripe / email tables idempotent.
+    from sqlalchemy.exc import OperationalError as _BootOpError
+    try:
+        db.create_all()
+    except _BootOpError as exc:
+        db.session.rollback()
+        if 'already exists' not in str(exc).lower():
+            raise
+        app.logger.info(
+            'db.create_all raced another worker (%s); continuing',
+            str(exc).split('\n')[0][:120],
+        )
     ensure_credit_purchases_table()
     ensure_email_sent_log_table()
 

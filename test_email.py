@@ -14,12 +14,16 @@ from unittest import mock
 
 import pytest
 
-_TEST_DB = os.path.join(tempfile.mkdtemp(prefix='podskrift-email-'), 'test.db')
-os.environ['DATABASE_URL'] = f'sqlite:///{_TEST_DB}'
-os.environ['SENTRY_DSN'] = ''
-os.environ['POSTHOG_KEY'] = ''
-os.environ['POSTHOG_HOST'] = ''
-os.environ['PODSKRIFT_DISABLE_WATCHDOG'] = '1'
+# Prefer the suite DB already configured by test_app.py (collected first).
+# Overwriting DATABASE_URL here used to point cross-process children at an
+# empty file while users lived in test_app's DB — every reserve looked refused.
+if not os.environ.get('DATABASE_URL'):
+    _TEST_DB = os.path.join(tempfile.mkdtemp(prefix='podskrift-email-'), 'test.db')
+    os.environ['DATABASE_URL'] = f'sqlite:///{_TEST_DB}'
+os.environ.setdefault('SENTRY_DSN', '')
+os.environ.setdefault('POSTHOG_KEY', '')
+os.environ.setdefault('POSTHOG_HOST', '')
+os.environ.setdefault('PODSKRIFT_DISABLE_WATCHDOG', '1')
 os.environ['EMAIL_ENABLED'] = '0'
 os.environ.pop('MAILGUN_API_KEY', None)
 os.environ.pop('MAILGUN_DOMAIN', None)
