@@ -139,6 +139,10 @@ class TranscriptionTask(db.Model):
     # Dedicated column so completed previews never look like errors (error_message
     # stays reserved for real failures / cancel).
     partial_meta = db.Column(db.Text, nullable=True)
+    # How many times boot recovery has re-queued this task after a process
+    # death. 0 = never resumed; 1 = resumed once (second failure is terminal).
+    resume_attempts = db.Column(db.Integer, nullable=False, default=0,
+                                server_default='0')
 
 
 class CreditPurchase(db.Model):
@@ -205,6 +209,7 @@ TASK_COLUMN_MIGRATIONS = {
     'paid_seconds_charged': 'INTEGER',
     'trial_settled': 'BOOLEAN NOT NULL DEFAULT 0',
     'partial_meta': 'TEXT',
+    'resume_attempts': 'INTEGER NOT NULL DEFAULT 0',
 }
 
 #: Same, for the users table.

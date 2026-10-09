@@ -88,7 +88,8 @@ jobs:
     needs: test
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Drain can wait up to 20 minutes for in-flight transcriptions before restart.
+    timeout-minutes: 30
     steps:
       - name: Configure SSH
         env:
@@ -106,7 +107,7 @@ jobs:
           printf '%s\n' "$PODSKRIFT_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
-      - name: Pull main and restart podskrift
+      - name: Pull main, drain in-flight jobs, restart podskrift
         env:
           PODSKRIFT_SSH_HOST: ${{ secrets.PODSKRIFT_SSH_HOST }}
           PODSKRIFT_SSH_USER: ${{ secrets.PODSKRIFT_SSH_USER }}
@@ -124,6 +125,11 @@ jobs:
                git fetch origin
                git checkout main
                git pull --ff-only origin main
+               # Wait for queued/running transcriptions (max 20 min) so a restart
+               # does not kill mid-ffmpeg work. New jobs stay accepted; anything
+               # still running after the wait is re-queued on boot resume.
+               chmod +x ops/drain-in-flight.sh
+               PODSKRIFT_DRAIN_MAX_WAIT_SEC=1200 ops/drain-in-flight.sh
                systemctl restart podskrift
                systemctl is-active --quiet podskrift
                echo "podskrift is active"

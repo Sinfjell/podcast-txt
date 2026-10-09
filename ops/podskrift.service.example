@@ -1,0 +1,31 @@
+# Example systemd unit for Podskrift (adjust paths/user for the host).
+# Copy ideas into the live unit under /etc/systemd/system/podskrift.service
+# then: systemctl daemon-reload && systemctl restart podskrift
+#
+# Graceful shutdown: gunicorn finishes in-flight HTTP requests up to
+# --graceful-timeout. Transcription threads watch SIGTERM (app.request_shutdown)
+# and stop at safe points; deploy drain waits for jobs before restart; boot
+# resume re-queues anything still interrupted.
+
+[Unit]
+Description=Podskrift (gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=podskrift
+WorkingDirectory=/var/www/vhosts/podskrift.nettsmed.dev/app
+EnvironmentFile=-/var/www/vhosts/podskrift.nettsmed.dev/app/.env
+ExecStart=/var/www/vhosts/podskrift.nettsmed.dev/app/.venv/bin/gunicorn \
+  --bind 127.0.0.1:5002 \
+  --workers 2 \
+  --threads 4 \
+  --timeout 300 \
+  --graceful-timeout 120 \
+  app:app
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=130
+
+[Install]
+WantedBy=multi-user.target
