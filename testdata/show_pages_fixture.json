@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "generated_at": "2026-10-09T00:00:00Z",
+  "storefronts": ["us"],
+  "shows": [
+    {
+      "slug": "fixture-show",
+      "name": "Fixture Show",
+      "author": "Fixture Host",
+      "itunes_id": "9990001",
+      "feed_url": "https://feeds.example.com/fixture.xml",
+      "artwork": "https://example.com/art.jpg",
+      "language": "en",
+      "description": "A short description of Fixture Show for landing-page tests.",
+      "source": "apple_top"
+    },
+    {
+      "slug": "another-fixture",
+      "name": "Another Fixture",
+      "author": "Other Host",
+      "itunes_id": "9990002",
+      "feed_url": "https://feeds.example.com/another.xml",
+      "artwork": "",
+      "language": "no",
+      "description": "Norwegian fixture podcast.",
+      "source": "apple_top"
+    }
+  ]
+}
