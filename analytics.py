@@ -113,11 +113,16 @@ def openai_error_code(exc):
     return None
 
 
-def openai_fail_reason(exc=None, *, looks_like_key=True):
+def openai_fail_reason(exc=None, *, looks_like_key=True, key_source=None):
     """Coarse reason for openai_key_validation_failed / transcript_failed.
 
-    Values: invalid_key | no_billing | rate_limit | network | other.
+    Values: invalid_key | no_billing | own_key_invalid | own_key_no_credit |
+    rate_limit | network | other.
     Never includes key material.
+
+    When `key_source` is ``'user'`` (BYOK), auth/billing failures are remapped
+    to ``own_key_*`` so product analytics can tell a user's empty OpenAI
+    account apart from our platform key being out of credit.
     """
     if not looks_like_key:
         return 'invalid_key'
@@ -125,21 +130,32 @@ def openai_fail_reason(exc=None, *, looks_like_key=True):
         return 'other'
     status = getattr(exc, 'status_code', None)
     if status == 401 or status == 403:
-        return 'invalid_key'
-    if status == 429:
+        reason = 'invalid_key'
+    elif status == 429:
         # models.list can 429 either way; Whisper usually sends a code.
         code = openai_error_code(exc)
         if code == 'rate_limit_exceeded':
-            return 'rate_limit'
-        # insufficient_quota, or a bare 429 with no code (common on empty billing).
-        return 'no_billing'
-    # Import locally so analytics stays importable without the OpenAI SDK.
-    try:
-        from openai import APIConnectionError, APITimeoutError
-    except ImportError:  # pragma: no cover
-        APIConnectionError = APITimeoutError = ()
-    if isinstance(exc, (APIConnectionError, APITimeoutError)):
-        return 'network'
-    if status is not None and 500 <= status < 600:
-        return 'network'
-    return 'other'
+            reason = 'rate_limit'
+        else:
+            # insufficient_quota, or a bare 429 with no code (common on empty billing).
+            reason = 'no_billing'
+    else:
+        reason = None
+    if reason is None:
+        # Import locally so analytics stays importable without the OpenAI SDK.
+        try:
+            from openai import APIConnectionError, APITimeoutError
+        except ImportError:  # pragma: no cover
+            APIConnectionError = APITimeoutError = ()
+        if isinstance(exc, (APIConnectionError, APITimeoutError)):
+            reason = 'network'
+        elif status is not None and 500 <= status < 600:
+            reason = 'network'
+        else:
+            reason = 'other'
+    if key_source == 'user':
+        if reason == 'no_billing':
+            return 'own_key_no_credit'
+        if reason == 'invalid_key':
+            return 'own_key_invalid'
+    return reason

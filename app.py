@@ -1272,19 +1272,30 @@ def _is_openai_error(exc):
     return type(exc).__module__.split('.')[0] == 'openai'
 
 
-def describe_openai_error(exc, context='transcription'):
+def describe_openai_error(exc, context='transcription', key_source=None):
     """Turn an OpenAI SDK exception into something a human can act on.
 
     Users were shown the raw error JSON, which is both unreadable and unsafe:
     OpenAI echoes the submitted key back in 401s, and people paste passwords
     into that field, so the raw text put a third party's password in our
     database. Never surface the provider's message verbatim.
+
+    When `key_source` is ``'user'`` (BYOK), auth/billing copy also hints that
+    removing the key falls back to Podskrift free or paid minutes.
     """
+    byok = key_source == 'user'
+    remove_hint = (
+        ' Or remove the key in Settings to use Podskrift free or paid minutes '
+        'instead.'
+    )
     status = getattr(exc, 'status_code', None)
     if status == 401:
-        return ('OpenAI rejected this key. It may have been deleted, or copied '
-                'incompletely. Create a new one at platform.openai.com/api-keys '
-                'and paste the whole thing.')
+        msg = ('OpenAI rejected this key. It may have been deleted, or copied '
+               'incompletely. Create a new one at platform.openai.com/api-keys '
+               'and paste the whole thing.')
+        if byok and context == 'transcription':
+            return msg + remove_hint
+        return msg
     if status == 429:
         code = product_analytics.openai_error_code(exc)
         if code == 'rate_limit_exceeded':
@@ -1299,13 +1310,18 @@ def describe_openai_error(exc, context='transcription'):
             return ('Your OpenAI account has no credit yet, so transcription won\'t '
                     'work. Add a payment method or prepaid credit at '
                     'platform.openai.com/account/billing.')
-        return ('OpenAI refused the job: your OpenAI account has no credit left. '
-                'Add credit at platform.openai.com/account/billing — it can take a '
-                'minute to activate — then retry this episode. Nothing was charged '
-                'by Podskrift.')
+        msg = ('OpenAI refused the job: your OpenAI account has no credit left. '
+               'Add credit at platform.openai.com/account/billing — it can take a '
+               'minute to activate — then retry this episode.')
+        if byok:
+            msg += remove_hint
+        return msg + ' Nothing was charged by Podskrift.'
     if status == 403:
-        return ('Your OpenAI key is not allowed to use the Whisper API. Check its '
-                'permissions at platform.openai.com.')
+        msg = ('Your OpenAI key is not allowed to use the Whisper API. Check its '
+               'permissions at platform.openai.com.')
+        if byok and context == 'transcription':
+            return msg + remove_hint
+        return msg
     if status and 500 <= status < 600:
         return 'OpenAI had a server error. Wait a moment and try again.'
     if isinstance(exc, APITimeoutError):
@@ -4264,12 +4280,15 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                                 {**ph_props, 'reason': 'abandoned'},
                             )
                     except Exception as e:
-                        _update_task(task_id, status='error', phase='error',
-                                     error_message=describe_openai_error(e)
-                                     if _is_openai_error(e) else str(e))
+                        _update_task(
+                            task_id, status='error', phase='error',
+                            error_message=(
+                                describe_openai_error(e, key_source=key_source)
+                                if _is_openai_error(e) else str(e)))
                         # A job that never produced a transcript must not consume the
                         # trial allowance it reserved.
                         failed = db.session.get(TranscriptionTask, task_id)
+                        reason = None
                         if failed:
                             trial_refund_task(failed)
                             if isinstance(e, TrialExhausted):
@@ -4287,7 +4306,8 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                             elif isinstance(e, SourceAudioUnavailable):
                                 reason = e.reason
                             elif _is_openai_error(e):
-                                reason = product_analytics.openai_fail_reason(e)
+                                reason = product_analytics.openai_fail_reason(
+                                    e, key_source=key_source)
                             else:
                                 reason = 'other'
                             product_analytics.capture(
@@ -4297,13 +4317,19 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                             )
                         # After the refund, and it cannot raise: reporting must
                         # never cost a user the allowance they are owed.
-                        # Dead enclosure / host block is expected user-side noise
-                        # — log it, but do not fire the Sentry error alert.
+                        # Dead enclosure / host block, and BYOK auth/billing
+                        # (user's OpenAI account), are expected user-side noise
+                        # — log them, but do not fire the Sentry error alert.
+                        # Platform-key quota/auth failures still go to Sentry.
                         if isinstance(e, SourceAudioUnavailable):
                             app.logger.warning(
                                 'Source audio unavailable for task %s: %s '
                                 '(HTTP %s)',
                                 task_id, e.reason, e.status_code)
+                        elif reason in ('own_key_no_credit', 'own_key_invalid'):
+                            app.logger.warning(
+                                'Own-key OpenAI account error for task %s: %s',
+                                task_id, reason)
                         else:
                             report_task_failure(
                                 e, task_id=task_id, key_source=key_source)

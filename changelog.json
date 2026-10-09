@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "own-key-billing-clarity",
+      "date": "2026-10-09",
+      "title": "Clearer help when your OpenAI key is out of credit",
+      "summary": "If you use your own OpenAI key and the account has no credit (or the key is invalid), Podskrift says so plainly and suggests adding credit at OpenAI or removing the key to use free or paid minutes instead. Nothing is charged."
+    },
+    {
       "id": "clearer-missing-episode-audio",
       "date": "2026-10-09",
       "title": "Clearer error when an episode’s audio is gone",

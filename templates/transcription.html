@@ -461,7 +461,8 @@
             if (d.no_billing) {
                 el('errorMessage').textContent =
                     'Your OpenAI account has no credit, so transcription cannot start. '
-                    + 'Add credit at OpenAI, then retry this episode — no need to search again.';
+                    + 'Add credit at OpenAI, then retry this episode — or remove the key in '
+                    + 'Settings to use Podskrift free or paid minutes instead.';
             } else {
                 el('errorMessage').textContent = d.error || 'Unknown error';
             }
