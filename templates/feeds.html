@@ -2,11 +2,11 @@
 {% block title %}My Feeds — Podskrift{% endblock %}
 
 {% block content %}
-<h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">My Feeds</h2>
+<h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">My Feeds</h1>
 
 <div class="card">
     <div class="card-header">
-        <h5>Add Feed</h5>
+        <h2>Add Feed</h2>
     </div>
     <div class="card-body">
         <form method="POST" action="{{ url_for('add_feed') }}" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
@@ -23,7 +23,7 @@
 
 <div class="card">
     <div class="card-header">
-        <h5>Saved Feeds</h5>
+        <h2>Saved Feeds</h2>
         <span class="badge">{{ feeds|length }}</span>
     </div>
     {% if feeds %}

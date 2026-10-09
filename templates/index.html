@@ -18,7 +18,7 @@
     {# Signup-trial marketing — anonymous only. Logged-in users have their own
        grant (often 180 for legacy accounts) and a balance banner below. #}
     {% if trial_minutes and not current_user.is_authenticated %}
-    <p style="color: var(--muted); font-size: 14px; margin-top: 6px; max-width: 520px; line-height: 1.5; opacity: 0.85;">
+    <p style="color: var(--muted); font-size: 14px; margin-top: 6px; max-width: 520px; line-height: 1.5;">
         First {{ trial_minutes }} minutes of audio free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} — longer episodes get that as a free preview. No card, no OpenAI key needed to start.
     </p>
     {% endif %}
@@ -101,7 +101,7 @@
 {% if current_user.is_authenticated and saved_feeds %}
 <div class="card" style="margin-bottom: 16px;">
     <div class="card-header">
-        <h5>Saved Feeds</h5>
+        <h2>Saved Feeds</h2>
         <a href="{{ url_for('feeds') }}" class="btn btn-sm btn-ghost">Manage</a>
     </div>
     {% for feed in saved_feeds %}
@@ -118,7 +118,7 @@
 <!-- Search -->
 <div class="card">
     <div class="card-header">
-        <h3>Paste a Spotify link or search a podcast</h3>
+        <h2>Paste a Spotify link or search a podcast</h2>
     </div>
     <div class="card-body">
         <div class="tabs" id="searchTabs">
@@ -127,6 +127,8 @@
         </div>
         <div class="input-group">
             <input type="text" class="form-input form-input-lg" id="podcastSearch"
+                   aria-label="Spotify episode link or podcast name" aria-describedby="searchHint"
+                   enterkeyhint="search"
                    placeholder="https://open.spotify.com/episode/…  or  podcast name" autocomplete="off"
                    {% if first_run and current_user.is_authenticated %}autofocus{% endif %}>
             <button class="btn btn-primary" type="button" id="searchBtn">Search</button>
@@ -177,12 +179,13 @@
 <!-- RSS URL -->
 <div class="card">
     <div class="card-header">
-        <h5>Or paste an RSS feed URL</h5>
+        <h2>Or paste an RSS feed URL</h2>
     </div>
     <div class="card-body">
         <form method="POST" action="{{ url_for('parse_rss') }}">
             <div class="input-group">
                 <input type="url" class="form-input" id="rss_url" name="rss_url"
+                       aria-label="Podcast RSS feed URL" enterkeyhint="go"
                        placeholder="https://feeds.example.com/podcast/rss" required>
                 <button type="submit" class="btn btn-ghost">Get Episodes</button>
             </div>
@@ -246,10 +249,10 @@
 
 {% if faq %}
 <section class="mt-3" style="padding: 0 4px;" aria-labelledby="faqHeading">
-    <p class="section-label" id="faqHeading">Questions</p>
+    <h2 class="section-label" id="faqHeading">Questions</h2>
     <div style="border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden;">
         {% for question, answer in faq %}
-        <details style="border-bottom: 1px solid var(--border);">
+        <details style="border-bottom: 1px solid var(--border);"{% if text_lang(question) %} lang="{{ text_lang(question) }}"{% endif %}>
             <summary style="padding: 14px 16px; cursor: pointer; font-size: 14px; font-weight: 600;">
                 {{ question }}
             </summary>
@@ -430,6 +433,11 @@
     function buildRow(item) {
         var row = document.createElement('div');
         row.className = 'search-result';
+        // Keyboard: focusable, announced as a button, Enter/Space click it
+        // (see the data-kbd-click handler in base.html).
+        row.tabIndex = 0;
+        row.setAttribute('role', 'button');
+        row.setAttribute('data-kbd-click', '');
 
         if (item.artwork) {
             var img = document.createElement('img');
