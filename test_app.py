@@ -11793,6 +11793,231 @@ def test_admin_never_renders_byok_key(monkeypatch):
         assert 'SHOULD-NEVER' not in r.data.decode()
 
 
+def _admin_fake_stripe_revenue_client(
+        *,
+        available=None,
+        pending=None,
+        payouts=None,
+        balance_transactions=None,
+        balance_error=None,
+        payouts_error=None,
+        bt_error=None,
+        livemode=True):
+    """Minimal StripeClient surface for admin revenue panel tests."""
+    from types import SimpleNamespace
+
+    available = available if available is not None else [
+        {'amount': 12345, 'currency': 'usd'},
+    ]
+    pending = pending if pending is not None else [
+        {'amount': 5000, 'currency': 'usd'},
+    ]
+    now = int(datetime.now(timezone.utc).timestamp())
+    if payouts is None:
+        payouts = [
+            SimpleNamespace(
+                id='po_in_transit',
+                amount=10000,
+                currency='usd',
+                status='in_transit',
+                created=now - 86400,
+                arrival_date=now + 86400,
+                destination=SimpleNamespace(last4='4242', object='bank_account'),
+            ),
+            SimpleNamespace(
+                id='po_paid',
+                amount=8000,
+                currency='usd',
+                status='paid',
+                created=now - 7 * 86400,
+                arrival_date=now - 5 * 86400,
+                destination='ba_unexpanded_must_not_appear_in_html',
+            ),
+        ]
+    if balance_transactions is None:
+        balance_transactions = [
+            SimpleNamespace(
+                id='txn_1', type='charge', amount=500, fee=45, net=455,
+                currency='usd', created=now - 3600,
+                fee_details=[
+                    SimpleNamespace(type='stripe_fee', amount=30),
+                    SimpleNamespace(type='tax', amount=15),
+                ],
+            ),
+            SimpleNamespace(
+                id='txn_2', type='refund', amount=-200, fee=0, net=-200,
+                currency='usd', created=now - 2 * 86400,
+                fee_details=[],
+            ),
+            SimpleNamespace(
+                id='txn_old', type='charge', amount=500, fee=30, net=470,
+                currency='usd', created=now - 40 * 86400,
+                fee_details=[SimpleNamespace(type='stripe_fee', amount=30)],
+            ),
+        ]
+
+    class FakeBalance:
+        def retrieve(self, params=None, options=None):
+            if balance_error:
+                raise balance_error
+            return SimpleNamespace(
+                available=available,
+                pending=pending,
+                livemode=livemode,
+            )
+
+    class FakePayouts:
+        def list(self, params=None, options=None):
+            if payouts_error:
+                raise payouts_error
+            return SimpleNamespace(data=list(payouts))
+
+    class FakeBTList:
+        def __init__(self, rows):
+            self.data = list(rows)
+
+        def auto_paging_iter(self):
+            return iter(self.data)
+
+    class FakeBT:
+        def list(self, params=None, options=None):
+            if bt_error:
+                raise bt_error
+            return FakeBTList(balance_transactions)
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            self.v1 = SimpleNamespace(
+                balance=FakeBalance(),
+                payouts=FakePayouts(),
+                balance_transactions=FakeBT(),
+            )
+
+    return FakeClient
+
+
+def test_admin_stripe_revenue_section_renders_mocked_data(monkeypatch):
+    import admin_dashboard as AD
+    AD.clear_stripe_revenue_cache()
+    monkeypatch.setenv('ADMIN_EMAILS', 'stripe-admin@test.com')
+    monkeypatch.setattr(A, 'STRIPE_SECRET_KEY', 'sk_live_fake_for_admin')
+    FakeClient = _admin_fake_stripe_revenue_client()
+    monkeypatch.setattr(AD, 'admin_stripe_client', lambda: FakeClient())
+
+    client, _ = _admin_login('stripe-admin@test.com')
+    resp = client.get('/admin')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'Revenue &amp; payouts' in body or 'Revenue & payouts' in body
+    assert 'data-stripe="balance"' in body
+    assert '$123.45' in body  # available
+    assert '$50.00' in body  # pending
+    assert 'in_transit' in body
+    assert '•••• 4242' in body
+    assert 'ba_unexpanded_must_not_appear_in_html' not in body
+    assert 'sk_live_fake' not in body
+    assert 'Gross charges' in body
+    assert 'chartStripeWeekly' in body
+    assert 'adminStripeWeekly' in body
+    assert 'payout-highlight' in body
+
+
+def test_admin_stripe_unavailable_does_not_break_dashboard(monkeypatch):
+    import admin_dashboard as AD
+    AD.clear_stripe_revenue_cache()
+    monkeypatch.setenv('ADMIN_EMAILS', 'stripe-fail@test.com')
+    monkeypatch.setattr(A, 'STRIPE_SECRET_KEY', 'sk_live_fake')
+
+    class Boom(Exception):
+        pass
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            from types import SimpleNamespace
+
+            class Bal:
+                def retrieve(self, params=None, options=None):
+                    raise Boom('connection reset')
+
+            self.v1 = SimpleNamespace(balance=Bal())
+
+    monkeypatch.setattr(AD, 'admin_stripe_client', lambda: FakeClient())
+    client, _ = _admin_login('stripe-fail@test.com')
+    resp = client.get('/admin')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'data-kpi="total_users"' in body
+    assert 'Stripe unavailable:' in body
+    assert 'data-stripe="error"' in body
+
+
+def test_admin_stripe_permission_error_names_missing_scope(monkeypatch):
+    import admin_dashboard as AD
+    AD.clear_stripe_revenue_cache()
+    monkeypatch.setenv('ADMIN_EMAILS', 'stripe-perm@test.com')
+    monkeypatch.setattr(A, 'STRIPE_SECRET_KEY', 'rk_live_restricted')
+
+    # Use real stripe.PermissionError so describe_stripe_admin_error classifies it.
+    err = A.stripe.PermissionError(
+        "The provided key does not have the required permissions for this "
+        "endpoint on account 'acct_1'. Having the 'rak_balance_read' "
+        "permission would allow this request to continue.",
+    )
+    FakeClient = _admin_fake_stripe_revenue_client(balance_error=err)
+    monkeypatch.setattr(AD, 'admin_stripe_client', lambda: FakeClient())
+
+    client, _ = _admin_login('stripe-perm@test.com')
+    body = client.get('/admin').data.decode()
+    assert 'Stripe unavailable:' in body
+    assert 'rak_balance_read' in body
+    assert 'rk_live_restricted' not in body
+
+
+def test_admin_stripe_unconfigured_shows_clear_message(monkeypatch):
+    import admin_dashboard as AD
+    AD.clear_stripe_revenue_cache()
+    monkeypatch.setenv('ADMIN_EMAILS', 'stripe-off@test.com')
+    monkeypatch.setattr(A, 'STRIPE_SECRET_KEY', '')
+    client, _ = _admin_login('stripe-off@test.com')
+    body = client.get('/admin').data.decode()
+    assert 'Stripe unavailable:' in body
+    assert 'STRIPE_SECRET_KEY' in body
+
+
+def test_admin_stripe_revenue_cache_ttl(monkeypatch):
+    import admin_dashboard as AD
+    AD.clear_stripe_revenue_cache()
+    monkeypatch.setattr(A, 'STRIPE_SECRET_KEY', 'sk_live_cache')
+    calls = {'n': 0}
+    FakeClient = _admin_fake_stripe_revenue_client()
+
+    def make():
+        calls['n'] += 1
+        return FakeClient()
+
+    monkeypatch.setattr(AD, 'admin_stripe_client', make)
+    first = AD.collect_stripe_revenue()
+    second = AD.collect_stripe_revenue()
+    assert first['ok'] is True
+    assert second['cached'] is True
+    assert calls['n'] == 1
+    AD.clear_stripe_revenue_cache()
+    third = AD.collect_stripe_revenue(force_refresh=True)
+    assert third['cached'] is False
+    assert calls['n'] == 2
+
+
+def test_admin_stripe_money_helpers():
+    import admin_dashboard as AD
+    assert AD.format_stripe_money(500, 'usd') == '$5.00'
+    assert AD.format_stripe_money(12345, 'usd') == '$123.45'
+    assert '4242' not in (AD._payout_destination_last4(
+        type('P', (), {'destination': 'ba_secret_full_id'})()) or '')
+    from types import SimpleNamespace
+    assert AD._payout_destination_last4(SimpleNamespace(
+        destination=SimpleNamespace(last4='9999'))) == '9999'
+
+
 def test_listen_links_platform_labels_require_canonical_urls():
     links = A.listen_links_from_fields(
         spotify_url='https://evil.example/open.spotify.com/episode/x',
