@@ -51,7 +51,8 @@
                 <input type="hidden" name="cancel_url" value="{{ url_for('pricing') }}">
                 <button type="submit" class="btn btn-primary">{{ credit_pack_label }}</button>
             </form>
-            <p class="form-hint" style="margin-top: 8px;">{{ credit_pack_subline }}</p>
+            <p class="form-hint" style="margin-top: 8px;">{{ credit_pack_payment_hint }}</p>
+            <p class="form-hint" style="margin-top: 4px;">{{ credit_pack_subline }}</p>
             {% elif stripe_configured %}
             <a href="{{ url_for('register') }}" class="btn btn-primary">Create free account</a>
             <p class="form-hint" style="margin-top: 8px;">

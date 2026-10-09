@@ -804,6 +804,10 @@ CREDIT_PACK_CURRENCY = 'usd'
 CREDIT_PACK_LABEL = 'Buy 5 hours for $5'
 #: Shown under Buy buttons — do not fold into CREDIT_PACK_LABEL (SKU/analytics).
 CREDIT_PACK_SUBLINE = 'One-time · 300 min · VAT incl.'
+#: Trust line near Buy CTAs. Methods match Managed Payments dynamic PMs
+#: (cards + wallets); we never pass payment_method_types on the session.
+CREDIT_PACK_PAYMENT_HINT = (
+    'Card · Apple Pay · Google Pay · secure checkout by Stripe')
 CREDIT_PACK_SKU = 'minutes_300_usd500_v1'
 CREDIT_PACK_TAX_BEHAVIOR = STRIPE_TAX_BEHAVIOR if STRIPE_TAX_BEHAVIOR in (
     'inclusive', 'exclusive') else 'inclusive'
@@ -4283,8 +4287,12 @@ def billing_checkout():
         'client_reference_id': str(current_user.id),
         'customer_email': current_user.email,
         'customer_creation': 'always',
-        'billing_address_collection': 'required',
-'metadata': meta,
+        # auto: Checkout collects the minimum address fields needed for tax
+        # (Managed Payments / automatic_tax). required would force a full
+        # street address on every buyer. Do not pass payment_method_types —
+        # Managed Payments uses dynamic payment methods (card + wallets).
+        'billing_address_collection': 'auto',
+        'metadata': meta,
         'payment_intent_data': {
             'metadata': pi_meta,
         },
@@ -8333,6 +8341,7 @@ def inject_trial_badge():
         'stripe_buy_enabled': stripe_checkout_enabled(),
         'credit_pack_label': CREDIT_PACK_LABEL,
         'credit_pack_subline': CREDIT_PACK_SUBLINE,
+        'credit_pack_payment_hint': CREDIT_PACK_PAYMENT_HINT,
         'credit_pack_minutes': CREDIT_PACK_MINUTES,
         'credit_pack_price_usd': f'{CREDIT_PACK_AMOUNT_CENTS / 100:.0f}',
         'nav_minutes_left': nav['nav_minutes_left'],
