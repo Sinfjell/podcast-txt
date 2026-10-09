@@ -6,7 +6,7 @@
 
 {% block content %}
 <style>
-    .show-page { max-width: 720px; margin: 24px auto; }
+    .show-page { max-width: 720px; margin: 24px auto; font-size: 17px; line-height: 1.55; }
     .show-hero {
         display: flex;
         gap: 18px;
@@ -18,29 +18,28 @@
         border-radius: var(--radius);
         object-fit: cover;
         background: var(--surface);
-        border: 1px solid var(--border);
+        border: 1px solid var(--line);
         flex-shrink: 0;
     }
     .show-art-ph {
         width: 96px; height: 96px;
         border-radius: var(--radius);
-        background: var(--accent-bg);
-        border: 1px solid var(--accent-border);
+        background: var(--accent-tint);
         flex-shrink: 0;
     }
     .show-hero h1 {
-        font-size: clamp(24px, 4vw, 32px);
-        font-weight: 700;
+        font-size: clamp(30px, 4vw, 44px);
+        font-weight: 800;
         letter-spacing: -0.03em;
-        line-height: 1.2;
-        margin-bottom: 6px;
+        line-height: 1.05;
+        overflow-wrap: anywhere;
+        margin-bottom: 8px;
     }
-    .show-author { color: var(--muted); font-size: 14px; margin-bottom: 10px; }
+    .show-author { color: var(--muted); font-size: 15px; margin-bottom: 10px; }
     .show-desc {
-        color: var(--text);
-        font-size: 14.5px;
-        line-height: 1.65;
-        opacity: 0.92;
+        color: var(--ink);
+        font-size: 17px;
+        line-height: 1.55;
     }
     .show-desc-attr {
         color: var(--muted);
@@ -49,35 +48,36 @@
     }
     .show-section { margin: 36px 0; }
     .show-section h2 {
-        font-size: 18px;
+        font-size: 24px;
         font-weight: 700;
-        letter-spacing: -0.02em;
+        letter-spacing: -0.015em;
+        line-height: 1.2;
         margin-bottom: 8px;
     }
     .show-section > .lead {
         color: var(--muted);
-        font-size: 14px;
+        font-size: 15px;
         line-height: 1.55;
         margin-bottom: 16px;
     }
     .ep-row {
         display: flex;
-        gap: 14px;
-        align-items: flex-start;
-        padding: 14px 0;
-        border-bottom: 1px solid var(--border);
+        flex-wrap: wrap;
+        gap: 8px 16px;
+        align-items: center;
+        padding: 16px 0;
+        border-top: 1px solid var(--line);
     }
-    .ep-row:last-child { border-bottom: 0; }
-    .ep-main { flex: 1; min-width: 0; }
+    .ep-row:last-of-type { border-bottom: 1px solid var(--line); }
+    .ep-main { flex: 1 1 280px; min-width: 0; overflow-wrap: anywhere; }
     .ep-title {
-        font-size: 15px;
-        font-weight: 600;
-        letter-spacing: -0.01em;
-        margin-bottom: 4px;
+        font-size: 17px;
+        font-weight: 700;
+        margin-bottom: 2px;
     }
-    .ep-meta { font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
+    .ep-meta { font-size: 14px; color: var(--muted); margin-bottom: 6px; font-variant-numeric: tabular-nums; }
     .ep-desc {
-        font-size: 13px;
+        font-size: 14px;
         color: var(--muted);
         line-height: 1.5;
         display: -webkit-box;
@@ -85,7 +85,7 @@
         -webkit-box-orient: vertical;
         overflow: hidden;
     }
-    .ep-actions { flex-shrink: 0; padding-top: 2px; }
+    .ep-actions { flex-shrink: 0; }
     .show-steps {
         list-style: none;
         margin: 0;
@@ -96,19 +96,18 @@
         position: relative;
         padding: 0 0 14px 36px;
         color: var(--muted);
-        font-size: 14px;
+        font-size: 17px;
         line-height: 1.55;
     }
     .show-steps li::before {
         counter-increment: step;
         content: counter(step);
         position: absolute;
-        left: 0; top: 0;
+        left: 0; top: 2px;
         width: 24px; height: 24px;
         border-radius: 50%;
-        background: var(--accent-bg);
-        border: 1px solid var(--accent-border);
-        color: var(--accent-bright);
+        background: var(--accent-tint);
+        color: var(--on-accent-tint);
         font-size: 12px;
         font-weight: 700;
         display: flex;
@@ -116,37 +115,41 @@
         justify-content: center;
     }
     .show-faq details {
-        border-bottom: 1px solid var(--border);
-        padding: 12px 0;
+        border-bottom: 1px solid var(--line);
+        padding: 4px 0;
     }
     .show-faq summary {
+        display: flex;
+        align-items: center;
+        min-height: 44px;
         cursor: pointer;
-        font-weight: 600;
-        font-size: 14.5px;
+        font-weight: 700;
+        font-size: 17px;
         list-style: none;
     }
     .show-faq summary::-webkit-details-marker { display: none; }
     .show-faq details p {
         margin-top: 8px;
         color: var(--muted);
-        font-size: 14px;
-        line-height: 1.6;
+        font-size: 17px;
+        line-height: 1.55;
     }
     .show-note {
         margin-top: 12px;
-        font-size: 13px;
+        font-size: 14px;
         color: var(--muted);
     }
     .show-back {
-        display: inline-block;
+        display: inline-flex;
+        align-items: center;
+        min-height: 44px;
         margin-bottom: 16px;
-        font-size: 13px;
+        font-size: 15px;
         color: var(--muted);
     }
-    .show-back:hover { color: var(--text); }
+    .show-back:hover { color: var(--ink); }
     @media (max-width: 560px) {
         .show-hero { flex-direction: column; }
-        .ep-row { flex-direction: column; gap: 10px; }
         .ep-actions { width: 100%; }
         .ep-actions .btn { width: 100%; }
     }
@@ -207,7 +210,7 @@
                     <input type="hidden" name="rss_url" value="{{ show.feed_url }}">
                     <input type="hidden" name="episode_index" value="{{ ep.index }}">
                     <input type="hidden" name="episode_audio_url" value="{{ ep.audio_url }}">
-                    <button type="submit" class="btn btn-accent btn-sm"
+                    <button type="submit" class="btn btn-secondary btn-sm"
                             aria-label="Transcribe this episode: {{ ep.title }}">Transcribe this episode</button>
                 </form>
             </div>

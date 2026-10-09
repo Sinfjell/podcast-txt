@@ -2,17 +2,46 @@
 {% block title %}Settings — Podskrift{% endblock %}
 
 {% block content %}
-<div style="max-width: 500px; margin: 24px auto;">
-    <h1 style="font-size: 24px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 24px;">Settings</h1>
+<style>
+    .settings { max-width: 560px; margin: 24px auto 48px; }
+    .settings-title {
+        font-size: clamp(30px, 4vw, 44px); font-weight: 800; letter-spacing: -0.03em;
+        line-height: 1.05; margin-bottom: 16px;
+    }
+    .settings-section { border-top: 1px solid var(--line); padding: 32px 0; }
+    .settings-section h2 { font-size: 24px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.2; margin-bottom: 16px; }
+    .settings-section > summary {
+        cursor: pointer; min-height: 44px; display: flex; align-items: center;
+        justify-content: space-between; gap: 12px; list-style: none;
+    }
+    .settings-section > summary::-webkit-details-marker { display: none; }
+    .settings-section > summary::after {
+        content: ''; flex-shrink: 0; width: 10px; height: 10px; margin: 0 4px 4px 0;
+        border-right: 2px solid var(--ink); border-bottom: 2px solid var(--ink);
+        transform: rotate(45deg);
+    }
+    .settings-section[open] > summary::after { transform: rotate(-135deg); margin: 4px 4px 0 0; }
+    .settings-section > summary h2 { margin-bottom: 0; }
+    .settings-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+    .settings-head h2 { margin-bottom: 0; }
+    .settings-note { color: var(--muted); font-size: 14px; line-height: 1.5; }
+    .settings-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch; }
+    .settings-row form { margin: 0; }
+    .form-input:disabled { background: var(--surface); color: var(--muted); }
+    .check-row { display: flex; align-items: flex-start; gap: 12px; font-size: 15px; line-height: 1.5; margin-bottom: 16px; }
+    .check-row input { width: 20px; height: 20px; margin-top: 2px; flex-shrink: 0; accent-color: var(--accent); }
+    .settings code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; background: var(--surface); padding: 2px 6px; border-radius: var(--radius-sm); }
+    .settings .alert { display: block; }
+</style>
+<div class="settings">
+    <h1 class="settings-title">Settings</h1>
 
     {% if trial %}
-    <div class="card" id="credits">
-        <div class="card-header">
+    <section class="settings-section" id="credits">
+        <div>
             <h2>Minutes{% if trial.paid_minutes or trial.stripe_buy %} &amp; credits{% endif %}</h2>
-        </div>
-        <div class="card-body">
             {% if trial.on_own_key %}
-            <p style="color: var(--muted); font-size: 14px; line-height: 1.6;">
+            <p class="settings-note">
                 You're on your own OpenAI key, so Podskrift is free — OpenAI bills you
                 directly (about ${{ openai_hourly_cost }} per hour of audio). Nothing is counted against the trial.
                 {{ trial.remaining_minutes }} of {{ trial.limit_minutes }} trial minutes are still
@@ -22,21 +51,21 @@
                 {% endif %}
             </p>
             {% else %}
-            <p style="font-size: 15px; margin-bottom: 6px;">
+            <p style="margin-bottom: 8px;">
                 <strong>{{ trial.total_minutes }}</strong> minutes available
-                <span style="color: var(--muted); font-size: 13px;">
+                <span class="text-muted" style="font-size: 14px;">
                     ({{ trial.remaining_minutes }} free
                     {% if trial.paid_minutes %}+ {{ trial.paid_minutes }} paid{% endif %})
                 </span>
             </p>
             {% if trial.limit_minutes %}
-            <div style="height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; margin-bottom: 12px;">
-                <div style="height: 100%; border-radius: 4px; background: {% if trial.exhausted %}var(--error){% elif trial.low_balance %}var(--warning){% else %}var(--accent-bright){% endif %};
+            <div class="progress-track" style="margin-bottom: 16px;">
+                <div class="progress-fill" style="background: {% if trial.exhausted %}var(--danger){% elif trial.low_balance %}var(--on-warning-tint){% else %}var(--accent){% endif %};
                             width: {{ (100 * trial.used_minutes / trial.limit_minutes) if trial.limit_minutes else 0 }}%;"></div>
             </div>
             {% endif %}
             {% if trial.stripe_buy %}
-            <p style="font-size: 14px; margin-bottom: 10px;">
+            <p style="font-size: 15px; margin-bottom: 12px;">
                 ${{ credit_pack_price_usd }} · {{ credit_pack_minutes }} minutes · one-time · VAT included
             </p>
             <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline-block; margin: 0 8px 8px 0;">
@@ -46,12 +75,12 @@
                 <button type="submit" class="btn btn-primary">{{ trial.buy_label }}</button>
             </form>
             <p class="form-hint" style="display: inline; margin: 0;">{{ credit_pack_subline }}</p>
-            <p class="form-hint" style="margin-top: 10px;">
+            <p class="form-hint">
                 <a href="{{ url_for('terms') }}">Terms &amp; refunds</a>
                 · <a href="{{ url_for('pricing') }}">Pricing</a>
             </p>
             {% endif %}
-            <div class="form-hint" style="margin-top: 12px;">
+            <div class="form-hint" style="margin-top: 16px;">
                 {% if trial.exhausted %}
                 <p style="margin: 0 0 8px;">Your trial is used up.
                 <a href="#openai">Add your own OpenAI API key</a>
@@ -67,12 +96,12 @@
             </div>
             {% endif %}
         </div>
-    </div>
+    </section>
     {% elif stripe_buy_enabled and current_user.is_authenticated and not current_user.openai_api_key %}
-    <div class="card" id="credits">
-        <div class="card-header"><h2>Paid minutes</h2></div>
-        <div class="card-body">
-            <p style="font-size: 14px; margin-bottom: 10px;">
+    <section class="settings-section" id="credits">
+        <div>
+            <h2>Paid minutes</h2>
+            <p style="font-size: 15px; margin-bottom: 12px;">
                 ${{ credit_pack_price_usd }} · {{ credit_pack_minutes }} minutes · one-time · VAT included
             </p>
             <form method="POST" action="{{ url_for('billing_checkout') }}">
@@ -81,29 +110,28 @@
                 <input type="hidden" name="ph_sid" value="">
                 <button type="submit" class="btn btn-primary">{{ credit_pack_label }}</button>
             </form>
-            <p class="form-hint" style="margin-top: 8px;">{{ credit_pack_subline }}</p>
-            <p class="form-hint" style="margin-top: 10px;">
+            <p class="form-hint">{{ credit_pack_subline }}</p>
+            <p class="form-hint">
                 <a href="{{ url_for('terms') }}">Terms &amp; refunds</a>
                 · <a href="{{ url_for('pricing') }}">Pricing</a>
             </p>
         </div>
-    </div>
+    </section>
     {% endif %}
 
-    <div class="card" style="margin-top: 16px;" id="email">
-        <div class="card-header"><h2>Email</h2></div>
-        <div class="card-body">
+    <section class="settings-section" id="email">
+        <div>
+            <h2>Email</h2>
             <div class="form-group">
-                <label class="form-label">Address</label>
-                <input type="email" class="form-input ph-no-capture" value="{{ current_user.email }}"
-                       disabled style="opacity: 0.5;" autocomplete="email">
+                <label class="form-label" for="account_email">Address</label>
+                <input type="email" class="form-input ph-no-capture" id="account_email" value="{{ current_user.email }}"
+                       disabled autocomplete="email">
             </div>
             <form method="POST">
                 <input type="hidden" name="form" value="email_prefs">
-                <label style="display: flex; align-items: flex-start; gap: 8px; font-size: 14px; line-height: 1.5;">
+                <label class="check-row">
                     <input type="checkbox" name="email_transcript_ready" value="1"
-                           {% if current_user.email_transcript_ready and not current_user.email_unsubscribed_at %}checked{% endif %}
-                           style="margin-top: 3px;">
+                           {% if current_user.email_transcript_ready and not current_user.email_unsubscribed_at %}checked{% endif %}>
                     <span>
                         Email me when a transcript is ready
                         <span class="form-hint" style="display: block; margin-top: 4px;">
@@ -112,13 +140,14 @@
                         </span>
                     </span>
                 </label>
-                <button type="submit" class="btn btn-primary" style="margin-top: 12px;">Save email prefs</button>
+                <button type="submit" class="btn btn-secondary">Save email prefs</button>
             </form>
         </div>
-    </div>
+    </section>
 
-    <div class="card" style="margin-top: 16px;">
-        <div class="card-body">
+    <section class="settings-section">
+        <div>
+            <h2>OpenAI API key</h2>
             <form method="POST">
                 <div class="form-group" id="openai">
                     <label class="form-label" for="openai_api_key">OpenAI API Key</label>
@@ -141,20 +170,20 @@
                         Leave blank to keep it; paste a new key to replace it.
                         You're on your own key; nothing is metered against the trial.
                         {% else %}
-                        <br><span style="color: var(--warning);">
+                        <br><strong>
                             {% if trial %}Needed only after the free trial.
                             {% else %}No key saved — add one to start transcribing.
                             {% endif %}
                             Podskrift doesn't charge; you pay OpenAI directly.
-                        </span>
+                        </strong>
                         {% endif %}
                     </p>
                 </div>
-                <button type="submit" class="btn btn-primary">Save</button>
+                <button type="submit" class="btn btn-secondary">Save</button>
             </form>
             {% if no_billing_warning and stripe_buy_enabled %}
-            <div id="openai-no-billing" style="margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px;">
-                <p style="font-size: 14px; margin: 0 0 8px; line-height: 1.5;">
+            <div id="openai-no-billing" class="alert alert-warning" style="margin-top: 16px;">
+                <p style="margin: 0 0 12px;">
                     Your OpenAI account still needs credit. Add it at
                     <a href="https://platform.openai.com/account/billing" target="_blank" rel="noopener">OpenAI billing</a>,
                     or switch to Podskrift minutes instead (removes this OpenAI key):
@@ -163,29 +192,29 @@
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="source" value="openai_no_billing">
                     <input type="hidden" name="ph_sid" value="">
-                    <button type="submit" class="btn btn-primary">{{ credit_pack_label }}</button>
+                    <button type="submit" class="btn btn-secondary">{{ credit_pack_label }}</button>
                 </form>
-                <p class="form-hint" style="margin-top: 8px;">{{ credit_pack_subline }}</p>
+                <p style="margin: 12px 0 0; font-size: 14px;">{{ credit_pack_subline }}</p>
             </div>
             {% endif %}
             {% if current_user.openai_api_key %}
             <form method="POST" action="{{ url_for('settings_remove_openai_key') }}"
                   style="margin-top: 12px;"
                   onsubmit="return confirm('Remove your OpenAI API key? You will fall back to the free trial if it is available.');">
-                <button type="submit" class="btn btn-ghost">Remove key</button>
+                <button type="submit" class="btn btn-danger">Remove key</button>
             </form>
             {% endif %}
         </div>
-    </div>
+    </section>
 
     {% if new_api_key or current_user.has_api_key %}
-    <div class="card" style="margin-top: 16px;">
-        <div class="card-header">
+    <section class="settings-section">
+        <div class="settings-head">
             <h2>Podskrift API key (developers only)</h2>
-            <a href="{{ url_for('api_docs') }}" class="btn btn-sm btn-ghost">Docs</a>
+            <a href="{{ url_for('api_docs') }}" class="btn btn-sm btn-secondary">Docs</a>
         </div>
-        <div class="card-body">
-            <p style="color: var(--muted); font-size: 14px; line-height: 1.6; margin-bottom: 12px;">
+        <div>
+            <p class="settings-note" style="margin-bottom: 16px;">
                 For scripts and agents calling the Podskrift API. You don't need this to
                 transcribe on the website — for that, use the OpenAI API key above.
                 <a href="{{ url_for('api_docs') }}">How to use</a>
@@ -194,71 +223,68 @@
             {% if new_api_key %}
             <div class="form-group">
                 <label class="form-label" for="new_api_key">Your key (copy now)</label>
-                <div style="display: flex; gap: 8px; align-items: stretch;">
+                <div class="settings-row">
                     <input type="text" class="form-input ph-no-capture" id="new_api_key" readonly
-                           value="{{ new_api_key }}"
-                           style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;"
+                           value="{{ new_api_key }}" style="flex: 1 1 200px; width: auto;"
                            autocomplete="off" data-ph-no-capture>
-                    <button type="button" class="btn btn-ghost" id="copy_api_key">Copy</button>
+                    <button type="button" class="btn btn-secondary" id="copy_api_key">Copy</button>
                 </div>
-                <p class="form-hint" style="color: var(--warning); margin-top: 8px;">
+                <div class="alert alert-warning" style="margin: 12px 0 0;">
                     This is the only time the full key is shown.
-                </p>
+                </div>
             </div>
             {% else %}
-            <p style="font-size: 14px; margin-bottom: 12px;">
+            <p style="margin-bottom: 16px;">
                 Active key:
-                <code style="font-size: 13px;">{{ current_user.api_key_prefix }}…</code>
+                <code>{{ current_user.api_key_prefix }}…</code>
                 {% if current_user.api_key_created_at %}
-                <span style="color: var(--muted);">
+                <span class="text-muted">
                     · created {{ current_user.api_key_created_at.strftime('%Y-%m-%d') }}
                 </span>
                 {% endif %}
             </p>
-            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <div class="settings-row">
                 <form method="POST" action="{{ url_for('settings_generate_api_key') }}"
                       onsubmit="return confirm('Old keys stop working immediately.');">
-                    <button type="submit" class="btn btn-ghost">Regenerate</button>
+                    <button type="submit" class="btn btn-secondary">Regenerate</button>
                 </form>
                 <form method="POST" action="{{ url_for('settings_revoke_api_key') }}"
                       onsubmit="return confirm('Revoke this key? Scripts using it will get 401.');">
-                    <button type="submit" class="btn btn-ghost">Revoke</button>
+                    <button type="submit" class="btn btn-danger">Revoke</button>
                 </form>
             </div>
             {% endif %}
         </div>
-    </div>
+    </section>
     {% else %}
-    <details class="card" style="margin-top: 16px; padding: 0;">
-        <summary class="card-header" style="cursor: pointer; list-style-position: inside;">
-            <h2 style="display: inline;">Podskrift API key (developers only)</h2>
+    <details class="settings-section">
+        <summary>
+            <h2>Podskrift API key (developers only)</h2>
         </summary>
-        <div class="card-body">
-            <p style="color: var(--muted); font-size: 14px; line-height: 1.6; margin-bottom: 12px;">
+        <div style="padding-top: 16px;">
+            <p class="settings-note" style="margin-bottom: 16px;">
                 For scripts and agents calling the Podskrift API. You don't need this to
                 transcribe on the website — for that, use the OpenAI API key above.
                 <a href="{{ url_for('api_docs') }}">How to use</a>
                 · <a href="{{ url_for('api_docs') }}">Docs</a>
             </p>
             <form method="POST" action="{{ url_for('settings_generate_api_key') }}">
-                <button type="submit" class="btn btn-primary">Create</button>
+                <button type="submit" class="btn btn-secondary">Create</button>
             </form>
         </div>
     </details>
     {% endif %}
 
-    <div class="card" style="margin-top: 16px;">
-        <div class="card-header">
+    <section class="settings-section">
+        <div>
             <h2>Feedback / feature ideas</h2>
-        </div>
-        <div class="card-body">
-            <p style="color: var(--muted); font-size: 14px; line-height: 1.6;">
+            <p class="settings-note">
                 Something broken, or something that should exist?
                 <a href="https://productivitytech.io/contact/" target="_blank">Send feedback</a>
                 — bugs, feature ideas, and rough edges all welcome.
             </p>
         </div>
-    </div>
+    </section>
 </div>
 {% if trial and trial.exhausted and trial.stripe_buy and not trial.on_own_key %}
 <script>

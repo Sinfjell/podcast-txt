@@ -27,6 +27,8 @@ UNSUBSCRIBE_MAX_AGE = 60 * 60 * 24 * 365 * 5  # five years
 
 TRANSCRIPT_READY = 'transcript_ready'
 NEW_EPISODES = 'new_episodes'
+PASSWORD_RESET = 'password_reset'
+PASSWORD_CHANGED = 'password_changed'
 
 # Job finished quickly *and* the owner was still polling → skip the email.
 TRANSCRIPT_READY_MIN_DURATION_SEC = 60
@@ -433,3 +435,105 @@ def notify_new_episodes_digest(
         for key in claim_keys:
             release_email_send(db, EmailSentLog, idempotency_key=key)
         return False
+
+
+# ---------------------------------------------------------------------------
+# Password reset (security mail — always sent when mail_ready, ignore prefs)
+# ---------------------------------------------------------------------------
+
+def build_password_reset_bodies(reset_url: str) -> tuple[str, str, str]:
+    """Subject, text, html for a one-time reset link. No email address in body."""
+    safe = html_lib.escape(reset_url, quote=True)
+    subject = 'Reset your Podskrift password'
+    text = (
+        'Reset your Podskrift password\n\n'
+        'We received a request to reset the password for your Podskrift account.\n'
+        'Open this link within 60 minutes to choose a new password:\n\n'
+        f'{reset_url}\n\n'
+        'If you did not ask for this, you can ignore this email — your password '
+        'stays the same.\n\n'
+        '—\nPodskrift · hello@podskrift.com · https://podskrift.com\n'
+    )
+    html = (
+        '<p style="font-size:15px;line-height:1.5;color:#111">'
+        'We received a request to reset the password for your Podskrift account.'
+        '</p>'
+        f'<p style="margin:24px 0"><a href="{safe}" '
+        'style="display:inline-block;background:#059669;color:#fff;'
+        'text-decoration:none;padding:12px 18px;border-radius:8px;'
+        'font-weight:600">Choose a new password</a></p>'
+        '<p style="font-size:13px;line-height:1.5;color:#666">'
+        'This link expires in 60 minutes. If you did not ask for this, ignore '
+        'this email — your password stays the same.</p>'
+        '<hr style="border:none;border-top:1px solid #ddd;margin:24px 0">'
+        '<p style="font-size:12px;color:#666;line-height:1.5">'
+        'Podskrift · '
+        '<a href="mailto:hello@podskrift.com">hello@podskrift.com</a> · '
+        '<a href="https://podskrift.com">podskrift.com</a>'
+        '</p>'
+    )
+    return subject, text, html
+
+
+def build_password_changed_bodies() -> tuple[str, str, str]:
+    """Short confirmation that the password was changed."""
+    subject = 'Your Podskrift password was changed'
+    text = (
+        'Your Podskrift password was changed\n\n'
+        'The password for your Podskrift account was just updated. If you did '
+        'this, no further action is needed.\n\n'
+        'If you did not change your password, contact us at hello@podskrift.com '
+        'right away.\n\n'
+        '—\nPodskrift · hello@podskrift.com · https://podskrift.com\n'
+    )
+    html = (
+        '<p style="font-size:15px;line-height:1.5;color:#111">'
+        'The password for your Podskrift account was just updated. If you did '
+        'this, no further action is needed.'
+        '</p>'
+        '<p style="font-size:13px;line-height:1.5;color:#666">'
+        'If you did not change your password, contact us at '
+        '<a href="mailto:hello@podskrift.com">hello@podskrift.com</a> '
+        'right away.</p>'
+        '<hr style="border:none;border-top:1px solid #ddd;margin:24px 0">'
+        '<p style="font-size:12px;color:#666;line-height:1.5">'
+        'Podskrift · '
+        '<a href="mailto:hello@podskrift.com">hello@podskrift.com</a> · '
+        '<a href="https://podskrift.com">podskrift.com</a>'
+        '</p>'
+    )
+    return subject, text, html
+
+
+def send_password_reset_email(*, to: str, reset_url: str, user_id: int) -> str:
+    """Send the reset link. Never logs the address. Returns mailer outcome."""
+    if not mailer.mail_ready():
+        return mailer.SEND_FAILED
+    subject, text, html = build_password_reset_bodies(reset_url)
+    # No unsubscribe footer: this is account-security mail.
+    return mailer.send_email(
+        to=to,
+        subject=subject,
+        text=text,
+        html=html,
+        tags=[PASSWORD_RESET],
+        kind=PASSWORD_RESET,
+        idempotency_key=f'password-reset:{user_id}:{hashlib.sha256(reset_url.encode()).hexdigest()[:16]}',
+    )
+
+
+def send_password_changed_email(*, to: str, user_id: int) -> str:
+    """Confirm a successful password change. Ignores marketing prefs."""
+    if not mailer.mail_ready():
+        return mailer.SEND_FAILED
+    subject, text, html = build_password_changed_bodies()
+    return mailer.send_email(
+        to=to,
+        subject=subject,
+        text=text,
+        html=html,
+        tags=[PASSWORD_CHANGED],
+        kind=PASSWORD_CHANGED,
+        # Fresh Message-Id each send; a second change is a new notice.
+        idempotency_key='',
+    )

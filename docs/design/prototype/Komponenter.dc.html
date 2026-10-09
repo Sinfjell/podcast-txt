@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="nb">
+<head>
+<meta charset="utf-8">
+<title>Podskrift komponenter i profil A</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700;800&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap">
+<style>
+body{margin:0}
+a{color:#0A7A55}a:hover{color:#075C40}
+</style>
+</helmet>
+<div style="width: 1200px; height: 1480px; box-sizing: border-box; padding: 56px; display: flex; flex-direction: column; gap: 40px; background: #FFFFFF; color: #0E1512; font-family: 'Schibsted Grotesk', system-ui, sans-serif">
+
+<div style="display: flex; flex-direction: column; gap: 14px">
+<div style="font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #56635D">Toppmeny</div>
+<nav aria-label="Main" style="display: flex; align-items: center; gap: 28px; height: 64px; padding: 0 20px; border: 1px solid #DCE2DF; border-radius: 8px">
+<a href="#" style="display: flex; align-items: center; gap: 10px; color: #0E1512; text-decoration: none; font-size: 22px; font-weight: 800; letter-spacing: -0.03em"><svg width="30" height="28" viewBox="0 0 30 28" aria-hidden="true"><rect x="2" y="9" width="3" height="10" rx="1.5" fill="#0E1512"/><rect x="8" y="4" width="3" height="20" rx="1.5" fill="#0E1512"/><rect x="14" y="8" width="3" height="12" rx="1.5" fill="#0E1512"/><rect x="20" y="7" width="8" height="3" rx="1.5" fill="#0A7A55"/><rect x="20" y="12.5" width="8" height="3" rx="1.5" fill="#0A7A55"/><rect x="20" y="18" width="5" height="3" rx="1.5" fill="#0A7A55"/></svg>podskrift</a>
+<div style="flex-grow: 1"></div>
+<a href="#" style="color: #0E1512; text-decoration: none; font-size: 15px; font-weight: 500; padding: 12px 0">Feeds</a>
+<a href="#" style="color: #0E1512; text-decoration: none; font-size: 15px; font-weight: 500; padding: 12px 0">History</a>
+<a href="#" style="color: #0E1512; text-decoration: none; font-size: 15px; font-weight: 500; padding: 12px 0">Find RSS</a>
+<a href="#" style="color: #0E1512; text-decoration: none; font-size: 15px; font-weight: 500; padding: 12px 0">Log in</a>
+<a href="#" style="display: flex; align-items: center; height: 44px; padding: 0 18px; color: #FFFFFF; background: #0E1512; text-decoration: none; font-size: 15px; font-weight: 700; border-radius: 8px">Sign up</a>
+</nav>
+</div>
+
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 48px; align-items: start">
+
+<div style="display: flex; flex-direction: column; gap: 36px">
+
+<div style="display: flex; flex-direction: column; gap: 14px">
+<div style="font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #56635D">Knapper</div>
+<div style="display: flex; flex-wrap: wrap; gap: 10px">
+<button type="button" style="height: 48px; padding: 0 22px; font-family: inherit; font-size: 16px; font-weight: 700; color: #FFFFFF; background: #0A7A55; border: none; border-radius: 8px">Transcribe</button>
+<button type="button" style="height: 48px; padding: 0 22px; font-family: inherit; font-size: 16px; font-weight: 700; color: #0E1512; background: #FFFFFF; border: 1px solid #0E1512; border-radius: 8px">Get episodes</button>
+<button type="button" style="height: 48px; padding: 0 14px; font-family: inherit; font-size: 16px; font-weight: 600; color: #0A7A55; background: none; border: none; border-radius: 8px">Manage</button>
+<button type="button" disabled style="height: 48px; padding: 0 22px; font-family: inherit; font-size: 16px; font-weight: 700; color: #56635D; background: #F4F6F5; border: none; border-radius: 8px">Transcribing</button>
+<button type="button" style="height: 48px; padding: 0 22px; font-family: inherit; font-size: 16px; font-weight: 700; color: #B42318; background: #FFFFFF; border: 1px solid #B42318; border-radius: 8px">Cancel</button>
+</div>
+<div style="font-size: 14px; color: #56635D">Én grønn knapp per skjerm. Resten er ramme eller tekst.</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 14px">
+<div style="font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #56635D">Søk</div>
+<div style="display: flex; gap: 24px; border-bottom: 1px solid #DCE2DF">
+<button type="button" aria-pressed="true" style="height: 44px; padding: 0; font-family: inherit; font-size: 16px; font-weight: 700; color: #0E1512; background: none; border: none; border-bottom: 3px solid #0A7A55">Podcasts</button>
+<button type="button" aria-pressed="false" style="height: 44px; padding: 0; font-family: inherit; font-size: 16px; font-weight: 500; color: #56635D; background: none; border: none; border-bottom: 3px solid #FFFFFF">Episodes</button>
+</div>
+<div style="display: flex; gap: 10px">
+<input type="text" aria-label="Search podcasts" placeholder="Search by name, or paste a Spotify link" style="flex-grow: 1; min-width: 0; height: 52px; box-sizing: border-box; padding: 0 16px; font-family: inherit; font-size: 16px; color: #0E1512; background: #FFFFFF; border: 1px solid #0E1512; border-radius: 8px">
+<button type="button" style="height: 52px; padding: 0 24px; font-family: inherit; font-size: 16px; font-weight: 700; color: #FFFFFF; background: #0A7A55; border: none; border-radius: 8px">Search</button>
+</div>
+<a href="#" style="display: flex; align-items: center; gap: 14px; padding: 12px; border: 1px solid #DCE2DF; border-radius: 8px; color: #0E1512; text-decoration: none">
+<div style="flex: none; width: 56px; height: 56px; border-radius: 6px; background: #F4F6F5; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #56635D">cover</div>
+<div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px"><div style="font-size: 17px; font-weight: 700">The Long Listen</div><div style="font-size: 14px; color: #56635D">Example Studio · 214 episodes</div></div>
+<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="#0E1512" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4l6 6-6 6"/></svg>
+</a>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 14px">
+<div style="font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #56635D">Skjemafelt</div>
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="k-lang" style="font-size: 14px; font-weight: 700">Spoken language</label>
+<select id="k-lang" style="height: 48px; padding: 0 12px; font-family: inherit; font-size: 16px; color: #0E1512; background: #FFFFFF; border: 1px solid #0E1512; border-radius: 8px"><option>Auto-detect</option></select>
+<div style="font-size: 14px; color: #56635D">Leave on auto unless the result is in the wrong language.</div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="k-key" style="font-size: 14px; font-weight: 700">OpenAI API key</label>
+<input id="k-key" type="text" value="sk-proj-…" aria-invalid="true" aria-describedby="k-key-err" style="height: 48px; box-sizing: border-box; padding: 0 14px; font-family: inherit; font-size: 16px; color: #0E1512; background: #FFFFFF; border: 2px solid #B42318; border-radius: 8px">
+<div id="k-key-err" style="font-size: 14px; font-weight: 500; color: #B42318">OpenAI rejected this key. Check that it is active and has billing set up.</div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 14px">
+<div style="font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #56635D">Kredittpakke</div>
+<div style="display: flex; align-items: center; gap: 20px; padding: 20px; border: 1px solid #0E1512; border-radius: 8px">
+<div style="flex-grow: 1; display: flex; flex-direction: column; gap: 2px"><div style="font-size: 26px; font-weight: 800; letter-spacing: -0.02em">300 minutes</div><div style="font-size: 14px; color: #56635D">One-time purchase. No subscription.</div></div>
+<button type="button" style="height: 48px; padding: 0 22px; font-family: inherit; font-size: 16px; font-weight: 700; color: #FFFFFF; background: #0A7A55; border: none; border-radius: 8px">Buy for $5</button>
+</div>
+</div>
+
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 36px">
+
+<div style="display: flex; flex-direction: column; gap: 14px">
+<div style="font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #56635D">Episoderad</div>
+<div style="display: flex; flex-direction: column">
+<div style="display: flex; align-items: center; gap: 16px; padding: 16px 0; border-top: 1px solid #DCE2DF">
+<div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px"><div style="font-size: 17px; font-weight: 700">Why we still take notes</div><div style="font-size: 14px; color: #56635D; font-variant-numeric: tabular-nums">2 Oct 2026 · 48 min</div></div>
+<button type="button" style="height: 44px; padding: 0 18px; font-family: inherit; font-size: 15px; font-weight: 700; color: #FFFFFF; background: #0A7A55; border: none; border-radius: 8px">Transcribe</button>
+</div>
+<div style="display: flex; align-items: center; gap: 16px; padding: 16px 0; border-top: 1px solid #DCE2DF; border-bottom: 1px solid #DCE2DF">
+<div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px"><div style="font-size: 17px; font-weight: 700">The case for slow interviews</div><div style="font-size: 14px; color: #56635D; font-variant-numeric: tabular-nums">25 Sep 2026 · 1 h 12 min</div></div>
+<a href="#" style="display: flex; align-items: center; height: 44px; font-size: 15px; font-weight: 700">View transcript</a>
+</div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 14px">
+<div style="font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #56635D">Jobbkort · transkripsjon kjører</div>
+<div style="display: flex; flex-direction: column; gap: 14px; padding: 20px; background: #F4F6F5; border-radius: 8px">
+<div style="display: flex; justify-content: space-between; align-items: baseline; gap: 16px"><div style="font-size: 17px; font-weight: 700">Transcribing part 3 of 5</div><div style="font-size: 14px; color: #56635D; font-variant-numeric: tabular-nums">about 2 min left</div></div>
+<div role="progressbar" aria-valuenow="50" aria-valuemin="0" aria-valuemax="100" aria-label="Transcription progress" style="height: 8px; border-radius: 4px; background: #DCE2DF"><div style="width: 50%; height: 8px; border-radius: 4px; background: #0A7A55"></div></div>
+<div style="display: flex; justify-content: space-between; align-items: center; gap: 16px"><div style="font-size: 14px; color: #56635D">It keeps going if you close the page.</div><button type="button" style="height: 44px; padding: 0 16px; font-family: inherit; font-size: 15px; font-weight: 700; color: #B42318; background: none; border: 1px solid #B42318; border-radius: 8px">Cancel</button></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 14px">
+<div style="font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #56635D">Transkript</div>
+<div style="border: 1px solid #DCE2DF; border-radius: 8px">
+<div style="display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid #DCE2DF">
+<div style="flex-grow: 1; font-size: 15px; font-weight: 700">Transcript</div>
+<button type="button" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 15px; font-weight: 700; color: #0E1512; background: #FFFFFF; border: 1px solid #0E1512; border-radius: 8px">Copy</button>
+<button type="button" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 15px; font-weight: 700; color: #0E1512; background: #FFFFFF; border: 1px solid #0E1512; border-radius: 8px">.txt</button>
+<button type="button" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 15px; font-weight: 700; color: #0E1512; background: #FFFFFF; border: 1px solid #0E1512; border-radius: 8px">.srt</button>
+</div>
+<div style="display: flex; flex-direction: column; gap: 14px; padding: 20px">
+<div style="display: flex; gap: 16px"><div style="flex: none; width: 48px; padding-top: 4px; font-size: 13px; font-weight: 700; color: #0A7A55; font-variant-numeric: tabular-nums">00:14</div><div style="font-family: 'Newsreader', Georgia, serif; font-size: 19px; line-height: 1.55">Welcome back. Today we are talking about why a written version of a conversation is often more useful than the recording.</div></div>
+<div style="display: flex; gap: 16px"><div style="flex: none; width: 48px; padding-top: 4px; font-size: 13px; font-weight: 700; color: #0A7A55; font-variant-numeric: tabular-nums">00:31</div><div style="font-family: 'Newsreader', Georgia, serif; font-size: 19px; line-height: 1.55">You can search it, quote it and skim it. None of that works with audio.</div></div>
+</div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 14px">
+<div style="font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #56635D">Varsler</div>
+<div style="padding: 14px 16px; border-radius: 8px; background: #E3F3EC; color: #064E36; font-size: 15px; line-height: 1.45">Free trial: 46 minutes of audio left, on our key. <a href="#" style="color: #064E36; font-weight: 700">Add your own key</a> for unlimited use.</div>
+<div style="padding: 14px 16px; border-radius: 8px; background: #FFF1D6; color: #6B3F00; font-size: 15px; line-height: 1.45">Your free trial is used up. <a href="#" style="color: #6B3F00; font-weight: 700">Add your own OpenAI API key</a> to keep transcribing.</div>
+<div style="padding: 14px 16px; border-radius: 8px; background: #FDE7E4; color: #8A1C12; font-size: 15px; line-height: 1.45">We could not fetch this feed. Check that the RSS link is public.</div>
+</div>
+
+</div>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1200,"height":1480}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

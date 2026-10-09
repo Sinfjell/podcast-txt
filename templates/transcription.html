@@ -1,88 +1,82 @@
 {% extends "base.html" %}
+{% block head_links %}<link rel="preload" href="{{ asset_url('fonts/newsreader-latin.woff2') }}" as="font" type="font/woff2" crossorigin>{% endblock %}
 {% block title %}Transcribing — Podskrift{% endblock %}
 {% block container_class %}container-wide{% endblock %}
 
 {% block content %}
 <!-- Episode header: gives the page something to show for the minutes it runs -->
-<div class="card mb-2">
-    <div class="card-body">
-        <div class="episode-hero">
-            <img id="heroArtwork" alt="" style="display: none;">
-            <div class="episode-hero-info">
-                <p class="section-label" id="podcastName"></p>
-                <h1 id="episodeTitle" style="font-size: 21px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.3;">
-                    Loading episode…
-                </h1>
-                <p class="text-muted text-sm mt-1" id="episodeMeta"></p>
+<div class="episode-hero tx-head">
+    <img id="heroArtwork" alt="" style="display: none;">
+    <div class="episode-hero-info">
+        <p class="section-label" id="podcastName"></p>
+        <h1 id="episodeTitle" class="tx-title">Loading episode…</h1>
+        <p class="tx-meta" id="episodeMeta"></p>
 
-                <div class="stat-row">
-                    <div>
-                        <div class="stat-label">Elapsed</div>
-                        <div class="stat-value" id="statElapsed">—</div>
-                    </div>
-                    <div>
-                        <div class="stat-label">Remaining</div>
-                        <div class="stat-value" id="statEta">—</div>
-                    </div>
-                    <div>
-                        <div class="stat-label">Audio length</div>
-                        <div class="stat-value" id="statDuration">—</div>
-                    </div>
-                    <div>
-                        <div class="stat-label">Est. cost</div>
-                        <div class="stat-value" id="statCost">—</div>
-                    </div>
-                </div>
+        <div class="stat-row">
+            <div>
+                <div class="stat-label">Elapsed</div>
+                <div class="stat-value" id="statElapsed">—</div>
+            </div>
+            <div>
+                <div class="stat-label">Remaining</div>
+                <div class="stat-value" id="statEta">—</div>
+            </div>
+            <div>
+                <div class="stat-label">Audio length</div>
+                <div class="stat-value" id="statDuration">—</div>
+            </div>
+            <div>
+                <div class="stat-label">Est. cost</div>
+                <div class="stat-value" id="statCost">—</div>
             </div>
         </div>
     </div>
 </div>
 
 <!-- Progress -->
-<div class="card mb-2" id="progressCard">
-    <div class="card-body">
-        <div class="flex-between mb-1">
-            <span id="statusText" class="text-sm" style="font-weight: 600;">Starting…</span>
-            <span id="progressText" class="text-sm text-muted" style="font-variant-numeric: tabular-nums;">0%</span>
-        </div>
-        <div class="progress-track progress-track-lg">
-            <div class="progress-fill" id="progressBar" style="width: 0%"></div>
-        </div>
+<div class="job-card" id="progressCard">
+    <svg class="job-motif" viewBox="0 0 520 48" aria-hidden="true" focusable="false"><g fill="var(--ink)"><rect x="0" y="20" width="4" height="8" rx="2"/><rect x="10" y="17" width="4" height="14" rx="2"/><rect x="20" y="13" width="4" height="22" rx="2"/><rect x="30" y="7" width="4" height="34" rx="2"/><rect x="40" y="15" width="4" height="18" rx="2"/><rect x="50" y="10" width="4" height="28" rx="2"/><rect x="60" y="4" width="4" height="40" rx="2"/><rect x="70" y="12" width="4" height="24" rx="2"/><rect x="80" y="18" width="4" height="12" rx="2"/><rect x="90" y="9" width="4" height="30" rx="2"/><rect x="100" y="2" width="4" height="44" rx="2"/><rect x="110" y="11" width="4" height="26" rx="2"/><rect x="120" y="16" width="4" height="16" rx="2"/><rect x="130" y="6" width="4" height="36" rx="2"/><rect x="140" y="13" width="4" height="22" rx="2"/><rect x="150" y="19" width="4" height="10" rx="2"/><rect x="160" y="10" width="4" height="28" rx="2"/><rect x="170" y="5" width="4" height="38" rx="2"/><rect x="180" y="14" width="4" height="20" rx="2"/><rect x="190" y="17" width="4" height="14" rx="2"/><rect x="200" y="12" width="4" height="24" rx="2"/><rect x="210" y="18" width="4" height="12" rx="2"/><rect x="220" y="20" width="4" height="8" rx="2"/><rect x="230" y="21" width="4" height="6" rx="2"/></g><g fill="var(--accent)"><rect x="256" y="8" width="264" height="4" rx="2"/><rect x="256" y="22" width="264" height="4" rx="2"/><rect x="256" y="36" width="168" height="4" rx="2"/></g></svg>
+    <div class="flex-between job-status-row">
+        <span id="statusText" class="job-status" aria-live="polite">Starting…</span>
+        <span id="progressText" class="text-muted" style="font-size: 15px; font-variant-numeric: tabular-nums;">0%</span>
+    </div>
+    <div class="progress-track progress-track-lg">
+        <div class="progress-fill" id="progressBar" style="width: 0%"></div>
+    </div>
 
-        <div class="steps" id="steps">
-            <div class="step" data-phase="downloading">
-                <div class="step-bar"></div><div class="step-label">Download</div>
-            </div>
-            <div class="step" data-phase="splitting">
-                <div class="step-bar"></div><div class="step-label">Prepare</div>
-            </div>
-            <div class="step" data-phase="transcribing">
-                <div class="step-bar"></div><div class="step-label">Transcribe</div>
-            </div>
-            <div class="step" data-phase="completed">
-                <div class="step-bar"></div><div class="step-label">Done</div>
-            </div>
+    <div class="steps" id="steps">
+        <div class="step" data-phase="downloading">
+            <div class="step-bar"></div><div class="step-label">Download</div>
         </div>
-        <p class="text-sm text-muted mt-1" id="phaseDetail"></p>
+        <div class="step" data-phase="splitting">
+            <div class="step-bar"></div><div class="step-label">Prepare</div>
+        </div>
+        <div class="step" data-phase="transcribing">
+            <div class="step-bar"></div><div class="step-label">Transcribe</div>
+        </div>
+        <div class="step" data-phase="completed">
+            <div class="step-bar"></div><div class="step-label">Done</div>
+        </div>
+    </div>
+    <p class="text-sm text-muted mt-1" id="phaseDetail"></p>
 
-        <div class="flex-between mt-2" id="runningControls">
-            <span class="text-sm text-muted">
-                This keeps running if you close the page.
-            </span>
-            <button type="button" class="btn btn-sm btn-ghost" id="cancelBtn"
-                    onclick="cancelTranscription()">Stop</button>
-        </div>
+    <div class="flex-between mt-2" id="runningControls" style="flex-wrap: wrap; gap: 8px 16px;">
+        <span class="text-muted" style="font-size: 15px;">
+            This keeps running if you close the page.
+        </span>
+        <button type="button" class="btn btn-sm btn-danger" id="cancelBtn"
+                onclick="cancelTranscription()">Stop</button>
     </div>
 </div>
 
 <!-- Cancelled -->
 <div id="cancelledContainer" class="hidden">
-    <div class="alert alert-warning">
+    <div class="alert alert-warning mb-2" style="flex-direction: column; align-items: flex-start;">
         <strong>Transcription stopped.</strong>
         <span id="cancelledInfo" class="text-sm" style="margin-top: 4px;"></span>
     </div>
     <div class="flex-between mb-2">
-        <a href="{{ url_for('index') }}" class="btn btn-ghost">Start over</a>
+        <a href="{{ url_for('index') }}" class="btn btn-secondary">Start over</a>
     </div>
 </div>
 
@@ -90,12 +84,12 @@
 <div id="resultBanner" class="hidden">
     <div class="alert alert-success" style="flex-direction: column; align-items: flex-start;">
         <strong id="completionTitle">Transcription complete</strong>
-        <span id="completionInfo" class="text-sm" style="margin-top: 4px; opacity: 0.8;"></span>
+        <span id="completionInfo" class="text-sm" style="margin-top: 4px;"></span>
     </div>
 </div>
 
 <!-- Partial free preview: buy / finish full episode -->
-<div id="partialPreviewCard" class="hidden card mb-2" style="margin-top: 16px; border-color: var(--accent-border);">
+<div id="partialPreviewCard" class="hidden card mb-2" style="margin-top: 16px;">
     <div class="card-body">
         <p style="font-weight: 700; font-size: 15px; margin: 0 0 6px;" id="partialPreviewTitle">
             Free preview
@@ -109,9 +103,9 @@
 <div id="nextSteps" class="hidden card mb-2" style="margin-top: 16px;">
     <div class="card-body">
         <div class="flex-between" style="flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
-            <h2 style="margin: 0; font-size: 15px;">What’s next</h2>
+            <h2 style="margin: 0; font-size: 19px; font-weight: 700;">What’s next</h2>
             <div class="flex-center" style="gap: 8px; flex-wrap: wrap;">
-                <button type="button" class="btn btn-sm btn-ghost hidden" id="followBtn"
+                <button type="button" class="btn btn-sm btn-secondary hidden" id="followBtn"
                         aria-live="polite">Follow this podcast</button>
                 <label id="followEmailLabel" class="hidden text-sm text-muted"
                        style="display: none; align-items: center; gap: 6px; margin: 0; flex-wrap: wrap;">
@@ -124,7 +118,7 @@
                         Email me a summary of each new episode
                     </span>
                 </label>
-                <a href="{{ url_for('history') }}" class="btn btn-sm btn-ghost" id="historyLink">History</a>
+                <a href="{{ url_for('history') }}" class="btn btn-sm btn-text" id="historyLink">History</a>
             </div>
         </div>
         <div id="moreEpisodesBlock" class="hidden">
@@ -141,12 +135,12 @@
     .next-ep-list { display: flex; flex-direction: column; gap: 8px; }
     .next-ep {
         display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-        padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
-        background: var(--surface);
+        padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius);
+        background: var(--paper);
     }
     .next-ep-info { flex: 1 1 160px; min-width: 0; }
     .next-ep-title {
-        font-weight: 600; font-size: 13.5px; line-height: 1.35;
+        font-weight: 600; font-size: 14px; line-height: 1.35;
         display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
     }
     .next-ep-meta { color: var(--muted); font-size: 12px; margin-top: 3px; }
@@ -171,36 +165,36 @@
         <div id="errorActions" class="hidden" style="margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px;"></div>
     </div>
     <div class="text-center mt-2">
-        <a href="{{ url_for('index') }}" class="btn btn-ghost">Start over</a>
+        <a href="{{ url_for('index') }}" class="btn btn-secondary">Start over</a>
     </div>
 </div>
 
 <!-- Optional AI summary (collapsible; only when ready) -->
 <div class="card hidden mb-2" id="summaryCard" style="margin-top: 16px;">
     <details id="summaryDetails" open>
-        <summary class="card-header" style="cursor: pointer; list-style-position: inside; gap: 8px;">
-            <h5 style="display: inline; margin: 0;">Summary</h5>
+        <summary class="card-header" style="cursor: pointer; list-style-position: inside; gap: 8px; min-height: 44px;">
+            <h5 style="display: inline; margin: 0; font-size: 19px;">Summary</h5>
             <span class="badge hidden" id="summaryPartialBadge" style="margin-left: 8px;">Preview</span>
         </summary>
         <div class="card-body" style="padding-top: 0;">
-            <p class="text-sm" id="summaryTldr" style="margin: 0 0 12px; line-height: 1.55;"></p>
-            <ul id="summaryKeyPoints" class="text-sm" style="margin: 0 0 12px; padding-left: 1.2em; line-height: 1.5;"></ul>
+            <p id="summaryTldr" style="margin: 0 0 12px; font-size: 15px; line-height: 1.55;"></p>
+            <ul id="summaryKeyPoints" style="font-size: 15px; margin: 0 0 12px; padding-left: 1.2em; line-height: 1.5;"></ul>
             <div id="summaryQuotes" class="text-sm text-muted" style="display: flex; flex-direction: column; gap: 6px;"></div>
         </div>
     </details>
 </div>
 
 <!-- Transcript, filling in live -->
-<div class="card" id="transcriptCard">
-    <div class="card-header" style="flex-wrap: wrap; gap: 10px;">
-        <h2>Transcript</h2>
+<section class="tx-section" id="transcriptCard">
+    <div class="tx-toolbar">
+        <h2 class="tx-h2">Transcript</h2>
         <div class="flex-center" style="gap: 8px; flex-wrap: wrap;" id="transcriptActions">
-            <button type="button" class="btn btn-sm btn-primary hidden" id="copyBtn" onclick="copyTranscript()">Copy</button>
-            <button type="button" class="btn btn-sm btn-ghost hidden" id="shareBtn">Share</button>
+            <button type="button" class="btn btn-primary hidden" id="copyBtn" onclick="copyTranscript()">Copy</button>
             <span class="download-group hidden" id="downloadGroup" aria-label="Download">
-                <a href="#" id="downloadTxt" class="btn btn-sm btn-ghost hidden">Download .txt</a>
-                <a href="#" id="downloadSrt" class="btn btn-sm btn-ghost hidden">Download .srt</a>
+                <a href="#" id="downloadTxt" class="btn btn-secondary hidden">Download .txt</a>
+                <a href="#" id="downloadSrt" class="btn btn-secondary hidden">Download .srt</a>
             </span>
+            <button type="button" class="btn btn-secondary hidden" id="shareBtn">Share</button>
         </div>
     </div>
     <div id="sharePanel" class="hidden share-panel" role="region" aria-label="Share transcript">
@@ -210,13 +204,13 @@
         <div class="share-panel-row">
             <input type="text" class="form-input" id="shareUrlInput" readonly
                    placeholder="Link appears here after you create it" aria-label="Share link">
-            <button type="button" class="btn btn-sm btn-primary" id="shareCreateBtn">Create link</button>
-            <button type="button" class="btn btn-sm btn-ghost hidden" id="shareCopyLinkBtn">Copy link</button>
-            <button type="button" class="btn btn-sm btn-ghost hidden" id="shareRevokeBtn">Revoke</button>
+            <button type="button" class="btn btn-sm btn-secondary" id="shareCreateBtn">Create link</button>
+            <button type="button" class="btn btn-sm btn-secondary hidden" id="shareCopyLinkBtn">Copy link</button>
+            <button type="button" class="btn btn-sm btn-text hidden" id="shareRevokeBtn">Revoke</button>
         </div>
         <p class="text-sm text-muted hidden" id="shareStatus" style="margin: 8px 0 0;" aria-live="polite"></p>
     </div>
-    <div id="listenLinksMount" class="hidden" style="margin: 0 16px 12px;">
+    <div id="listenLinksMount" class="hidden" style="margin: 0 0 16px;">
         {% with listen_analytics_event='result_listen_clicked' %}
         {% include '_listen_links.html' %}
         {% endwith %}
@@ -225,7 +219,7 @@
     <div id="copyNextSteps" class="hidden copy-next" role="status">
         <div class="copy-next-head">
             <strong id="copyNextTitle">Copied!</strong>
-            <button type="button" class="btn btn-sm btn-ghost hidden" id="copyFollowBtn"
+            <button type="button" class="btn btn-sm btn-secondary hidden" id="copyFollowBtn"
                     aria-live="polite">Follow this podcast</button>
         </div>
         <p class="text-sm text-muted" id="copyNextHint" style="margin: 6px 0 10px;"></p>
@@ -235,36 +229,61 @@
         </p>
         <p id="copyNextLoading" class="text-sm text-muted hidden">Loading more episodes…</p>
     </div>
-    <div class="card-body">
+    <div class="tx-body">
         <div class="transcript-pane ph-no-capture" id="transcriptPane"></div>
     </div>
-</div>
+</section>
 <style>
-    .download-group {
-        display: inline-flex; gap: 6px; flex-wrap: wrap; align-items: center;
-        padding-left: 8px; border-left: 1px solid var(--border);
+    .tx-head { margin-bottom: 24px; }
+    .tx-title {
+        margin: 0; font-size: clamp(30px, 4vw, 44px); font-weight: 800;
+        letter-spacing: -0.03em; line-height: 1.05; overflow-wrap: anywhere;
     }
+    .tx-meta { margin: 6px 0 0; font-size: 16px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .job-card {
+        display: flex; flex-direction: column; gap: 16px;
+        padding: 24px; margin-bottom: 24px;
+        background: var(--surface); border-radius: var(--radius);
+    }
+    .job-card .steps, .job-card .mt-1, .job-card .mt-2 { margin-top: 0; }
+    .job-card .mt-1:empty { display: none; }
+    .job-card p { margin: 0; }
+    .job-motif { width: 100%; max-width: 520px; height: auto; }
+    .job-status-row { gap: 12px; }
+    .job-status { font-size: 20px; font-weight: 700; }
+    .tx-section { margin-top: 24px; }
+    .tx-toolbar {
+        display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+        gap: 12px 16px; padding-bottom: 16px; margin-bottom: 20px;
+        border-bottom: 1px solid var(--line);
+    }
+    .tx-h2 { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: -0.01em; }
+    .tx-body { max-width: 70ch; }
+    .tx-body .transcript-pane { max-height: none; overflow-wrap: anywhere; }
+    .tx-body .transcript-pane:not(:empty) { max-height: 70vh; }
+    .download-group { display: inline-flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .share-panel {
-        margin: 0 16px 12px; padding: 12px 14px;
-        border: 1px solid var(--border); border-radius: var(--radius-sm);
-        background: var(--surface);
+        margin: 0 0 16px; padding: 14px 16px;
+        border-radius: var(--radius); background: var(--surface);
     }
     .share-panel-row {
         display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
     }
     .share-panel-row .form-input { flex: 1 1 220px; min-width: 0; }
     .copy-next {
-        margin: 0 16px 12px; padding: 12px 14px;
-        border: 1px solid var(--border); border-radius: var(--radius-sm);
-        background: var(--surface);
+        margin: 0 0 16px; padding: 14px 16px;
+        border-radius: var(--radius); background: var(--surface);
     }
     .copy-next-head {
         display: flex; align-items: center; justify-content: space-between;
         gap: 10px; flex-wrap: wrap;
     }
     @media (max-width: 560px) {
-        .download-group { border-left: none; padding-left: 0; width: 100%; }
+        .job-card { padding: 20px 16px; }
+        .download-group { width: 100%; }
         .download-group .btn { flex: 1 1 auto; justify-content: center; }
+        #transcriptActions { width: 100%; }
+        #transcriptActions > .btn { flex: 1 1 auto; }
     }
 </style>
 {% endblock %}
@@ -315,6 +334,11 @@
         });
     }
 
+    // Partial text is audio the user has already been charged for: never hide it.
+    function hideTranscriptIfEmpty() {
+        var pane = el('transcriptPane');
+        if (!pane || !pane.textContent.trim()) show(el('transcriptCard'), false);
+    }
     function show(node, visible) {
         node.classList.toggle('hidden', !visible);
         node.style.display = visible ? '' : 'none';
@@ -341,6 +365,14 @@
         form.submit();
     }
 
+    // One accent button per state: when the paid-upgrade CTA shows, Copy steps back.
+    function demoteCopyButton() {
+        var c = el('copyBtn');
+        if (!c) return;
+        c.classList.remove('btn-primary');
+        c.classList.add('btn-secondary');
+    }
+
     function renderPartialPreview(d) {
         var card = el('partialPreviewCard');
         var actions = el('partialPreviewActions');
@@ -356,6 +388,7 @@
             var finishBtn = document.createElement('button');
             finishBtn.type = 'button';
             finishBtn.className = 'btn btn-sm btn-primary';
+            demoteCopyButton();
             finishBtn.textContent = 'Transcribe the full episode';
             finishBtn.addEventListener('click', function() {
                 phCapture('finish_episode_clicked', {
@@ -371,6 +404,7 @@
             var buyBtn = document.createElement('button');
             buyBtn.type = 'button';
             buyBtn.className = 'btn btn-sm btn-primary';
+            demoteCopyButton();
             buyBtn.textContent = 'Buy minutes to finish this episode';
             buyBtn.addEventListener('click', function() {
                 phCapture('finish_episode_clicked', {
@@ -386,7 +420,7 @@
 
         var keyLink = document.createElement('a');
         keyLink.href = SETTINGS_OPENAI;
-        keyLink.className = 'btn btn-sm btn-ghost';
+        keyLink.className = 'btn btn-sm btn-secondary';
         keyLink.textContent = 'Add OpenAI key →';
         actions.appendChild(keyLink);
         show(card, true);
@@ -438,7 +472,7 @@
             if (d.retry && d.retry.audio_url) {
                 var retryBtn = document.createElement('button');
                 retryBtn.type = 'button';
-                retryBtn.className = 'btn btn-sm btn-ghost';
+                retryBtn.className = 'btn btn-sm btn-secondary';
                 retryBtn.textContent = 'Retry this episode';
                 retryBtn.addEventListener('click', function() { retryEpisode(d.retry); });
                 actions.appendChild(retryBtn);
@@ -447,7 +481,7 @@
             if (d.buy_available && STRIPE_BUY) {
                 var buyBtn = document.createElement('button');
                 buyBtn.type = 'button';
-                buyBtn.className = 'btn btn-sm btn-ghost';
+                buyBtn.className = 'btn btn-sm btn-secondary';
                 buyBtn.textContent = d.buy_label || BUY_LABEL;
                 buyBtn.addEventListener('click', function() { postBuyForm('transcription_no_billing'); });
                 actions.appendChild(buyBtn);
@@ -476,7 +510,7 @@
         var keyLink = document.createElement('a');
         keyLink.href = SETTINGS_OPENAI;
         keyLink.textContent = 'Add OpenAI key →';
-        keyLink.className = 'btn btn-sm btn-ghost';
+        keyLink.className = 'btn btn-sm btn-secondary';
         actions.appendChild(keyLink);
         show(actions, true);
     }
@@ -602,7 +636,7 @@
                 var qel = document.createElement('blockquote');
                 qel.style.margin = '0';
                 qel.style.paddingLeft = '10px';
-                qel.style.borderLeft = '2px solid var(--border)';
+                qel.style.borderLeft = '2px solid var(--line)';
                 qel.textContent = '“' + q + '”';
                 quotes.appendChild(qel);
             });
@@ -663,6 +697,7 @@
         if (d.status === 'error') {
             show(el('progressCard'), false);
             show(el('errorContainer'), true);
+            hideTranscriptIfEmpty();
             if (d.no_billing) {
                 el('errorMessage').textContent =
                     'Your OpenAI account has no credit, so transcription cannot start. '
@@ -781,6 +816,7 @@
                 if (d.error && !d.status) {
                     show(el('progressCard'), false);
                     show(el('errorContainer'), true);
+            hideTranscriptIfEmpty();
                     el('errorMessage').textContent = d.error;
                     fireResultViewed(false);
                     return;
@@ -798,6 +834,7 @@
                 } else {
                     show(el('progressCard'), false);
                     show(el('errorContainer'), true);
+            hideTranscriptIfEmpty();
                     el('errorMessage').textContent = 'Lost connection. Refresh to check status.';
                     fireResultViewed(false);
                 }
@@ -948,7 +985,7 @@
             btn.disabled = true;
             btn.textContent = 'Following';
             btn.classList.remove('btn-primary');
-            btn.classList.add('btn-ghost');
+            btn.classList.add('btn-secondary');
         } else {
             btn.disabled = false;
             btn.textContent = 'Follow this podcast';
@@ -1012,7 +1049,7 @@
         info.appendChild(meta);
         var btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'btn btn-sm btn-accent';
+        btn.className = 'btn btn-sm btn-secondary';
         btn.textContent = 'Transcribe';
         btn.addEventListener('click', function() { startRelatedEpisode(ep, source); });
         row.appendChild(info);

@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Podskrift home page</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700;800&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap">
+<style>
+body{margin:0}
+.pk{--paper:#FFFFFF;--surface:#F4F6F5;--line:#DCE2DF;--line-strong:#0E1512;--ink:#0E1512;--muted:#56635D;--accent:#0A7A55;--accent-hover:#075C40;--on-accent:#FFFFFF;--accent-tint:#E3F3EC;--on-accent-tint:#064E36}
+.pk[data-theme="dark"]{--paper:#0A0F0D;--surface:#121916;--line:#24302B;--line-strong:#5C6F66;--ink:#EEF2F0;--muted:#9AA8A1;--accent:#34D399;--accent-hover:#6EE7B7;--on-accent:#06241A;--accent-tint:#0F2A20;--on-accent-tint:#A7F3D0}
+.pk a{color:var(--accent)}.pk a:hover{color:var(--accent-hover)}
+.pk a.primary{color:var(--on-accent)}.pk a.primary:hover{color:var(--on-accent);background:var(--accent-hover)}
+.pk a.plain{color:var(--ink)}.pk a.plain:hover{color:var(--accent)}
+.pk input::placeholder{color:var(--muted)}
+.pk :focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.pk summary{cursor:pointer;list-style:none}.pk summary::-webkit-details-marker{display:none}
+.pk .wave rect{transform-box:fill-box;transform-origin:center;animation:pk-bar 1.1s ease-in-out infinite alternate}
+.pk .wave rect:nth-child(3n){animation-delay:-.35s}
+.pk .wave rect:nth-child(3n+1){animation-delay:-.7s}
+.pk .wave rect:nth-child(4n){animation-duration:.8s}
+.pk .lines rect{transform-box:fill-box;transform-origin:left center;animation:pk-line 5s ease-out infinite backwards}
+.pk .lines rect:nth-child(2){animation-delay:.45s}
+.pk .lines rect:nth-child(3){animation-delay:.9s}
+.pk .say{animation:pk-say .6s ease-out .6s backwards}
+.pk .say2{animation-delay:1.5s}
+@keyframes pk-bar{from{transform:scaleY(.35)}to{transform:scaleY(1)}}
+@keyframes pk-line{0%{transform:scaleX(0);opacity:1}30%{transform:scaleX(1);opacity:1}88%{transform:scaleX(1);opacity:1}100%{transform:scaleX(1);opacity:0}}
+@keyframes pk-say{from{opacity:0;transform:translateY(6px)}}
+@media (prefers-reduced-motion:reduce){.pk .wave rect,.pk .lines rect,.pk .say{animation:none}}
+</style>
+</helmet>
+<div class="pk" data-theme="{{theme}}" style="background: var(--paper); color: var(--ink); font-family: 'Schibsted Grotesk', system-ui, sans-serif; font-size: 17px; line-height: 1.55">
+
+<header style="border-bottom: 1px solid var(--line)">
+<nav aria-label="Main" style="max-width: 1120px; margin: 0 auto; padding: 12px 24px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 28px">
+<a class="plain" href="Forside.dc.html" style="display: flex; align-items: center; gap: 10px; min-height: 44px; text-decoration: none; font-size: 22px; font-weight: 800; letter-spacing: -0.035em"><svg width="30" height="28" viewBox="0 0 30 28" aria-hidden="true"><g fill="var(--ink)"><rect x="2" y="9" width="3" height="10" rx="1.5"/><rect x="8" y="4" width="3" height="20" rx="1.5"/><rect x="14" y="8" width="3" height="12" rx="1.5"/></g><g fill="var(--accent)"><rect x="20" y="7" width="8" height="3" rx="1.5"/><rect x="20" y="12.5" width="8" height="3" rx="1.5"/><rect x="20" y="18" width="5" height="3" rx="1.5"/></g></svg>podskrift</a>
+<div style="flex-grow: 1"></div>
+<a class="plain" href="#pricing" style="display: flex; align-items: center; min-height: 44px; text-decoration: none; font-size: 15px; font-weight: 500">Pricing</a>
+<a class="plain" href="#faq" style="display: flex; align-items: center; min-height: 44px; text-decoration: none; font-size: 15px; font-weight: 500">Questions</a>
+<a class="plain" href="#" style="display: flex; align-items: center; min-height: 44px; text-decoration: none; font-size: 15px; font-weight: 500">API</a>
+<a class="plain" href="#" style="display: flex; align-items: center; min-height: 44px; text-decoration: none; font-size: 15px; font-weight: 500">Log in</a>
+<a href="#" style="display: flex; align-items: center; height: 44px; padding: 0 18px; color: var(--paper); background: var(--ink); text-decoration: none; font-size: 15px; font-weight: 700; border-radius: 8px">Sign up</a>
+</nav>
+</header>
+
+<main>
+<section style="max-width: 1120px; margin: 0 auto; padding: 72px 24px 96px; display: flex; flex-wrap: wrap; gap: 48px; align-items: center">
+<div style="flex: 1 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 22px">
+<h1 style="margin: 0; font-size: clamp(40px, 6vw, 64px); font-weight: 800; letter-spacing: -0.035em; line-height: 1.02">Transcribe any podcast in minutes</h1>
+<p style="margin: 0; font-size: 19px; line-height: 1.5; color: var(--muted); max-width: 520px">Search for a podcast, pick an episode, get the full transcript. First 60 minutes free.</p>
+<div style="display: flex; flex-direction: column; gap: 12px; margin-top: 6px">
+<div style="display: flex; gap: 24px; border-bottom: 1px solid var(--line)">
+<button type="button" aria-pressed="{{showTab}}" onClick="{{pickShow}}" style="height: 44px; padding: 0; font-family: inherit; font-size: 16px; font-weight: 700; color: var(--ink); background: none; border: none; border-bottom: 3px solid {{showLine}}">Podcasts</button>
+<button type="button" aria-pressed="{{episodeTab}}" onClick="{{pickEpisode}}" style="height: 44px; padding: 0; font-family: inherit; font-size: 16px; font-weight: 700; color: var(--ink); background: none; border: none; border-bottom: 3px solid {{episodeLine}}">Episodes</button>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 10px">
+<input type="text" aria-label="Search" placeholder="Search by name, or paste a Spotify link" style="flex: 1 1 260px; min-width: 0; height: 56px; box-sizing: border-box; padding: 0 18px; font-family: inherit; font-size: 17px; color: var(--ink); background: var(--paper); border: 1px solid var(--line-strong); border-radius: 8px">
+<a class="primary" href="Episoder.dc.html" style="display: flex; align-items: center; justify-content: center; height: 56px; padding: 0 28px; font-size: 17px; font-weight: 700; background: var(--accent); text-decoration: none; border-radius: 8px">Search</a>
+</div>
+<div style="font-size: 14px; color: var(--muted)">Public feeds only. Not in the index? <a href="#">Paste an RSS feed URL</a></div>
+</div>
+</div>
+
+<div style="flex: 1 1 400px; min-width: 0; background: var(--surface); border-radius: 8px; padding: 28px; display: flex; flex-direction: column; gap: 20px">
+<svg viewBox="0 0 520 48" role="img" aria-label="Sound wave turning into lines of text" style="width: 100%; height: auto"><g class="wave" fill="var(--ink)"><rect x="0" y="20" width="4" height="8" rx="2"/><rect x="10" y="17" width="4" height="14" rx="2"/><rect x="20" y="13" width="4" height="22" rx="2"/><rect x="30" y="7" width="4" height="34" rx="2"/><rect x="40" y="15" width="4" height="18" rx="2"/><rect x="50" y="10" width="4" height="28" rx="2"/><rect x="60" y="4" width="4" height="40" rx="2"/><rect x="70" y="12" width="4" height="24" rx="2"/><rect x="80" y="18" width="4" height="12" rx="2"/><rect x="90" y="9" width="4" height="30" rx="2"/><rect x="100" y="2" width="4" height="44" rx="2"/><rect x="110" y="11" width="4" height="26" rx="2"/><rect x="120" y="16" width="4" height="16" rx="2"/><rect x="130" y="6" width="4" height="36" rx="2"/><rect x="140" y="13" width="4" height="22" rx="2"/><rect x="150" y="19" width="4" height="10" rx="2"/><rect x="160" y="10" width="4" height="28" rx="2"/><rect x="170" y="5" width="4" height="38" rx="2"/><rect x="180" y="14" width="4" height="20" rx="2"/><rect x="190" y="17" width="4" height="14" rx="2"/><rect x="200" y="12" width="4" height="24" rx="2"/><rect x="210" y="18" width="4" height="12" rx="2"/><rect x="220" y="20" width="4" height="8" rx="2"/><rect x="230" y="21" width="4" height="6" rx="2"/></g><g class="lines" fill="var(--accent)"><rect x="256" y="8" width="264" height="4" rx="2"/><rect x="256" y="22" width="264" height="4" rx="2"/><rect x="256" y="36" width="168" height="4" rx="2"/></g></svg>
+<div class="say" style="display: flex; gap: 16px"><div style="flex: none; width: 48px; padding-top: 5px; font-size: 13px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums">00:14</div><div style="font-family: 'Newsreader', Georgia, serif; font-size: 20px; line-height: 1.55">Welcome back. Today we are talking about why a written version of a conversation is often more useful than the recording.</div></div>
+<div class="say say2" style="display: flex; gap: 16px"><div style="flex: none; width: 48px; padding-top: 5px; font-size: 13px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums">00:31</div><div style="font-family: 'Newsreader', Georgia, serif; font-size: 20px; line-height: 1.55">You can search it, quote it and skim it. None of that works with audio.</div></div>
+<div style="font-size: 14px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 14px">Download as .txt or as .srt subtitles with timestamps.</div>
+</div>
+</section>
+
+<section aria-labelledby="how" style="border-top: 1px solid var(--line)">
+<div style="max-width: 1120px; margin: 0 auto; padding: 72px 24px; display: flex; flex-direction: column; gap: 32px">
+<h2 id="how" style="margin: 0; font-size: 32px; font-weight: 800; letter-spacing: -0.025em; line-height: 1.1">How it works</h2>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 32px">
+<div style="display: flex; flex-direction: column; gap: 8px; border-top: 3px solid var(--ink); padding-top: 16px"><h3 style="margin: 0; font-size: 19px; font-weight: 700">Search</h3><p style="margin: 0; font-size: 16px; color: var(--muted)">Search by podcast name, or jump straight to an episode.</p></div>
+<div style="display: flex; flex-direction: column; gap: 8px; border-top: 3px solid var(--ink); padding-top: 16px"><h3 style="margin: 0; font-size: 19px; font-weight: 700">Pick an episode</h3><p style="margin: 0; font-size: 16px; color: var(--muted)">Select the episode to transcribe. No file to upload.</p></div>
+<div style="display: flex; flex-direction: column; gap: 8px; border-top: 3px solid var(--ink); padding-top: 16px"><h3 style="margin: 0; font-size: 19px; font-weight: 700">Watch it run</h3><p style="margin: 0; font-size: 16px; color: var(--muted)">It keeps going if you close the page.</p></div>
+<div style="display: flex; flex-direction: column; gap: 8px; border-top: 3px solid var(--accent); padding-top: 16px"><h3 style="margin: 0; font-size: 19px; font-weight: 700">Download</h3><p style="margin: 0; font-size: 16px; color: var(--muted)">Get the transcript as .txt or .srt.</p></div>
+</div>
+</div>
+</section>
+
+<section id="pricing" aria-labelledby="pricing-h" style="background: var(--surface)">
+<div style="max-width: 1120px; margin: 0 auto; padding: 72px 24px; display: flex; flex-direction: column; gap: 32px">
+<div style="display: flex; flex-direction: column; gap: 8px"><h2 id="pricing-h" style="margin: 0; font-size: 32px; font-weight: 800; letter-spacing: -0.025em; line-height: 1.1">Pay for minutes, not months</h2><p style="margin: 0; color: var(--muted)">There is no subscription.</p></div>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 20px">
+<div style="display: flex; flex-direction: column; gap: 10px; padding: 24px; background: var(--paper); border: 1px solid var(--line); border-radius: 8px"><div style="font-size: 15px; font-weight: 700; color: var(--muted)">Free trial</div><div style="font-size: 30px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.1">60 minutes</div><p style="margin: 0; font-size: 16px; color: var(--muted)">New accounts get 60 minutes of audio free, on our OpenAI key.</p></div>
+<div style="display: flex; flex-direction: column; gap: 10px; padding: 24px; background: var(--paper); border: 1px solid var(--line-strong); border-radius: 8px"><div style="font-size: 15px; font-weight: 700; color: var(--muted)">Credit pack</div><div style="font-size: 30px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.1">300 minutes for $5</div><p style="margin: 0; font-size: 16px; color: var(--muted)">One-time purchase. Nothing to set up at OpenAI.</p></div>
+<div style="display: flex; flex-direction: column; gap: 10px; padding: 24px; background: var(--paper); border: 1px solid var(--line); border-radius: 8px"><div style="font-size: 15px; font-weight: 700; color: var(--muted)">Your own OpenAI key</div><div style="font-size: 30px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.1">About $0.36 per hour</div><p style="margin: 0; font-size: 16px; color: var(--muted)">Paid to OpenAI directly at their rate. No limit from us.</p></div>
+</div>
+</div>
+</section>
+
+<section id="faq" aria-labelledby="faq-h">
+<div style="max-width: 760px; margin: 0 auto; padding: 72px 24px; display: flex; flex-direction: column; gap: 24px">
+<h2 id="faq-h" style="margin: 0; font-size: 32px; font-weight: 800; letter-spacing: -0.025em; line-height: 1.1">Questions</h2>
+<div style="display: flex; flex-direction: column; border-bottom: 1px solid var(--line)">
+<details open style="border-top: 1px solid var(--line); padding: 4px 0"><summary style="display: flex; align-items: center; min-height: 52px; font-size: 18px; font-weight: 700">How do I transcribe a podcast episode to text?</summary><p style="margin: 0 0 16px; color: var(--muted)">Search for the podcast or the episode by name, pick the episode, and Podskrift downloads the audio and transcribes it with OpenAI Whisper. You get the full text plus an .srt subtitle file. No file to upload and no feed URL to find first.</p></details>
+<details style="border-top: 1px solid var(--line); padding: 4px 0"><summary style="display: flex; align-items: center; min-height: 52px; font-size: 18px; font-weight: 700">Is it free?</summary><p style="margin: 0 0 16px; color: var(--muted)">New accounts get 60 minutes of audio free, on our OpenAI key. After that you add your own OpenAI API key and pay OpenAI directly at their rate, about $0.36 per hour of audio. There is no subscription.</p></details>
+<details style="border-top: 1px solid var(--line); padding: 4px 0"><summary style="display: flex; align-items: center; min-height: 52px; font-size: 18px; font-weight: 700">Do I need an OpenAI API key?</summary><p style="margin: 0 0 16px; color: var(--muted)">Not to start. The free trial runs on ours. Add your own key when the trial runs out and there is no limit beyond what you spend at OpenAI.</p></details>
+<details style="border-top: 1px solid var(--line); padding: 4px 0"><summary style="display: flex; align-items: center; min-height: 52px; font-size: 18px; font-weight: 700">What file formats do I get?</summary><p style="margin: 0 0 16px; color: var(--muted)">Plain text (.txt) and SubRip subtitles (.srt) with timestamps.</p></details>
+<details style="border-top: 1px solid var(--line); padding: 4px 0"><summary style="display: flex; align-items: center; min-height: 52px; font-size: 18px; font-weight: 700">Can I transcribe a podcast that is not in the search index?</summary><p style="margin: 0 0 16px; color: var(--muted)">Yes. Paste the RSS feed URL instead and pick the episode from the feed.</p></details>
+<details style="border-top: 1px solid var(--line); padding: 4px 0"><summary style="display: flex; align-items: center; min-height: 52px; font-size: 18px; font-weight: 700">Is there an API?</summary><p style="margin: 0 0 16px; color: var(--muted)">Yes. Create an API key in Settings and use it from scripts to find an episode, start a transcription and fetch the transcript.</p></details>
+</div>
+</div>
+</section>
+</main>
+
+<footer style="border-top: 1px solid var(--line)">
+<div style="max-width: 1120px; margin: 0 auto; padding: 32px 24px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 28px; font-size: 15px">
+<div style="font-weight: 800; letter-spacing: -0.03em; font-size: 18px">podskrift</div>
+<div style="flex-grow: 1"></div>
+<a class="plain" href="#" style="display: flex; align-items: center; min-height: 44px; text-decoration: none">API docs</a>
+<a class="plain" href="#" style="display: flex; align-items: center; min-height: 44px; text-decoration: none">Find an RSS feed</a>
+<a class="plain" href="#" style="display: flex; align-items: center; min-height: 44px; text-decoration: none">Log in</a>
+</div>
+</footer>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"dark":{"editor":"boolean","default":false},"$preview":{"width":1280,"height":2500}}'>
+class Component extends DCLogic {
+constructor(props) {
+super(props);
+this.state = { tab: 'show' };
+}
+renderVals() {
+const show = this.state.tab === 'show';
+return {
+theme: this.props.dark ? 'dark' : 'light',
+showTab: show ? 'true' : 'false',
+episodeTab: show ? 'false' : 'true',
+showLine: show ? 'var(--accent)' : 'transparent',
+episodeLine: show ? 'transparent' : 'var(--accent)',
+pickShow: () => this.setState({ tab: 'show' }),
+pickEpisode: () => this.setState({ tab: 'episode' })
+};
+}
+}
+</script>
+</body>
+</html>
