@@ -13,6 +13,9 @@ from unittest import mock
 
 import pytest
 
+# Prefer the suite DB already configured by test_app.py (collected first
+# alphabetically). Overwriting DATABASE_URL here would bind `import app` to a
+# different file than cross-process children that read the env var later.
 if not os.environ.get('DATABASE_URL'):
     _TEST_DB = os.path.join(tempfile.mkdtemp(prefix='podskrift-summary-'), 'test.db')
     os.environ['DATABASE_URL'] = f'sqlite:///{_TEST_DB}'
@@ -20,9 +23,9 @@ os.environ.setdefault('SENTRY_DSN', '')
 os.environ.setdefault('POSTHOG_KEY', '')
 os.environ.setdefault('POSTHOG_HOST', '')
 os.environ.setdefault('PODSKRIFT_DISABLE_WATCHDOG', '1')
-os.environ['EMAIL_ENABLED'] = '0'
-os.environ['SUMMARY_ENABLED'] = '0'
-os.environ['SUMMARY_EMAIL_ENABLED'] = '0'
+os.environ.setdefault('EMAIL_ENABLED', '0')
+os.environ.setdefault('SUMMARY_ENABLED', '0')
+os.environ.setdefault('SUMMARY_EMAIL_ENABLED', '0')
 
 import app as A  # noqa: E402
 import email_notify  # noqa: E402
