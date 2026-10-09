@@ -344,6 +344,8 @@ def notify_transcript_ready(
             headers=_list_unsubscribe_headers(unsub),
             tags=[TRANSCRIPT_READY],
             kind=TRANSCRIPT_READY,
+            timeout=8,
+            idempotency_key=key,
         )
         if not ok:
             release_email_send(db, EmailSentLog, idempotency_key=key)
@@ -392,6 +394,8 @@ def notify_new_episodes_digest(
         unsub = unsubscribe_url(public_base_url, secret_key, user.id)
         subject, text, html = build_new_episodes_bodies(
             items=items, unsub_url=unsub)
+        # Digest covers many episodes; key the Message-Id on the first claim.
+        digest_key = claim_keys[0] if claim_keys else ''
         ok = mailer.send_email(
             to=user.email,
             subject=subject,
@@ -400,6 +404,7 @@ def notify_new_episodes_digest(
             headers=_list_unsubscribe_headers(unsub),
             tags=[NEW_EPISODES],
             kind=NEW_EPISODES,
+            idempotency_key=digest_key,
         )
         if not ok:
             for key in claim_keys:

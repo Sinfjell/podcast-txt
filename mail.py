@@ -2,8 +2,11 @@
 
 Off unless EMAIL_ENABLED is truthy and MAILGUN_API_KEY is set.
 Domain defaults to podskrift.com (root sending domain, EU). Misconfiguration or
-Mailgun failures are logged; 5xx retries with backoff; each failure *kind* is
-reported to Sentry once per process (not once per recipient).
+Mailgun failures are logged; clear 5xx responses retry with backoff and a
+stable Message-Id; ambiguous transport errors (timeouts) are not retried so a
+late accept cannot double-send. Each failure *kind* is reported to Sentry once
+per process (not once per recipient). 4xx is logged at warning without PII so
+the logging integration does not create a Sentry event per bad address.
 
 Mailgun click/open tracking is forced off — we use our own utm params instead
 (email.podskrift.com tracking CNAME may exist but is unused by default).
@@ -11,9 +14,11 @@ Mailgun click/open tracking is forced off — we use our own utm params instead
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import time
+import uuid
 from typing import Iterable, Mapping, Optional
 
 import requests
@@ -28,9 +33,24 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = 'https://api.eu.mailgun.net'
 DEFAULT_DOMAIN = 'podskrift.com'
 DEFAULT_FROM = 'Podskrift <hello@podskrift.com>'
+DEFAULT_TIMEOUT_SEC = 10
 
 # Kinds already reported this process lifetime — avoid inbox-scale Sentry spam.
 _sentry_kinds_reported: set[str] = set()
+
+
+def stable_message_id(kind: str, idempotency_key: str = '') -> str:
+    """RFC 5322 Message-Id reused across retries of the same logical send."""
+    if idempotency_key:
+        digest = hashlib.sha256(
+            idempotency_key.encode('utf-8', errors='replace')
+        ).hexdigest()[:24]
+        local = f'{kind}.{digest}'
+    else:
+        local = f'{kind}.{uuid.uuid4().hex}'
+    # Keep chars conservative for header safety.
+    safe = ''.join(c if c.isalnum() or c in '.-_' else '-' for c in local)[:72]
+    return f'<{safe}@podskrift.com>'
 
 
 def _truthy(raw: Optional[str]) -> bool:
@@ -115,11 +135,17 @@ def send_email(
     tags: Optional[Iterable[str]] = None,
     kind: str = 'generic',
     max_attempts: int = 3,
+    timeout: float = DEFAULT_TIMEOUT_SEC,
+    message_id: Optional[str] = None,
+    idempotency_key: str = '',
 ) -> bool:
     """Send one message via Mailgun. Never raises. Returns True on 2xx.
 
     When email is disabled or misconfigured: log and return False.
-    Retries with exponential backoff on 5xx / transport errors only.
+    Retries with exponential backoff on clear 5xx responses only.
+    Transport timeouts / connection errors are not retried (ambiguous: the
+    first attempt may already have been accepted). A stable Message-Id is set
+    for every attempt of this call.
     """
     if not to or not subject:
         logger.warning('mail.send skipped (%s): missing to/subject', kind)
@@ -137,6 +163,19 @@ def send_email(
 
     domain = mailgun_domain()
     url = f'{mailgun_base_url()}/v3/{domain}/messages'
+    # Resolve Message-Id once so 5xx retries are the same logical message.
+    hdrs = dict(headers or {})
+    msg_id = (
+        message_id
+        or hdrs.get('Message-Id')
+        or hdrs.get('Message-ID')
+        or hdrs.get('h:Message-Id')
+        or hdrs.get('h:Message-ID')
+        or stable_message_id(kind, idempotency_key)
+    )
+    for drop in ('Message-Id', 'Message-ID', 'h:Message-Id', 'h:Message-ID'):
+        hdrs.pop(drop, None)
+
     # List of pairs so repeated o:tag fields encode correctly.
     fields: list[tuple[str, str]] = [
         ('from', mail_from()),
@@ -147,13 +186,14 @@ def send_email(
         ('o:tracking', 'no'),
         ('o:tracking-clicks', 'no'),
         ('o:tracking-opens', 'no'),
+        ('h:Message-Id', msg_id),
     ]
     if html:
         fields.append(('html', html))
     reply = mail_reply_to()
     if reply:
         fields.append(('h:Reply-To', reply))
-    for key, value in (headers or {}).items():
+    for key, value in hdrs.items():
         if not key or value is None:
             continue
         header_key = key if key.lower().startswith('h:') else f'h:{key}'
@@ -163,10 +203,11 @@ def send_email(
             fields.append(('o:tag', str(tag)))
 
     auth = ('api', mailgun_api_key())
-    last_exc: BaseException | None = None
+    post_timeout = max(1.0, float(timeout))
     for attempt in range(1, max(1, max_attempts) + 1):
         try:
-            resp = requests.post(url, auth=auth, data=fields, timeout=20)
+            resp = requests.post(
+                url, auth=auth, data=fields, timeout=post_timeout)
             if 200 <= resp.status_code < 300:
                 return True
             if 500 <= resp.status_code < 600:
@@ -182,10 +223,12 @@ def send_email(
                     message=f'Mailgun {resp.status_code} for kind={kind}',
                 )
                 return False
-            # 4xx — do not retry (bad address, auth, etc.)
-            logger.error(
-                'mailgun rejected %s with %s: %s',
-                kind, resp.status_code, (resp.text or '')[:200],
+            # 4xx — do not retry (bad address, auth, etc.). Warning level so
+            # Sentry's logging integration (ERROR+) does not create an event
+            # per recipient; _report_once still records the kind once.
+            logger.warning(
+                'mailgun rejected %s with HTTP %s',
+                kind, resp.status_code,
             )
             _report_once(
                 f'http_{resp.status_code}',
@@ -193,16 +236,12 @@ def send_email(
             )
             return False
         except requests.RequestException as exc:
-            last_exc = exc
+            # Ambiguous: the request may have reached Mailgun after we timed
+            # out. Do not retry — Message-Id alone is not a guaranteed dedupe.
             logger.warning(
-                'mailgun transport error (%s) attempt %s/%s: %s',
-                kind, attempt, max_attempts, type(exc).__name__,
+                'mailgun transport error (%s): %s (not retrying)',
+                kind, type(exc).__name__,
             )
-            if attempt < max_attempts:
-                time.sleep(min(8.0, 0.5 * (2 ** (attempt - 1))))
-                continue
-            _report_once('transport', last_exc)
+            _report_once('transport', exc)
             return False
-    if last_exc is not None:
-        _report_once('transport', last_exc)
     return False

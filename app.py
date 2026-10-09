@@ -369,7 +369,7 @@ def partial_minutes_pair(meta):
 def partial_transcript_note(meta):
     """Short plain-text note for copy/download of a partial preview."""
     n, m = partial_minutes_pair(meta)
-    return f'Free preview: first {n} minutes of {m}.'
+    return f'Free preview: first {n} minutes of {m} minutes.'
 
 
 def episode_needs_own_key(duration_min, remaining_minutes, paid_minutes=0):
@@ -4051,9 +4051,54 @@ def _apply_global_unsubscribe(user):
     product_analytics.capture('unsubscribe', user.id, {'channel': 'all'})
 
 
+def _schedule_transcript_ready_email(task_id, user_id):
+    """Fire-and-forget transcript-ready mail; never blocks the worker thread."""
+    def _run():
+        with app.app_context():
+            try:
+                owner = db.session.get(User, user_id)
+                task = db.session.get(TranscriptionTask, task_id)
+                if owner is None or task is None:
+                    return
+                email_notify.notify_transcript_ready(
+                    db=db,
+                    user=owner,
+                    task=task,
+                    EmailSentLog=EmailSentLog,
+                    public_base_url=PUBLIC_BASE_URL,
+                    secret_key=app.secret_key,
+                )
+            except Exception:  # noqa: BLE001
+                app.logger.exception(
+                    'scheduled transcript-ready email failed for %s', task_id)
+
+    threading.Thread(
+        target=_run, daemon=True, name=f'transcript-ready-{task_id[:8]}',
+    ).start()
+
+
+def _finalize_global_unsubscribe(user):
+    """Stamp unsub, disable transcript + per-feed alerts. Idempotent."""
+    _apply_global_unsubscribe(user)
+    # Also opt out of per-feed alerts so digests stop without a second click.
+    SavedFeed.query.filter_by(user_id=user.id).update(
+        {'email_new_episodes': False}, synchronize_session=False)
+    db.session.commit()
+
+
+def _is_rfc8058_one_click_unsubscribe() -> bool:
+    """True for List-Unsubscribe-Post bodies (RFC 8058), not the confirm form."""
+    return (request.form.get('List-Unsubscribe') or '').strip() == 'One-Click'
+
+
 @app.route('/email/unsubscribe/<token>', methods=['GET', 'POST'])
 def email_unsubscribe(token):
-    """One-click unsubscribe without login (List-Unsubscribe + footer link)."""
+    """Logged-out unsubscribe: GET confirms; POST applies (RFC 8058 or form).
+
+    Link scanners must not unsubscribe on GET. Mail clients that honour
+    List-Unsubscribe-Post send ``List-Unsubscribe=One-Click`` and skip the
+    confirm page — that path still works without a second click.
+    """
     user_id = email_notify.parse_unsubscribe_token(app.secret_key, token)
     if user_id is None:
         return render_template(
@@ -4068,19 +4113,29 @@ def email_unsubscribe(token):
             ok=False,
             message='That account is no longer here.',
         ), 404
-    _apply_global_unsubscribe(user)
-    # Also opt out of per-feed alerts so digests stop without a second click.
-    SavedFeed.query.filter_by(user_id=user.id).update(
-        {'email_new_episodes': False}, synchronize_session=False)
-    db.session.commit()
-    if request.method == 'POST':
-        # RFC 8058 one-click agents expect a simple 200.
-        return ('', 200)
+
+    if request.method == 'GET':
+        return render_template(
+            'email_unsubscribe_confirm.html',
+            token=token,
+        )
+
+    # POST: RFC 8058 one-click, or the confirm-page button.
+    if _is_rfc8058_one_click_unsubscribe() or request.form.get('confirm') == '1':
+        _finalize_global_unsubscribe(user)
+        if _is_rfc8058_one_click_unsubscribe():
+            return ('', 200)
+        return render_template(
+            'email_unsubscribed.html',
+            ok=True,
+            message='You are unsubscribed from Podskrift emails.',
+        )
+
+    # Bare POST without One-Click / confirm — show confirm (do not unsub).
     return render_template(
-        'email_unsubscribed.html',
-        ok=True,
-        message='You are unsubscribed from Podskrift emails.',
-    )
+        'email_unsubscribe_confirm.html',
+        token=token,
+    ), 400
 
 
 @app.route('/go/transcribe')
@@ -4182,7 +4237,11 @@ def toggle_feed_email_alerts(feed_id):
     """Per-feed opt-in/out for new-episode emails."""
     feed = SavedFeed.query.filter_by(id=feed_id, user_id=current_user.id).first_or_404()
     want = request.form.get('email_new_episodes') == '1'
+    was_on = bool(feed.email_new_episodes)
     feed.email_new_episodes = want
+    if want and not was_on:
+        # Re-enable: reset baseline so the next poll does not flood a backlog.
+        episode_alerts.reset_feed_alert_baseline(feed)
     db.session.commit()
     product_analytics.capture(
         'alert_opt_in' if want else 'alert_opt_out',
@@ -4857,19 +4916,11 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                                     done_props['episode_minutes'] = m_min
                             product_analytics.capture(
                                 'transcript_completed', user_id, done_props)
-                            # Transcript-ready email: gated by EMAIL_ENABLED +
-                            # prefs + "slow job or owner left" timing rule.
+                            # Transcript-ready email off the critical path so
+                            # Mailgun latency / retries cannot hold the worker.
                             if finished is not None:
-                                owner = db.session.get(User, user_id)
-                                if owner is not None:
-                                    email_notify.notify_transcript_ready(
-                                        db=db,
-                                        user=owner,
-                                        task=finished,
-                                        EmailSentLog=EmailSentLog,
-                                        public_base_url=PUBLIC_BASE_URL,
-                                        secret_key=app.secret_key,
-                                    )
+                                _schedule_transcript_ready_email(
+                                    task_id, user_id)
                         except Exception:  # noqa: BLE001
                             app.logger.exception(
                                 'transcript_completed analytics failed for %s',
@@ -7543,14 +7594,23 @@ def _match_episode(episodes, title):
 #: Large back catalogues run to a few MB; anything past this is not a feed we want.
 SPOTIFY_FEED_MAX_BYTES = 15 * 1024 * 1024
 
+#: Closed RSS/Atom entry markers — used to stop reading once we have enough
+#: newest items for the alert poller without holding a whole mega-feed.
+_FEED_ITEM_CLOSE_RE = re.compile(br'</(item|entry)\s*>', re.I)
 
-def _fetch_feed_capped(feed_url, max_bytes=SPOTIFY_FEED_MAX_BYTES):
+
+def _fetch_feed_capped(feed_url, max_bytes=SPOTIFY_FEED_MAX_BYTES,
+                       early_stop_items=None):
     """Feed bytes, or None when the feed is unreachable or too big.
 
     A dead feed returns None instead of raising, so the resolver still gets
     to try the next show and the iTunes episode search. Redirects are followed
     by hand and every hop revalidated, as in download_audio: the route is
     public, and a public feed could otherwise 302 to a private address.
+
+    When ``early_stop_items`` is set (alert poller), streaming stops after that
+    many ``</item>`` / ``</entry>`` closes — newest-first feeds only need the
+    head. Oversized feeds without an early-stop still return None.
     """
     current = feed_url
     seen = set()
@@ -7576,13 +7636,22 @@ def _fetch_feed_capped(feed_url, max_bytes=SPOTIFY_FEED_MAX_BYTES):
                         current = urljoin(current, location)
                         continue
                     resp.raise_for_status()
-                    chunks, size = [], 0
+                    chunks, size, items_seen = [], 0, 0
                     for chunk in resp.iter_content(64 * 1024):
-                        size += len(chunk)
-                        if size > max_bytes:
-                            return None
+                        next_size = size + len(chunk)
+                        if next_size > max_bytes:
+                            # Alert poller: keep a usable prefix if we already
+                            # streamed some bytes; Spotify resolve: refuse.
+                            if not early_stop_items or not chunks:
+                                return None
+                            break
                         chunks.append(chunk)
-                    return b''.join(chunks)
+                        size = next_size
+                        if early_stop_items:
+                            items_seen += len(_FEED_ITEM_CLOSE_RE.findall(chunk))
+                            if items_seen >= early_stop_items:
+                                break
+                    return b''.join(chunks) if chunks else None
     except requests.RequestException:
         return None
     return None
@@ -8146,10 +8215,18 @@ def ensure_email_sent_log_table():
 
 
 def fetch_feed_for_alerts(feed_url):
-    """SSRF-safe capped feed fetch for the new-episode poller."""
+    """SSRF-safe capped feed fetch for the new-episode poller.
+
+    Uses a higher byte ceiling than Spotify resolve and may stop reading once
+    enough newest items are streamed (feeds are almost always newest-first).
+    """
     if not _is_fetchable_url(feed_url):
         return None
-    return _fetch_feed_capped(feed_url, max_bytes=episode_alerts.FEED_MAX_BYTES)
+    return _fetch_feed_capped(
+        feed_url,
+        max_bytes=episode_alerts.FEED_MAX_BYTES,
+        early_stop_items=episode_alerts.FEED_EARLY_STOP_ITEMS,
+    )
 
 
 def run_new_episode_alerts_poll():
