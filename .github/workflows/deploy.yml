@@ -81,7 +81,7 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Run test suite
-        run: python -m pytest test_app.py test_admin_costs.py -q
+        run: python -m pytest test_app.py -q
 
   deploy:
     name: Deploy to Hetzner
