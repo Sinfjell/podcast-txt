@@ -45,7 +45,7 @@ from flask import (Flask, render_template, request, jsonify, send_file, flash,
                    make_response, abort)
 import show_pages as show_pages_mod
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from urllib.parse import parse_qs, urljoin, urlparse, unquote
+from urllib.parse import parse_qs, urljoin, urlparse, urlunparse, unquote
 import uuid
 from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError, APITimeoutError
@@ -267,6 +267,10 @@ def openai_whisper_cost_usd(minutes):
 #: Session key for an episode an anonymous visitor picked before signing up.
 #: Cleared after resume (success or failure) so a stale stash cannot fire later.
 PENDING_TRANSCRIPTION_KEY = 'pending_transcription'
+# First-party preference cookie written by static/cookie-consent.js (12 months).
+# Necessary to remember Accept/Decline — not a tracking cookie.
+COOKIE_CONSENT_NAME = 'podskrift_cookie_consent'
+COOKIE_CONSENT_ACCEPTED = 'accepted'
 #: Relative path to return to after Stripe Checkout (cancel / success CTA).
 #: Validated with safe_return_to(); never trust a raw absolute URL here.
 BILLING_RETURN_TO_KEY = 'billing_return_to'
@@ -2798,6 +2802,8 @@ def get_episodes_from_rss(rss_url, *, timeout=None):
             if getattr(entry, 'image', None):
                 artwork = entry.image.get('href', '') or feed_image
 
+            episode_link = (entry.get('link') or '').strip() or None
+            show_link = (getattr(feed.feed, 'link', None) or '').strip() or None
             episodes.append({
                 'index': i,
                 'title': entry.title,
@@ -2810,6 +2816,8 @@ def get_episodes_from_rss(rss_url, *, timeout=None):
                 ),
                 'artwork': artwork,
                 'podcast_name': feed_title,
+                'episode_link': episode_link,
+                'show_link': show_link,
             })
 
         if not episodes:
@@ -3073,6 +3081,11 @@ def _stash_pending_from_request():
         'published': (request.form.get('published') or '').strip() or None,
         'duration_min': _positive_float_or_none(request.form.get('duration_min')),
         'input_origin': (request.form.get('input_origin') or '').strip() or None,
+        'spotify_url': (request.form.get('spotify_url') or '').strip() or None,
+        'apple_url': (request.form.get('apple_url') or '').strip() or None,
+        'episode_link': (request.form.get('episode_link') or '').strip() or None,
+        'website_url': (request.form.get('website_url') or '').strip() or None,
+        'show_link': (request.form.get('show_link') or '').strip() or None,
     }
 
     if audio_url:
@@ -3142,6 +3155,10 @@ def resume_transcription():
             'published': episode.get('published'),
             'duration_min': _positive_float_or_none(episode.get('duration_min')),
             'input_origin': pending_origin or 'rss',
+            'spotify_url': pending.get('spotify_url') or '',
+            'apple_url': pending.get('apple_url') or '',
+            'episode_link': episode.get('episode_link') or pending.get('episode_link') or '',
+            'show_link': episode.get('show_link') or pending.get('show_link') or '',
         }
     else:
         audio_url = (pending.get('audio_url') or '').strip()
@@ -3156,6 +3173,11 @@ def resume_transcription():
             'published': pending.get('published'),
             'duration_min': _positive_float_or_none(pending.get('duration_min')),
             'input_origin': pending_origin,
+            'spotify_url': pending.get('spotify_url') or '',
+            'apple_url': pending.get('apple_url') or '',
+            'episode_link': pending.get('episode_link') or '',
+            'website_url': pending.get('website_url') or '',
+            'show_link': pending.get('show_link') or '',
         }
 
     payload, status = enqueue_transcription(
@@ -3331,6 +3353,20 @@ def _record_needs_review(session_dict, user_id, event_id, reason):
 def _ph_uuid5(name):
     """Stable PostHog event uuid from a durable Stripe/object id."""
     return uuid.uuid5(uuid.NAMESPACE_URL, str(name))
+
+
+def _consented_posthog_session_id(raw):
+    """Return a client PostHog session id only when analytics consent is on.
+
+    Server captures use the internal user id as distinct_id and never mint
+    browser cookies. $session_id / Stripe ph_sid metadata are cookie-derived,
+    so they are dropped unless podskrift_cookie_consent=accepted.
+    """
+    if not has_request_context():
+        return ''
+    if request.cookies.get(COOKIE_CONSENT_NAME) != COOKIE_CONSENT_ACCEPTED:
+        return ''
+    return (raw or '').strip()[:128]
 
 
 def _capture_purchase_failed(reason, *, stage, user_id=None, session_id=None,
@@ -3904,7 +3940,7 @@ def billing_checkout():
             return redirect(url_for('settings'))
 
     source = (request.form.get('source') or 'settings').strip()[:64]
-    ph_sid = (request.form.get('ph_sid') or '').strip()[:128]
+    ph_sid = _consented_posthog_session_id(request.form.get('ph_sid'))
     trial_ctx = _trial_context() or {}
     trial_remaining_min = trial_ctx.get('remaining_minutes')
     paid_remaining_min = trial_ctx.get('paid_minutes')
@@ -4877,7 +4913,9 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
     ``(payload_dict, http_status)``. On success payload is
     ``{'task_id': ...}``; on refusal it carries ``error``.
 
-    `meta` keys: title, audio_url, podcast_name, artwork, published, duration_min.
+    `meta` keys: title, audio_url, podcast_name, artwork, published, duration_min,
+    and optional listen URLs: spotify_url, apple_url, episode_link / website_url /
+    show_link.
     `source` is 'web' or 'api'; it only labels the analytics events.
     """
     language = normalize_language_code(language)
@@ -4885,6 +4923,12 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
     audio_url = (meta.get('audio_url') or '').strip()
     if not audio_url or not _is_fetchable_url(audio_url):
         return {'error': 'That audio URL cannot be fetched.'}, 400
+
+    # Platform-labelled links are rebuilt from parsed ids only, so a form
+    # value cannot put an arbitrary URL behind "Listen on Spotify/Apple".
+    spotify_url = canonical_spotify_episode_url(meta.get('spotify_url') or '')
+    apple_url = canonical_apple_podcasts_url(meta.get('apple_url') or '')
+    website_url = website_url_from_episode_meta(meta)
 
     # Snapshot before the worker thread: callers may pass flask_login's
     # current_user LocalProxy, which is None outside a request context.
@@ -5095,6 +5139,9 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                 artwork_url=meta.get('artwork'),
                 episode_published=meta.get('published'),
                 source_audio_url=audio_url,
+                source_spotify_url=spotify_url,
+                source_apple_url=apple_url,
+                source_website_url=website_url,
                 # Feed duration is the best ETA source we have, and it is available
                 # before a single byte is downloaded. For partials, store the
                 # reserved preview length so the progress ETA matches the work.
@@ -5334,6 +5381,11 @@ def start_transcription():
             'published': request.form.get('published'),
             'duration_min': _positive_float_or_none(request.form.get('duration_min')),
             'input_origin': request.form.get('input_origin') or '',
+            'spotify_url': request.form.get('spotify_url') or '',
+            'apple_url': request.form.get('apple_url') or '',
+            'episode_link': request.form.get('episode_link') or '',
+            'website_url': request.form.get('website_url') or '',
+            'show_link': request.form.get('show_link') or '',
         }
     else:
         if not rss_url or request.form.get('episode_index') in (None, ''):
@@ -5357,6 +5409,10 @@ def start_transcription():
             'duration_min': _positive_float_or_none(episode.get('duration_min')),
             # RSS picker path (incl. Apple→RSS): prefer an explicit form value.
             'input_origin': request.form.get('input_origin') or 'rss',
+            'spotify_url': request.form.get('spotify_url') or '',
+            'apple_url': request.form.get('apple_url') or '',
+            'episode_link': episode.get('episode_link') or request.form.get('episode_link') or '',
+            'show_link': episode.get('show_link') or request.form.get('show_link') or '',
         }
 
     payload, status = enqueue_transcription(
@@ -5914,6 +5970,7 @@ def get_status(task_id):
         # Boolean only — the result page uses this to offer Follow when the
         # async related-episodes fetch times out or fails.
         'has_rss': bool((task.rss_url or '').strip()),
+        'listen_links': listen_links_for_task(task),
     }
 
     if task.status == 'cancelled':
@@ -6208,7 +6265,11 @@ def transcription_page(task_id):
             current_user.id,
             {'type': campaign},
         )
-    return render_template('transcription.html', task_id=task_id)
+    return render_template(
+        'transcription.html',
+        task_id=task_id,
+        listen_links=listen_links_for_task(task),
+    )
 
 
 def _task_owned_or_404(task_id):
@@ -6259,6 +6320,281 @@ def share_create_release(user_id, token):
             return
         if not held:
             _share_create_attempts.pop(key, None)
+
+
+def safe_public_http_url(raw, *, max_len=1024):
+    """Return a cleaned public http(s) URL, or None.
+
+    Rejects javascript:, data:, and anything that is not http/https. Used for
+    outbound listen links on share / result pages (never echo unvalidated URLs).
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text or len(text) > max_len:
+        return None
+    # Block scheme-relative and sneaky whitespace / control characters.
+    if re.search(r'[\x00-\x1f\x7f]', text):
+        return None
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return None
+    scheme = (parsed.scheme or '').lower()
+    if scheme not in ('http', 'https'):
+        return None
+    if not parsed.netloc or '@' in parsed.netloc:
+        return None
+    # Rebuild from parts so a mixed javascript: payload cannot survive into an href.
+    cleaned = urlunparse((
+        scheme, parsed.netloc.lower(), parsed.path or '',
+        parsed.params, parsed.query, parsed.fragment,
+    ))
+    return cleaned if len(cleaned) <= max_len else None
+
+
+def canonical_spotify_episode_url(raw):
+    """https://open.spotify.com/episode/<id> when raw is an episode link."""
+    kind, spotify_id = parse_spotify_url(raw)
+    if kind != 'episode' or not spotify_id:
+        return None
+    return f'https://open.spotify.com/episode/{spotify_id}'
+
+
+def canonical_apple_podcasts_url(raw):
+    """Normalised podcasts.apple.com show/episode URL, or None."""
+    cleaned = safe_public_http_url(raw)
+    if not cleaned or urlparse(cleaned).hostname != 'podcasts.apple.com':
+        return None
+    show_id, episode_id = parse_apple_podcasts_url(cleaned)
+    if not show_id:
+        return None
+    base = f'https://podcasts.apple.com/podcast/id{show_id}'
+    if episode_id:
+        return f'{base}?i={episode_id}'
+    return base
+
+
+#: feed_url → apple show/episode URL ('' = looked up, none found).
+_apple_feed_url_cache = {}
+_apple_feed_url_cache_lock = threading.Lock()
+APPLE_FEED_LOOKUP_TIMEOUT_SEC = 2.0
+
+
+def _norm_title(value):
+    return re.sub(r'\s+', ' ', (value or '')).strip().casefold()
+
+
+def apple_url_for_feed(feed_url, podcast_name=None, *, episode_title=None,
+                       audio_url=None, timeout=APPLE_FEED_LOOKUP_TIMEOUT_SEC):
+    """Apple Podcasts URL for a feed (episode-level when it can match), or None.
+
+    Only the show *name* is sent to Apple's search, never the feed URL or its
+    path (private feeds carry tokens there). A hit must have exactly the same
+    feedUrl, which also proves the feed is in Apple's public directory.
+    Cached per process (misses too). Never raises. Do not call from a request
+    thread: use schedule_listen_link_backfill().
+    """
+    feed = safe_public_http_url(feed_url)
+    name = (podcast_name or '').strip()
+    if not feed or len(name) < 2:
+        return None
+    want_feed = feed.rstrip('/').lower()
+    audio = safe_public_http_url(audio_url) or ''
+    cache_key = (want_feed, audio, _norm_title(episode_title))
+    with _apple_feed_url_cache_lock:
+        if cache_key in _apple_feed_url_cache:
+            return _apple_feed_url_cache[cache_key] or None
+
+    found = None
+    try:
+        show_id = None
+        try:
+            resp = requests.get(
+                'https://itunes.apple.com/search',
+                timeout=timeout,
+                params={'term': name[:200], 'media': 'podcast',
+                        'entity': 'podcast', 'limit': 25},
+            )
+            resp.raise_for_status()
+            results = resp.json().get('results') or []
+        except (requests.RequestException, ValueError, TypeError):
+            results = None
+        for item in results or []:
+            item_feed = safe_public_http_url(item.get('feedUrl') or '')
+            if item_feed and item_feed.rstrip('/').lower() == want_feed:
+                cid = str(item.get('collectionId') or '')
+                if re.fullmatch(r'\d+', cid):
+                    show_id = cid
+                    break
+        if show_id:
+            found = f'https://podcasts.apple.com/podcast/id{show_id}'
+            want_title = _norm_title(episode_title)
+            if audio or want_title:
+                try:
+                    eps = _itunes_lookup(show_id, entity='podcastEpisode',
+                                         limit=200)
+                except Exception:  # noqa: BLE001
+                    eps = []
+                for ep in eps or []:
+                    if ep.get('wrapperType') != 'podcastEpisode':
+                        continue
+                    tid = str(ep.get('trackId') or '')
+                    if not re.fullmatch(r'\d+', tid):
+                        continue
+                    ep_audio = safe_public_http_url(ep.get('episodeUrl') or '')
+                    if ((audio and ep_audio == audio)
+                            or (want_title
+                                and _norm_title(ep.get('trackName')) == want_title)):
+                        found = f'{found}?i={tid}'
+                        break
+    except Exception:  # noqa: BLE001 - never break share/result render
+        app.logger.exception('apple feed lookup failed')
+        found = None
+        return None  # do not cache unexpected failures
+
+    with _apple_feed_url_cache_lock:
+        if results is not None or found:
+            _apple_feed_url_cache[cache_key] = found or ''
+    return found
+
+
+def website_url_from_episode_meta(meta):
+    """Prefer episode <link>, then show link; never the audio file itself."""
+    audio = safe_public_http_url(meta.get('audio_url') or '')
+    for key in ('episode_link', 'website_url', 'show_link'):
+        url = safe_public_http_url(meta.get(key) or '')
+        if url and url != audio:
+            return url
+    return None
+
+
+def listen_links_from_fields(*, spotify_url=None, apple_url=None,
+                             website_url=None, audio_url=None):
+    """Build ordered listen-link dicts from stored/resolved URLs."""
+    links = []
+    spotify = canonical_spotify_episode_url(spotify_url or '')
+    if spotify:
+        links.append({
+            'platform': 'spotify',
+            'label': 'Listen on Spotify',
+            'url': spotify,
+        })
+    apple = canonical_apple_podcasts_url(apple_url or '')
+    if apple:
+        links.append({
+            'platform': 'apple',
+            'label': 'Listen on Apple Podcasts',
+            'url': apple,
+        })
+    website = safe_public_http_url(website_url)
+    if website:
+        links.append({
+            'platform': 'website',
+            'label': "Listen on the podcast's website",
+            'url': website,
+        })
+    audio = safe_public_http_url(audio_url)
+    if audio:
+        links.append({
+            'platform': 'audio',
+            'label': 'Play audio',
+            'url': audio,
+            'is_audio': True,
+        })
+    return links
+
+
+def listen_links_for_task(task):
+    """Listen destinations already stored on the task (no network)."""
+    if task is None:
+        return []
+    return listen_links_from_fields(
+        spotify_url=getattr(task, 'source_spotify_url', None),
+        apple_url=getattr(task, 'source_apple_url', None),
+        website_url=getattr(task, 'source_website_url', None),
+        audio_url=getattr(task, 'source_audio_url', None),
+    )
+
+
+def public_listen_links_for_task(task):
+    """Listen links safe for the public /t/ page.
+
+    The raw audio URL is only shown when the episode is known to be in a
+    public directory (Spotify/Apple link stored). Private/premium feeds put
+    access tokens in enclosure URLs, and a share link must not hand those out.
+    """
+    links = listen_links_for_task(task)
+    if task is None:
+        return links
+    public = bool(getattr(task, 'source_spotify_url', None)
+                  or getattr(task, 'source_apple_url', None))
+    if public:
+        return links
+    return [L for L in links if not L.get('is_audio')]
+
+
+def ensure_task_listen_links(task, *, timeout=APPLE_FEED_LOOKUP_TIMEOUT_SEC):
+    """Fill a missing Apple URL from the feed; persist if found.
+
+    Network call: run from schedule_listen_link_backfill(), never inline in a
+    request thread (except under TESTING).
+    """
+    if task is None:
+        return listen_links_for_task(task)
+    if not getattr(task, 'source_apple_url', None) and (task.rss_url or '').strip():
+        apple = apple_url_for_feed(
+            task.rss_url, task.podcast_name,
+            episode_title=task.episode_title,
+            audio_url=getattr(task, 'source_audio_url', None),
+            timeout=timeout)
+        if apple:
+            task.source_apple_url = apple
+            try:
+                db.session.commit()
+            except Exception:  # noqa: BLE001
+                db.session.rollback()
+                app.logger.exception('could not persist listen links for task %s',
+                                     getattr(task, 'id', '?'))
+    return listen_links_for_task(task)
+
+
+_listen_backfill_inflight = set()
+_listen_backfill_lock = threading.Lock()
+
+
+def _listen_backfill_worker(task_id):
+    try:
+        with app.app_context():
+            try:
+                task = db.session.get(TranscriptionTask, task_id)
+                if task is not None:
+                    ensure_task_listen_links(task)
+            finally:
+                db.session.remove()
+    except Exception:  # noqa: BLE001
+        app.logger.exception('listen-link backfill failed for %s', task_id)
+    finally:
+        with _listen_backfill_lock:
+            _listen_backfill_inflight.discard(task_id)
+
+
+def schedule_listen_link_backfill(task):
+    """Look up a missing Apple link off the request thread (single-flight)."""
+    if task is None or getattr(task, 'source_apple_url', None):
+        return
+    if not (task.rss_url or '').strip():
+        return
+    task_id = task.id
+    with _listen_backfill_lock:
+        if task_id in _listen_backfill_inflight:
+            return
+        _listen_backfill_inflight.add(task_id)
+    if app.config.get('TESTING'):
+        _listen_backfill_worker(task_id)
+        return
+    threading.Thread(target=_listen_backfill_worker, args=(task_id,),
+                     daemon=True, name=f'listen-links-{task_id[:8]}').start()
 
 
 def _active_share_for_task(task_id):
@@ -6375,6 +6711,8 @@ def transcription_share(task_id):
             db.session.add(share)
         db.session.commit()
         created = True
+        # Best-effort Apple link from the feed, off the request thread.
+        schedule_listen_link_backfill(task)
         product_analytics.capture(
             'share_link_created',
             current_user.id,
@@ -6441,6 +6779,11 @@ def shared_transcript(token):
 
     partial_meta = share_partial_meta(task)
     segments = _readable_share_segments(task)
+    # Only stored listen URLs are rendered (no network on this path). A
+    # missing Apple link is looked up in the background for the next view.
+    # In tests the backfill runs inline, so re-read after scheduling.
+    schedule_listen_link_backfill(task)
+    listen_links = public_listen_links_for_task(task)
     signup_url = url_for('register', utm_source='share')
     product_analytics.capture(
         'shared_transcript_viewed',
@@ -6448,6 +6791,7 @@ def shared_transcript(token):
         {
             'partial': bool(partial_meta),
             'has_timestamps': bool(segments),
+            'has_listen_links': bool(listen_links),
             '$process_person_profile': False,
         },
     )
@@ -6464,6 +6808,7 @@ def shared_transcript(token):
         task=task,
         segments=segments,
         partial_meta=partial_meta,
+        listen_links=listen_links,
         signup_url=signup_url,
         download_txt_url=url_for('shared_transcript_download',
                                  token=token, file_type='txt'),
@@ -7744,6 +8089,9 @@ def inject_posthog():
             if getattr(current_user, 'is_authenticated', False)
             else ''
         ),
+        # Admin blueprint overrides to True; default False so Jinja `not`
+        # is unambiguous outside /admin.
+        'is_admin_page': False,
         'public_base_url': PUBLIC_BASE_URL,
     }
 
@@ -8416,6 +8764,16 @@ def _itunes_episode_result(item):
     duration_min = None
     if item.get('trackTimeMillis'):
         duration_min = round(item['trackTimeMillis'] / 60000, 1)
+    apple_url = (
+        safe_public_http_url(item.get('trackViewUrl') or '')
+        or (
+            canonical_apple_podcasts_url(
+                f"https://podcasts.apple.com/podcast/id{item.get('collectionId')}"
+                + (f"?i={item.get('trackId')}" if item.get('trackId') else '')
+            )
+            if item.get('collectionId') else None
+        )
+    )
     return {
         'type': 'episode',
         'name': item.get('trackName', ''),
@@ -8429,11 +8787,21 @@ def _itunes_episode_result(item):
             round(duration_min * WHISPER_COST_PER_MINUTE, 3) if duration_min else None
         ),
         'origin': 'itunes_episode',
+        'apple_url': apple_url or '',
     }
 
 
 def _itunes_show_result(item):
     """An iTunes podcast (show) hit, in the shape the search box renders."""
+    apple_url = (
+        safe_public_http_url(item.get('collectionViewUrl') or '')
+        or (
+            canonical_apple_podcasts_url(
+                f"https://podcasts.apple.com/podcast/id{item.get('collectionId')}"
+            )
+            if item.get('collectionId') else None
+        )
+    )
     return {
         'type': 'show',
         'name': item.get('collectionName', ''),
@@ -8441,6 +8809,7 @@ def _itunes_show_result(item):
         'artwork': _best_artwork(item),
         'feed_url': item.get('feedUrl'),
         'genre': item.get('primaryGenreName', ''),
+        'apple_url': apple_url or '',
     }
 
 
@@ -8829,6 +9198,8 @@ def _episode_from_feed(feed_url, title):
         'released': ep['published'],
         'duration_min': ep['duration_min'],
         'estimated_cost': ep['estimated_cost'],
+        'episode_link': ep.get('episode_link') or '',
+        'show_link': ep.get('show_link') or '',
     }
 
 
@@ -8917,11 +9288,34 @@ def resolve_spotify_url(raw):
         return _spotify_resolve_outcome(
             [], _paid_episode_message(show_name), 'paid_episode', show_name)
 
+    spotify_episode_url = (
+        f'https://open.spotify.com/episode/{spotify_id}' if kind == 'episode' else ''
+    )
+
+    def _with_spotify(hit, itunes_show=None):
+        out = dict(hit, origin='spotify')
+        if spotify_episode_url:
+            out['spotify_url'] = spotify_episode_url
+        if not out.get('apple_url') and itunes_show:
+            apple = (
+                safe_public_http_url(itunes_show.get('collectionViewUrl') or '')
+                or (
+                    canonical_apple_podcasts_url(
+                        f"https://podcasts.apple.com/podcast/id"
+                        f"{itunes_show.get('collectionId')}"
+                    )
+                    if itunes_show.get('collectionId') else None
+                )
+            )
+            if apple:
+                out['apple_url'] = apple
+        return out
+
     for show in shows[:2]:
         hit = _episode_from_feed(show['feedUrl'], title)
         if hit:
-            hit = dict(hit, origin='spotify')
-            return _spotify_resolve_outcome([hit], show_name=show_name)
+            return _spotify_resolve_outcome(
+                [_with_spotify(hit, show)], show_name=show_name)
 
     # Exact name missed: try stripped variants, but only accept a candidate
     # when the episode title is actually in that show's feed.
@@ -8929,14 +9323,15 @@ def resolve_spotify_url(raw):
         for show in _public_shows_named_loose(show_name)[:3]:
             hit = _episode_from_feed(show['feedUrl'], title)
             if hit:
-                hit = dict(hit, origin='spotify')
-                return _spotify_resolve_outcome([hit], show_name=show_name)
+                return _spotify_resolve_outcome(
+                    [_with_spotify(hit, show)], show_name=show_name)
 
     hit = _episode_from_itunes(title, show_name)
     if hit:
         # Prefer spotify even when the match came via iTunes as a lookup aid.
-        hit = dict(hit, origin='spotify')
-        return _spotify_resolve_outcome([hit], show_name=show_name)
+        itunes_show = shows[0] if shows else None
+        return _spotify_resolve_outcome(
+            [_with_spotify(hit, itunes_show)], show_name=show_name)
     if shows:
         return _spotify_resolve_outcome(
             [_itunes_show_result(shows[0])],
@@ -9065,12 +9460,17 @@ def _apple_episode_from_lookup(items, episode_id):
     return None
 
 
-def _apple_episode_result(item, show_item=None):
+def _apple_episode_result(item, show_item=None, *, pasted_url=None):
     """Episode search-box row; copy feedUrl from the show when the episode omits it."""
     if not item.get('feedUrl') and show_item and show_item.get('feedUrl'):
         item = dict(item, feedUrl=show_item['feedUrl'])
     # Pasted Apple Podcasts links are a distinct origin from iTunes name search.
-    return dict(_itunes_episode_result(item), origin='apple')
+    out = dict(_itunes_episode_result(item), origin='apple')
+    # Prefer the exact pasted episode URL when it parses cleanly.
+    pasted = canonical_apple_podcasts_url(pasted_url or '')
+    if pasted:
+        out['apple_url'] = pasted
+    return out
 
 
 def resolve_apple_url(raw):
@@ -9090,7 +9490,8 @@ def resolve_apple_url(raw):
         show_item = _apple_show_from_lookup(items)
         episode_item = _apple_episode_from_lookup(items, episode_id)
         if episode_item and episode_item.get('episodeUrl'):
-            ep = _apple_episode_result(episode_item, show_item)
+            ep = _apple_episode_result(
+                episode_item, show_item, pasted_url=raw)
             audio = ep.get('audio_url') or ''
             if audio and not _is_fetchable_url(audio):
                 # Keep the show when audio is on a private host; never fetch it.

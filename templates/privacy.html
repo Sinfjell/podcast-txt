@@ -31,10 +31,12 @@
             Whisper API to produce the transcript.</li>
         <li><strong>PostHog</strong> (EU Cloud): product analytics and
             session replay, so we can see where signup-to-first-transcript
-            drops off. Replays mask form inputs (including email, password and
-            API key fields) and transcript text. We identify you only by an
-            internal user id, not by email or name, and we do not send API
-            keys, passwords, emails or transcript text as event properties.</li>
+            drops off — only after you Accept cookies. Replays mask form
+            inputs (including email, password and API key fields) and
+            transcript text. We identify you only by an internal user id, not
+            by email or name, and we do not send API keys, passwords, emails or
+            transcript text as event properties. If you Decline, we do not load
+            analytics cookies or record sessions.</li>
         <li><strong>Stripe</strong>: card payments for optional credit packs.
             Stripe receives the payment details you enter on their Checkout
             page; we store only a purchase record (Stripe session id, amount and
@@ -52,8 +54,15 @@
     <ul>
         <li><strong>session</strong> and <strong>remember_token</strong>: keep
             you logged in. Necessary for the site to work.</li>
+        <li><strong>podskrift_cookie_consent</strong> (cookie and local
+            storage, kept for 12 months): remembers whether you Accepted or
+            Declined analytics. Necessary to honour your choice. Change it any
+            time via Cookie settings in the footer.</li>
         <li>PostHog's <strong>ph_…</strong> cookie and local storage: an
-            anonymous analytics id.</li>
+            anonymous analytics id and session replay state. Set only after
+            you Accept. Before that (and if you Decline), PostHog runs in
+            memory-only mode with capturing off — no analytics cookies and no
+            session recording.</li>
         <li>Local storage for small preferences, such as your last spoken
             language and which What's new items you have seen.</li>
     </ul>

@@ -216,6 +216,11 @@
         </div>
         <p class="text-sm text-muted hidden" id="shareStatus" style="margin: 8px 0 0;" aria-live="polite"></p>
     </div>
+    <div id="listenLinksMount" class="hidden" style="margin: 0 16px 12px;">
+        {% with listen_analytics_event='result_listen_clicked' %}
+        {% include '_listen_links.html' %}
+        {% endwith %}
+    </div>
     <!-- Shown right after Copy: next episodes + follow, while the lower What’s next stays too -->
     <div id="copyNextSteps" class="hidden copy-next" role="status">
         <div class="copy-next-head">
@@ -702,6 +707,8 @@
             show(el('copyBtn'), true);
             show(el('shareBtn'), true);
             loadShareState();
+            show(el('listenLinksMount'), !!(el('listenLinksMount')
+                && el('listenLinksMount').querySelector('.listen-block')));
             loadNextSteps();
             return;
         }
