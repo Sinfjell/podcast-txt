@@ -457,7 +457,10 @@ SAMPLE_FEED_V2 = b"""<?xml version="1.0"?>
 def _isolate_alert_feeds():
     """Turn off other tests' feeds so poller counters stay local."""
     with A.app.app_context():
-        A.SavedFeed.query.update({'email_new_episodes': False})
+        A.SavedFeed.query.update({
+            'email_new_episodes': False,
+            'email_summaries': False,
+        })
         A.db.session.commit()
 
 
