@@ -6092,6 +6092,9 @@ def test_cookie_consent_js_is_served_from_static():
     assert 'PodskriftConsent' in text
     assert 'Max-Age' in text
     assert 'localStorage' in text
+    # Regression: a mangled ";cookie" once SyntaxError'd the whole file.
+    assert 'document.cookie' in text
+    assert ';cookie' not in text.replace('document.cookie', '')
 
 
 def test_cookie_consent_absent_on_admin_even_with_posthog(monkeypatch):
