@@ -6154,23 +6154,40 @@ def test_posthog_snippet_renders_when_key_is_set(monkeypatch):
     assert "posthog.register({app: 'podskrift'})" in body
     assert 'podskriftPaywallShown' in body
     assert 'buy_clicked' in body
-    # GDPR: the SDK (array.js + init) is only injected after Accept, so
-    # nothing talks to PostHog or writes ph_* storage before consent.
+    # Cookieless until Accept: SDK loads immediately with on_reject; opt_out
+    # enables anonymous hash counting without ph_* cookies/storage.
+    assert "cookieless_mode: 'on_reject'" in body
+    assert "person_profiles: 'identified_only'" in body
+    assert 'disable_session_recording: true' in body
     assert 'function loadPosthogSdk' in body
-    assert "if (choice() === 'accepted') {\n            loadPosthogSdk();" in body
-    head, _, rest = body.partition('function loadPosthogSdk')
+    assert 'function applyConsentToPosthog' in body
+    assert 'opt_out_capturing()' in body
+    assert 'opt_in_capturing()' in body
+    assert 'loadPosthogSdk();' in body
+    # Loader is defined before the unconditional boot call; init stays inside.
+    head, _, _rest = body.partition('function loadPosthogSdk')
     assert 'posthog.init(' not in head
     assert '-assets.i.posthog.com' not in head
     assert 'function clearPosthogStorage' in body
+    assert 'sessionStorage' in body
     assert 'cookie-consent.js' in body
     assert 'id="cookieConsent"' in body
     assert 'id="cookieConsentAccept"' in body
     assert 'id="cookieConsentDecline"' in body
     assert 'id="cookieSettingsLink"' in body
     assert 'href="/privacy"' in body or "url_for('privacy')" in body
+    assert 'anonymous, cookie-free' in body
     # identify only after Accept (helper gates on choice()).
     assert 'function identifyIfAllowed' in body
     assert "choice() !== 'accepted'" in body
+
+
+def test_cookie_consent_banner_mentions_cookieless_on_decline(monkeypatch):
+    """Decline copy must not imply zero analytics — cookieless stats remain."""
+    monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
+    body = A.app.test_client().get('/').data.decode()
+    assert 'cookie-free usage statistics' in body
+    assert 'session replay' in body.lower()
 
 
 def test_cookie_consent_banner_absent_without_posthog_key():
@@ -6188,6 +6205,7 @@ def test_cookie_consent_js_is_served_from_static():
     assert 'PodskriftConsent' in text
     assert 'Max-Age' in text
     assert 'localStorage' in text
+    assert "cookieless_mode: 'on_reject'" in text
     # Regression: a mangled ";cookie" once SyntaxError'd the whole file.
     assert 'document.cookie' in text
     assert ';cookie' not in text.replace('document.cookie', '')
@@ -6603,7 +6621,11 @@ def test_privacy_page_mentions_posthog():
     assert 'Cookie settings' in body
     assert 'Accept' in body
     assert 'Decline' in body
-    assert 'memory-only' in body or 'memory' in body.lower()
+    assert 'cookieless' in body.lower()
+    assert 'legitimate interest' in body.lower()
+    assert '6(1)(f)' in body or 'art. 6(1)(f)' in body
+    assert 'daily' in body.lower()
+    assert 'hash' in body.lower()
 
 
 def test_whats_new_page_renders_changelog_entries(trial_on):
