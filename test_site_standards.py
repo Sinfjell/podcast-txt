@@ -296,3 +296,19 @@ def test_episode_selection_is_noindex():
     src = open(os.path.join(os.path.dirname(__file__), 'templates',
                             'episode_selection.html'), encoding='utf-8').read()
     assert '{% block robots_meta %}<meta name="robots" content="noindex">{% endblock %}' in src
+
+
+def test_wildcard_or_missing_accept_gets_html_not_markdown(client):
+    for headers in ({}, {'Accept': '*/*'}, {'Accept': 'text/*'},
+                    {'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8'}):
+        resp = client.get('/', headers=headers)
+        assert resp.mimetype == 'text/html', headers
+        assert 'Accept' in resp.headers.get('Vary', '')
+
+
+def test_explicit_markdown_accept_gets_markdown_with_vary(client):
+    resp = client.get('/', headers={'Accept': 'text/markdown, */*;q=0.5'})
+    assert resp.mimetype == 'text/markdown'
+    assert 'Accept' in resp.headers.get('Vary', '')
+    resp = client.get('/docs/api', headers={'Accept': 'text/markdown'})
+    assert resp.mimetype == 'text/markdown'
