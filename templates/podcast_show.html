@@ -1,0 +1,273 @@
+{% extends "base.html" %}
+{% block title %}Transcripts for {{ show.name }} — Podskrift{% endblock %}
+{% block meta_description %}Transcribe {{ show.name }} episodes to text with Podskrift. Private .txt and .srt transcripts{% if trial_minutes %}; {{ trial_minutes }} free minutes for new accounts{% endif %}.{% endblock %}
+{% block og_title %}Transcripts for {{ show.name }} — Podskrift{% endblock %}
+{% block og_description %}Get a private transcript of recent {{ show.name }} episodes. Paste Spotify or Apple links, or pick an episode below.{% endblock %}
+
+{% block content %}
+<style>
+    .show-page { max-width: 720px; margin: 24px auto; }
+    .show-hero {
+        display: flex;
+        gap: 18px;
+        align-items: flex-start;
+        margin-bottom: 28px;
+    }
+    .show-art {
+        width: 96px; height: 96px;
+        border-radius: var(--radius);
+        object-fit: cover;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        flex-shrink: 0;
+    }
+    .show-art-ph {
+        width: 96px; height: 96px;
+        border-radius: var(--radius);
+        background: var(--accent-bg);
+        border: 1px solid var(--accent-border);
+        flex-shrink: 0;
+    }
+    .show-hero h1 {
+        font-size: clamp(24px, 4vw, 32px);
+        font-weight: 700;
+        letter-spacing: -0.03em;
+        line-height: 1.2;
+        margin-bottom: 6px;
+    }
+    .show-author { color: var(--muted); font-size: 14px; margin-bottom: 10px; }
+    .show-desc {
+        color: var(--text);
+        font-size: 14.5px;
+        line-height: 1.65;
+        opacity: 0.92;
+    }
+    .show-desc-attr {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 8px;
+    }
+    .show-section { margin: 36px 0; }
+    .show-section h2 {
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        margin-bottom: 8px;
+    }
+    .show-section > .lead {
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.55;
+        margin-bottom: 16px;
+    }
+    .ep-row {
+        display: flex;
+        gap: 14px;
+        align-items: flex-start;
+        padding: 14px 0;
+        border-bottom: 1px solid var(--border);
+    }
+    .ep-row:last-child { border-bottom: 0; }
+    .ep-main { flex: 1; min-width: 0; }
+    .ep-title {
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        margin-bottom: 4px;
+    }
+    .ep-meta { font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
+    .ep-desc {
+        font-size: 13px;
+        color: var(--muted);
+        line-height: 1.5;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+    }
+    .ep-actions { flex-shrink: 0; padding-top: 2px; }
+    .show-steps {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        counter-reset: step;
+    }
+    .show-steps li {
+        position: relative;
+        padding: 0 0 14px 36px;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.55;
+    }
+    .show-steps li::before {
+        counter-increment: step;
+        content: counter(step);
+        position: absolute;
+        left: 0; top: 0;
+        width: 24px; height: 24px;
+        border-radius: 50%;
+        background: var(--accent-bg);
+        border: 1px solid var(--accent-border);
+        color: var(--accent-bright);
+        font-size: 12px;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .show-faq details {
+        border-bottom: 1px solid var(--border);
+        padding: 12px 0;
+    }
+    .show-faq summary {
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 14.5px;
+        list-style: none;
+    }
+    .show-faq summary::-webkit-details-marker { display: none; }
+    .show-faq details p {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.6;
+    }
+    .show-note {
+        margin-top: 12px;
+        font-size: 13px;
+        color: var(--muted);
+    }
+    .show-back {
+        display: inline-block;
+        margin-bottom: 16px;
+        font-size: 13px;
+        color: var(--muted);
+    }
+    .show-back:hover { color: var(--text); }
+    @media (max-width: 560px) {
+        .show-hero { flex-direction: column; }
+        .ep-row { flex-direction: column; gap: 10px; }
+        .ep-actions { width: 100%; }
+        .ep-actions .btn { width: 100%; }
+    }
+</style>
+
+<div class="show-page">
+    <a class="show-back" href="{{ url_for('podcasts_index') }}">← All podcasts</a>
+
+    <div class="show-hero">
+        {% if show.artwork %}
+        <img class="show-art" src="{{ show.artwork }}" alt="" width="96" height="96" loading="eager">
+        {% else %}
+        <div class="show-art-ph" aria-hidden="true"></div>
+        {% endif %}
+        <div>
+            <h1>Transcripts for {{ show.name }}</h1>
+            {% if show.author %}<p class="show-author">{{ show.author }}</p>{% endif %}
+            {% if show.description %}
+            <p class="show-desc">{{ show.description }}</p>
+            <p class="show-desc-attr">Description from the show’s public podcast feed.</p>
+            {% else %}
+            <p class="show-desc">
+                Transcribe recent episodes of {{ show.name }} to plain text and
+                timestamped subtitles. Transcripts stay in your Podskrift account —
+                this page never publishes episode text.
+            </p>
+            {% endif %}
+        </div>
+    </div>
+
+    <section class="show-section" id="episodes">
+        <h2>Recent episodes</h2>
+        <p class="lead">
+            {% if feed_meta.stale %}
+            Showing the last good episode list while the live feed is slow or unavailable.
+            {% elif episodes %}
+            Latest episodes from the show’s RSS feed. Pick one to open Podskrift with that episode ready.
+            {% else %}
+            Episode list is temporarily unavailable. You can still
+            <a href="{{ url_for('index') }}">search for {{ show.name }}</a>
+            or paste a Spotify / Apple link on the home page.
+            {% endif %}
+        </p>
+
+        {% for ep in episodes %}
+        <div class="ep-row">
+            <div class="ep-main">
+                <div class="ep-title">{{ ep.title }}</div>
+                <div class="ep-meta">
+                    {% if ep.published %}{{ ep.published }}{% endif %}
+                    {% if ep.duration_min %} · {{ ep.duration_min|round|int }} min{% endif %}
+                </div>
+                {% if ep.description %}<div class="ep-desc">{{ ep.description }}</div>{% endif %}
+            </div>
+            <div class="ep-actions">
+                <form method="POST" action="{{ url_for('parse_rss') }}" class="show-transcribe-form"
+                      data-show-slug="{{ show.slug }}" data-episode-index="{{ ep.index }}">
+                    <input type="hidden" name="rss_url" value="{{ show.feed_url }}">
+                    <input type="hidden" name="episode_index" value="{{ ep.index }}">
+                    <input type="hidden" name="episode_audio_url" value="{{ ep.audio_url }}">
+                    <button type="submit" class="btn btn-accent btn-sm"
+                            aria-label="Transcribe this episode: {{ ep.title }}">Transcribe this episode</button>
+                </form>
+            </div>
+        </div>
+        {% endfor %}
+
+        {% if not episodes %}
+        <form method="POST" action="{{ url_for('parse_rss') }}" class="show-transcribe-form"
+              data-show-slug="{{ show.slug }}">
+            <input type="hidden" name="rss_url" value="{{ show.feed_url }}">
+            <button type="submit" class="btn btn-accent">Open episode list</button>
+        </form>
+        {% endif %}
+        <p class="show-note">
+            Prefer a link? Paste a Spotify, Apple Podcasts, or RSS URL on the
+            <a href="{{ url_for('index') }}">home page</a>.
+        </p>
+    </section>
+
+    <section class="show-section">
+        <h2>How it works</h2>
+        <ol class="show-steps">
+            <li>Choose an episode above (or paste a Spotify / Apple / RSS link on the home page).</li>
+            <li>Create a free account if you don’t have one — new accounts get {% if trial_minutes %}{{ trial_minutes }} free minutes{% else %}transcription with your own OpenAI key{% endif %}.</li>
+            <li>Podskrift downloads the audio and transcribes it with OpenAI Whisper. Download .txt or .srt when it’s done.</li>
+        </ol>
+        <p class="show-note">
+            Supports {{ language_count }} languages in the language picker. Name the language for short or accented audio; auto-detect is the default.
+        </p>
+    </section>
+
+    <section class="show-section show-faq">
+        <h2>FAQ</h2>
+        {% for question, answer in faq %}
+        <details{% if loop.first %} open{% endif %}{% if text_lang(question) %} lang="{{ text_lang(question) }}"{% endif %}>
+            <summary>{{ question }}</summary>
+            <p>{{ answer }}</p>
+        </details>
+        {% endfor %}
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    try {
+        if (!window.posthog) return;
+        document.querySelectorAll('.show-transcribe-form').forEach(function(form) {
+            form.addEventListener('submit', function() {
+                try {
+                    posthog.capture('show_page_transcribe_clicked', {
+                        show_slug: form.getAttribute('data-show-slug') || '',
+                        episode_index: form.getAttribute('data-episode-index') || '',
+                        logged_in: {{ current_user.is_authenticated|tojson }}
+                    });
+                } catch (e) { /* ignore */ }
+            });
+        });
+    } catch (e) { /* ignore */ }
+});
+</script>
+{% endblock %}

@@ -1203,7 +1203,7 @@ def test_unverified_key_flashes_as_a_warning_not_success(monkeypatch):
     # Match the rendered flash div, not the stylesheet -- base.html inlines
     # `.alert-warning { ... }`, so a bare substring check passes on every page.
     import re as _re
-    flashes = _re.findall(r'<div class="alert alert-(\w+)">', body)
+    flashes = _re.findall(r'<div class="alert alert-(\w+)"', body)
     assert flashes, 'no flash rendered'
     assert 'warning' in flashes, f'flash categories were {flashes}, expected a warning'
     assert 'success' not in flashes
@@ -3636,7 +3636,7 @@ def test_the_page_says_what_it_is_before_asking_for_anything(trial_on):
     )
     assert 'meta name="description"' in body
     assert 'og:title' in body
-    assert '<main id="content">' in body, 'no main landmark for anything to orient on'
+    assert '<main id="content"' in body, 'no main landmark for anything to orient on'
 
 def test_every_named_crawler_group_repeats_the_rules(trial_on):
     """RFC 9309: a crawler obeys ONLY its most specific matching group and
@@ -4099,7 +4099,7 @@ def test_an_oversized_feed_is_not_read_into_memory(monkeypatch):
     _fake_web(monkeypatch, embed=_embed_page(_HUBERMAN_EP_ENTITY), shows=[_HUBERMAN_SHOW],
               feed=_rss('Essentials: Genes &amp; Memory'), episodes=[])
     # (max_bytes, early_stop_items) — tiny cap, no early-stop (Spotify path).
-    monkeypatch.setattr(A._fetch_feed_capped, '__defaults__', (100, None))
+    monkeypatch.setattr(A._fetch_feed_capped, '__defaults__', (100, None, 15))
     out = A.resolve_spotify_url(f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
     # The feed would have matched; being over the cap it is skipped, not parsed.
     assert [r['type'] for r in out['results']] == ['show']
@@ -6413,17 +6413,17 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'resume-after-deploy'
-    assert entries[1]['id'] == 'public-share-links'
-    assert entries[2]['id'] == 'unsubscribe-confirm-click'
-    assert entries[3]['id'] == 'partial-preview-minutes-wording'
-    assert entries[4]['id'] == 'partial-trial-preview'
-    assert entries[5]['id'] == 'own-key-billing-clarity'
-    assert entries[6]['id'] == 'clearer-missing-episode-audio'
-    assert entries[7]['id'] == 'new-signup-60-min-trial'
-    assert entries[8]['id'] == 'spotify-paste-robustness'
-    assert entries[9]['id'] == 'no-double-charge-restart'
-    assert entries[10]['id'] == 'apple-rss-link-resolve'
+    assert entries[0]['id'] == 'keyboard-and-faster-loading'
+    assert entries[1]['id'] == 'show-landing-pages'
+    assert entries[2]['id'] == 'public-share-links'
+    assert entries[3]['id'] == 'unsubscribe-confirm-click'
+    assert entries[4]['id'] == 'partial-preview-minutes-wording'
+    assert entries[5]['id'] == 'partial-trial-preview'
+    assert entries[6]['id'] == 'own-key-billing-clarity'
+    assert entries[7]['id'] == 'clearer-missing-episode-audio'
+    assert entries[8]['id'] == 'new-signup-60-min-trial'
+    assert entries[9]['id'] == 'spotify-paste-robustness'
+    assert entries[10]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -9632,32 +9632,35 @@ def test_login_wall_shown_emits_next_type(ph_events):
     assert 'email' not in walls[0]['properties']
 
 
-def test_get_episodes_from_rss_timeout_uses_requests(monkeypatch):
-    """Timed path fetches via requests so a hung host cannot block forever."""
-    class FakeResp:
-        content = b"""<?xml version="1.0"?>
+def test_get_episodes_from_rss_timeout_uses_capped_fetch(monkeypatch):
+    """Timed path goes through the SSRF-safe, byte-capped, early-stop fetch."""
+    body = b"""<?xml version="1.0"?>
         <rss><channel><title>Show</title>
         <item><title>Ep</title>
         <enclosure url="https://cdn.example.com/a.mp3" type="audio/mpeg"/>
         </item></channel></rss>"""
-        def raise_for_status(self):
-            return None
-
     called = {}
 
-    def fake_get(url, timeout=None, headers=None):
-        called['url'] = url
-        called['timeout'] = timeout
-        return FakeResp()
+    def fake_capped(url, max_bytes=None, early_stop_items=None, timeout=None):
+        called.update(url=url, timeout=timeout, max_bytes=max_bytes,
+                      early_stop_items=early_stop_items)
+        return body
 
-    monkeypatch.setattr(A.requests, 'get', fake_get)
+    monkeypatch.setattr(A, '_fetch_feed_capped', fake_capped)
     monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
     episodes, err = A.get_episodes_from_rss(
         'https://feeds.example.com/x.xml', timeout=8)
     assert err is None
     assert called['timeout'] == 8
+    assert called['max_bytes'] == A.SHOW_FEED_MAX_BYTES
+    assert called['early_stop_items'] == A.SHOW_FEED_EARLY_STOP_ITEMS
     assert len(episodes) == 1
     assert episodes[0]['title'] == 'Ep'
+
+    monkeypatch.setattr(A, '_fetch_feed_capped', lambda *a, **k: None)
+    episodes, err = A.get_episodes_from_rss(
+        'https://feeds.example.com/x.xml', timeout=8)
+    assert episodes is None and err
 
 
 # --------------------------------------------------------------------------
@@ -9905,6 +9908,298 @@ def test_derive_input_origin_from_rss_and_apple():
     assert A.derive_input_origin(
         {'input_origin': 'itunes_episode'}, rss_url=None) == 'itunes_episode'
     assert A.derive_input_origin({}, rss_url=None) == 'audio'
+
+
+# --- Show landing pages (/podcasts) -------------------------------------------
+
+_SHOW_FIXTURE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'testdata', 'show_pages_fixture.json')
+
+
+@pytest.fixture
+def show_pages_fixture(monkeypatch, tmp_path):
+    """Point show pages at a tiny fixture and an isolated feed-cache dir."""
+    import show_pages as SP
+    monkeypatch.setattr(SP, 'SHOW_PAGES_PATH', __import__('pathlib').Path(_SHOW_FIXTURE))
+    monkeypatch.setattr(SP, 'SHOW_FEED_CACHE_DIR', tmp_path / 'show_feed_cache')
+    with SP._curated_lock:
+        SP._curated_mtime = None
+        SP._curated_by_slug = {}
+        SP._curated_list = []
+    with SP._mem_cache_lock:
+        SP._mem_feed_cache.clear()
+    return SP
+
+
+def _fixture_episodes():
+    return [
+        {
+            'index': 0,
+            'title': 'Episode One: Hello',
+            'published': '2026-10-01',
+            'audio_url': 'https://cdn.example.com/ep1.mp3',
+            'description': 'First fixture episode.',
+            'duration_min': 32.0,
+            'artwork': '',
+            'podcast_name': 'Fixture Show',
+        },
+        {
+            'index': 1,
+            'title': 'Episode Two: World',
+            'published': '2026-09-20',
+            'audio_url': 'https://cdn.example.com/ep2.mp3',
+            'description': 'Second fixture episode.',
+            'duration_min': 45.0,
+            'artwork': '',
+            'podcast_name': 'Fixture Show',
+        },
+    ]
+
+
+def test_show_page_renders_from_fixture_data(show_pages_fixture, monkeypatch, trial_on, ph_events):
+    """Curated show page: H1, description, episodes, FAQ — no transcript body."""
+    SP = show_pages_fixture
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+
+    def fake_rss(url, *, timeout=None):
+        assert url == 'https://feeds.example.com/fixture.xml'
+        assert timeout is not None  # show pages must use a bounded fetch
+        return _fixture_episodes(), None
+
+    monkeypatch.setattr(A, 'get_episodes_from_rss', fake_rss)
+    client = A.app.test_client()
+    resp = client.get('/podcasts/fixture-show')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'Transcripts for Fixture Show' in body
+    assert 'A short description of Fixture Show' in body
+    assert 'Episode One: Hello' in body
+    assert 'Transcribe this episode' in body
+    assert 'Is it free?' in body
+    assert '60' in body  # free minutes copy
+    # Never leak transcript text (we don't have any — guard the word patterns).
+    assert 'transcript_text' not in body
+    assert 'Full transcript' not in body
+    # SEO bits
+    assert 'application/ld+json' in body
+    assert 'PodcastSeries' in body
+    assert 'FAQPage' in body
+    assert 'BreadcrumbList' in body
+    assert 'aria-label="Transcribe this episode: Episode One: Hello"' in body
+    assert 'rel="canonical"' in body or 'rel=canonical' in body.lower() or 'canonical' in body
+    # Analytics
+    views = [e for e in ph_events.events if e['event'] == 'show_page_viewed']
+    assert len(views) == 1
+    assert views[0]['properties']['show_slug'] == 'fixture-show'
+    assert 'referrer_source' in views[0]['properties']
+
+
+def test_show_page_feed_failure_falls_back_without_500(
+        show_pages_fixture, monkeypatch, trial_on, tmp_path):
+    """A hung/failed feed still returns 200 with last-good episodes or empty list."""
+    SP = show_pages_fixture
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    # Seed last-good on disk.
+    cache_dir = tmp_path / 'show_feed_cache'
+    cache_dir.mkdir(parents=True)
+    import json as _json
+    import time as _time
+    (cache_dir / 'fixture-show.json').write_text(_json.dumps({
+        'fetched_at': _time.time() - 10,
+        'episodes': [{
+            'index': 0,
+            'title': 'Cached Episode',
+            'published': '2026-01-01',
+            'duration_min': 10,
+            'description': 'from cache',
+            'artwork': '',
+            'audio_url': 'https://cdn.example.com/cached.mp3',
+        }],
+        'error': None,
+        'feed_url': 'https://feeds.example.com/fixture.xml',
+    }), encoding='utf-8')
+    # Force TTL miss so we attempt a fetch, then fail.
+    monkeypatch.setattr(SP, 'SHOW_FEED_CACHE_TTL', 0)
+
+    def boom(url, *, timeout=None):
+        return None, 'timeout talking to feed'
+
+    monkeypatch.setattr(A, 'get_episodes_from_rss', boom)
+    resp = A.app.test_client().get('/podcasts/fixture-show')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'Cached Episode' in body
+    assert 'last good' in body.lower() or 'Transcribe this episode' in body
+
+
+def test_show_page_unknown_slug_is_404(show_pages_fixture, trial_on):
+    assert A.app.test_client().get('/podcasts/no-such-show-xyz').status_code == 404
+
+
+def test_podcasts_index_lists_fixture_shows(show_pages_fixture, trial_on):
+    resp = A.app.test_client().get('/podcasts')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'Fixture Show' in body
+    assert '/podcasts/fixture-show' in body
+    assert 'Another Fixture' in body
+
+
+def test_sitemap_includes_show_pages(show_pages_fixture, trial_on, monkeypatch):
+    monkeypatch.setattr(A, 'PUBLIC_BASE_URL', 'https://podskrift.com')
+    # Match canonical Host so before_request does not 301.
+    resp = A.app.test_client().get(
+        '/sitemap.xml', headers={'Host': 'podskrift.com'})
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert '/podcasts</loc>' in body or body.count('/podcasts') >= 1
+    assert '/podcasts/fixture-show' in body
+    assert '/podcasts/another-fixture' in body
+
+
+def test_show_page_uses_ssrf_guard(show_pages_fixture, monkeypatch, trial_on):
+    """Blocked feed URLs must not be fetched; page still 200."""
+    called = {'n': 0}
+
+    def tracking_fetchable(url):
+        return False
+
+    def should_not_run(url, *, timeout=None):
+        called['n'] += 1
+        raise AssertionError('get_episodes_from_rss must not run for blocked URLs')
+
+    monkeypatch.setattr(A, '_is_fetchable_url', tracking_fetchable)
+    monkeypatch.setattr(A, 'get_episodes_from_rss', should_not_run)
+    resp = A.app.test_client().get('/podcasts/fixture-show')
+    assert resp.status_code == 200
+    assert called['n'] == 0
+    body = resp.data.decode()
+    assert 'Transcripts for Fixture Show' in body
+    # No episode rows from a blocked feed.
+    assert 'Episode One' not in body
+
+
+def test_show_page_never_leaks_transcript_text(
+        show_pages_fixture, monkeypatch, trial_on):
+    """Even if a feed description somehow contained transcript-like text, the
+    page must not surface DB transcript_text from completed jobs."""
+    uid = _make_user('show-leak@test.com')
+    secret = 'TOP SECRET TRANSCRIPT BODY UNIQUE 9f3a2c'
+    with A.app.app_context():
+        A.db.session.add(A.TranscriptionTask(
+            id='show-leak-task',
+            user_id=uid,
+            episode_title='Secret Ep',
+            podcast_name='Fixture Show',
+            rss_url='https://feeds.example.com/fixture.xml',
+            status='completed',
+            transcript_text=secret,
+            progress=100,
+        ))
+        A.db.session.commit()
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    monkeypatch.setattr(
+        A, 'get_episodes_from_rss',
+        lambda url, *, timeout=None: (_fixture_episodes(), None))
+    body = A.app.test_client().get('/podcasts/fixture-show').data.decode()
+    assert secret not in body
+    assert 'TOP SECRET' not in body
+
+
+def test_community_shows_off_by_default(show_pages_fixture, monkeypatch, trial_on):
+    """User-derived shows (feed URLs may carry private tokens) need opt-in."""
+    uid = _make_user('community-off@test.com')
+    with A.app.app_context():
+        A.db.session.add(A.TranscriptionTask(
+            id='community-off-task', user_id=uid, episode_title='Ep',
+            podcast_name='Private Premium Feed Show',
+            rss_url='https://feeds.example.com/private.xml?token=SECRET123',
+            status='completed', transcript_text='x', progress=100,
+        ))
+        A.db.session.commit()
+    monkeypatch.setattr(show_pages_fixture, 'SHOW_PAGES_COMMUNITY', False)
+    index = A.app.test_client().get('/podcasts').data.decode()
+    assert 'Private Premium Feed Show' not in index
+    assert 'SECRET123' not in index
+    assert A.app.test_client().get(
+        '/podcasts/private-premium-feed-show').status_code == 404
+
+
+def test_community_show_appears_when_completed_with_feed(
+        show_pages_fixture, monkeypatch, trial_on):
+    uid = _make_user('community-show@test.com')
+    monkeypatch.setattr(show_pages_fixture, 'SHOW_PAGES_COMMUNITY', True)
+    with A.app.app_context():
+        A.db.session.add(A.TranscriptionTask(
+            id='community-show-task',
+            user_id=uid,
+            episode_title='Ep',
+            podcast_name='Niche Community Podcast',
+            rss_url='https://feeds.example.com/niche.xml',
+            status='completed',
+            transcript_text='should not appear on index',
+            progress=100,
+        ))
+        A.db.session.commit()
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    monkeypatch.setattr(
+        A, 'get_episodes_from_rss',
+        lambda url, *, timeout=None: ([], 'empty'))
+    index = A.app.test_client().get('/podcasts').data.decode()
+    assert 'Niche Community Podcast' in index
+    assert 'should not appear on index' not in index
+    # Slug is generated from the name.
+    resp = A.app.test_client().get('/podcasts/niche-community-podcast')
+    assert resp.status_code == 200
+    assert 'Transcripts for Niche Community Podcast' in resp.data.decode()
+    assert 'should not appear on index' not in resp.data.decode()
+
+
+def test_llms_txt_links_podcasts_index(trial_on):
+    body = A.app.test_client().get('/llms.txt').data.decode()
+    assert '/podcasts' in body
+    assert 'Spotify' in body
+    assert 'Apple' in body
+
+
+def test_footer_links_to_podcasts(trial_on):
+    home = A.app.test_client().get('/').data.decode()
+    assert '/podcasts' in home
+    assert 'Podcasts' in home
+
+
+def test_show_page_transcribe_posts_rss_with_episode_index(
+        show_pages_fixture, monkeypatch, trial_on):
+    """Transcribe button reuses parse_rss with rss_url + episode_index."""
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    monkeypatch.setattr(
+        A, 'get_episodes_from_rss',
+        lambda url, *, timeout=None: (_fixture_episodes(), None))
+    # parse_rss itself uses get_episodes_from_rss without timeout by default.
+    client = A.app.test_client()
+    page = client.get('/podcasts/fixture-show').data.decode()
+    assert 'name="rss_url"' in page
+    assert 'name="episode_index"' in page
+    assert 'action="/parse_rss"' in page or 'parse_rss' in page
+    resp = client.post('/parse_rss', data={
+        'rss_url': 'https://feeds.example.com/fixture.xml',
+        'episode_index': '0',
+    }, follow_redirects=True)
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'Episode One: Hello' in body
+    # Preselected index is wired into the picker JS.
+    assert 'PRESELECTED_INDEX' in body
+    assert '0' in body
+    assert 'name="episode_audio_url"' in page
+    # A new release shifted indexes since the page was cached: the audio URL
+    # still preselects the right episode, not whatever is now at index 0.
+    resp = client.post('/parse_rss', data={
+        'rss_url': 'https://feeds.example.com/fixture.xml',
+        'episode_index': '0',
+        'episode_audio_url': 'https://cdn.example.com/ep2.mp3',
+    }, follow_redirects=True)
+    assert 'var PRESELECTED_INDEX = 1;' in resp.data.decode()
 
 
 # --------------------------------------------------------------------------

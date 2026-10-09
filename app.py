@@ -42,7 +42,8 @@ if not os.path.exists(certifi.where()):
         os.environ.setdefault('SSL_CERT_FILE', _sys_ca)
 from flask import (Flask, render_template, request, jsonify, send_file, flash,
                    redirect, url_for, Response, g, session, has_request_context,
-                   make_response)
+                   make_response, abort)
+import show_pages as show_pages_mod
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from urllib.parse import parse_qs, urljoin, urlparse, unquote
 import uuid
@@ -63,6 +64,7 @@ from models import (db, User, SavedFeed, TranscriptionTask, CreditPurchase,
                     TRANSCRIPT_SHARE_COLUMN_MIGRATIONS)
 from observability import init_sentry, report_stale_task, report_task_failure
 import analytics as product_analytics
+from site_standards import init_site_standards
 import email_notify
 import mail as mailer
 import episode_alerts
@@ -2737,6 +2739,11 @@ RELATED_EPISODES_TIMEOUT = 8
 RELATED_EPISODES_LIMIT = 5
 
 
+#: Timed (show page) feed fetch: byte ceiling and newest-items early stop.
+SHOW_FEED_MAX_BYTES = 8 * 1024 * 1024
+SHOW_FEED_EARLY_STOP_ITEMS = 25
+
+
 def get_episodes_from_rss(rss_url, *, timeout=None):
     """Parse RSS feed and return (episodes, error). Feed title lands on each episode.
 
@@ -2748,18 +2755,18 @@ def get_episodes_from_rss(rss_url, *, timeout=None):
         if timeout is not None:
             if not _is_fetchable_url(rss_url):
                 return None, "That feed URL cannot be fetched."
-            resp = requests.get(
+            # Show pages: per-hop SSRF revalidation on redirects, a byte cap,
+            # and early stop after the newest items so a huge or slow feed
+            # cannot pin a request thread or blow memory.
+            body = _fetch_feed_capped(
                 rss_url,
+                max_bytes=SHOW_FEED_MAX_BYTES,
+                early_stop_items=SHOW_FEED_EARLY_STOP_ITEMS,
                 timeout=timeout,
-                headers={
-                    'User-Agent': (
-                        'Mozilla/5.0 (compatible; Podskrift/1.0; +https://podskrift.com)'
-                    ),
-                    'Accept': 'application/rss+xml, application/xml, text/xml, */*',
-                },
             )
-            resp.raise_for_status()
-            feed = feedparser.parse(resp.content)
+            if body is None:
+                return None, "Could not fetch that feed."
+            feed = feedparser.parse(body)
         else:
             feed = feedparser.parse(rss_url)
         if not feed.entries:
@@ -4779,6 +4786,23 @@ def parse_rss():
     _annotate_episodes_for_trial(episodes)
     episodes_to_show = episodes[:10]
     has_more = len(episodes) > 10
+    preselected_index = None
+    raw_idx = request.form.get('episode_index')
+    want_audio = (request.form.get('episode_audio_url') or '').strip()
+    if want_audio:
+        # Show pages cache feeds for hours; a new release shifts indexes, so
+        # match the exact episode by enclosure URL before trusting the index.
+        for ep in episodes:
+            if ep.get('audio_url') == want_audio:
+                preselected_index = ep.get('index')
+                break
+    if preselected_index is None and raw_idx not in (None, ''):
+        try:
+            candidate = int(raw_idx)
+            if any(ep.get('index') == candidate for ep in episodes):
+                preselected_index = candidate
+        except (TypeError, ValueError):
+            preselected_index = None
     return render_template(
         'episode_selection.html',
         episodes=episodes_to_show,
@@ -4790,6 +4814,7 @@ def parse_rss():
         podcast_name=episodes[0].get('podcast_name') or '',
         artwork=episodes[0].get('artwork') or '',
         languages=language_choices(),
+        preselected_index=preselected_index,
     )
 
 
@@ -7817,6 +7842,131 @@ def _structured_data():
             .replace('<', '\\u003c').replace('>', '\\u003e'))
 
 
+def _show_page_structured_data(show, faq, page_url):
+    """PodcastSeries + FAQPage JSON-LD for a show landing page."""
+    import json as _json
+    graph = [
+        {
+            '@type': 'PodcastSeries',
+            '@id': page_url + '#series',
+            'name': show['name'],
+            'url': page_url,
+            'description': (
+                show.get('description')
+                or f'Transcribe episodes of {show["name"]} to text with Podskrift.'
+            ),
+        },
+        {
+            '@type': 'FAQPage',
+            '@id': page_url + '#faq',
+            'mainEntity': [
+                {
+                    '@type': 'Question',
+                    'name': question,
+                    'acceptedAnswer': {'@type': 'Answer', 'text': answer},
+                }
+                for question, answer in faq
+            ],
+        },
+    ]
+    if show.get('author'):
+        graph[0]['author'] = {'@type': 'Person', 'name': show['author']}
+    if show.get('artwork'):
+        graph[0]['image'] = show['artwork']
+    # The seed's `language` is often the Apple storefront ('us'), which is not
+    # a language. Only emit codes the app itself knows as languages.
+    lang = (show.get('language') or '').strip()
+    if lang and lang.split('-')[0].lower() in LANGUAGE_ENGLISH_NAMES:
+        graph[0]['inLanguage'] = lang
+    graph.append({
+        '@type': 'BreadcrumbList',
+        '@id': page_url + '#breadcrumb',
+        'itemListElement': [
+            {'@type': 'ListItem', 'position': 1, 'name': 'Podskrift',
+             'item': public_url('index')},
+            {'@type': 'ListItem', 'position': 2, 'name': 'Podcasts',
+             'item': public_url('podcasts_index')},
+            {'@type': 'ListItem', 'position': 3, 'name': show['name'],
+             'item': page_url},
+        ],
+    })
+    data = {'@context': 'https://schema.org', '@graph': graph}
+    return (_json.dumps(data, ensure_ascii=False, indent=2)
+            .replace('<', '\\u003c').replace('>', '\\u003e'))
+
+
+@app.route('/podcasts')
+def podcasts_index():
+    """Index of curated + community show landing pages, grouped by letter."""
+    shows = show_pages_mod.all_shows(db.session, TranscriptionTask)
+    curated_count = sum(1 for s in shows if s.get('source') == 'curated')
+    community_count = len(shows) - curated_count
+    return render_template(
+        'podcasts_index.html',
+        letter_groups=show_pages_mod.group_shows_by_letter(shows),
+        show_count=len(shows),
+        curated_count=curated_count,
+        community_count=community_count,
+    )
+
+
+@app.route('/podcasts/<slug>')
+def podcast_show(slug):
+    """Per-show landing page: description, recent episodes, FAQ. No transcript text."""
+    show = show_pages_mod.find_show(slug, db.session, TranscriptionTask)
+    if not show:
+        abort(404)
+    # Community feeds still go through the SSRF gate before we fetch.
+    if not _is_fetchable_url(show['feed_url']):
+        episodes, feed_meta = [], {'from_cache': False, 'stale': False, 'error': 'feed_blocked'}
+    else:
+        episodes, feed_meta = show_pages_mod.fetch_show_episodes(
+            show,
+            get_episodes_from_rss=get_episodes_from_rss,
+            is_fetchable_url=_is_fetchable_url,
+        )
+    trial_minutes = advertised_trial_minutes() or 0
+    faq = show_pages_mod.show_faq_entries(
+        show['name'],
+        trial_minutes=trial_minutes,
+        credit_pack_price=f'{CREDIT_PACK_AMOUNT_CENTS / 100:.0f}',
+        credit_pack_minutes=CREDIT_PACK_MINUTES,
+        language_count=len(LANGUAGE_ENGLISH_NAMES),
+    )
+    page_url = public_url('podcast_show', slug=show['slug'])
+    # Analytics: coarse referrer bucket only (no full URL / PII).
+    distinct = (
+        str(current_user.id)
+        if getattr(current_user, 'is_authenticated', False)
+        else _analytics_anon_id()
+    )
+    product_analytics.capture(
+        'show_page_viewed',
+        distinct,
+        {
+            'show_slug': show['slug'],
+            'referrer_source': show_pages_mod.referrer_source(
+                request.referrer or '',
+                request.args.get('utm_source', ''),
+            ),
+            'show_source': show.get('source') or 'curated',
+            '$process_person_profile': False,
+        },
+    )
+    return render_template(
+        'podcast_show.html',
+        show=show,
+        episodes=episodes,
+        feed_meta=feed_meta,
+        faq=faq,
+        trial_minutes=trial_minutes,
+        structured_data=_show_page_structured_data(show, faq, page_url),
+    )
+
+
+CONTENT_SIGNAL = 'Content-Signal: search=yes, ai-input=yes, ai-train=yes'
+
+
 @app.route('/robots.txt')
 def robots_txt():
     """Explicit crawler policy.
@@ -7836,7 +7986,11 @@ def robots_txt():
         '',
         'User-agent: *',
         'Allow: /',
-        '',
+        # Content Signals (contentsignals.org): the explicit statement of what
+        # the Allow lines already imply -- search, AI answers and AI training
+        # are all welcome on the public pages.
+        CONTENT_SIGNAL,
+        # No blank lines inside a group: some parsers end the group there.
         '# Nothing here is useful without a session, and some of it is personal.',
     ] + disallow + [
         '',
@@ -7850,7 +8004,7 @@ def robots_txt():
         # `Allow: /` therefore told exactly the bots this file exists for that
         # /history and /download/ were fair game -- strictly worse than not
         # naming them. Every group repeats the rules.
-        lines += [f'User-agent: {agent}', 'Allow: /'] + disallow + ['']
+        lines += [f'User-agent: {agent}', 'Allow: /', CONTENT_SIGNAL] + disallow + ['']
     lines.append(f'Sitemap: {public_url('sitemap_xml')}')
     return Response('\n'.join(lines) + '\n', mimetype='text/plain')
 
@@ -7881,43 +8035,55 @@ def llms_txt():
         f'included, paid via Stripe — no subscription.'
         if stripe_checkout_enabled() else ''
     )
+    lang_count = len(LANGUAGE_ENGLISH_NAMES)
     body = f"""# Podskrift
 
-> Transcribes podcast episodes to text using OpenAI Whisper, in {len(LANGUAGE_ENGLISH_NAMES)}
-> languages. Works with any podcast in any of them -- search by show or episode
-> name, no file upload and no feed URL needed.
+> Transcribes podcast episodes to text using OpenAI Whisper, in {lang_count}
+> languages. Paste a Spotify, Apple Podcasts, or RSS link — or search by show
+> or episode name. No file upload required.
 
-Podskrift is a free web tool. You search for a podcast or an individual episode
-by name, pick the episode, and it downloads the audio and returns the full
-transcript plus timestamped subtitles. There is no file to upload and no RSS
-feed to track down first -- though you can paste a feed URL if the podcast is
-not in the search index.
+Podskrift (https://podskrift.com) turns podcast audio into private text.
+You paste a Spotify episode link, an Apple Podcasts link, or an RSS feed URL,
+or search by show/episode name. Podskrift downloads the audio and returns the
+full transcript plus timestamped SubRip subtitles (.srt). Transcripts are
+private to your account; public show pages list episodes but never publish
+transcript text.
 
 Made by Nettsmed (Fjellestad AS), Kristiansand, Norway.
 
 ## What it does
 - Search podcast catalogues by show name or by individual episode title
+- Paste Spotify, Apple Podcasts, or RSS links (and direct audio URLs)
 - Transcribe an episode to plain text (.txt) and SubRip subtitles (.srt)
 - Pick the spoken language explicitly, or let Whisper detect it
 - Follow progress live; the job keeps running if you close the page
+- Per-show landing pages at /podcasts for “transcript of [show]” queries
 
 ## Languages
 {languages}
 
-Auto-detect is the default, but naming the language beats it on short or
-accented audio -- Whisper takes the choice as a constraint rather than a hint.
+{lang_count} languages in the picker (Whisper’s commonly used set). Auto-detect
+is the default, but naming the language beats it on short or accented audio —
+Whisper takes the choice as a constraint rather than a hint.
 
 ## What it costs
 {cost} add your own OpenAI API key and pay OpenAI directly -- roughly
 USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscription and no per-seat pricing.{pack}
 
 ## Pages
-- [Home]({public_url('index')}): search, pick an episode, transcribe
+- [Home]({public_url('index')}): search, paste Spotify/Apple/RSS, pick an episode, transcribe
+- [Podcasts]({public_url('podcasts_index')}): show landing pages for popular podcasts
 - [Pricing]({public_url('pricing')}): free trial, credit pack, or bring your own key
 - [What's new]({public_url('whats_new')}): dated feature list, newest first (build in public)
 - [API docs]({public_url('api_docs')}): customer HTTP API (resolve → transcribe → transcript)
 - [How to find an RSS feed]({public_url('rss_help')}): for podcasts outside the search index
 - [Sign up]({public_url('register')}): {signup_blurb}
+
+## For agents
+- [API docs as Markdown]({public_url('site_standards.api_docs_markdown')}): the same reference, no HTML (or send `Accept: text/markdown` to /docs/api; on / it returns this file)
+- [Agent skill index]({public_url('site_standards.agent_skills_index')}): a SKILL.md for getting transcripts through the API
+- [API catalog]({public_url('site_standards.api_catalog')}): RFC 9727 linkset
+- [What's new feed]({public_url('site_standards.whats_new_feed')}): RSS of new features
 
 ## Frequently asked
 
@@ -7935,14 +8101,18 @@ Nettsmed -- https://nettsmed.no
 
 @app.route('/sitemap.xml')
 def sitemap_xml():
-    """The three pages worth indexing. Everything else needs a session."""
+    """Public pages worth indexing, including curated show landings."""
     from xml.sax.saxutils import escape
     pages = [public_url('index'),
+             public_url('podcasts_index'),
              public_url('pricing'),
              public_url('whats_new'),
              public_url('api_docs'),
              public_url('rss_help'),
              public_url('register')]
+    # Curated show pages only — community slugs can churn with the DB.
+    for show in show_pages_mod.load_curated_shows():
+        pages.append(public_url('podcast_show', slug=show['slug']))
     # No lastmod: it was emitting today's date on every fetch, which claims all
     # pages change daily. That is a discount signal, not a freshness one.
     urls = '\n'.join(f'  <url><loc>{escape(u)}</loc></url>' for u in pages)
@@ -8112,7 +8282,7 @@ def markdown_to_safe_html(source):
             header = cells(data_rows[0])
             parts.append('<table><thead><tr>')
             for cell in header:
-                parts.append(f'<th>{_md_inline(cell)}</th>')
+                parts.append(f'<th scope="col">{_md_inline(cell)}</th>')
             parts.append('</tr></thead><tbody>')
             for row in data_rows[1:]:
                 parts.append('<tr>')
@@ -8149,6 +8319,15 @@ def api_docs():
         body_html=body_html,
         trial_minutes=advertised_trial_minutes(),
     )
+
+
+init_site_standards(
+    app,
+    public_base_url=PUBLIC_BASE_URL,
+    changelog_loader=load_changelog_entries,
+    api_markdown_loader=load_customer_api_markdown,
+    posthog_host=product_analytics.posthog_host,
+)
 
 
 @app.route('/health')
@@ -8570,7 +8749,7 @@ _FEED_ITEM_CLOSE_RE = re.compile(br'</(item|entry)\s*>', re.I)
 
 
 def _fetch_feed_capped(feed_url, max_bytes=SPOTIFY_FEED_MAX_BYTES,
-                       early_stop_items=None):
+                       early_stop_items=None, timeout=15):
     """Feed bytes, or None when the feed is unreachable or too big.
 
     A dead feed returns None instead of raising, so the resolver still gets
@@ -8594,7 +8773,7 @@ def _fetch_feed_capped(feed_url, max_bytes=SPOTIFY_FEED_MAX_BYTES,
                 if finger in seen:
                     return None
                 seen.add(finger)
-                with session.get(current, headers=_SPOTIFY_HEADERS, timeout=15,
+                with session.get(current, headers=_SPOTIFY_HEADERS, timeout=timeout,
                                  stream=True, allow_redirects=False) as resp:
                     if resp.is_redirect or resp.is_permanent_redirect:
                         location = resp.headers.get('location')

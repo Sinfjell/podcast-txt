@@ -60,6 +60,8 @@ PODSKRIFT_EVENTS = (
     'trial_limit_hit',
     'offer_shown',
     'pricing_viewed',
+    'show_page_viewed',
+    'show_page_transcribe_clicked',
     'paywall_shown',
     'buy_modal_opened',
     'buy_modal_closed',
