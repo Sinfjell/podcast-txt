@@ -349,13 +349,7 @@
             .then(function(r) { return r.json().then(function(data) { return { status: r.status, data: data }; }); })
             .then(function(res) {
                 if (res.data && res.data.task_id) {
-                    phCapture('transcript_started', {
-                        task_id: res.data.task_id,
-                        partial: false,
-                        from_partial_task_id: taskId,
-                        episode_minutes: d && d.episode_minutes,
-                        source: 'finish_episode',
-                    });
+                    // Server emits transcript_started for the full run.
                     window.location.href = '/transcription/' + res.data.task_id;
                     return;
                 }
