@@ -637,8 +637,7 @@
             bottom: 0;
             display: none;
             background: var(--surface);
-            border-top: 1px solid var(--border-light);
-            box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.35);
+            border-top: 1px solid var(--line);
             padding: 12px 16px;
         }
         .cookie-consent[data-open="1"] { display: block; }
@@ -658,8 +657,8 @@
             color: var(--muted);
             margin: 0;
         }
-        .cookie-consent-copy a { color: #a3a3a3; font-weight: 500; }
-        .cookie-consent-copy a:hover { color: var(--text); }
+        .cookie-consent-copy a { color: var(--muted); font-weight: 500; }
+        .cookie-consent-copy a:hover { color: var(--ink); }
         .cookie-consent-actions {
             display: flex;
             gap: 8px;
@@ -671,16 +670,16 @@
         }
         /* Equal-weight Accept / Decline — identical chrome; no primary/accent. */
         .cookie-consent-actions .btn-consent {
-            background: var(--bg);
-            color: var(--text);
-            border: 1px solid var(--border-light);
+            background: var(--paper);
+            color: var(--ink);
+            border: 1px solid var(--line-strong);
             font-weight: 500;
         }
         .cookie-consent-actions .btn-consent:hover,
         .cookie-consent-actions .btn-consent:focus-visible {
             background: var(--surface-hover);
-            border-color: #3a3a3a;
-            color: var(--text);
+            border-color: var(--line-strong);
+            color: var(--ink);
         }
         body.cookie-banner-open .whats-new-toast[data-open="1"] {
             bottom: 88px;
@@ -696,12 +695,12 @@
             padding: 0;
             margin: 0;
             font: inherit;
-            color: #a3a3a3;
+            color: var(--muted);
             text-decoration: underline;
             text-underline-offset: 2px;
             cursor: pointer;
         }
-        .footer-text-btn:hover { color: var(--text); }
+        .footer-text-btn:hover { color: var(--ink); }
 
         /* Utility */
         .text-center { text-align: center; }
