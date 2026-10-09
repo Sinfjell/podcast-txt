@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "share-listen-links",
+      "date": "2026-10-09",
+      "title": "Listen to the episode from a shared transcript",
+      "summary": "Shared transcript pages now show Listen on Spotify, Apple Podcasts, the podcast website, or a direct audio player when we know those links — so people who get your link can hear the episode too."
+    },
+    {
       "id": "auto-summary-and-summary-email",
       "date": "2026-10-09",
       "hidden": true,
