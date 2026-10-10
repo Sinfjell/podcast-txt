@@ -34,9 +34,11 @@
         <a href="{{ url_for('guides_index') }}">All guides</a>
     </div>
 
+    {% include '_ai_mcp_help.html' %}
+
     <h2>How it works</h2>
     <p>
-        Podskrift adds four tools to your AI. You don't need to name them. Just ask in plain language.
+        Podskrift adds tools to your AI. You don't need to name them. Just ask in plain language.
     </p>
     <table>
         <thead>
@@ -45,6 +47,8 @@
         <tbody>
             <tr><td><code>search_podcasts</code></td><td>Finds a show by name</td></tr>
             <tr><td><code>list_episodes</code></td><td>Lists a show's recent episodes</td></tr>
+            <tr><td><code>list_my_transcripts</code></td><td>Lists <em>your</em> past transcripts (History) — filter, search, paginate</td></tr>
+            <tr><td><code>get_my_transcript</code></td><td>Fetches one past transcript by id — never charges</td></tr>
             <tr><td><code>get_transcript</code></td><td>Returns the transcript, or starts transcription and shows the cost in minutes</td></tr>
             <tr><td><code>get_transcript_status</code></td><td>Checks a running job until the text is ready</td></tr>
         </tbody>
@@ -52,9 +56,10 @@
     <p class="muted">
         Before a new transcription starts, your AI sees what it costs and how many minutes you'll have left.
         A one-hour episode takes a few minutes. If you don't have enough minutes, nothing starts, and you get a link to buy more.
+        Fetching something you've already transcribed costs 0 minutes.
     </p>
     <p class="muted">
-        Podskrift only makes the transcript. The summary, translation or Q&amp;A comes from your chat app, in whatever style you ask for.
+        Podskrift only returns the transcript (or your library list). The summary, blog post, translation or Q&amp;A comes from your chat app, in whatever style you ask for.
     </p>
 
     <h2>Connect Podskrift to ChatGPT</h2>
@@ -130,13 +135,9 @@
         See <a href="{{ url_for('pricing') }}">pricing</a>.
     </p>
 
-    <h2>Things to try</h2>
-    <ul class="try">
-        <li>“Summarise the newest episode of [show] in five bullets.”</li>
-        <li>“Get the last three episodes of [show] and list every book they mention.”</li>
-        <li>“Find the exact sentence where the guest talks about pricing.”</li>
-        <li>“Transcribe this episode and translate the summary into Norwegian.”</li>
-    </ul>
+    <section class="ai-ask-section" aria-labelledby="aiAskHeading">
+        {% include '_ai_ask_prompts.html' %}
+    </section>
 
     <h2>FAQ</h2>
     <div class="faq">
@@ -147,6 +148,10 @@
         </details>
         {% endfor %}
     </div>
+
+    {% with mcp_help_extra_class='ai-mcp-help--bottom' %}
+    {% include '_ai_mcp_help.html' %}
+    {% endwith %}
 
     <div class="cta">
         <a href="{{ url_for('register') }}" class="btn btn-primary">Create a free account</a>

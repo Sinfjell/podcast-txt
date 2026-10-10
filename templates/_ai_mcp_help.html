@@ -1,0 +1,14 @@
+{# MCP troubleshooting notice — secondary (info notice), no primary button.
+   Place near setup steps and again at the bottom of connector pages.
+   Optional class: {% with mcp_help_extra_class='ai-mcp-help--bottom' %}…{% endwith %} #}
+{% from "components/macros.html" import notice %}
+{% set mcp_help_mailto = 'mailto:hello@podskrift.com?subject=' ~ ('Podskrift MCP help'|urlencode) %}
+<div class="ai-mcp-help{% if mcp_help_extra_class is defined and mcp_help_extra_class %} {{ mcp_help_extra_class }}{% endif %}">
+{% call notice(variant='info', class='ai-mcp-help__notice') %}
+    <strong>Having trouble?</strong>
+    Something not working? Email
+    <a href="{{ mcp_help_mailto }}">hello@podskrift.com</a>
+    with a screenshot, the error message, the URL you were on and which app you use
+    (ChatGPT, Claude, Cursor…). We reply fast.
+{% endcall %}
+</div>

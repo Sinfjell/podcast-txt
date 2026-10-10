@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import notice %}
+{% block title %}Contact — Podskrift{% endblock %}
+{% block meta_description %}Email Podskrift at hello@podskrift.com. We reply fast — include a screenshot and which app you use if something is broken.{% endblock %}
+{% block og_title %}Contact Podskrift{% endblock %}
+{% block og_description %}hello@podskrift.com — we reply fast.{% endblock %}
+
+{% block content %}
+<div class="ai-wrap">
+    <h1 class="ai-title">Contact</h1>
+    <p class="ai-lead">
+        Questions, MCP connector trouble, feedback or feature ideas — write to us.
+    </p>
+
+    <p class="contact-email">
+        <a href="mailto:hello@podskrift.com?subject={{ 'Podskrift help'|urlencode }}">hello@podskrift.com</a>
+    </p>
+
+    {% call notice(variant='info') %}
+        For connector issues, include a screenshot, the error message, the URL you were on,
+        and which app you use (ChatGPT, Claude, Cursor…).
+        Prefer a prefilled subject?
+        <a href="mailto:hello@podskrift.com?subject={{ 'Podskrift MCP help'|urlencode }}">Email about MCP help</a>.
+    {% endcall %}
+
+    <p class="ai-dev">
+        Setting up ChatGPT or Claude?
+        <a href="{{ url_for('ai_landing') }}">Use Podskrift in ChatGPT and Claude</a>
+        ·
+        <a href="{{ url_for('guide_chatgpt') }}">ChatGPT guide</a>
+        ·
+        <a href="{{ url_for('guide_claude') }}">Claude guide</a>.
+    </p>
+</div>
+{% endblock %}

@@ -37,6 +37,8 @@
         <span class="form-hint" id="aiCopyStatus" aria-live="polite"></span>
     </div>
 
+    {% include '_ai_mcp_help.html' %}
+
     <section class="ai-section" aria-labelledby="aiStepsHeading">
         <h2 id="aiStepsHeading">How to connect</h2>
         <div class="ai-steps">
@@ -145,6 +147,10 @@
         </div>
     </section>
 
+    <section class="ai-section" aria-labelledby="aiAskHeading">
+        {% include '_ai_ask_prompts.html' %}
+    </section>
+
     <section class="ai-section" aria-labelledby="aiPriceHeading">
         <h2 id="aiPriceHeading">Pricing</h2>
         <p class="ai-price">
@@ -166,7 +172,7 @@
         </div>
     </section>
 
-    <section class="ai-section ai-section-last">
+    <section class="ai-section ai-section--end">
         <p class="ai-dev">
             Prefer a longer walkthrough?
             <a href="{{ url_for('guides_index') }}">All guides</a>
@@ -179,6 +185,9 @@
             Building scripts or agents? Use the HTTP API with a key from Settings —
             <a href="{{ url_for('api_docs') }}">API docs</a>.
         </p>
+        {% with mcp_help_extra_class='ai-mcp-help--bottom' %}
+        {% include '_ai_mcp_help.html' %}
+        {% endwith %}
     </section>
 </div>
 {% endblock %}
