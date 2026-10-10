@@ -726,9 +726,10 @@ def tool_get_transcript(user, episode: str, language: str = '',
         }
 
     meta = A._catalog_to_enqueue_meta(catalog)
+    source_client = getattr(g, 'mcp_source_client', None)
     result, status = A.enqueue_transcription(
         user, meta, rss_url=catalog.get('rss_url') or None, language=language or '',
-        source='mcp')
+        source='mcp', source_client=source_client)
     balance_after = _balance_snapshot(user)
     if status != 200:
         payload = {
@@ -954,6 +955,7 @@ def _authenticate_mcp():
         if oauth_user is not None:
             g.api_auth_kind = 'oauth'
             g.api_user_id = oauth_user.id
+            g.mcp_source_client = oauth_mod.lookup_access_token_client_name(provided)
             return oauth_user, None
 
     return None, (jsonify({'error': 'Unauthorized'}), 401)

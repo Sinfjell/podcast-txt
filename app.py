@@ -5297,7 +5297,34 @@ def _completed_transcript_count(user_id):
     )
 
 
-def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
+def normalize_task_source(source):
+    """Canonical enqueue channel: web | mcp | api (default web)."""
+    s = (source or 'web').strip().lower()
+    if s in ('web', 'mcp', 'api'):
+        return s
+    return 'web'
+
+
+def task_source_via_label(source, source_client=None):
+    """User-facing 'via …' label for History / admin, or None if not MCP."""
+    if (source or '').strip().lower() != 'mcp':
+        return None
+    name = (source_client or '').strip()
+    if not name:
+        return 'via MCP'
+    lower = name.lower()
+    if 'chatgpt' in lower or lower in ('openai', 'openai chatgpt'):
+        return 'via ChatGPT'
+    if 'claude' in lower or 'anthropic' in lower:
+        return 'via Claude'
+    # Keep short; connector names can be long CIMD URLs in edge cases.
+    if len(name) > 40:
+        name = name[:37] + '…'
+    return f'via {name}'
+
+
+def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
+                          source_client=None):
     """Start Whisper for one episode on behalf of `user`.
 
     Shared by the UI form and the agent write API so trial reservation,
@@ -5308,9 +5335,12 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
     `meta` keys: title, audio_url, podcast_name, artwork, published, duration_min,
     and optional listen URLs: spotify_url, apple_url, episode_link / website_url /
     show_link.
-    `source` is 'web' or 'api'; it only labels the analytics events.
+    `source` is 'web', 'mcp', or 'api' — stored on the task and used for analytics.
+    `source_client` is an optional connector display name (MCP OAuth clients).
     """
     language = normalize_language_code(language)
+    source = normalize_task_source(source)
+    client_label = (source_client or '').strip()[:64] or None
 
     audio_url = (meta.get('audio_url') or '').strip()
     if not audio_url or not _is_fetchable_url(audio_url):
@@ -5548,6 +5578,8 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                     encode_partial_task_meta(trial_charge, estimate)
                     if partial_job and trial_charge else None
                 ),
+                source=source,
+                source_client=client_label if source == 'mcp' else None,
             )
             db.session.add(task)
             db.session.commit()
@@ -8422,7 +8454,10 @@ def inject_posthog():
         # Admin blueprint overrides to True; default False so Jinja `not`
         # is unambiguous outside /admin.
         'is_admin_page': False,
+        # Nav "Admin" link — only for ADMIN_EMAILS allowlisted sessions.
+        'show_admin_nav': is_admin_user(),
         'public_base_url': PUBLIC_BASE_URL,
+        'task_source_via_label': task_source_via_label,
     }
 
 
