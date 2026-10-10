@@ -16308,3 +16308,19 @@ def test_mcp_chat_illustration_is_readable_and_clearly_an_example():
         assert 'Today we’re talking about listening' in illustration.select_one('.ds-chat-example__transcript').get_text()
         assert not illustration.select('button, input, form, [role="status"], [aria-live]')
         assert not illustration.select('[style]')
+
+
+def test_signed_in_home_offers_buying_minutes_in_header_and_hero(stripe_on):
+    """Go-live condition for the redesign: a signed-in user on our key can see
+    where to buy minutes without hunting -- the header button, the link under
+    the search box, and (once the trial is used up) the banner's Buy button."""
+    from bs4 import BeautifulSoup
+    uid = _make_user('buy-entry@test.com', limit=120 * 60, used=120 * 60)
+    page = BeautifulSoup(_login(uid).get('/').data, 'html.parser')
+    header = page.select_one('#navBuyPill')
+    assert header is not None and 'Buy minutes' in header.get_text()
+    assert header.has_attr('data-open-buy-modal')
+    hero = page.select_one('.hp-hero .hp-balance a[data-open-buy-modal]')
+    assert hero is not None and 'Buy more minutes' in hero.get_text()
+    assert page.select_one('form[data-paywall-buy="home_banner"] button[type="submit"]')
+    assert page.select_one('#buyModal, .buy-modal, [id^="buyModal"]') is not None
