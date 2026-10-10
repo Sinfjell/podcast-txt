@@ -838,6 +838,11 @@ def register_oauth(app_flask):
         client_label = client.client_name or client.client_id
 
         if request.method == 'GET':
+            # Do NOT pass csrf_token=… into render_template: that shadows the
+            # context-processor csrf_token() callable that base.html →
+            # _buy_modal.html invokes when Stripe is on (Sentry PODSKRIFT-J).
+            # Ensure a token exists; the template calls csrf_token().
+            A.generate_csrf_token()
             page = Response(render_template(
                 'oauth_consent.html',
                 client_name=client_label,
@@ -852,7 +857,6 @@ def register_oauth(app_flask):
                 code_challenge=code_challenge,
                 code_challenge_method=code_challenge_method,
                 resource=normalize_resource(resource) or mcp_resource_url(),
-                csrf_token=A.generate_csrf_token(),
             ), mimetype='text/html')
             # Consent must never be framed (clickjacking), not even by the
             # PostHog toolbar origins the site-wide CSP allows.

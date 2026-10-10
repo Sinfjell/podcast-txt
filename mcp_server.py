@@ -233,6 +233,7 @@ def _can_afford(user, duration_min) -> tuple[bool, int, dict | None]:
 
 
 def _tool_defs() -> list[dict]:
+    # annotations: MCP tool hints for hosts (ChatGPT Pro filters to read/fetch).
     return [
         {
             'name': 'search_podcasts',
@@ -250,6 +251,10 @@ def _tool_defs() -> list[dict]:
                     },
                 },
                 'required': ['query'],
+            },
+            'annotations': {
+                'readOnlyHint': True,
+                'openWorldHint': True,
             },
         },
         {
@@ -273,6 +278,10 @@ def _tool_defs() -> list[dict]:
                     },
                 },
                 'required': ['podcast'],
+            },
+            'annotations': {
+                'readOnlyHint': True,
+                'openWorldHint': True,
             },
         },
         {
@@ -321,6 +330,11 @@ def _tool_defs() -> list[dict]:
                 },
                 'required': ['episode'],
             },
+            'annotations': {
+                'readOnlyHint': False,
+                'destructiveHint': False,
+                'idempotentHint': True,
+            },
         },
         {
             'name': 'get_transcript_status',
@@ -337,6 +351,10 @@ def _tool_defs() -> list[dict]:
                     },
                 },
                 'required': ['job_id'],
+            },
+            'annotations': {
+                'readOnlyHint': True,
+                'openWorldHint': True,
             },
         },
     ]
