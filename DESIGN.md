@@ -330,11 +330,12 @@ Reference markup for every component is in `design-reference.html`. **Runnable J
 ## How to build a page
 
 1. **Compose from macros.** Import from `templates/components/macros.html` (`button`, `link_button`, `section`/`card`, `page_header`, `tabs`/`tab_panel`, `checklist`/`checklist_row`, `snippet`, `secret_field`, `notice`, `empty_state`, `form_field`, `chip`). Prefer existing class names in `base.html` (`.btn`, `.form-input`, `.card`) when a macro is not needed yet — do not invent parallel styles.
-2. **Never hand-roll component CSS.** No `style=` attributes, no hard-coded hex, no new colours or fonts, no `box-shadow`, gradients, or pill radii. Put shared rules in `static/components.css` using the tokens already defined in `base.html`. Layout spacing uses `--space-*`.
+2. **Never hand-roll component CSS.** No page-local `<style>` block in a new template, no `style=` attributes, no hard-coded hex or `rgb()`/`hsl()` colours, no new colours or fonts, no `box-shadow`, gradients, or pill radii. Put shared rules in `static/components.css` using the tokens already defined in `base.html`. Layout spacing uses `--space-*`.
 3. **One primary button.** Exactly one `btn-primary` / accent-filled control per screen (the desktop nav Sign up CTA does not count). Demote everything else to secondary, ghost, or a link-button.
-4. **Check the gallery.** Open `/design/components` (app.debug or an ADMIN user) and match states there before shipping. The gallery is noindex.
-5. **Light and dark.** Follow `prefers-color-scheme`. PRs that change UI must include light + dark screenshots (desktop and ~390px where layout matters). Home and pricing are the visual baselines — do not change their look unless the task says so.
-6. **CI guardrails.** `test_design_system.py` fails the build on inline styles in new templates, hex outside the token section, forbidden elevation/shape/type rules, and extra primary buttons. Legacy `style=` counts are ratcheted down only.
+4. **Behaviour ships with the library.** `static/components.js` (loaded from `base.html`) drives tabs (click, arrow keys, Home/End) and copy buttons. Do not write per-page handlers for them. `notice()` escapes its message; pass a link with `{% call notice(variant=...) %}`.
+5. **Check the gallery.** Open `/design/components` (app.debug or an ADMIN user) and match states there before shipping. The gallery is noindex.
+6. **Light and dark.** Follow `prefers-color-scheme`. PRs that change UI must include light + dark screenshots (desktop and ~390px where layout matters). Home and pricing are the visual baselines — do not change their look unless the task says so.
+7. **CI guardrails.** `test_design_system.py` fails the build on `<style>` blocks or inline styles in new templates, hex outside the token section, forbidden elevation/shape/type rules, and extra primary buttons. Legacy `style=` counts are ratcheted down only.
 
 Anti-pattern (do not repeat): the rejected `/connect` draft used pill CTAs, monospace on a Copy control, ad-hoc grey boxes, and inconsistent tabs — none of that is in this system.
 

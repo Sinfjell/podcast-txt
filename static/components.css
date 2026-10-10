@@ -74,7 +74,7 @@
     color: var(--muted);
     border-color: transparent;
 }
-a.ds-link-button {
+.ds-link-button {
     display: inline-flex;
     align-items: center;
     min-height: 44px;
@@ -89,24 +89,14 @@ a.ds-link-button {
     cursor: pointer;
     font-family: inherit;
 }
-a.ds-link-button:hover,
-button.ds-link-button:hover {
-    color: var(--accent-hover);
-}
-button.ds-link-button {
-    display: inline-flex;
-    align-items: center;
-    min-height: 44px;
-    font-size: 1rem;
-    font-weight: 700;
-    color: var(--accent);
-    text-decoration: underline;
-    text-underline-offset: 2px;
-    background: none;
-    border: none;
-    padding: 0;
-    cursor: pointer;
-    font-family: inherit;
+.ds-link-button:hover { color: var(--accent-hover); }
+/* A link styled as a button cannot take [disabled]; match the disabled look. */
+.btn[aria-disabled="true"] {
+    background: var(--surface);
+    color: var(--muted);
+    border-color: transparent;
+    cursor: not-allowed;
+    pointer-events: none;
 }
 
 /* ---------------------------------------------------------------------------
@@ -128,6 +118,9 @@ button.ds-link-button {
     background: var(--paper);
     border: 1px solid var(--line-strong);
 }
+/* Actions keep their own width; a flex column would stretch them edge to edge. */
+.ds-section > .btn,
+.ds-section > .ds-link-button { align-self: flex-start; }
 .ds-section__title {
     margin: 0;
     font-size: 1.5rem;
@@ -210,6 +203,14 @@ button.ds-link-button {
     border-color: var(--accent);
     background: var(--paper);
 }
+/* Active differs from pending by shape (inner dot), not by ring colour alone. */
+.ds-checklist__row.is-active .ds-checklist__marker::after {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+}
 .ds-checklist__row.is-error .ds-checklist__marker {
     border-color: var(--danger);
     background: var(--danger-tint);
@@ -229,7 +230,6 @@ button.ds-link-button {
     line-height: 1.35;
     color: var(--ink);
 }
-.ds-checklist__row.is-pending .ds-checklist__title { font-weight: 700; }
 .ds-checklist__detail {
     margin: 0;
     font-size: 0.875rem;
@@ -420,9 +420,6 @@ button.ds-link-button {
     width: 18px;
     height: 18px;
     margin-top: 2px;
-}
-.ds-field .form-input[aria-invalid="true"] {
-    border: 2px solid var(--danger);
 }
 
 /* ---------------------------------------------------------------------------

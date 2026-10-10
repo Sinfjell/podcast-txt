@@ -67,6 +67,45 @@ LEGACY_PRIMARY_ALLOWLIST: dict[str, int] = {
     'transcription.html': 6,
 }
 
+# Page-local <style> blocks are where hand-rolled components come from (the
+# rejected /connect draft was built in one). Legacy templates keep theirs;
+# new templates get none and compose from macros + static/components.css.
+# Do not raise these numbers or add entries.
+LEGACY_STYLE_BLOCK_ALLOWLIST: dict[str, int] = {
+    '_buy_modal.html': 1,
+    '_listen_links.html': 1,
+    'admin/dashboard.html': 1,
+    'admin/user_detail.html': 1,
+    'api_docs.html': 1,
+    'base.html': 2,
+    'email_unsubscribe_confirm.html': 1,
+    'email_unsubscribed.html': 1,
+    'episode_selection.html': 1,
+    'error.html': 1,
+    'error_500.html': 1,
+    'forgot_password.html': 1,
+    'index.html': 1,
+    'login.html': 1,
+    'oauth_consent.html': 1,
+    'podcast_show.html': 1,
+    'podcasts_index.html': 1,
+    'pricing.html': 1,
+    'privacy.html': 1,
+    'register.html': 1,
+    'reset_password.html': 1,
+    'settings.html': 1,
+    'shared_transcript.html': 1,
+    'terms.html': 1,
+    'transcription.html': 2,
+    'whats_new.html': 1,
+}
+
+# The two modal scrims are the only colour functions in the product.
+LEGACY_COLOR_FUNC_ALLOWLIST: dict[str, int] = {
+    'base.html': 1,
+    '_buy_modal.html': 1,
+}
+
 # Standalone error page carries its own mini token block (no base.html).
 HEX_TOKEN_FILE_ALLOWLIST = {
     'error_500.html',
@@ -85,11 +124,24 @@ PRIMARY_BUTTON_EXEMPT = {
 
 HEX_RE = re.compile(r'#[0-9A-Fa-f]{3,8}\b')
 STYLE_ATTR_RE = re.compile(r'\bstyle\s*=', re.I)
-PILL_RADIUS_RE = re.compile(
-    r'border-radius\s*:\s*(9999px|999px)\b',
+# Any radius that is not a token, 0, the 2px hairline or a true circle is a
+# drift (100px, 99px, 50rem and 9999px all draw a pill).
+RADIUS_DECL_RE = re.compile(r'border(?:-[a-z]+)*-radius\s*:\s*([^;}"\n]+)', re.I)
+RADIUS_ALLOWED_RE = re.compile(
+    r'^(?:(?:var\(--radius(?:-sm|-md)?(?:,\s*var\(--radius\))?\)|0|2px|50%|inherit)\s*)+$',
     re.I,
 )
-BOX_SHADOW_RE = re.compile(r'\b(box-shadow|drop-shadow|text-shadow)\s*:', re.I)
+BOX_SHADOW_RE = re.compile(
+    r'\b(box-shadow|text-shadow)\s*:|\bdrop-shadow\s*\(|\bbackdrop-filter\s*:',
+    re.I,
+)
+COLOR_FUNC_RE = re.compile(r'\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color-mix)\s*\(', re.I)
+STYLE_BLOCK_RE = re.compile(r'<style\b', re.I)
+LEFT_ACCENT_RE = re.compile(
+    r'border-(?:left|inline-start)(?:-width)?\s*:\s*(?:[2-9]|\d{2,})px', re.I,
+)
+ITALIC_RE = re.compile(r'font-style\s*:\s*italic', re.I)
+REMOTE_FONT_RE = re.compile(r'fonts\.(?:googleapis|gstatic)\.com', re.I)
 GRADIENT_RE = re.compile(r'\b(linear-gradient|radial-gradient|conic-gradient)\s*\(', re.I)
 MONO_FONT_RE = re.compile(
     r'font-family\s*:\s*[^;]*(monospace|ui-monospace|SFMono|Menlo|Consolas|Courier)',
@@ -103,9 +155,10 @@ PRIMARY_CLASS_RE = re.compile(
     r'''class\s*=\s*["'][^"']*\b(?:btn-primary|btn-accent)\b[^"']*["']''',
     re.I,
 )
+# Keyword or positional: button("Save", variant="primary") / button("Save", "primary").
 PRIMARY_VARIANT_RE = re.compile(
-    r'''variant\s*=\s*["']primary["']''',
-    re.I,
+    r'''\bbutton\s*\((?:[^()]|\([^()]*\))*?["']primary["']''',
+    re.I | re.S,
 )
 
 
@@ -142,9 +195,17 @@ def _count_primaries(text: str) -> int:
     )
     without_jinja = re.sub(r'\{%.*?%\}', '\n', html, flags=re.S)
     without_jinja = re.sub(r'\{\{.*?\}\}', '', without_jinja, flags=re.S)
-    return len(PRIMARY_CLASS_RE.findall(without_jinja)) + len(
-        PRIMARY_VARIANT_RE.findall(without_jinja)
+    # Macro calls live inside {{ }} / {% call %}, so count them on the
+    # unstripped source; class="btn-primary" is counted on the stripped one.
+    # A macro can also be handed the class directly: button("B", class="btn-primary").
+    macro_class = sum(
+        len(re.findall(r'\bbtn-(?:primary|accent)\b', call))
+        for call in re.findall(r'\{\{.*?\}\}|\{%.*?%\}', html, flags=re.S)
+        if not PRIMARY_VARIANT_RE.search(call)
     )
+    return len(PRIMARY_CLASS_RE.findall(without_jinja)) + len(
+        PRIMARY_VARIANT_RE.findall(html)
+    ) + macro_class
 
 
 def _hex_outside_token_section_base(text: str) -> list[str]:
@@ -173,12 +234,19 @@ def test_components_css_exists_and_uses_tokens_only():
     assert HEX_RE.search(text) is None, 'components.css must use var(--token), not hex'
     assert BOX_SHADOW_RE.search(text) is None
     assert GRADIENT_RE.search(text) is None
-    assert PILL_RADIUS_RE.search(text) is None
+    assert COLOR_FUNC_RE.search(text) is None, 'components.css must not define colours'
+    assert LEFT_ACCENT_RE.search(text) is None
+    assert ITALIC_RE.search(text) is None
+    for m in RADIUS_DECL_RE.finditer(text):
+        assert RADIUS_ALLOWED_RE.match(m.group(1).strip()), (
+            f'radius outside the scale: {m.group(0)[:60]}'
+        )
     for m in MONO_FONT_RE.finditer(text):
         start = text.rfind('{', 0, m.start())
         rule_start = text.rfind('}', 0, start)
         header = text[rule_start + 1:start]
-        assert re.search(r'(code|pre|snippet|secret)', header, re.I), (
+        # Only the code element of a snippet/secret, never its label or button.
+        assert re.search(r'(__code|__value)\b|(^|[\s,>])(code|pre|kbd|samp)\b', header, re.I), (
             f'monospace outside code/snippet/secret: {header.strip()[:80]}'
         )
     assert SERIF_UI_RE.search(text) is None
@@ -210,10 +278,17 @@ def test_no_forbidden_css_in_templates():
                 failures.append(f'{_rel(path)}:{i}: shadow forbidden')
             if GRADIENT_RE.search(line):
                 failures.append(f'{_rel(path)}:{i}: gradient forbidden')
-            if PILL_RADIUS_RE.search(line):
-                failures.append(
-                    f'{_rel(path)}:{i}: pill radius forbidden ({line.strip()[:60]})'
-                )
+            for m in RADIUS_DECL_RE.finditer(line):
+                if not RADIUS_ALLOWED_RE.match(m.group(1).strip()):
+                    failures.append(
+                        f'{_rel(path)}:{i}: radius outside the scale ({line.strip()[:60]})'
+                    )
+            if LEFT_ACCENT_RE.search(line):
+                failures.append(f'{_rel(path)}:{i}: left-border accent forbidden')
+            if ITALIC_RE.search(line):
+                failures.append(f'{_rel(path)}:{i}: italic forbidden')
+            if REMOTE_FONT_RE.search(line):
+                failures.append(f'{_rel(path)}:{i}: Google Fonts at runtime forbidden')
     assert not failures, 'DESIGN.md violations:\n' + '\n'.join(failures)
 
 
@@ -334,6 +409,120 @@ def test_monospace_only_in_code_contexts():
     assert not failures, 'typography guardrail:\n' + '\n'.join(failures)
 
 
+def test_no_new_page_local_style_blocks():
+    failures = []
+    for path in _iter_templates():
+        rel = _rel(path)
+        count = len(STYLE_BLOCK_RE.findall(_strip_jinja_comments(path.read_text(encoding='utf-8'))))
+        allowed = LEGACY_STYLE_BLOCK_ALLOWLIST.get(rel, 0)
+        if count > allowed:
+            failures.append(
+                f'{rel}: {count} <style> block(s), cap {allowed}; put shared rules in '
+                f'static/components.css and compose from macros'
+            )
+    for rel in LEGACY_STYLE_BLOCK_ALLOWLIST:
+        if not (TEMPLATES / rel).is_file():
+            failures.append(f'style-block allowlist entry missing on disk: {rel}')
+    assert not failures, 'page-local CSS guardrail:\n' + '\n'.join(failures)
+
+
+def test_colour_functions_only_in_legacy_scrims():
+    failures = []
+    for path in _iter_templates():
+        rel = _rel(path)
+        body = _strip_jinja_comments(path.read_text(encoding='utf-8'))
+        body = re.sub(r'<script\b[^>]*>.*?</script>', '', body, flags=re.I | re.S)
+        count = len(COLOR_FUNC_RE.findall(body))
+        if count > LEGACY_COLOR_FUNC_ALLOWLIST.get(rel, 0):
+            failures.append(f'{rel}: {count} rgb()/hsl()/color-mix() colour(s); use tokens')
+    assert not failures, 'colours outside tokens:\n' + '\n'.join(failures)
+
+
+@pytest.mark.parametrize('snippet, expected', [
+    ('{{ button("A", variant="primary") }}{{ button("B", variant="primary") }}', 2),
+    ('{{ button("A", "primary") }}<a class="btn btn-primary">B</a>', 2),
+    ("{{ button('A', variant='secondary') }}{{ button('B', 'ghost') }}", 0),
+    ('{# {{ button("A", variant="primary") }} #}', 0),
+    ('{{ button("A", variant="primary") }}{{ button("B", class="btn-primary") }}', 2),
+])
+def test_primary_counter_sees_macro_calls(snippet, expected):
+    assert _count_primaries(snippet) == expected
+
+
+@pytest.mark.parametrize('value, ok', [
+    ('var(--radius)', True), ('var(--radius-md, var(--radius))', True),
+    ('var(--radius) var(--radius) 0 0', True), ('50%', True),
+    ('9999px', False), ('100px', False), ('50rem', False), ('12px', False),
+])
+def test_radius_allowlist(value, ok):
+    assert bool(RADIUS_ALLOWED_RE.match(value)) is ok
+
+
+def _render(source: str) -> str:
+    with A.app.test_request_context('/'):
+        return A.app.jinja_env.from_string(
+            '{% import "components/macros.html" as ds %}' + source
+        ).render()
+
+
+def test_tabs_macro_follows_the_aria_tabs_pattern():
+    html = _render(
+        '{{ ds.tabs("Clients", [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]) }}'
+        '{% call ds.tab_panel("a", selected=true) %}x{% endcall %}'
+        '{% call ds.tab_panel("b") %}y{% endcall %}'
+    )
+    assert 'role="tablist" aria-label="Clients"' in html
+    assert html.count('role="tab"') == 2
+    assert html.count('aria-selected="true"') == 1
+    assert html.count('tabindex="-1"') == 1  # roving tabindex: only unselected tabs
+    assert 'aria-controls="a-panel"' in html and 'id="a-panel"' in html
+    assert 'aria-labelledby="b-tab"' in html
+    assert re.search(r'id="b-panel"[^>]*\bhidden\b', html, re.S)
+
+
+def test_copy_buttons_are_labelled_and_need_no_ids():
+    html = _render('{{ ds.snippet("one") }}{{ ds.snippet("two") }}{{ ds.secret_field("sk-x") }}')
+    assert html.count('data-ds-copy-root') == 3
+    assert html.count('data-ds-copy-source') == 3
+    assert 'aria-label="Copy snippet"' in html
+    assert 'aria-label="Copy API key"' in html
+    assert html.count('role="status"') == 3
+    ids = re.findall(r'\bid="([^"]*)"', html)
+    assert len(ids) == len(set(ids)), f'duplicate ids: {ids}'
+
+
+def test_notice_escapes_its_message():
+    html = _render('{{ ds.notice("<script>alert(1)</script>", variant="error") }}')
+    assert '<script>' not in html and '&lt;script&gt;' in html
+    assert 'role="alert"' in html
+    html = _render('{% call ds.notice(variant="warning") %}<a href="/pricing">Pricing</a>{% endcall %}')
+    assert '<a href="/pricing">Pricing</a>' in html and 'role="status"' in html
+
+
+def test_macros_only_mark_attrs_safe():
+    text = (TEMPLATES / 'components' / 'macros.html').read_text(encoding='utf-8')
+    unsafe = [m for m in re.findall(r'\{\{\s*([^}]*?)\|\s*safe\s*\}\}', text) if m.strip() != 'attrs']
+    assert not unsafe, f'|safe on something other than attrs: {unsafe}'
+
+
+def test_checklist_state_is_in_text_not_colour_only():
+    html = _render('{{ ds.checklist(items=[{"title": "A", "state": "active"}, {"title": "B"}]) }}')
+    assert '(in progress)' in html and '(not started)' in html
+
+
+def test_disabled_link_button_is_inert():
+    html = _render('{{ ds.button("Go", variant="primary", href="/x", disabled=true) }}')
+    assert 'aria-disabled="true"' in html and 'tabindex="-1"' in html
+    css = COMPONENTS_CSS.read_text(encoding='utf-8')
+    assert '.btn[aria-disabled="true"]' in css
+
+
+def test_card_is_an_alias_of_section():
+    a = _render('{% call ds.card(title="T", variant="bordered") %}x{% endcall %}')
+    b = _render('{% call ds.section(title="T", variant="bordered") %}x{% endcall %}')
+    assert a == b
+
+
 @pytest.fixture
 def client():
     A.app.config['TESTING'] = True
@@ -384,3 +573,5 @@ def test_base_links_components_css(client):
     assert r.status_code == 200
     html = r.get_data(as_text=True)
     assert 'components.css' in html
+    # Tabs and copy buttons ship their behaviour with the library, not per page.
+    assert 'components.js' in html

@@ -81,19 +81,10 @@
 </section>
 {%- endmacro %}
 
-{# Alias: use {% call section(...) %} … {% endcall %} (same markup). #}
+{# card — alias of section; same parameters and markup. #}
 {% macro card(title=None, variant='surface', attrs='', class='') -%}
-{%- set cls = 'ds-section' -%}
-{%- if variant == 'bordered' %}{% set cls = cls ~ ' ds-section--bordered' %}
-{%- elif variant == 'strong' %}{% set cls = cls ~ ' ds-section--strong' %}
-{%- endif -%}
-{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
-<section class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>
-  {%- if title -%}
-  <h2 class="ds-section__title">{{ title }}</h2>
-  {%- endif -%}
-  {{ caller() }}
-</section>
+{%- set body = caller() -%}
+{%- call section(title=title, variant=variant, attrs=attrs, class=class) -%}{{ body }}{%- endcall -%}
 {%- endmacro %}
 
 {# ------------------------------------------------------------------------- #}
@@ -137,6 +128,7 @@
 {%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
 <div class="{{ cls }}"
      role="tabpanel"
+     tabindex="0"
      id="{{ id }}-panel"
      aria-labelledby="{{ id }}-tab"
      {% if not selected %}hidden{% endif %}
@@ -159,7 +151,9 @@
     {%- endif -%}
   </span>
   <div class="ds-checklist__body">
-    <p class="ds-checklist__title">{{ title }}</p>
+    <p class="ds-checklist__title">{{ title }}<span class="sr-only">
+      {%- if st == 'done' %} (done){% elif st == 'active' %} (in progress){% elif st == 'error' %} (failed){% else %} (not started){% endif -%}
+    </span></p>
     {%- if detail -%}
     <p class="ds-checklist__detail">{{ detail }}</p>
     {%- endif -%}
@@ -182,17 +176,19 @@
 {# ------------------------------------------------------------------------- #}
 {# snippet — code/pre block with copy button                                  #}
 {# ------------------------------------------------------------------------- #}
-{% macro snippet(code, copy_label='Copy', attrs='', class='', copy_id='ds-snippet') -%}
+{% macro snippet(code, copy_label='Copy', attrs='', class='', what='snippet') -%}
 {%- set cls = 'ds-snippet' -%}
 {%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
-<div class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>
-  <pre class="ds-snippet__code" id="{{ copy_id }}"><code>{{ code }}</code></pre>
+<div class="{{ cls }}" data-ds-copy-root{% if attrs %} {{ attrs|safe }}{% endif %}>
+  <pre class="ds-snippet__code" data-ds-copy-source><code>{{ code }}</code></pre>
   <div class="ds-snippet__actions">
     <button type="button"
             class="btn btn-secondary btn-sm"
-            data-ds-copy="#{{ copy_id }}"
+            aria-label="{{ copy_label }} {{ what }}"
+            data-ds-copy
             data-ds-copy-label="{{ copy_label }}"
             data-ds-copied-label="Copied">{{ copy_label }}</button>
+    <span class="sr-only" role="status" data-ds-copy-status></span>
   </div>
 </div>
 {%- endmacro %}
@@ -201,30 +197,32 @@
 {# secret_field — shown-once key with copy                                    #}
 {# ------------------------------------------------------------------------- #}
 {% macro secret_field(value, label='API key', hint='Copy it now. It will not be shown again.',
-                      copy_label='Copy', attrs='', class='', field_id=None) -%}
+                      copy_label='Copy', attrs='', class='') -%}
 {%- set cls = 'ds-secret' -%}
 {%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
-{%- set fid = field_id or 'ds-secret-value' -%}
-<div class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>
-  <span class="ds-field__label" id="{{ fid }}-label">{{ label }}</span>
+<div class="{{ cls }}" data-ds-copy-root{% if attrs %} {{ attrs|safe }}{% endif %}>
+  <span class="ds-field__label">{{ label }}</span>
   {%- if hint -%}
-  <p class="ds-secret__hint" id="{{ fid }}-hint">{{ hint }}</p>
+  <p class="ds-secret__hint">{{ hint }}</p>
   {%- endif -%}
   <div class="ds-secret__field">
-    <code class="ds-secret__value" id="{{ fid }}" aria-labelledby="{{ fid }}-label"{% if hint %} aria-describedby="{{ fid }}-hint"{% endif %}>{{ value }}</code>
+    <code class="ds-secret__value" data-ds-copy-source>{{ value }}</code>
     <button type="button"
             class="btn btn-secondary btn-sm"
-            data-ds-copy="#{{ fid }}"
+            aria-label="{{ copy_label }} {{ label }}"
+            data-ds-copy
             data-ds-copy-label="{{ copy_label }}"
             data-ds-copied-label="Copied">{{ copy_label }}</button>
+    <span class="sr-only" role="status" data-ds-copy-status></span>
   </div>
 </div>
 {%- endmacro %}
 
 {# ------------------------------------------------------------------------- #}
-{# notice — info | success | warning | error                                  #}
+{# notice — info | success | warning | error
+   message is escaped. For a link inside, use {% call notice(variant=...) %}. #}
 {# ------------------------------------------------------------------------- #}
-{% macro notice(message, variant='info', attrs='', class='', role=None) -%}
+{% macro notice(message=None, variant='info', attrs='', class='', role=None) -%}
 {%- set v = variant|lower -%}
 {%- if v == 'success' -%}{%- set v = 'success' -%}
 {%- elif v == 'warning' -%}{%- set v = 'warning' -%}
@@ -240,7 +238,7 @@
   {%- elif v == 'success' -%}{{ icon_success() }}
   {%- else -%}{{ icon_info() }}
   {%- endif -%}
-  <div class="ds-notice__body">{{ message|safe }}</div>
+  <div class="ds-notice__body">{% if caller is defined %}{{ caller() }}{% else %}{{ message }}{% endif %}</div>
 </div>
 {%- endmacro %}
 

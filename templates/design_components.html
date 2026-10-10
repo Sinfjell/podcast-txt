@@ -27,6 +27,7 @@
       {{ button("Ghost", variant="ghost") }}
       {{ button("Danger", variant="danger") }}
       {{ button("Disabled", variant="primary", disabled=true) }}
+      {{ button("Disabled link", variant="secondary", href="#g-buttons", disabled=true) }}
       {{ button("Small", variant="secondary", size="sm") }}
       {{ button("Large", variant="secondary", size="lg") }}
       {{ link_button("Link button", href="#g-buttons") }}
@@ -88,8 +89,8 @@
   <section class="ds-gallery-section" aria-labelledby="g-snippet">
     <h2 id="g-snippet" class="ds-gallery-label">SNIPPET + SECRET</h2>
     <div class="ds-stack ds-stack-6">
-      {{ snippet("Try: Transcribe the latest episode of Hard Fork and summarise it.", copy_id="gallery-snippet") }}
-      {{ secret_field("sk-live-example-key-shown-once", field_id="gallery-secret") }}
+      {{ snippet("Try: Transcribe the latest episode of Hard Fork and summarise it.") }}
+      {{ secret_field("sk-live-example-key-shown-once") }}
     </div>
     <p class="ds-gallery-note">Monospace is allowed only inside code/pre (and the secret value, which is a code element).</p>
   </section>
@@ -101,6 +102,7 @@
       {{ notice("Key saved. You can close this page.", variant="success") }}
       {{ notice("Your free trial is used up. Add your own OpenAI API key to keep transcribing.", variant="warning") }}
       {{ notice("We could not fetch this feed. Check that the RSS link is public.", variant="error") }}
+      {% call notice(variant="warning") %}Out of minutes. <a href="/pricing">See pricing</a>.{% endcall %}
     </div>
   </section>
 
@@ -123,7 +125,7 @@
         </select>
       {% endcall %}
       {% call form_field("OpenAI API key", "gallery-key", error="OpenAI rejected this key. Check that it is active and has billing set up.", required=true) %}
-        <input class="form-input" id="gallery-key" type="text" value="sk-proj-…" aria-invalid="true" aria-describedby="gallery-key-error" autocomplete="off">
+        <input class="form-input" id="gallery-key" type="text" value="sk-proj-…" required aria-invalid="true" aria-describedby="gallery-key-error" autocomplete="off">
       {% endcall %}
       {{ button("Save key", variant="secondary", type="submit") }}
     </form>
@@ -139,44 +141,4 @@
     <p class="ds-gallery-note">Chips use radius-md (8px), never 9999px pills. Prefer the nav balance pattern for account minutes.</p>
   </section>
 </div>
-{% endblock %}
-
-{% block scripts %}
-<script>
-(function () {
-  function textOf(selector) {
-    var el = document.querySelector(selector);
-    if (!el) return '';
-    return (el.innerText || el.textContent || '').trim();
-  }
-  document.addEventListener('click', function (e) {
-    var btn = e.target.closest('[data-ds-copy]');
-    if (!btn) return;
-    var value = textOf(btn.getAttribute('data-ds-copy'));
-    if (!value || !navigator.clipboard) return;
-    navigator.clipboard.writeText(value).then(function () {
-      var label = btn.getAttribute('data-ds-copy-label') || 'Copy';
-      var done = btn.getAttribute('data-ds-copied-label') || 'Copied';
-      btn.textContent = done;
-      window.setTimeout(function () { btn.textContent = label; }, 1500);
-    }).catch(function () { /* ignore */ });
-  });
-
-  var list = document.querySelector('[role="tablist"]');
-  if (!list) return;
-  list.addEventListener('click', function (e) {
-    var tab = e.target.closest('[role="tab"]');
-    if (!tab || !list.contains(tab)) return;
-    var tabs = list.querySelectorAll('[role="tab"]');
-    tabs.forEach(function (t) {
-      var on = t === tab;
-      t.setAttribute('aria-selected', on ? 'true' : 'false');
-      t.classList.toggle('is-active', on);
-      t.tabIndex = on ? 0 : -1;
-      var panel = document.getElementById(t.getAttribute('aria-controls'));
-      if (panel) panel.hidden = !on;
-    });
-  });
-})();
-</script>
 {% endblock %}

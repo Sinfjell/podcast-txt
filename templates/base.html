@@ -1523,6 +1523,8 @@
     <script type="speculationrules">
     {"prefetch": [{"where": {"href_matches": ["/", "/pricing", "/whats-new", "/docs/api", "/rss-help", "/privacy", "/terms", "/podcasts"]}, "eagerness": "moderate"}]}
     </script>
+    {# Tabs and copy buttons for templates/components macros. #}
+    <script src="{{ asset_url('components.js') }}" defer></script>
     {% block scripts %}{% endblock %}
     <script>
     // Live job bar. Polls a small endpoint so a transcription that keeps running
