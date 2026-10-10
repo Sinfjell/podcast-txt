@@ -59,12 +59,13 @@ from sqlalchemy.exc import IntegrityError as SaIntegrityError
 from models import (db, User, SavedFeed, TranscriptionTask, CreditPurchase,
                     TranscriptShare, EmailSentLog, SummaryEmailJob, SummaryEmailBudgetDay,
                     TrialBudgetDay,
-                    PasswordResetToken,
+                    PasswordResetToken, McpCredential,
                     TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS,
                     CREDIT_PURCHASE_COLUMN_MIGRATIONS,
                     SAVED_FEED_COLUMN_MIGRATIONS,
                     TRANSCRIPT_SHARE_COLUMN_MIGRATIONS,
-                    PASSWORD_RESET_TOKEN_COLUMN_MIGRATIONS)
+                    PASSWORD_RESET_TOKEN_COLUMN_MIGRATIONS,
+                    MCP_CREDENTIAL_COLUMN_MIGRATIONS)
 from observability import init_sentry, report_stale_task, report_task_failure
 import analytics as product_analytics
 from site_standards import init_site_standards
@@ -72,6 +73,7 @@ import email_notify
 import mail as mailer
 import summary as summary_mod
 import mcp_server as mcp_server_mod
+import mcp_credentials as mcp_credentials_mod
 from admin_dashboard import admin_bp, ensure_admin_indexes
 
 try:
@@ -2731,6 +2733,17 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
         transcription_time=elapsed,
         completed_at=datetime.now(timezone.utc),
     )
+    # /connect checklist: first transcript for the MCP credential that started
+    # this job. Cheap no-op when credential_id is null (web/API).
+    done_task = db.session.get(TranscriptionTask, task_id)
+    if done_task is not None and getattr(done_task, 'credential_id', None):
+        if mcp_credentials_mod.mark_first_transcript_for_task(done_task):
+            cred = db.session.get(McpCredential, done_task.credential_id)
+            product_analytics.capture(
+                'mcp_first_transcript',
+                done_task.user_id,
+                {'client': cred.client if cred else 'other'},
+            )
 
     if os.path.exists(audio_file):
         os.remove(audio_file)
@@ -4351,6 +4364,9 @@ def settings():
     trial_ctx = _trial_context()
     buy_source = (
         'header_pill' if request.args.get('from') == 'header_pill' else 'settings')
+    # Ensure a pre-multi-key hash appears in the list (idempotent).
+    mcp_credentials_mod.migrate_legacy_api_keys()
+    api_credentials = mcp_credentials_mod.list_active_credentials(current_user.id)
     return render_template(
         'settings.html',
         trial=trial_ctx,
@@ -4358,6 +4374,8 @@ def settings():
         openai_key_hint=_openai_key_hint(current_user),
         buy_source=buy_source,
         no_billing_warning=no_billing_warning,
+        api_credentials=api_credentials,
+        mcp_enabled=mcp_server_mod.mcp_enabled(),
     )
 
 
@@ -4700,16 +4718,24 @@ def settings_remove_openai_key():
 @app.route('/settings/api-key/generate', methods=['POST'])
 @login_required
 def settings_generate_api_key():
-    """Create (or rotate) the user's one customer HTTP API key.
+    """Mint a new labelled customer API key (does not revoke existing keys).
 
     Plaintext is shown once via the session and never stored — only the hash.
-    Rotating invalidates the previous key immediately.
+    Stored in ``mcp_credentials`` so Cursor/VS Code keys stay valid.
     """
-    plaintext = mint_customer_api_key()
-    current_user.api_key_hash = hash_customer_api_key(plaintext)
-    current_user.api_key_prefix = customer_api_key_prefix(plaintext)
-    current_user.api_key_created_at = datetime.now(timezone.utc)
-    db.session.commit()
+    # CSRF when the form sent a token (connect always does); bare POSTs from
+    # older bookmarks still work so we do not lock out existing clients.
+    if request.form.get('csrf_token') and not validate_csrf_token():
+        flash('That form expired. Try again.', 'error')
+        return redirect(url_for('settings'))
+    _row, plaintext = mcp_credentials_mod.mint_credential(
+        current_user.id,
+        'other',
+        mint_fn=mint_customer_api_key,
+        hash_fn=hash_customer_api_key,
+        prefix_fn=customer_api_key_prefix,
+        label='API key',
+    )
     session['new_api_key'] = plaintext
     flash('API key created. Copy it now — it will not be shown again.', 'success')
     return redirect(url_for('settings'))
@@ -4718,16 +4744,151 @@ def settings_generate_api_key():
 @app.route('/settings/api-key/revoke', methods=['POST'])
 @login_required
 def settings_revoke_api_key():
-    """Drop the active customer API key. Subsequent API calls get 401."""
+    """Revoke one customer API key (by id) or the legacy users.api_key_* row."""
+    if request.form.get('csrf_token') and not validate_csrf_token():
+        flash('That form expired. Try again.', 'error')
+        return redirect(url_for('settings'))
+    cred_id = request.form.get('credential_id', type=int)
+    if cred_id:
+        row = mcp_credentials_mod.revoke_credential(
+            current_user.id, cred_id, clear_legacy_user=current_user)
+        if row is None:
+            flash('No API key to revoke.', 'info')
+        else:
+            flash('API key revoked. It can no longer be used.', 'success')
+        return redirect(url_for('settings'))
+    # Legacy single-key revoke (no credential_id in the form).
     if not current_user.api_key_hash:
         flash('No API key to revoke.', 'info')
         return redirect(url_for('settings'))
-    current_user.api_key_hash = None
-    current_user.api_key_prefix = None
-    current_user.api_key_created_at = None
-    db.session.commit()
+    legacy = McpCredential.query.filter_by(
+        user_id=current_user.id, key_hash=current_user.api_key_hash).first()
+    if legacy and legacy.revoked_at is None:
+        mcp_credentials_mod.revoke_credential(
+            current_user.id, legacy.id, clear_legacy_user=current_user)
+    else:
+        current_user.api_key_hash = None
+        current_user.api_key_prefix = None
+        current_user.api_key_created_at = None
+        db.session.commit()
     flash('API key revoked. It can no longer be used.', 'success')
     return redirect(url_for('settings'))
+
+
+_CONNECT_CLIENTS = frozenset(mcp_credentials_mod.CONNECT_CLIENTS)
+_CONNECT_LIVE_CLIENTS = frozenset(('cursor', 'vscode', 'claude_code'))
+
+
+def _connect_client_arg(raw=None):
+    """Normalise ?client= for /connect. Default cursor until OAuth ships."""
+    client = (raw or request.args.get('client') or '').strip().lower()
+    if client in ('claude.ai', 'claude_desktop', 'claude-desktop'):
+        client = 'claude'
+    if client == 'claude-code':
+        client = 'claude_code'
+    if client not in _CONNECT_CLIENTS:
+        client = 'cursor'
+    return client
+
+
+@app.route('/connect')
+def connect_page():
+    """Connect Podskrift to Cursor, VS Code, or Claude Code (OAuth clients soon)."""
+    if not mcp_server_mod.mcp_enabled():
+        abort(404)
+    client = _connect_client_arg()
+    logged_in = current_user.is_authenticated
+    if logged_in:
+        mcp_credentials_mod.migrate_legacy_api_keys()
+        product_analytics.capture(
+            'connect_page_viewed', current_user.id, {'client': client})
+    else:
+        product_analytics.capture(
+            'connect_page_viewed', 'anonymous', {'client': client})
+    status = mcp_credentials_mod.connect_status_payload(
+        current_user if logged_in else None, client)
+    mcp_url = public_url('mcp')
+    return render_template(
+        'connect.html',
+        client=client,
+        status=status,
+        mcp_url=mcp_url,
+        oauth_enabled=False,  # separate PR; Claude/ChatGPT tabs stay Coming soon
+        live_clients=sorted(_CONNECT_LIVE_CLIENTS),
+        client_labels=mcp_credentials_mod.CLIENT_LABELS,
+        trial_minutes=advertised_trial_minutes(),
+        login_next=url_for('connect_page', client=client),
+    )
+
+
+@app.route('/connect/status')
+def connect_status():
+    """JSON checklist for the live /connect poller (session auth, no-store)."""
+    if not mcp_server_mod.mcp_enabled():
+        abort(404)
+    client = _connect_client_arg()
+    if not current_user.is_authenticated:
+        payload = mcp_credentials_mod.connect_status_payload(None, client)
+    else:
+        payload = mcp_credentials_mod.connect_status_payload(current_user, client)
+    resp = jsonify(payload)
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@app.route('/connect/credentials', methods=['POST'])
+@login_required
+def connect_mint_credential():
+    """Mint a labelled key for a client. Returns plaintext once (JSON)."""
+    if not mcp_server_mod.mcp_enabled():
+        abort(404)
+    if not validate_csrf_token():
+        return jsonify({'error': 'csrf'}), 400
+    data = request.get_json(silent=True) or {}
+    client = _connect_client_arg(
+        data.get('client') or request.form.get('client'))
+    if client not in _CONNECT_LIVE_CLIENTS and client != 'other':
+        return jsonify({
+            'error': 'coming_soon',
+            'message': 'This client is not available yet.',
+        }), 400
+    row, plaintext = mcp_credentials_mod.mint_credential(
+        current_user.id,
+        client,
+        mint_fn=mint_customer_api_key,
+        hash_fn=hash_customer_api_key,
+        prefix_fn=customer_api_key_prefix,
+        label=mcp_credentials_mod.CLIENT_LABELS.get(client, 'API key'),
+    )
+    product_analytics.capture(
+        'connect_clicked',
+        current_user.id,
+        {'client': client, 'kind': 'key'},
+    )
+    return jsonify({
+        'id': row.id,
+        'client': row.client,
+        'label': row.label,
+        'prefix': row.key_prefix,
+        'key': plaintext,
+        'mcp_url': public_url('mcp'),
+        'created_at': mcp_credentials_mod._iso(row.created_at),
+    })
+
+
+@app.route('/connect/credentials/<int:credential_id>/revoke', methods=['POST'])
+@login_required
+def connect_revoke_credential(credential_id):
+    """Disconnect / revoke one credential from /connect."""
+    if not mcp_server_mod.mcp_enabled():
+        abort(404)
+    if not validate_csrf_token():
+        return jsonify({'error': 'csrf'}), 400
+    row = mcp_credentials_mod.revoke_credential(
+        current_user.id, credential_id, clear_legacy_user=current_user)
+    if row is None:
+        return jsonify({'error': 'not_found'}), 404
+    return jsonify({'ok': True, 'id': credential_id})
 
 
 def _apply_global_unsubscribe(user):
@@ -5284,7 +5445,8 @@ def _completed_transcript_count(user_id):
     )
 
 
-def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
+def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
+                          credential_id=None):
     """Start Whisper for one episode on behalf of `user`.
 
     Shared by the UI form and the agent write API so trial reservation,
@@ -5295,7 +5457,8 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
     `meta` keys: title, audio_url, podcast_name, artwork, published, duration_min,
     and optional listen URLs: spotify_url, apple_url, episode_link / website_url /
     show_link.
-    `source` is 'web' or 'api'; it only labels the analytics events.
+    `source` is 'web', 'api', or 'mcp'; stored on the task and used for analytics.
+    `credential_id` links MCP jobs to an ``mcp_credentials`` row for /connect.
     """
     language = normalize_language_code(language)
 
@@ -5535,6 +5698,8 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                     encode_partial_task_meta(trial_charge, estimate)
                     if partial_job and trial_charge else None
                 ),
+                credential_id=credential_id,
+                source=(source or None),
             )
             db.session.add(task)
             db.session.commit()
@@ -7457,12 +7622,32 @@ def customer_api_key_prefix(plaintext):
     return (plaintext or '')[:12]
 
 
+def _set_g_mcp_credential(credential):
+    """Stash the matching McpCredential on flask.g when inside a request."""
+    try:
+        g.mcp_credential = credential
+    except RuntimeError:
+        pass
+
+
 def _lookup_user_by_api_key(plaintext):
-    """User owning this customer key, or None. Revoke clears the hash → None."""
-    if not plaintext:
-        return None
-    digest = hash_customer_api_key(plaintext)
-    return User.query.filter_by(api_key_hash=digest).first()
+    """User owning this customer key, or None.
+
+    Checks ``mcp_credentials`` first, then legacy ``users.api_key_hash``.
+    Sets ``g.mcp_credential`` when the match is a multi-key row. Revoked
+    hashes are noted on ``g.mcp_revoked_credential`` for /connect warnings.
+    """
+    user, cred, revoked = mcp_credentials_mod.lookup_credential_by_key(
+        plaintext, hash_fn=hash_customer_api_key)
+    if user is not None:
+        _set_g_mcp_credential(cred)
+        return user
+    if revoked is not None:
+        try:
+            g.mcp_revoked_credential = revoked
+        except RuntimeError:
+            pass
+    return None
 
 
 def _agent_configured_key():
@@ -8395,6 +8580,12 @@ def inject_trial_badge():
 
 
 @app.context_processor
+def inject_mcp_enabled():
+    """Expose MCP flag to nav/footer/settings without per-view plumbing."""
+    return {'mcp_enabled': mcp_server_mod.mcp_enabled()}
+
+
+@app.context_processor
 def inject_posthog():
     """Expose PostHog public config to templates. Empty key → client SDK off."""
     key = product_analytics.posthog_key()
@@ -8777,6 +8968,9 @@ def sitemap_xml():
              public_url('api_docs'),
              public_url('rss_help'),
              public_url('register')]
+    # /connect 404s when MCP_ENABLED is off — only index it when live.
+    if mcp_server_mod.mcp_enabled():
+        pages.append(public_url('connect_page'))
     # Curated show pages only — community slugs can churn with the DB.
     for show in show_pages_mod.load_curated_shows():
         pages.append(public_url('podcast_show', slug=show['slug']))
@@ -10390,8 +10584,16 @@ with app.app_context():
     ensure_summary_email_tables()
     ensure_trial_budget_days_table()
     ensure_password_reset_tokens_table()
+    mcp_credentials_mod.ensure_mcp_credentials_table(
+        app, text, _live_columns)
 
     apply_column_migrations()
+    # Copy users.api_key_* into mcp_credentials (idempotent; keeps legacy cols).
+    try:
+        mcp_credentials_mod.migrate_legacy_api_keys(app)
+    except Exception:
+        db.session.rollback()
+        app.logger.exception('legacy API key migration into mcp_credentials failed')
     raise_60_minute_trial_cohort()
     # Admin dashboard indexes: only after columns exist (same rule as
     # credit_purchases payment_intent index). Additive IF NOT EXISTS.

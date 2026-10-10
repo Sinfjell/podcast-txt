@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 from flask import Response, g, jsonify, request
 
 import analytics as product_analytics
+import mcp_credentials as mcp_credentials_mod
 
 # Protocol versions we accept on initialize (echo the client's when supported).
 _SUPPORTED_PROTOCOL_VERSIONS = (
@@ -708,9 +709,12 @@ def tool_get_transcript(user, episode: str, language: str = '',
         }
 
     meta = A._catalog_to_enqueue_meta(catalog)
+    cred = _active_credential()
     result, status = A.enqueue_transcription(
         user, meta, rss_url=catalog.get('rss_url') or None, language=language or '',
-        source='mcp')
+        source='mcp',
+        credential_id=cred.id if cred is not None else None,
+    )
     balance_after = _balance_snapshot(user)
     if status != 200:
         payload = {
@@ -776,6 +780,10 @@ def tool_get_transcript_status(user, job_id: str) -> dict:
     return payload
 
 
+def _active_credential():
+    return getattr(g, 'mcp_credential', None)
+
+
 def _capture_tool(tool: str, user_id, success: bool):
     """PostHog mcp_tool_called — tool name + success only (no PII)."""
     product_analytics.capture(
@@ -785,6 +793,27 @@ def _capture_tool(tool: str, user_id, success: bool):
     )
 
 
+def _note_tool_outcome(result: dict, *, insufficient_balance=False):
+    """Update /connect checklist fields for the authenticated credential."""
+    cred = _active_credential()
+    if cred is None:
+        return
+    is_error = bool(result.get('isError'))
+    success = (not is_error) or insufficient_balance
+    was_first_ok = cred.first_tool_ok_at is None and success
+    mcp_credentials_mod.mark_tool_result(
+        cred,
+        ok=not is_error,
+        insufficient_balance=insufficient_balance,
+    )
+    if was_first_ok:
+        product_analytics.capture(
+            'mcp_first_tool_ok',
+            getattr(g, 'api_user_id', None) or cred.user_id,
+            {'client': cred.client},
+        )
+
+
 def _run_tool(name: str, arguments: dict, user) -> dict:
     args = arguments if isinstance(arguments, dict) else {}
     try:
@@ -792,36 +821,64 @@ def _run_tool(name: str, arguments: dict, user) -> dict:
             out = tool_search_podcasts(args.get('query') or '')
             ok = 'error' not in out or bool(out.get('results'))
             _capture_tool(name, user.id, ok)
-            return _tool_text(out, is_error=not ok and not out.get('results'))
+            result = _tool_text(out, is_error=not ok and not out.get('results'))
+            _note_tool_outcome(result)
+            return result
         if name == 'list_episodes':
             out = tool_list_episodes(args.get('podcast') or '', args.get('limit'))
             ok = 'error' not in out
             _capture_tool(name, user.id, ok)
-            return _tool_text(out, is_error=not ok)
+            result = _tool_text(out, is_error=not ok)
+            _note_tool_outcome(result)
+            return result
         if name == 'get_transcript':
             out = tool_get_transcript(
                 user, args.get('episode') or '', args.get('language') or '',
                 meta=args)
+            insufficient = out.get('error') == 'insufficient_balance'
             ok = out.get('error') is None and out.get('transcript_status') != 'failed'
-            # insufficient_balance is a clean refusal, not a tool crash
-            if out.get('error') == 'insufficient_balance':
+            if insufficient:
                 ok = False
             _capture_tool(name, user.id, ok and 'error' not in out)
-            return _tool_text(out, is_error='error' in out)
+            result = _tool_text(out, is_error='error' in out)
+            _note_tool_outcome(result, insufficient_balance=insufficient)
+            if out.get('transcript_status') == 'ready':
+                cred = _active_credential()
+                if mcp_credentials_mod.mark_first_transcript(cred):
+                    product_analytics.capture(
+                        'mcp_first_transcript',
+                        user.id,
+                        {'client': cred.client if cred else 'other'},
+                    )
+            return result
         if name == 'get_transcript_status':
             out = tool_get_transcript_status(user, args.get('job_id') or '')
             ok = 'error' not in out
             _capture_tool(name, user.id, ok)
-            return _tool_text(out, is_error=not ok)
+            result = _tool_text(out, is_error=not ok)
+            _note_tool_outcome(result)
+            if out.get('transcript_status') == 'ready':
+                cred = _active_credential()
+                if mcp_credentials_mod.mark_first_transcript(cred):
+                    product_analytics.capture(
+                        'mcp_first_transcript',
+                        user.id,
+                        {'client': cred.client if cred else 'other'},
+                    )
+            return result
         _capture_tool(name, getattr(user, 'id', 'mcp'), False)
-        return _tool_text({'error': f'Unknown tool: {name}'}, is_error=True)
+        result = _tool_text({'error': f'Unknown tool: {name}'}, is_error=True)
+        _note_tool_outcome(result)
+        return result
     except Exception:  # noqa: BLE001 — never 500 a tool call into the LLM
         _app().app.logger.exception('mcp tool %s failed', name)
         _capture_tool(name, getattr(user, 'id', 'mcp'), False)
-        return _tool_text(
+        result = _tool_text(
             {'error': 'internal_error', 'message': 'Tool failed; try again shortly.'},
             is_error=True,
         )
+        _note_tool_outcome(result)
+        return result
 
 
 def _handle_initialize(params: dict) -> dict:
@@ -830,6 +887,19 @@ def _handle_initialize(params: dict) -> dict:
         requested if requested in _SUPPORTED_PROTOCOL_VERSIONS
         else _DEFAULT_PROTOCOL_VERSION
     )
+    cred = _active_credential()
+    client_info = (params or {}).get('clientInfo') or {}
+    if mcp_credentials_mod.mark_initialize(cred, client_info):
+        product_analytics.capture(
+            'mcp_connected',
+            getattr(g, 'api_user_id', None) or (cred.user_id if cred else 'mcp'),
+            {
+                'client': cred.client if cred else 'other',
+                'client_name': (client_info.get('name') or '')[:128] or None,
+            },
+        )
+    elif cred is not None:
+        mcp_credentials_mod.touch_credential_seen(cred)
     return {
         'protocolVersion': version,
         'capabilities': {
@@ -841,7 +911,8 @@ def _handle_initialize(params: dict) -> dict:
         },
         'instructions': (
             'Podskrift MCP: search podcasts, list episodes, and fetch transcripts. '
-            'Authenticate with Authorization: Bearer psk_… (API key from Settings). '
+            'Authenticate with Authorization: Bearer psk_… '
+            '(API key from /connect or Settings). '
             'Transcription uses the same free trial / paid minutes / BYOK rules as '
             f'the website. Pricing: {_pricing_url()}'
         ),
@@ -908,6 +979,8 @@ def _authenticate_mcp():
         and len(provided) == len(expected)
         and __import__('hmac').compare_digest(provided, expected)
     )
+    g.mcp_credential = None
+    g.mcp_revoked_credential = None
     customer = None if agent_ok else A._lookup_user_by_api_key(provided)
     if agent_ok:
         g.api_auth_kind = 'agent'
@@ -921,7 +994,13 @@ def _authenticate_mcp():
     if customer is not None:
         g.api_auth_kind = 'customer'
         g.api_user_id = customer.id
+        cred = getattr(g, 'mcp_credential', None)
+        if cred is not None:
+            mcp_credentials_mod.touch_credential_seen(cred)
         return customer, None
+    revoked = getattr(g, 'mcp_revoked_credential', None)
+    if revoked is not None and isinstance(provided, str) and provided.startswith('psk_'):
+        mcp_credentials_mod.note_revoked_key_hit(revoked)
     return None, (jsonify({'error': 'Unauthorized'}), 401)
 
 
