@@ -25,14 +25,16 @@ from flask import Response, g, jsonify, request
 
 import analytics as product_analytics
 
-# Protocol versions we accept on initialize (echo the client's when supported).
+# Protocol versions we accept on initialize (newest first).
+# Echo the client's version when supported; otherwise fall back to newest.
 _SUPPORTED_PROTOCOL_VERSIONS = (
+    '2025-11-25',
     '2025-06-18',
     '2025-03-26',
     '2024-11-05',
     '2024-10-07',
 )
-_DEFAULT_PROTOCOL_VERSION = '2025-03-26'
+_DEFAULT_PROTOCOL_VERSION = _SUPPORTED_PROTOCOL_VERSIONS[0]
 
 _MCP_DOC_BEGIN = '<!-- mcp-section -->'
 _MCP_DOC_END = '<!-- /mcp-section -->'
@@ -844,11 +846,12 @@ def _run_tool(name: str, arguments: dict, user) -> dict:
 
 
 def _handle_initialize(params: dict) -> dict:
-    requested = (params or {}).get('protocolVersion') or _DEFAULT_PROTOCOL_VERSION
-    version = (
-        requested if requested in _SUPPORTED_PROTOCOL_VERSIONS
-        else _DEFAULT_PROTOCOL_VERSION
-    )
+    requested = (params or {}).get('protocolVersion')
+    if requested in _SUPPORTED_PROTOCOL_VERSIONS:
+        version = requested
+    else:
+        # Unknown / missing → newest we speak (not a stale pinned default).
+        version = _SUPPORTED_PROTOCOL_VERSIONS[0]
     return {
         'protocolVersion': version,
         'capabilities': {

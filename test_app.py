@@ -6364,6 +6364,29 @@ def test_mcp_initialize_and_tools_list(mcp_on):
     assert 'tools' in result['capabilities']
     assert result['serverInfo']['name'] == 'podskrift'
 
+    # Newest supported is echoed when requested.
+    newest = _mcp_rpc(mcp_on['key_a'], 'initialize', {
+        'protocolVersion': '2025-11-25',
+        'capabilities': {},
+        'clientInfo': {'name': 'test', 'version': '0'},
+    })
+    assert newest.get_json()['result']['protocolVersion'] == '2025-11-25'
+
+    # Unknown / missing → fall back to newest supported (not 2025-03-26).
+    import mcp_server as MCP
+    assert MCP._SUPPORTED_PROTOCOL_VERSIONS[0] == '2025-11-25'
+    unknown = _mcp_rpc(mcp_on['key_a'], 'initialize', {
+        'protocolVersion': '2099-01-01',
+        'capabilities': {},
+        'clientInfo': {'name': 'future', 'version': '0'},
+    })
+    assert unknown.get_json()['result']['protocolVersion'] == '2025-11-25'
+    missing = _mcp_rpc(mcp_on['key_a'], 'initialize', {
+        'capabilities': {},
+        'clientInfo': {'name': 'old', 'version': '0'},
+    })
+    assert missing.get_json()['result']['protocolVersion'] == '2025-11-25'
+
     listed = _mcp_rpc(mcp_on['key_a'], 'tools/list', {})
     tools = listed.get_json()['result']['tools']
     by_name = {t['name']: t for t in tools}
@@ -6781,12 +6804,70 @@ def test_oauth_claude_callback_and_https_redirects_allowed(mcp_oauth_on):
     assert OAUTH.validate_redirect_uri('https://chatgpt.com/connector/oauth/callback')
     assert OAUTH.validate_redirect_uri('http://127.0.0.1:8787/callback')
     assert OAUTH.validate_redirect_uri('http://localhost/callback')
+    assert OAUTH.validate_redirect_uri('http://[::1]:9999/callback')
     # Claude callback registers cleanly via DCR.
     reg = _oauth_register(
         redirect_uris=[OAUTH.CLAUDE_AI_CALLBACK],
         client_name='Claude')
     assert reg.status_code == 201
     assert reg.get_json()['client_name'] == 'Claude'
+
+
+def test_oauth_loopback_redirect_ignores_port(mcp_oauth_on, monkeypatch):
+    """RFC 8252 §7.3: Claude Code random loopback ports must match registered URI."""
+    cimd_url = 'https://claude.ai/oauth/claude-code-client-metadata'
+    registered = 'http://localhost/callback'
+    requested = 'http://localhost:54321/callback'
+    doc = {
+        'client_id': cimd_url,
+        'client_name': 'Claude Code',
+        'redirect_uris': [registered, 'http://127.0.0.1/callback'],
+        'token_endpoint_auth_method': 'none',
+        'token_endpoint_auth_methods_supported': ['none'],
+        'grant_types': ['authorization_code', 'refresh_token'],
+        'response_types': ['code'],
+    }
+
+    class _FakeResp:
+        status_code = 200
+
+        def iter_content(self, chunk_size=4096):
+            yield json.dumps(doc).encode('utf-8')
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(OAUTH, '_cimd_host_is_safe', lambda host: True)
+    monkeypatch.setattr(OAUTH.requests, 'get', lambda *a, **k: _FakeResp())
+
+    assert OAUTH.redirect_uri_matches(requested, registered)
+    assert OAUTH.redirect_uri_matches(
+        'http://127.0.0.1:9999/callback', 'http://127.0.0.1/callback')
+    assert OAUTH.redirect_uri_matches(
+        'http://[::1]:4242/callback', 'http://[::1]/callback')
+    # Different loopback hosts do not cross-match; non-loopback stays exact.
+    assert not OAUTH.redirect_uri_matches(
+        'http://127.0.0.1:9999/callback', 'http://localhost/callback')
+    assert not OAUTH.redirect_uri_matches(
+        'https://evil.example:443/cb', 'https://evil.example/cb')
+    assert not OAUTH.redirect_uri_allowed(
+        'https://evil.example/other', ['https://evil.example/cb'])
+
+    verifier, challenge = _pkce_pair()
+    browser = _login(mcp_oauth_on['a'])
+    _, code = _oauth_approve(
+        browser, client_id=cimd_url, redirect_uri=requested,
+        verifier_challenge=(verifier, challenge))
+    assert code
+    tok = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': requested,
+        'client_id': cimd_url,
+        'code_verifier': verifier,
+        'resource': 'https://podskrift.com/mcp',
+    })
+    assert tok.status_code == 200, tok.get_json()
 
 
 def test_oauth_cimd_client_authorize_and_token(mcp_oauth_on, monkeypatch):
@@ -7650,6 +7731,7 @@ def test_oauth_refusal_reports_to_sentry(mcp_oauth_on, monkeypatch):
     assert tags.get('oauth_step') == 'token'
     assert tags.get('client_id_host') == 'dcr'
     assert 'reason' in tags
+    assert tags.get('test') is None
     blob = json.dumps(event)
     assert 'client_assertion' not in blob
     assert 'eyJ' not in blob
@@ -7670,6 +7752,24 @@ def test_oauth_refusal_reports_to_sentry(mcp_oauth_on, monkeypatch):
     assert denied.status_code == 400
     assert captured
     assert captured[-1]['tags']['oauth_step'] == 'authorize'
+
+    # Self-test UA: tag test=true and use info so it does not page.
+    captured.clear()
+    e2e = A.app.test_client().post(
+        '/oauth/token',
+        data={
+            'grant_type': 'authorization_code',
+            'code': 'nope',
+            'redirect_uri': 'http://127.0.0.1/cb',
+            'client_id': 'poc_unknown',
+            'code_verifier': 'a' * 64,
+        },
+        headers={'User-Agent': 'podskrift-e2e/1.0 negative-token'},
+    )
+    assert e2e.status_code == 401
+    assert captured
+    assert captured[-1].get('level') == 'info'
+    assert captured[-1]['tags'].get('test') == 'true'
 
 
 # --------------------------------------------------------------------------
