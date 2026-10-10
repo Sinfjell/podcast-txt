@@ -334,11 +334,11 @@ def _www_authenticate_header() -> str:
 # Token helpers
 # ---------------------------------------------------------------------------
 
-def lookup_access_token_user(plaintext: str):
-    """Return User for a valid (non-revoked, non-expired) access token, or None."""
+def lookup_access_token_row(plaintext: str):
+    """Return a valid OAuthAccessToken row, or None."""
     if not plaintext or not plaintext.startswith(ACCESS_TOKEN_PREFIX):
         return None
-    from models import OAuthAccessToken, User, db
+    from models import OAuthAccessToken
     digest = _hash_token(plaintext)
     row = OAuthAccessToken.query.filter_by(token_hash=digest).first()
     if row is None:
@@ -349,7 +349,29 @@ def lookup_access_token_user(plaintext: str):
         return None
     if not resource_matches_mcp(row.resource):
         return None
+    return row
+
+
+def lookup_access_token_user(plaintext: str):
+    """Return User for a valid (non-revoked, non-expired) access token, or None."""
+    from models import User, db
+    row = lookup_access_token_row(plaintext)
+    if row is None:
+        return None
     return db.session.get(User, row.user_id)
+
+
+def lookup_access_token_client_name(plaintext: str) -> str | None:
+    """OAuth client_name for a valid access token, when known."""
+    from models import OAuthClient
+    row = lookup_access_token_row(plaintext)
+    if row is None:
+        return None
+    client = OAuthClient.query.filter_by(client_id=row.client_id).first()
+    if client is None:
+        return None
+    name = (client.client_name or '').strip()
+    return name[:64] or None
 
 
 def list_connected_apps(user_id: int) -> list[dict]:

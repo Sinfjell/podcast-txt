@@ -8121,24 +8121,25 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[1]['id'] == 'new-signup-120-min-trial'
-    assert entries[2]['id'] == 'new-look'
-    assert entries[3]['id'] == 'forgot-password'
-    assert entries[4]['id'] == 'share-listen-links'
-    assert entries[5]['id'] == 'keyboard-and-faster-loading'
+    assert entries[0]['id'] == 'history-via-mcp'
+    assert entries[1]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[2]['id'] == 'new-signup-120-min-trial'
+    assert entries[3]['id'] == 'new-look'
+    assert entries[4]['id'] == 'forgot-password'
+    assert entries[5]['id'] == 'share-listen-links'
+    assert entries[6]['id'] == 'keyboard-and-faster-loading'
     # Internal / auth fixes never ship as user-facing changelog entries.
     assert all(e['id'] != 'chatgpt-oauth-private-key-jwt' for e in entries)
-    assert entries[6]['id'] == 'show-landing-pages'
-    assert entries[7]['id'] == 'public-share-links'
-    assert entries[8]['id'] == 'unsubscribe-confirm-click'
-    assert entries[9]['id'] == 'partial-preview-minutes-wording'
-    assert entries[10]['id'] == 'partial-trial-preview'
-    assert entries[11]['id'] == 'own-key-billing-clarity'
-    assert entries[12]['id'] == 'clearer-missing-episode-audio'
-    assert entries[13]['id'] == 'new-signup-60-min-trial'
-    assert entries[14]['id'] == 'spotify-paste-robustness'
-    assert entries[15]['id'] == 'no-double-charge-restart'
+    assert entries[7]['id'] == 'show-landing-pages'
+    assert entries[8]['id'] == 'public-share-links'
+    assert entries[9]['id'] == 'unsubscribe-confirm-click'
+    assert entries[10]['id'] == 'partial-preview-minutes-wording'
+    assert entries[11]['id'] == 'partial-trial-preview'
+    assert entries[12]['id'] == 'own-key-billing-clarity'
+    assert entries[13]['id'] == 'clearer-missing-episode-audio'
+    assert entries[14]['id'] == 'new-signup-60-min-trial'
+    assert entries[15]['id'] == 'spotify-paste-robustness'
+    assert entries[16]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -12455,9 +12456,10 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[1]['id'] == 'new-signup-120-min-trial'
-    assert entries[2]['id'] == 'new-look'
+    assert entries[0]['id'] == 'history-via-mcp'
+    assert entries[1]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[2]['id'] == 'new-signup-120-min-trial'
+    assert entries[3]['id'] == 'new-look'
 
 
 # --------------------------------------------------------------------------
@@ -13375,8 +13377,10 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
     assert 'data-kpi="total_users"' in body
     assert 'data-kpi="activated_users"' in body
     assert 'data-kpi="trial_daily_used_minutes"' in body
-    assert 'Trial today' in body
+    assert 'Free pool left' in body
     assert 'chartSignups' in body
+    assert 'data-ds-tab="admin-overview"' in body
+    assert '/admin/api/series' in body or 'admin/api/series' in body or 'loadSeries' in body
     # User detail lists tasks / purchases
     with A.app.app_context():
         uid0 = User.query.filter_by(email=f'{prefix}-0@test.com').one().id
@@ -14621,6 +14625,179 @@ def test_admin_costs_still_404_for_non_admin():
     uid = _make_user('not-costs-admin@example.com')
     client = _login(uid)
     assert client.get('/admin').status_code == 404
+
+
+def test_admin_nav_link_only_for_allowlisted(monkeypatch):
+    monkeypatch.setenv('ADMIN_EMAILS', 'nav-admin@test.com')
+    admin_client, _ = _admin_login('nav-admin@test.com')
+    admin_home = admin_client.get('/').data.decode()
+    assert 'data-nav="admin"' in admin_home
+    assert 'href="/admin"' in admin_home
+
+    other_uid = _make_user('nav-pleb@test.com')
+    other = _login(other_uid)
+    other_home = other.get('/').data.decode()
+    assert 'data-nav="admin"' not in other_home
+    assert 'href="/admin"' not in other_home
+    assert 'History' in other_home
+
+
+def test_admin_series_api_auth_and_payload(monkeypatch):
+    import admin_dashboard as AD
+    monkeypatch.setenv('ADMIN_EMAILS', 'series-admin@test.com')
+    anon = A.app.test_client()
+    assert anon.get('/admin/api/series?metric=signups&days=30').status_code == 404
+
+    uid = _make_user('series-pleb@test.com')
+    assert _login(uid).get('/admin/api/series?metric=signups').status_code == 404
+
+    client, _ = _admin_login('series-admin@test.com')
+    bad = client.get('/admin/api/series?metric=not-a-metric')
+    assert bad.status_code == 404
+
+    for metric in ('signups', 'users', 'transcripts', 'api_cost', 'income', 'mcp'):
+        resp = client.get(f'/admin/api/series?metric={metric}&days=7')
+        assert resp.status_code == 200, metric
+        data = resp.get_json()
+        assert data['metric'] == metric
+        assert data['days'] == 7
+        assert len(data['labels']) == 7
+        assert len(data['values']) == 7
+        assert resp.headers.get('Cache-Control') == 'no-store'
+
+    assert client.get('/admin/api/series?metric=signups&days=30').get_json()['days'] == 30
+    assert client.get('/admin/api/series?metric=signups&days=90').get_json()['days'] == 90
+    # Invalid days fall back to 30.
+    assert client.get('/admin/api/series?metric=signups&days=12').get_json()['days'] == 30
+
+    with A.app.app_context():
+        payload = AD.collect_series(A.db, 'signups', days=7)
+        assert payload['label'] == 'Signups'
+
+
+def test_task_source_column_migration_and_enqueue(monkeypatch, trial_on):
+    """source/source_client are additive; enqueue persists web|mcp|api."""
+    import sqlite3
+    import tempfile
+    import threading as _t
+    import types
+    from pathlib import Path
+    from sqlalchemy import create_engine, text as sa_text
+    from models import TASK_COLUMN_MIGRATIONS, TranscriptionTask, User, db
+
+    assert 'source' in TASK_COLUMN_MIGRATIONS
+    assert 'source_client' in TASK_COLUMN_MIGRATIONS
+    assert hasattr(TranscriptionTask, 'source')
+    assert hasattr(TranscriptionTask, 'source_client')
+
+    tmp = Path(tempfile.mkdtemp(prefix='podskrift-source-')) / 'prod-source.db'
+    conn = sqlite3.connect(str(tmp))
+    conn.execute('''
+        CREATE TABLE transcription_tasks (
+            id VARCHAR(36) PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            episode_title VARCHAR(512) NOT NULL,
+            status VARCHAR(20) NOT NULL,
+            progress INTEGER NOT NULL DEFAULT 0,
+            download_progress INTEGER NOT NULL DEFAULT 0,
+            trial_settled BOOLEAN NOT NULL DEFAULT 0
+        )
+    ''')
+    conn.commit()
+    cols_before = {row[1] for row in conn.execute('PRAGMA table_info(transcription_tasks)')}
+    assert 'source' not in cols_before
+    conn.close()
+
+    engine = create_engine(f'sqlite:///{tmp}')
+    with engine.begin() as bind:
+        existing = {row[1] for row in bind.execute(
+            sa_text('PRAGMA table_info(transcription_tasks)')).fetchall()}
+        for column, ddl_type in TASK_COLUMN_MIGRATIONS.items():
+            if column in existing:
+                continue
+            bind.execute(sa_text(
+                f'ALTER TABLE transcription_tasks ADD COLUMN {column} {ddl_type}'
+            ))
+        cols_after = {row[1] for row in bind.execute(
+            sa_text('PRAGMA table_info(transcription_tasks)')).fetchall()}
+    assert 'source' in cols_after
+    assert 'source_client' in cols_after
+
+    assert A.task_source_via_label('mcp', None) == 'via MCP'
+    assert A.task_source_via_label('mcp', 'ChatGPT') == 'via ChatGPT'
+    assert A.task_source_via_label('mcp', 'Claude Desktop') == 'via Claude'
+    assert A.task_source_via_label('web', None) is None
+    assert A.normalize_task_source('MCP') == 'mcp'
+
+    monkeypatch.setattr(A, 'MAX_CONCURRENT_TRANSCRIPTIONS', 2)
+    monkeypatch.setattr(A, '_transcription_slots', _t.BoundedSemaphore(2))
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda *a, **kw: types.SimpleNamespace(daemon=True, start=lambda: None))
+
+    uid = _make_user('source-enqueue@test.com', key='sk-' + 'c' * 40)
+    with A.app.app_context():
+        user = db.session.get(User, uid)
+        payload, status = A.enqueue_transcription(
+            user,
+            {
+                'title': 'Src Ep',
+                'audio_url': 'https://example.com/src.mp3',
+                'duration_min': 5,
+                'podcast_name': 'Show',
+            },
+            source='mcp',
+            source_client='ChatGPT',
+        )
+        assert status == 200
+        task = db.session.get(TranscriptionTask, payload['task_id'])
+        assert task.source == 'mcp'
+        assert task.source_client == 'ChatGPT'
+
+
+def test_history_shows_via_mcp_chip(monkeypatch, trial_on):
+    from models import TranscriptionTask, db
+    uid = _make_user('hist-mcp@test.com', limit=36000)
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='hist-mcp-1',
+            user_id=uid,
+            episode_title='MCP Episode',
+            status='completed',
+            transcript_text='hello',
+            audio_duration=120.0,
+            source='mcp',
+            source_client='Claude',
+            completed_at=datetime.now(timezone.utc),
+        ))
+        db.session.commit()
+    client = _login(uid)
+    body = client.get('/history').data.decode()
+    assert 'via Claude' in body
+    assert 'MCP Episode' in body
+
+
+def test_admin_transcripts_list_shows_via_label(monkeypatch):
+    from models import TranscriptionTask, db
+    monkeypatch.setenv('ADMIN_EMAILS', 'via-admin@test.com')
+    client, uid = _admin_login('via-admin@test.com')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='admin-via-mcp-1',
+            user_id=uid,
+            episode_title='Admin MCP Ep',
+            status='completed',
+            source='mcp',
+            source_client='ChatGPT',
+            completed_at=datetime.now(timezone.utc),
+        ))
+        db.session.commit()
+    body = client.get('/admin').data.decode()
+    assert 'via ChatGPT' in body
+    assert 'Admin MCP Ep' in body
+    assert 'data-series="api_cost"' in body
+    assert 'Free pool left' in body
 
 
 # --- Security review follow-ups (PR #86) -----------------------------------

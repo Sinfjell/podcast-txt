@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "components/macros.html" import chip, tabs, tab_panel %}
 {% block title %}Admin — Podskrift{% endblock %}
 {% block meta_description %}Internal admin dashboard. Not for public indexing.{% endblock %}
 {% block robots_meta %}<meta name="robots" content="noindex, nofollow">{% endblock %}
@@ -19,31 +20,63 @@
     .admin-meta { color: var(--muted); font-size: 14px; }
     .kpi-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        grid-template-columns: repeat(5, minmax(0, 1fr));
         gap: 10px;
-        margin-bottom: 28px;
+        margin-bottom: 16px;
+    }
+    @media (max-width: 960px) {
+        .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (max-width: 620px) {
+        .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     .kpi {
         background: var(--surface);
         border: 1px solid var(--line);
         border-radius: var(--radius);
         padding: 14px 14px 12px;
+        text-align: left;
+        font: inherit;
+        color: inherit;
+        width: 100%;
+        cursor: default;
+    }
+    button.kpi {
+        cursor: pointer;
+    }
+    button.kpi:hover, button.kpi.is-active {
+        border-color: var(--accent);
+        background: var(--accent-tint);
+        color: var(--on-accent-tint);
+    }
+    button.kpi:hover .kpi-label,
+    button.kpi.is-active .kpi-label,
+    button.kpi:hover .kpi-sub,
+    button.kpi.is-active .kpi-sub {
+        color: var(--on-accent-tint);
     }
     .kpi-label {
         font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 4px;
     }
     .kpi-value {
-        font-size: 24px; font-weight: 700; letter-spacing: -0.015em;
+        font-size: 22px; font-weight: 700; letter-spacing: -0.015em;
         font-variant-numeric: tabular-nums; line-height: 1.2;
     }
     .kpi-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
-    .admin-section { margin-bottom: 32px; }
-    .admin-section h2 {
-        font-size: 24px; font-weight: 700; margin-bottom: 12px;
-        letter-spacing: -0.015em; line-height: 1.2;
+    .admin-graph {
+        background: var(--surface); border: 1px solid var(--line);
+        border-radius: var(--radius); padding: 14px; margin-bottom: 20px;
+    }
+    .admin-graph[hidden] { display: none; }
+    .admin-graph-head {
+        display: flex; flex-wrap: wrap; align-items: center;
+        justify-content: space-between; gap: 8px; margin-bottom: 10px;
+    }
+    .admin-graph-head h2 {
+        font-size: 16px; font-weight: 700; margin: 0; letter-spacing: -0.01em;
     }
     .chart-toolbar {
-        display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap;
+        display: flex; gap: 6px; flex-wrap: wrap;
     }
     .chart-toolbar button {
         background: var(--surface); border: 1px solid var(--line);
@@ -53,6 +86,19 @@
     .chart-toolbar button.active {
         color: var(--on-accent-tint); border-color: var(--accent);
         background: var(--accent-tint);
+    }
+    .admin-graph-canvas-wrap { position: relative; height: 220px; }
+    .admin-graph-canvas-wrap canvas { width: 100% !important; height: 100% !important; }
+    .admin-graph-empty { color: var(--muted); font-size: 14px; padding: 24px 0; }
+    .admin-nav { margin-bottom: 20px; }
+    .admin-section { margin-bottom: 32px; }
+    .admin-section h2 {
+        font-size: 24px; font-weight: 700; margin-bottom: 12px;
+        letter-spacing: -0.015em; line-height: 1.2;
+    }
+    .admin-section h3 {
+        font-size: 13px; font-weight: 700; color: var(--muted);
+        margin: 0 0 8px;
     }
     .chart-grid {
         display: grid;
@@ -88,6 +134,9 @@
     }
     table.admin-table tr:last-child td { border-bottom: 0; }
     table.admin-table a { color: var(--accent); }
+    .admin-cell-clip {
+        max-width: 240px; overflow: hidden; text-overflow: ellipsis;
+    }
     .status-pill {
         display: inline-block; font-size: 12px; font-weight: 700;
         padding: 2px 8px; border-radius: var(--radius-sm);
@@ -182,17 +231,23 @@
         font-size: 12px; font-weight: 700; color: var(--muted);
         margin-bottom: 8px;
     }
-    .cost-card .est-badge {
-        font-size: 11px; font-weight: 700; color: var(--on-warning-tint);
-        background: var(--warning-tint); padding: 1px 6px;
-        border-radius: var(--radius-sm); margin-left: 6px;
-        vertical-align: middle;
+    .est-badge {
+        font-size: 12px; font-weight: 700; color: var(--on-warning-tint);
+        background: var(--warning-tint); padding: 2px 8px;
+        border-radius: var(--radius-sm); vertical-align: middle;
     }
-    .cost-metrics {
+    .mcp-stat-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
         gap: 10px; margin-bottom: 16px;
     }
+    .admin-flex-between {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 8px; flex-wrap: wrap; margin-bottom: 4px;
+    }
+    .admin-flex-between h2 { margin: 0; }
+    .money-muted { color: var(--muted); }
+    .admin-empty { color: var(--muted); }
 </style>
 
 <div class="admin-wrap ph-no-capture">
@@ -201,225 +256,114 @@
         <span class="admin-meta">Times in {{ admin_tz_name }} · read-only</span>
     </div>
 
-    <div class="kpi-grid" id="adminKpis">
-        <div class="kpi">
-            <div class="kpi-label">Users</div>
-            <div class="kpi-value" data-kpi="total_users">{{ kpis.total_users }}</div>
+    <div class="kpi-grid" id="adminKpis" role="group" aria-label="Headline metrics">
+        <button type="button" class="kpi" data-series="api_cost" data-kpi="api_cost"
+                aria-pressed="false">
+            <div class="kpi-label">API cost <span class="est-badge">est.</span></div>
+            <div class="kpi-value">${{ '%.2f'|format(kpis.api_cost_all_usd) }}</div>
+            <div class="kpi-sub">
+                ${{ '%.2f'|format(kpis.api_cost_7d_usd) }} / 7d ·
+                ${{ '%.2f'|format(kpis.api_cost_today_usd) }} today
+            </div>
+        </button>
+        <button type="button" class="kpi" data-series="income" data-kpi="income"
+                aria-pressed="false">
+            <div class="kpi-label">Income</div>
+            <div class="kpi-value">${{ '%.2f'|format(kpis.income_all_usd) }}</div>
+            <div class="kpi-sub">
+                ${{ '%.2f'|format(kpis.income_7d_usd) }} / 7d ·
+                ${{ '%.2f'|format(kpis.income_today_usd) }} today
+                {% if kpis.income_source == 'stripe_net' %} · Stripe net{% endif %}
+            </div>
+        </button>
+        <div class="kpi" data-kpi="margin">
+            <div class="kpi-label">Margin</div>
+            <div class="kpi-value">${{ '%.2f'|format(kpis.margin_all_usd) }}</div>
+            <div class="kpi-sub">
+                income − API · ${{ '%.2f'|format(kpis.margin_7d_usd) }} / 7d
+            </div>
         </div>
-        <div class="kpi">
+        <div class="kpi" data-kpi="trial_pool_left">
+            <div class="kpi-label">Free pool left</div>
+            <div class="kpi-value">{{ kpis.trial_pool_left_minutes }}</div>
+            <div class="kpi-sub">
+                of {{ kpis.trial_daily_limit_minutes }} min today (Oslo) ·
+                <span data-kpi="trial_daily_used_minutes">{{ kpis.trial_daily_used_minutes }}</span> used
+            </div>
+        </div>
+        <button type="button" class="kpi" data-series="signups" data-kpi="signups"
+                aria-pressed="false">
             <div class="kpi-label">Signups</div>
             <div class="kpi-value" data-kpi="signups_today">{{ kpis.signups_today }}</div>
             <div class="kpi-sub">
-                today · {{ kpis.signups_7d }} / 7d · {{ kpis.signups_30d }} / 30d
+                today · {{ kpis.signups_7d }} / 7d · {{ kpis.total_users }} total
             </div>
-        </div>
-        <div class="kpi">
-            <div class="kpi-label">Activated</div>
-            <div class="kpi-value" data-kpi="activated_users">{{ kpis.activated_users }}</div>
-            <div class="kpi-sub">≥1 completed transcript</div>
-        </div>
-        <div class="kpi">
-            <div class="kpi-label">Returning</div>
-            <div class="kpi-value" data-kpi="returning_users">{{ kpis.returning_users }}</div>
-            <div class="kpi-sub">≥2 days with transcripts</div>
-        </div>
-        <div class="kpi">
-            <div class="kpi-label">Transcripts 7d</div>
-            <div class="kpi-value" data-kpi="completed_7d">{{ kpis.completed_7d }}</div>
-            <div class="kpi-sub">{{ kpis.failed_7d }} failed</div>
-        </div>
-        <div class="kpi">
-            <div class="kpi-label">Minutes 7d</div>
-            <div class="kpi-value" data-kpi="minutes_7d">{{ kpis.minutes_7d }}</div>
-        </div>
-        <div class="kpi">
-            <div class="kpi-label">Trial today</div>
-            <div class="kpi-value" data-kpi="trial_daily_used_minutes">{{ kpis.trial_daily_used_minutes }}</div>
-            <div class="kpi-sub">of {{ kpis.trial_daily_limit_minutes }} min (Oslo)</div>
-        </div>
-        <div class="kpi">
-            <div class="kpi-label">Purchases</div>
-            <div class="kpi-value" data-kpi="purchase_count">{{ kpis.purchase_count }}</div>
-            <div class="kpi-sub">${{ '%.2f'|format(kpis.purchase_revenue_usd) }} credited</div>
-        </div>
-        <div class="kpi">
-            <div class="kpi-label">BYOK</div>
-            <div class="kpi-value" data-kpi="byok_users">{{ kpis.byok_users }}</div>
-        </div>
+        </button>
     </div>
 
-    <section class="admin-section" id="adminStripeRevenue">
-        <h2>Revenue &amp; payouts</h2>
-        {% if not stripe_revenue.ok %}
-        <div class="stripe-error" role="alert" data-stripe="error">
-            {{ stripe_revenue.error or 'Stripe unavailable.' }}
-        </div>
-        {% else %}
-        <p class="stripe-meta" data-stripe="meta">
-            Stripe {% if stripe_revenue.livemode %}live{% else %}test{% endif %}
-            · fetched {{ stripe_revenue.fetched_at_oslo }}
-            {% if stripe_revenue.cached %}· cached{% endif %}
-            {% if stripe_revenue.bt_truncated %}
-            · summary based on latest {{ stripe_revenue.bt_count }} balance transactions
-            {% endif %}
-            · Managed Payments MoR — tax/fee lines as Stripe reports them
-        </p>
-        <div class="balance-grid" data-stripe="balance">
-            <div class="kpi">
-                <div class="kpi-label">Available</div>
-                {% for b in stripe_revenue.balance.available %}
-                <div class="kpi-value" style="font-size: 18px;">{{ b.amount_fmt }}</div>
-                <div class="kpi-sub">{{ b.currency|upper }}</div>
-                {% else %}
-                <div class="kpi-value" style="font-size: 18px;">—</div>
-                {% endfor %}
-            </div>
-            <div class="kpi">
-                <div class="kpi-label">Pending</div>
-                {% for b in stripe_revenue.balance.pending %}
-                <div class="kpi-value" style="font-size: 18px;">{{ b.amount_fmt }}</div>
-                <div class="kpi-sub">{{ b.currency|upper }}</div>
-                {% else %}
-                <div class="kpi-value" style="font-size: 18px;">—</div>
-                {% endfor %}
+    <div class="admin-graph" id="adminSeriesGraph" hidden>
+        <div class="admin-graph-head">
+            <h2 id="adminSeriesTitle">Series</h2>
+            <div class="chart-toolbar" role="group" aria-label="Series range">
+                <button type="button" class="series-range-btn" data-days="7">7 days</button>
+                <button type="button" class="series-range-btn active" data-days="30">30 days</button>
+                <button type="button" class="series-range-btn" data-days="90">90 days</button>
             </div>
         </div>
-
-        <h3 style="font-size: 13px; font-weight: 500; color: var(--muted); margin: 0 0 8px;">
-            Money summary (balance transactions)
-        </h3>
-        <div class="money-summary-grid" data-stripe="summaries">
-            {% for key, title in [('7d', 'Last 7 days'), ('30d', 'Last 30 days'), ('all', 'All time')] %}
-            <div class="money-card">
-                <h3>{{ title }}</h3>
-                {% set rows = stripe_revenue.summaries[key] %}
-                {% if rows %}
-                    {% for r in rows %}
-                    {% if rows|length > 1 %}
-                    <div class="money-row"><span class="label">Currency</span><span>{{ r.currency|upper }}</span></div>
-                    {% endif %}
-                    <div class="money-row"><span class="label">Gross charges</span><span>{{ r.gross_charges_fmt }}</span></div>
-                    <div class="money-row"><span class="label">Stripe fees</span><span>−{{ r.stripe_fees_fmt }}</span></div>
-                    <div class="money-row"><span class="label">Refunds</span><span>−{{ r.refunds_fmt }}</span></div>
-                    {% if r.has_tax %}
-                    <div class="money-row"><span class="label">Tax</span><span>−{{ r.tax_fmt }}</span></div>
-                    {% endif %}
-                    {% if r.has_other_fees %}
-                    <div class="money-row"><span class="label">Other fees</span><span>−{{ r.other_fee_details_fmt }}</span></div>
-                    {% endif %}
-                    <div class="money-row net"><span class="label">Net</span><span>{{ r.net_fmt }}</span></div>
-                    {% endfor %}
-                {% else %}
-                    <div class="money-row"><span class="label">No balance transactions</span><span>—</span></div>
-                {% endif %}
-            </div>
-            {% endfor %}
+        <div class="admin-graph-canvas-wrap">
+            <canvas id="adminSeriesCanvas" height="220"></canvas>
         </div>
+        <p class="admin-graph-empty" id="adminSeriesEmpty" hidden>No data for this range.</p>
+    </div>
 
-        <h3 style="font-size: 13px; font-weight: 500; color: var(--muted); margin: 0 0 8px;">
-            Payouts (last {{ stripe_revenue.payouts|length }})
-        </h3>
-        <div class="admin-table-wrap" data-stripe="payouts">
-            <table class="admin-table">
-                <thead>
-                    <tr>
-                        <th>Amount</th>
-                        <th>Status</th>
-                        <th>Created</th>
-                        <th>Arrival</th>
-                        <th>Bank</th>
-                    </tr>
-                </thead>
-                <tbody>
-                {% for p in stripe_revenue.payouts %}
-                    <tr class="{{ 'payout-highlight' if p.highlight }}">
-                        <td>{{ p.amount_fmt }} <span style="color: var(--muted);">{{ p.currency|upper }}</span></td>
-                        <td><span class="status-pill {{ p.status }}">{{ p.status }}</span></td>
-                        <td>{{ p.created_oslo }}</td>
-                        <td>{{ p.arrival_oslo }}</td>
-                        <td>{% if p.destination_last4 %}•••• {{ p.destination_last4 }}{% else %}—{% endif %}</td>
-                    </tr>
-                {% else %}
-                    <tr><td colspan="5" style="color: var(--muted);">No payouts yet.</td></tr>
-                {% endfor %}
-                </tbody>
-            </table>
-        </div>
+    <nav class="admin-nav" aria-label="Admin sections">
+        {{ tabs("Admin sections", [
+            {"id": "admin-overview", "label": "Overview", "selected": true},
+            {"id": "admin-signups", "label": "Signups"},
+            {"id": "admin-users", "label": "Users"},
+            {"id": "admin-transcripts", "label": "Transcripts"},
+            {"id": "admin-costs", "label": "Costs"},
+            {"id": "admin-payments", "label": "Payments"},
+            {"id": "admin-mcp", "label": "MCP"},
+        ]) }}
+    </nav>
 
-        <div class="chart-card" style="margin-top: 16px;" data-stripe="weekly-chart">
-            <h3>Net revenue per week ({{ stripe_revenue.weekly_net.currency|upper }})</h3>
-            <canvas id="chartStripeWeekly" height="180"></canvas>
-        </div>
-        {% endif %}
-    </section>
-
-    <section class="admin-section" id="adminCosts" data-costs="section">
-        <h2>Costs <span class="est-badge" style="font-size: 12px; font-weight: 700; color: var(--on-warning-tint); background: var(--warning-tint); padding: 2px 8px; border-radius: var(--radius-sm); vertical-align: middle;">estimate</span></h2>
-        {% if costs.error %}
-        <div class="stripe-error" role="alert">{{ costs.error }}</div>
-        {% else %}
-        <p class="costs-note" data-costs="note">
-            {{ costs.note }}
-            {% if costs.fixed_monthly_usd %}
-            Fixed opex ${{ '%.2f'|format(costs.fixed_monthly_usd) }}/mo
-            (~${{ '%.2f'|format(costs.fixed_daily_usd) }}/day)
-            {% if costs.fixed_breakdown %}
-            —
-            {% for item in costs.fixed_breakdown %}
-            {{ item.name }} ${{ '%.2f'|format(item.usd) }}{% if not loop.last %}, {% endif %}
-            {% endfor %}
-            {% endif %}
-            ·
-            {% endif %}
-            As of {{ costs.as_of_oslo }} ({{ admin_tz_name }}).
-        </p>
-
-        <div class="costs-grid" data-costs="windows">
-            {% for key, title in [('today', 'Today'), ('7d', 'Last 7 days'), ('30d', 'Last 30 days'), ('all', 'All time')] %}
-            {% set w = costs.windows[key] %}
-            <div class="cost-card" data-costs-window="{{ key }}">
-                <h3>{{ title }}</h3>
-                <div class="money-row"><span class="label">Est. OpenAI (trial)</span><span>${{ '%.2f'|format(w.openai_trial_usd) }}</span></div>
-                <div class="money-row"><span class="label">Est. OpenAI (paid)</span><span>${{ '%.2f'|format(w.openai_paid_usd) }}</span></div>
-                <div class="money-row"><span class="label">Est. summaries</span><span>${{ '%.2f'|format(w.openai_summary_usd) }}</span></div>
-                <div class="money-row"><span class="label">Fixed (prorated)</span><span>${{ '%.2f'|format(w.fixed_usd) }}</span></div>
-                <div class="money-row net"><span class="label">Est. total cost</span><span>${{ '%.2f'|format(w.total_usd) }}</span></div>
-                <div class="money-row"><span class="label">Revenue (credits)</span><span>${{ '%.2f'|format(w.revenue_usd) }}</span></div>
-                <div class="money-row"><span class="label">Gross margin</span>
-                    <span>
-                        ${{ '%.2f'|format(w.gross_margin_usd) }}
-                        {% if w.gross_margin_pct is not none %}
-                        ({{ '%.1f'|format(w.gross_margin_pct) }}%)
-                        {% endif %}
-                    </span>
-                </div>
-                <div class="money-row" style="margin-top: 6px;"><span class="label">Trial minutes</span><span>{{ w.platform_trial_minutes }}</span></div>
-                <div class="money-row"><span class="label">Paid minutes</span><span>{{ w.platform_paid_minutes }}</span></div>
-                <div class="money-row"><span class="label">BYOK minutes (excl.)</span><span>{{ w.byok_minutes }}</span></div>
-                <div class="money-row"><span class="label">Failed w/ OpenAI hit</span><span>{{ w.failed_with_openai_count }}</span></div>
-                <div class="money-row"><span class="label">Cost / active user</span>
-                    <span>{% if w.cost_per_active_user_usd is not none %}${{ '%.2f'|format(w.cost_per_active_user_usd) }}{% else %}—{% endif %}</span>
-                </div>
-                <div class="money-row"><span class="label">Cost / paid user</span>
-                    <span>{% if w.cost_per_paid_user_usd is not none %}${{ '%.2f'|format(w.cost_per_paid_user_usd) }}{% else %}—{% endif %}</span>
-                </div>
-            </div>
-            {% endfor %}
-        </div>
-
-        <div class="chart-card" data-costs="daily-chart">
-            <h3>Estimated cost per day (30d)</h3>
-            <canvas id="chartCostsDaily" height="180"></canvas>
-        </div>
-        {% endif %}
-    </section>
-
-    <section class="admin-section">
-        <div class="flex-between" style="align-items: center; margin-bottom: 4px;">
-            <h2 style="margin: 0;">Charts</h2>
+    {% call tab_panel('admin-overview', selected=true) %}
+    <section class="admin-section" id="adminOverview">
+        <div class="admin-flex-between">
+            <h2>Overview</h2>
             <div class="chart-toolbar" role="group" aria-label="Chart range">
                 <button type="button" class="range-btn active" data-range="30">30 days</button>
                 <button type="button" class="range-btn" data-range="90">90 days</button>
+            </div>
+        </div>
+        <div class="kpi-grid" id="adminSecondaryKpis">
+            <button type="button" class="kpi" data-series="users" aria-pressed="false">
+                <div class="kpi-label">Users</div>
+                <div class="kpi-value" data-kpi="total_users">{{ kpis.total_users }}</div>
+                <div class="kpi-sub">
+                    <span data-kpi="activated_users">{{ kpis.activated_users }}</span> activated ·
+                    <span data-kpi="returning_users">{{ kpis.returning_users }}</span> returning
+                </div>
+            </button>
+            <button type="button" class="kpi" data-series="transcripts" aria-pressed="false">
+                <div class="kpi-label">Transcripts 7d</div>
+                <div class="kpi-value" data-kpi="completed_7d">{{ kpis.completed_7d }}</div>
+                <div class="kpi-sub">{{ kpis.failed_7d }} failed · {{ kpis.minutes_7d }} min</div>
+            </button>
+            <button type="button" class="kpi" data-series="mcp" aria-pressed="false">
+                <div class="kpi-label">MCP transcripts</div>
+                <div class="kpi-value">{{ mcp_stats.mcp_transcripts_today }}</div>
+                <div class="kpi-sub">today · {{ mcp_stats.mcp_transcripts_7d }} / 7d</div>
+            </button>
+            <div class="kpi">
+                <div class="kpi-label">Purchases</div>
+                <div class="kpi-value" data-kpi="purchase_count">{{ kpis.purchase_count }}</div>
+                <div class="kpi-sub">${{ '%.2f'|format(kpis.purchase_revenue_usd) }} credited</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">BYOK</div>
+                <div class="kpi-value" data-kpi="byok_users">{{ kpis.byok_users }}</div>
             </div>
         </div>
         <div class="chart-grid">
@@ -449,8 +393,20 @@
             </div>
         </div>
     </section>
+    {% endcall %}
 
-    <section class="admin-section">
+    {% call tab_panel('admin-signups') %}
+    <section class="admin-section" id="adminSignups">
+        <h2>Signups</h2>
+        <p class="admin-meta">
+            {{ kpis.signups_today }} today · {{ kpis.signups_7d }} / 7d · {{ kpis.signups_30d }} / 30d
+        </p>
+        <button type="button" class="btn btn-secondary" data-series="signups">Show signup graph</button>
+    </section>
+    {% endcall %}
+
+    {% call tab_panel('admin-users') %}
+    <section class="admin-section" id="adminUsers">
         <h2>Latest signups</h2>
         <form class="search-row" method="get" action="{{ url_for('admin.dashboard') }}" role="search">
             <input type="search" name="q" value="{{ users_table.q }}"
@@ -493,7 +449,7 @@
                         <td>{{ u.purchase_count }}</td>
                     </tr>
                 {% else %}
-                    <tr><td colspan="9" style="color: var(--muted);">No users match.</td></tr>
+                    <tr><td colspan="9" class="admin-empty">No users match.</td></tr>
                 {% endfor %}
                 </tbody>
             </table>
@@ -508,8 +464,10 @@
                href="{{ url_for('admin.dashboard', users_page=next_u, q=users_table.q or none, tasks_page=tasks_table.page if tasks_table.page > 1 else none) }}">Next</a>
         </div>
     </section>
+    {% endcall %}
 
-    <section class="admin-section">
+    {% call tab_panel('admin-transcripts') %}
+    <section class="admin-section" id="adminTranscripts">
         <h2>Latest transcription tasks</h2>
         <div class="admin-table-wrap">
             <table class="admin-table">
@@ -518,6 +476,7 @@
                         <th>User</th>
                         <th>Title</th>
                         <th>Status</th>
+                        <th>Via</th>
                         <th>Duration</th>
                         <th>error_kind</th>
                         <th>Created</th>
@@ -531,14 +490,15 @@
                             <a href="{{ url_for('admin.user_page', user_id=t.user_id) }}">{{ t.email }}</a>
                             {% else %}{{ t.email }}{% endif %}
                         </td>
-                        <td style="max-width: 240px; overflow: hidden; text-overflow: ellipsis;" title="{{ t.title }}">{{ t.title }}</td>
+                        <td class="admin-cell-clip" title="{{ t.title }}">{{ t.title }}</td>
                         <td><span class="status-pill {{ t.status }}">{{ t.status }}</span></td>
+                        <td>{% if t.via_label %}{{ chip(t.via_label, variant='muted') }}{% else %}—{% endif %}</td>
                         <td>{% if t.duration_min is not none %}{{ t.duration_min }} min{% else %}—{% endif %}</td>
                         <td>{{ t.error_kind or '—' }}</td>
                         <td>{{ t.created_oslo }}</td>
                     </tr>
                 {% else %}
-                    <tr><td colspan="6" style="color: var(--muted);">No tasks yet.</td></tr>
+                    <tr><td colspan="7" class="admin-empty">No tasks yet.</td></tr>
                 {% endfor %}
                 </tbody>
             </table>
@@ -553,6 +513,195 @@
                href="{{ url_for('admin.dashboard', tasks_page=next_t, users_page=users_table.page if users_table.page > 1 else none, q=users_table.q or none) }}">Next</a>
         </div>
     </section>
+    {% endcall %}
+
+    {% call tab_panel('admin-costs') %}
+    <section class="admin-section" id="adminCosts" data-costs="section">
+        <h2>Costs <span class="est-badge">estimate</span></h2>
+        {% if costs.error %}
+        <div class="stripe-error" role="alert">{{ costs.error }}</div>
+        {% else %}
+        <p class="costs-note" data-costs="note">
+            {{ costs.note }}
+            {% if costs.fixed_monthly_usd %}
+            Fixed opex ${{ '%.2f'|format(costs.fixed_monthly_usd) }}/mo
+            (~${{ '%.2f'|format(costs.fixed_daily_usd) }}/day)
+            {% if costs.fixed_breakdown %}
+            —
+            {% for item in costs.fixed_breakdown %}
+            {{ item.name }} ${{ '%.2f'|format(item.usd) }}{% if not loop.last %}, {% endif %}
+            {% endfor %}
+            {% endif %}
+            ·
+            {% endif %}
+            As of {{ costs.as_of_oslo }} ({{ admin_tz_name }}).
+        </p>
+
+        <div class="costs-grid" data-costs="windows">
+            {% for key, title in [('today', 'Today'), ('7d', 'Last 7 days'), ('30d', 'Last 30 days'), ('all', 'All time')] %}
+            {% set w = costs.windows[key] %}
+            <div class="cost-card" data-costs-window="{{ key }}">
+                <h3>{{ title }}</h3>
+                <div class="money-row"><span class="label">Est. OpenAI (trial)</span><span>${{ '%.2f'|format(w.openai_trial_usd) }}</span></div>
+                <div class="money-row"><span class="label">Est. OpenAI (paid)</span><span>${{ '%.2f'|format(w.openai_paid_usd) }}</span></div>
+                <div class="money-row"><span class="label">Est. summaries</span><span>${{ '%.2f'|format(w.openai_summary_usd) }}</span></div>
+                <div class="money-row"><span class="label">Fixed (prorated)</span><span>${{ '%.2f'|format(w.fixed_usd) }}</span></div>
+                <div class="money-row net"><span class="label">Est. total cost</span><span>${{ '%.2f'|format(w.total_usd) }}</span></div>
+                <div class="money-row"><span class="label">Revenue (credits)</span><span>${{ '%.2f'|format(w.revenue_usd) }}</span></div>
+                <div class="money-row"><span class="label">Gross margin</span>
+                    <span>
+                        ${{ '%.2f'|format(w.gross_margin_usd) }}
+                        {% if w.gross_margin_pct is not none %}
+                        ({{ '%.1f'|format(w.gross_margin_pct) }}%)
+                        {% endif %}
+                    </span>
+                </div>
+                <div class="money-row"><span class="label">Trial minutes</span><span>{{ w.platform_trial_minutes }}</span></div>
+                <div class="money-row"><span class="label">Paid minutes</span><span>{{ w.platform_paid_minutes }}</span></div>
+                <div class="money-row"><span class="label">BYOK minutes (excl.)</span><span>{{ w.byok_minutes }}</span></div>
+                <div class="money-row"><span class="label">Failed w/ OpenAI hit</span><span>{{ w.failed_with_openai_count }}</span></div>
+                <div class="money-row"><span class="label">Cost / active user</span>
+                    <span>{% if w.cost_per_active_user_usd is not none %}${{ '%.2f'|format(w.cost_per_active_user_usd) }}{% else %}—{% endif %}</span>
+                </div>
+                <div class="money-row"><span class="label">Cost / paid user</span>
+                    <span>{% if w.cost_per_paid_user_usd is not none %}${{ '%.2f'|format(w.cost_per_paid_user_usd) }}{% else %}—{% endif %}</span>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div class="chart-card" data-costs="daily-chart">
+            <h3>Estimated cost per day (30d)</h3>
+            <canvas id="chartCostsDaily" height="180"></canvas>
+        </div>
+        {% endif %}
+    </section>
+    {% endcall %}
+
+    {% call tab_panel('admin-payments') %}
+    <section class="admin-section" id="adminStripeRevenue">
+        <h2>Revenue &amp; payouts</h2>
+        {% if not stripe_revenue.ok %}
+        <div class="stripe-error" role="alert" data-stripe="error">
+            {{ stripe_revenue.error or 'Stripe unavailable.' }}
+        </div>
+        {% else %}
+        <p class="stripe-meta" data-stripe="meta">
+            Stripe {% if stripe_revenue.livemode %}live{% else %}test{% endif %}
+            · fetched {{ stripe_revenue.fetched_at_oslo }}
+            {% if stripe_revenue.cached %}· cached{% endif %}
+            {% if stripe_revenue.bt_truncated %}
+            · summary based on latest {{ stripe_revenue.bt_count }} balance transactions
+            {% endif %}
+            · Managed Payments MoR — tax/fee lines as Stripe reports them
+        </p>
+        <div class="balance-grid" data-stripe="balance">
+            <div class="kpi">
+                <div class="kpi-label">Available</div>
+                {% for b in stripe_revenue.balance.available %}
+                <div class="kpi-value">{{ b.amount_fmt }}</div>
+                <div class="kpi-sub">{{ b.currency|upper }}</div>
+                {% else %}
+                <div class="kpi-value">—</div>
+                {% endfor %}
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">Pending</div>
+                {% for b in stripe_revenue.balance.pending %}
+                <div class="kpi-value">{{ b.amount_fmt }}</div>
+                <div class="kpi-sub">{{ b.currency|upper }}</div>
+                {% else %}
+                <div class="kpi-value">—</div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <h3>Money summary (balance transactions)</h3>
+        <div class="money-summary-grid" data-stripe="summaries">
+            {% for key, title in [('7d', 'Last 7 days'), ('30d', 'Last 30 days'), ('all', 'All time')] %}
+            <div class="money-card">
+                <h3>{{ title }}</h3>
+                {% set rows = stripe_revenue.summaries[key] %}
+                {% if rows %}
+                    {% for r in rows %}
+                    {% if rows|length > 1 %}
+                    <div class="money-row"><span class="label">Currency</span><span>{{ r.currency|upper }}</span></div>
+                    {% endif %}
+                    <div class="money-row"><span class="label">Gross charges</span><span>{{ r.gross_charges_fmt }}</span></div>
+                    <div class="money-row"><span class="label">Stripe fees</span><span>−{{ r.stripe_fees_fmt }}</span></div>
+                    <div class="money-row"><span class="label">Refunds</span><span>−{{ r.refunds_fmt }}</span></div>
+                    {% if r.has_tax %}
+                    <div class="money-row"><span class="label">Tax</span><span>−{{ r.tax_fmt }}</span></div>
+                    {% endif %}
+                    {% if r.has_other_fees %}
+                    <div class="money-row"><span class="label">Other fees</span><span>−{{ r.other_fee_details_fmt }}</span></div>
+                    {% endif %}
+                    <div class="money-row net"><span class="label">Net</span><span>{{ r.net_fmt }}</span></div>
+                    {% endfor %}
+                {% else %}
+                    <div class="money-row"><span class="label">No balance transactions</span><span>—</span></div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+
+        <h3>Payouts (last {{ stripe_revenue.payouts|length }})</h3>
+        <div class="admin-table-wrap" data-stripe="payouts">
+            <table class="admin-table">
+                <thead>
+                    <tr>
+                        <th>Amount</th>
+                        <th>Status</th>
+                        <th>Created</th>
+                        <th>Arrival</th>
+                        <th>Bank</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for p in stripe_revenue.payouts %}
+                    <tr class="{{ 'payout-highlight' if p.highlight }}">
+                        <td>{{ p.amount_fmt }} <span class="money-muted">{{ p.currency|upper }}</span></td>
+                        <td><span class="status-pill {{ p.status }}">{{ p.status }}</span></td>
+                        <td>{{ p.created_oslo }}</td>
+                        <td>{{ p.arrival_oslo }}</td>
+                        <td>{% if p.destination_last4 %}•••• {{ p.destination_last4 }}{% else %}—{% endif %}</td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="5" class="admin-empty">No payouts yet.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="chart-card" data-stripe="weekly-chart">
+            <h3>Net revenue per week ({{ stripe_revenue.weekly_net.currency|upper }})</h3>
+            <canvas id="chartStripeWeekly" height="180"></canvas>
+        </div>
+        {% endif %}
+    </section>
+    {% endcall %}
+
+    {% call tab_panel('admin-mcp') %}
+    <section class="admin-section" id="adminMcp">
+        <h2>MCP</h2>
+        <div class="mcp-stat-grid">
+            <button type="button" class="kpi" data-series="mcp" aria-pressed="false">
+                <div class="kpi-label">MCP transcripts</div>
+                <div class="kpi-value">{{ mcp_stats.mcp_transcripts_total }}</div>
+                <div class="kpi-sub">{{ mcp_stats.mcp_transcripts_today }} today · {{ mcp_stats.mcp_transcripts_7d }} / 7d</div>
+            </button>
+            <div class="kpi">
+                <div class="kpi-label">OAuth clients</div>
+                <div class="kpi-value">{{ mcp_stats.oauth_clients }}</div>
+                <div class="kpi-sub">registered connectors</div>
+            </div>
+        </div>
+        <p class="admin-meta">
+            Transcripts started via the MCP connector are marked <code>source=mcp</code>
+            at enqueue. Graph counts those starts (not every tool call).
+        </p>
+    </section>
+    {% endcall %}
 </div>
 
 <script type="application/json" id="adminChartData">{{ charts | tojson }}</script>
@@ -566,6 +715,158 @@
 <script src="{{ url_for('static', filename='vendor/chart-4.4.7.umd.min.js') }}"></script>
 <script>
 (function () {
+    var css = getComputedStyle(document.documentElement);
+    function token(name) { return css.getPropertyValue(name).trim(); }
+    var palette = {
+        grid: token('--line'),
+        text: token('--muted'),
+        line: token('--accent'),
+        fill: token('--accent-tint'),
+        fail: token('--danger'),
+        funnel: [token('--accent'), token('--accent-hover'), token('--muted')],
+        costFixed: token('--muted'),
+    };
+
+    /* ---- Tabs: open the right panel when arriving with ?q= / tasks_page ---- */
+    function selectTab(panelId) {
+        var tab = document.querySelector('[data-ds-tab="' + panelId + '"]');
+        if (!tab) return;
+        var list = tab.closest('[role="tablist"]');
+        if (!list) return;
+        list.querySelectorAll('[role="tab"]').forEach(function (t) {
+            var on = t === tab;
+            t.classList.toggle('is-active', on);
+            t.setAttribute('aria-selected', on ? 'true' : 'false');
+            t.tabIndex = on ? 0 : -1;
+            var pid = t.getAttribute('aria-controls');
+            var panel = pid ? document.getElementById(pid) : null;
+            if (panel) panel.hidden = !on;
+        });
+    }
+    var params = new URLSearchParams(window.location.search);
+    if (params.get('q') || params.get('users_page')) {
+        selectTab('admin-users');
+    } else if (params.get('tasks_page')) {
+        selectTab('admin-transcripts');
+    }
+
+    /* ---- Click-to-graph series ---- */
+    var seriesChart = null;
+    var seriesState = { metric: null, days: 30 };
+    var graphEl = document.getElementById('adminSeriesGraph');
+    var titleEl = document.getElementById('adminSeriesTitle');
+    var emptyEl = document.getElementById('adminSeriesEmpty');
+    var canvasEl = document.getElementById('adminSeriesCanvas');
+
+    function setActiveSeriesButtons(metric) {
+        document.querySelectorAll('[data-series]').forEach(function (el) {
+            var on = el.getAttribute('data-series') === metric;
+            el.classList.toggle('is-active', on);
+            if (el.tagName === 'BUTTON') {
+                el.setAttribute('aria-pressed', on ? 'true' : 'false');
+            }
+        });
+    }
+
+    function renderSeries(data) {
+        if (!graphEl || typeof Chart === 'undefined' || !canvasEl) return;
+        graphEl.hidden = false;
+        titleEl.textContent = (data.label || data.metric) + ' · last ' + data.days + ' days';
+        var values = data.values || [];
+        var has = values.some(function (v) { return Number(v) !== 0; });
+        emptyEl.hidden = has;
+        canvasEl.style.display = has ? '' : 'none';
+        if (seriesChart) {
+            seriesChart.destroy();
+            seriesChart = null;
+        }
+        if (!has) return;
+        seriesChart = new Chart(canvasEl, {
+            type: 'line',
+            data: {
+                labels: data.labels,
+                datasets: [{
+                    data: values,
+                    borderColor: palette.line,
+                    backgroundColor: palette.fill,
+                    fill: true,
+                    tension: 0.25,
+                    pointRadius: 0,
+                    borderWidth: 2,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: {
+                        ticks: { color: palette.text, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 12 } },
+                        grid: { color: palette.grid },
+                    },
+                    y: {
+                        beginAtZero: true,
+                        ticks: { color: palette.text, font: { size: 12 } },
+                        grid: { color: palette.grid },
+                    },
+                },
+            },
+        });
+    }
+
+    function loadSeries(metric, days) {
+        seriesState.metric = metric;
+        seriesState.days = days || seriesState.days || 30;
+        setActiveSeriesButtons(metric);
+        document.querySelectorAll('.series-range-btn').forEach(function (b) {
+            b.classList.toggle('active', Number(b.getAttribute('data-days')) === seriesState.days);
+        });
+        fetch('/admin/api/series?metric=' + encodeURIComponent(metric)
+              + '&days=' + encodeURIComponent(seriesState.days), {
+            credentials: 'same-origin',
+            headers: { 'Accept': 'application/json' },
+        }).then(function (r) {
+            if (!r.ok) throw new Error('series ' + r.status);
+            return r.json();
+        }).then(renderSeries).catch(function () {
+            if (graphEl) {
+                graphEl.hidden = false;
+                titleEl.textContent = 'Could not load series';
+                emptyEl.hidden = false;
+                emptyEl.textContent = 'Request failed.';
+                if (seriesChart) { seriesChart.destroy(); seriesChart = null; }
+            }
+        });
+    }
+
+    document.querySelectorAll('[data-series]').forEach(function (el) {
+        el.addEventListener('click', function () {
+            var metric = el.getAttribute('data-series');
+            if (!metric) return;
+            if (seriesState.metric === metric && graphEl && !graphEl.hidden) {
+                graphEl.hidden = true;
+                setActiveSeriesButtons(null);
+                seriesState.metric = null;
+                return;
+            }
+            loadSeries(metric, seriesState.days);
+        });
+    });
+    document.querySelectorAll('.series-range-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var d = Number(btn.getAttribute('data-days'));
+            if (!seriesState.metric) {
+                seriesState.days = d;
+                document.querySelectorAll('.series-range-btn').forEach(function (b) {
+                    b.classList.toggle('active', b === btn);
+                });
+                return;
+            }
+            loadSeries(seriesState.metric, d);
+        });
+    });
+
+    /* ---- Existing overview / costs / stripe charts ---- */
     var weeklyEl = document.getElementById('adminStripeWeekly');
     if (weeklyEl && typeof Chart !== 'undefined') {
         try {
@@ -578,7 +879,9 @@
                         labels: weekly.labels,
                         datasets: [{
                             data: weekly.values,
-                            backgroundColor: 'rgba(16, 185, 129, 0.55)',
+                            backgroundColor: palette.fill,
+                            borderColor: palette.line,
+                            borderWidth: 1,
                             borderRadius: 4,
                         }],
                     },
@@ -607,18 +910,6 @@
     if (!dataEl || typeof Chart === 'undefined') return;
     var data = JSON.parse(dataEl.textContent);
     var charts = {};
-    var css = getComputedStyle(document.documentElement);
-    function token(name) { return css.getPropertyValue(name).trim(); }
-    var palette = {
-        grid: token('--line'),
-        text: token('--muted'),
-        line: token('--accent'),
-        fill: token('--accent-tint'),
-        fail: token('--danger'),
-        funnel: [token('--accent'), token('--accent-hover'), token('--muted')],
-        cost: token('--ink'),
-        costFixed: token('--muted'),
-    };
 
     var costsEl = document.getElementById('adminCostsChart');
     if (costsEl) {

@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "history-via-mcp",
+      "date": "2026-10-10",
+      "title": "See which transcripts came from ChatGPT or Claude",
+      "summary": "History now labels episodes you transcribed through an MCP connector, so you can tell website jobs from ChatGPT, Claude, or other AI clients."
+    },
+    {
       "id": "use-in-chatgpt-claude-cursor",
       "date": "2026-10-10",
       "title": "Use Podskrift inside ChatGPT, Claude and Cursor",

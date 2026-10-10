@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from flask import Blueprint, abort, current_app, render_template, request
+from flask import Blueprint, abort, current_app, jsonify, render_template, request
 from flask_login import current_user
 from sqlalchemy import text
 from zoneinfo import ZoneInfo
@@ -522,18 +522,33 @@ def list_tasks_page(db, page=1, per_page=TASKS_PAGE_SIZE):
         'SELECT COUNT(*) FROM transcription_tasks'
     )).scalar() or 0
 
-    rows = db.session.execute(text("""
+    # source / source_client may be missing on older DBs mid-migration.
+    cols = {
+        row[1]
+        for row in db.session.execute(text('PRAGMA table_info(transcription_tasks)'))
+    }
+    has_source = 'source' in cols
+    has_client = 'source_client' in cols
+    source_sel = 't.source' if has_source else 'NULL'
+    client_sel = 't.source_client' if has_client else 'NULL'
+
+    rows = db.session.execute(text(f"""
         SELECT t.id, t.user_id, u.email, t.episode_title, t.status,
-               t.audio_duration, t.error_message, t.started_at, t.completed_at
+               t.audio_duration, t.error_message, t.started_at, t.completed_at,
+               {source_sel}, {client_sel}
           FROM transcription_tasks t
           LEFT JOIN users u ON u.id = t.user_id
          ORDER BY t.started_at DESC, t.id DESC
          LIMIT :limit OFFSET :offset
     """), {'limit': per_page, 'offset': offset}).fetchall()
 
+    import app as app_module
+    via_label = getattr(app_module, 'task_source_via_label', lambda *_: None)
+
     tasks = []
     for r in rows:
         dur = r[5]
+        src, src_client = r[9], r[10]
         tasks.append({
             'id': r[0],
             'user_id': r[1],
@@ -544,6 +559,9 @@ def list_tasks_page(db, page=1, per_page=TASKS_PAGE_SIZE):
             'error_kind': classify_error_kind(r[6]) if r[4] == 'error' else None,
             'error_message': r[6],
             'created_oslo': format_oslo(r[7]),
+            'source': src,
+            'source_client': src_client,
+            'via_label': via_label(src, src_client),
         })
 
     pages = max(1, (int(total) + per_page - 1) // per_page)
@@ -553,6 +571,279 @@ def list_tasks_page(db, page=1, per_page=TASKS_PAGE_SIZE):
         'page': page,
         'pages': pages,
         'per_page': per_page,
+    }
+
+
+def collect_mcp_stats(db):
+    """Compact MCP section stats (tasks marked source=mcp + OAuth clients)."""
+    cols = {
+        row[1]
+        for row in db.session.execute(text('PRAGMA table_info(transcription_tasks)'))
+    }
+    mcp_total = 0
+    mcp_7d = 0
+    mcp_today = 0
+    if 'source' in cols:
+        today_start = _naive_utc(_oslo_day_start_utc(0))
+        d7 = _naive_utc(datetime.now(timezone.utc) - timedelta(days=7))
+        mcp_total = int(db.session.execute(text(
+            "SELECT COUNT(*) FROM transcription_tasks WHERE lower(source) = 'mcp'"
+        )).scalar() or 0)
+        mcp_7d = int(db.session.execute(text("""
+            SELECT COUNT(*) FROM transcription_tasks
+             WHERE lower(source) = 'mcp' AND started_at >= :since
+        """), {'since': d7}).scalar() or 0)
+        mcp_today = int(db.session.execute(text("""
+            SELECT COUNT(*) FROM transcription_tasks
+             WHERE lower(source) = 'mcp' AND started_at >= :since
+        """), {'since': today_start}).scalar() or 0)
+
+    oauth_clients = 0
+    try:
+        oauth_clients = int(db.session.execute(text(
+            'SELECT COUNT(*) FROM oauth_clients'
+        )).scalar() or 0)
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        oauth_clients = 0
+
+    return {
+        'mcp_transcripts_total': mcp_total,
+        'mcp_transcripts_7d': mcp_7d,
+        'mcp_transcripts_today': mcp_today,
+        'oauth_clients': oauth_clients,
+    }
+
+
+SERIES_METRICS = frozenset({
+    'signups', 'users', 'transcripts', 'api_cost', 'income', 'mcp',
+})
+SERIES_DAY_OPTIONS = frozenset({7, 30, 90})
+
+
+def collect_series(db, metric, days=30):
+    """Daily time series for admin click-to-graph (Europe/Oslo days).
+
+    Metrics: signups, users (cumulative), transcripts, api_cost (est. USD),
+    income (credited purchases USD), mcp (tasks with source=mcp).
+    """
+    metric = (metric or '').strip().lower()
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = 30
+    if days not in SERIES_DAY_OPTIONS:
+        days = 30
+    if metric not in SERIES_METRICS:
+        return None
+
+    since = _naive_utc(_oslo_day_start_utc(days - 1))
+    labels, zeros = _bucket_daily([], days)
+
+    if metric == 'signups':
+        ts = [
+            row[0] for row in db.session.execute(text(
+                'SELECT created_at FROM users WHERE created_at >= :since'
+            ), {'since': since})
+        ]
+        lab, vals = _bucket_daily(ts, days)
+        return {
+            'metric': metric, 'days': days, 'labels': lab, 'values': vals,
+            'unit': 'count', 'label': 'Signups',
+        }
+
+    if metric == 'users':
+        # Cumulative total users at end of each Oslo day (from all-time signups).
+        all_ts = [
+            row[0] for row in db.session.execute(text(
+                'SELECT created_at FROM users ORDER BY created_at ASC'
+            ))
+        ]
+        counts = {lab: 0 for lab in labels}
+        running = 0
+        # Sort labels oldest→newest; for each day, count users created by EOD.
+        day_ends = []
+        for lab in labels:
+            y, m, d = (int(x) for x in lab.split('-'))
+            eod = datetime(y, m, d, 23, 59, 59, tzinfo=ADMIN_TZ).astimezone(
+                timezone.utc)
+            day_ends.append((lab, _naive_utc(eod)))
+        idx = 0
+        parsed = []
+        for ts in all_ts:
+            dt = _parse_db_datetime(ts)
+            if dt is not None:
+                parsed.append(_naive_utc(dt))
+        parsed.sort()
+        for lab, end in day_ends:
+            while idx < len(parsed) and parsed[idx] <= end:
+                running += 1
+                idx += 1
+            counts[lab] = running
+        return {
+            'metric': metric, 'days': days, 'labels': labels,
+            'values': [counts[lab] for lab in labels],
+            'unit': 'count', 'label': 'Users (cumulative)',
+        }
+
+    if metric == 'transcripts':
+        ts = [
+            row[0] for row in db.session.execute(text("""
+                SELECT COALESCE(completed_at, started_at) FROM transcription_tasks
+                 WHERE status = 'completed'
+                   AND COALESCE(completed_at, started_at) >= :since
+            """), {'since': since})
+        ]
+        lab, vals = _bucket_daily(ts, days)
+        return {
+            'metric': metric, 'days': days, 'labels': lab, 'values': vals,
+            'unit': 'count', 'label': 'Completed transcripts',
+        }
+
+    if metric == 'mcp':
+        cols = {
+            row[1]
+            for row in db.session.execute(text('PRAGMA table_info(transcription_tasks)'))
+        }
+        if 'source' not in cols:
+            return {
+                'metric': metric, 'days': days, 'labels': labels, 'values': zeros,
+                'unit': 'count', 'label': 'MCP transcripts',
+            }
+        ts = [
+            row[0] for row in db.session.execute(text("""
+                SELECT started_at FROM transcription_tasks
+                 WHERE lower(source) = 'mcp' AND started_at >= :since
+            """), {'since': since})
+        ]
+        lab, vals = _bucket_daily(ts, days)
+        return {
+            'metric': metric, 'days': days, 'labels': lab, 'values': vals,
+            'unit': 'count', 'label': 'MCP transcripts',
+        }
+
+    if metric == 'income':
+        pairs = [
+            (row[0], (row[1] or 0) / 100.0)
+            for row in db.session.execute(text("""
+                SELECT created_at,
+                       COALESCE(amount_total_cents, amount_cents, 0)
+                  FROM credit_purchases
+                 WHERE status = 'credited' AND created_at >= :since
+            """), {'since': since})
+        ]
+        lab, vals = _bucket_daily_sum(pairs, days)
+        return {
+            'metric': metric, 'days': days, 'labels': lab, 'values': vals,
+            'unit': 'usd', 'label': 'Income (credited packs)',
+        }
+
+    if metric == 'api_cost':
+        # Platform OpenAI estimate per day (same rules as admin_costs).
+        from admin_costs import (
+            estimate_summary_cost_usd, estimate_transcription_cost_usd,
+            task_key_source,
+        )
+        rows = list(db.session.execute(text("""
+            SELECT COALESCE(completed_at, started_at) AS event_at,
+                   trial_seconds_charged, paid_seconds_charged,
+                   summary_status, summary_model, summary_prompt_tokens,
+                   summary_completion_tokens, summary_cost_usd_est,
+                   CASE WHEN summary_json IS NOT NULL AND summary_json != ''
+                        THEN 1 ELSE 0 END AS has_summary_json
+              FROM transcription_tasks
+             WHERE status IN ('completed', 'error', 'cancelled')
+               AND (summary_source_task_id IS NULL OR summary_source_task_id = '')
+               AND COALESCE(completed_at, started_at) >= :since
+        """), {'since': since}))
+        pairs = []
+        for r in rows:
+            (event_at, trial_charged, paid_charged, summary_status, summary_model,
+             prompt_tok, completion_tok, summary_cost, has_summary_json) = r
+            if task_key_source(trial_charged, paid_charged) == 'user':
+                continue
+            trial_secs = int(trial_charged or 0) if trial_charged is not None else 0
+            paid_secs = int(paid_charged or 0)
+            cost = (
+                estimate_transcription_cost_usd(trial_secs)
+                + estimate_transcription_cost_usd(paid_secs)
+                + estimate_summary_cost_usd(
+                    summary_status=summary_status,
+                    summary_cost_usd_est=summary_cost,
+                    summary_model=summary_model,
+                    summary_prompt_tokens=prompt_tok,
+                    summary_completion_tokens=completion_tok,
+                    has_summary_json=bool(has_summary_json),
+                )
+            )
+            pairs.append((event_at, cost))
+        lab, vals = _bucket_daily_sum(pairs, days)
+        return {
+            'metric': metric, 'days': days, 'labels': lab, 'values': vals,
+            'unit': 'usd', 'label': 'Est. OpenAI / API cost',
+        }
+
+    return None
+
+
+def collect_headline_kpis(db, trial_daily_seconds, costs=None, stripe_revenue=None):
+    """Top-row KPIs: API cost, income, margin, free pool left, signups."""
+    base = collect_kpis(db, trial_daily_seconds, trial_daily_seconds=trial_daily_seconds)
+    used = float(base.get('trial_daily_used_minutes') or 0)
+    limit = float(base.get('trial_daily_limit_minutes') or 0)
+    pool_left = max(0.0, round(limit - used, 1))
+
+    api_all = api_7d = api_today = 0.0
+    if costs and not costs.get('error'):
+        windows = costs.get('windows') or {}
+        api_all = float((windows.get('all') or {}).get('openai_usd') or 0)
+        api_7d = float((windows.get('7d') or {}).get('openai_usd') or 0)
+        api_today = float((windows.get('today') or {}).get('openai_usd') or 0)
+
+    income_all = income_7d = income_today = 0.0
+    income_source = 'purchases'
+    if stripe_revenue and stripe_revenue.get('ok'):
+        def _net_for(window):
+            rows = (stripe_revenue.get('summaries') or {}).get(window) or []
+            if not rows:
+                return 0.0
+            primary = stripe_revenue.get('primary_currency') or 'usd'
+            for r in rows:
+                if r.get('currency') == primary:
+                    return round(int(r.get('net') or 0) / 100.0, 2)
+            return round(int(rows[0].get('net') or 0) / 100.0, 2)
+        income_all = _net_for('all')
+        income_7d = _net_for('7d')
+        # Stripe panel has no "today" window — approximate from credited packs.
+        income_source = 'stripe_net'
+    if costs and not costs.get('error'):
+        windows = costs.get('windows') or {}
+        income_today = float((windows.get('today') or {}).get('revenue_usd') or 0)
+        if income_source != 'stripe_net':
+            income_all = float((windows.get('all') or {}).get('revenue_usd') or 0)
+            income_7d = float((windows.get('7d') or {}).get('revenue_usd') or 0)
+    else:
+        income_today = 0.0
+        if income_source != 'stripe_net':
+            income_all = float(base.get('purchase_revenue_usd') or 0)
+
+    margin_all = round(income_all - api_all, 2)
+    margin_7d = round(income_7d - api_7d, 2)
+    margin_today = round(income_today - api_today, 2)
+
+    return {
+        **base,
+        'api_cost_all_usd': round(api_all, 2),
+        'api_cost_7d_usd': round(api_7d, 2),
+        'api_cost_today_usd': round(api_today, 2),
+        'income_all_usd': round(income_all, 2),
+        'income_7d_usd': round(income_7d, 2),
+        'income_today_usd': round(income_today, 2),
+        'income_source': income_source,
+        'margin_all_usd': margin_all,
+        'margin_7d_usd': margin_7d,
+        'margin_today_usd': margin_today,
+        'trial_pool_left_minutes': pool_left,
     }
 
 
@@ -571,9 +862,16 @@ def user_detail(db, user_id, trial_default_seconds):
     if limit_secs is None:
         limit_secs = trial_default_seconds
 
-    tasks = db.session.execute(text("""
+    cols = {
+        row[1]
+        for row in db.session.execute(text('PRAGMA table_info(transcription_tasks)'))
+    }
+    source_sel = 'source' if 'source' in cols else 'NULL'
+    client_sel = 'source_client' if 'source_client' in cols else 'NULL'
+    tasks = db.session.execute(text(f"""
         SELECT id, episode_title, status, audio_duration, error_message,
-               started_at, completed_at, podcast_name
+               started_at, completed_at, podcast_name,
+               {source_sel}, {client_sel}
           FROM transcription_tasks
          WHERE user_id = :uid
          ORDER BY started_at DESC
@@ -587,6 +885,9 @@ def user_detail(db, user_id, trial_default_seconds):
          WHERE user_id = :uid
          ORDER BY created_at DESC
     """), {'uid': user_id}).fetchall()
+
+    import app as app_module
+    via_label = getattr(app_module, 'task_source_via_label', lambda *_: None)
 
     return {
         'id': row[0],
@@ -606,6 +907,7 @@ def user_detail(db, user_id, trial_default_seconds):
             'error_kind': classify_error_kind(t[4]) if t[2] == 'error' else None,
             'created_oslo': format_oslo(t[5]),
             'podcast_name': t[7],
+            'via_label': via_label(t[8], t[9]),
         } for t in tasks],
         'purchases': [{
             'id': p[0],
@@ -1141,7 +1443,6 @@ def dashboard():
     trial_daily = getattr(app_module, 'TRIAL_DAILY_SECONDS', 2000 * 60)
     trial_default = getattr(app_module, 'TRIAL_DEFAULT_SECONDS', 180 * 60)
 
-    kpis = collect_kpis(db, trial_daily, trial_daily_seconds=trial_daily)
     charts = collect_chart_data(db, days=90)
     users = list_users_page(
         db,
@@ -1182,6 +1483,19 @@ def dashboard():
             'note': '',
             'as_of_oslo': format_oslo(datetime.now(timezone.utc)),
         }
+    kpis = collect_headline_kpis(
+        db, trial_daily, costs=costs, stripe_revenue=stripe_revenue)
+    try:
+        mcp_stats = collect_mcp_stats(db)
+    except Exception as exc:  # noqa: BLE001
+        current_app.logger.exception('admin mcp stats failed')
+        mcp_stats = {
+            'mcp_transcripts_total': 0,
+            'mcp_transcripts_7d': 0,
+            'mcp_transcripts_today': 0,
+            'oauth_clients': 0,
+            'error': type(exc).__name__,
+        }
     return render_template(
         'admin/dashboard.html',
         kpis=kpis,
@@ -1191,7 +1505,22 @@ def dashboard():
         trial_default_minutes=trial_default // 60,
         stripe_revenue=stripe_revenue,
         costs=costs,
+        mcp_stats=mcp_stats,
     )
+
+
+@admin_bp.route('/api/series')
+def series_api():
+    """JSON daily series for click-to-graph KPIs (admin-only via before_request)."""
+    from models import db
+    metric = (request.args.get('metric') or '').strip().lower()
+    days = request.args.get('days', 30)
+    payload = collect_series(db, metric, days=days)
+    if payload is None:
+        abort(404)
+    resp = jsonify(payload)
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
 
 
 @admin_bp.route('/users/<int:user_id>')
