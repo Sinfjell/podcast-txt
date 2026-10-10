@@ -10497,12 +10497,13 @@ def test_checkout_session_creation(stripe_on, ph_events):
     assert 'automatic_tax' not in kw
     assert '/billing/cancel' in kw['cancel_url']
     assert 'next=' in kw['cancel_url']
-    # Abandoned-checkout recovery: short TTL + recovery email after expiry.
+    # Abandoned-checkout recovery: short TTL + recovery after expiry.
+    # consent_collection.promotions is US-only — absent by default (PODSKRIFT-W).
     assert kw['expires_at'] > int(A.time.time())
     assert kw['expires_at'] <= int(A.time.time()) + A.CHECKOUT_EXPIRES_HOURS * 3600 + 5
     assert kw['after_expiration']['recovery']['enabled'] is True
     assert kw['after_expiration']['recovery']['allow_promotion_codes'] is True
-    assert kw['consent_collection']['promotions'] == 'auto'
+    assert 'consent_collection' not in kw
     started = [e for e in ph_events.events if e['event'] == 'checkout_started']
     assert started and started[-1]['distinct_id'] == str(uid)
     props = started[-1]['properties']
@@ -10520,6 +10521,61 @@ def test_checkout_session_creation(stripe_on, ph_events):
     import uuid as _uuid
     assert started[-1]['uuid'] == str(
         _uuid.uuid5(_uuid.NAMESPACE_URL, 'cs_test_123'))
+
+
+def test_checkout_promotions_consent_opt_in(stripe_on, monkeypatch):
+    """US merchants may opt into consent_collection.promotions via env."""
+    monkeypatch.setattr(A, 'CHECKOUT_PROMOTIONS_CONSENT_ENABLED', True)
+    uid = _make_user('promoconsent@test.com', limit=600, used=0)
+    client = _login(uid)
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'settings',
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    kw = stripe_on['last_create_params']
+    assert kw['after_expiration']['recovery']['enabled'] is True
+    assert kw['consent_collection']['promotions'] == 'auto'
+
+
+def test_checkout_falls_back_when_recovery_params_rejected(stripe_on, monkeypatch):
+    """Optional recovery knobs must not block purchase (PODSKRIFT-W)."""
+    monkeypatch.setattr(A, 'CHECKOUT_PROMOTIONS_CONSENT_ENABLED', True)
+    calls = {'n': 0}
+
+    class RejectThenOk:
+        def create(self, params=None, options=None):
+            calls['n'] += 1
+            stripe_on['last_create_params'] = params
+            stripe_on['last_create_options'] = options
+            if calls['n'] == 1:
+                raise Exception(
+                    'Request req_test: consent_collection.promotions '
+                    'is not available in your country.')
+            from types import SimpleNamespace
+            return SimpleNamespace(
+                id='cs_fallback_1',
+                url='https://checkout.stripe.test/fallback',
+            )
+
+    stripe_on['client'].v1.checkout.sessions = RejectThenOk()
+    uid = _make_user('fallback@test.com', limit=600, used=0)
+    client = _login(uid)
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'settings',
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers['Location'] == 'https://checkout.stripe.test/fallback'
+    assert calls['n'] == 2
+    kw = stripe_on['last_create_params']
+    assert 'after_expiration' not in kw
+    assert 'consent_collection' not in kw
+    assert 'expires_at' in kw  # short TTL still applies on the retry
 
 
 def test_checkout_passes_automatic_tax_when_enabled(stripe_on, monkeypatch):

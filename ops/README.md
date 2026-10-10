@@ -336,7 +336,8 @@ the day when the shared daily budget is empty.
 | `TRIAL_SPLIT_VARIANTS` | `60,120` | Comma-separated minute labels for the split (equal buckets). |
 | `TRIAL_ENABLED` | on | Kill switch for handing out the platform key. |
 | `CHECKOUT_EXPIRES_HOURS` | `2` | Stripe Checkout Session TTL (1–24). Shorter than Stripe’s 24h default so abandoned-checkout recovery can email the same day. |
-| `CHECKOUT_RECOVERY_ENABLED` | on | Sets `after_expiration.recovery.enabled` + `consent_collection.promotions=auto` on Checkout Session create. Dashboard must also enable recovery emails and the `checkout.session.expired` webhook. |
+| `CHECKOUT_RECOVERY_ENABLED` | on | Sets `after_expiration.recovery.enabled` (+ `allow_promotion_codes`) on Checkout Session create. Dashboard must also enable recovery emails and the `checkout.session.expired` webhook. Kill switch: `0` still keeps the short `expires_at`. |
+| `CHECKOUT_PROMOTIONS_CONSENT_ENABLED` | off | When on, also sends `consent_collection.promotions=auto`. Stripe allows this only for US merchants and US customers; non-US accounts get `InvalidRequestError` and checkout fails (PODSKRIFT-W). Leave off for Norwegian/EU Stripe accounts. |
 
 `/health` exposes `trial_available` (today's budget still has room) plus
 `trial_daily_used` / `trial_daily_limit` in minutes.
