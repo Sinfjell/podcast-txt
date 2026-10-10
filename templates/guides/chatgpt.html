@@ -36,6 +36,8 @@
     Business/Enterprise may need an admin to allow custom MCP servers.
   {% endcall %}
 
+  {% include '_ai_mcp_help.html' %}
+
   <section class="ds-guide__section" aria-labelledby="chatgpt-setup">
     <h2 id="chatgpt-setup">Set it up</h2>
     <ol class="ds-guide__steps">
@@ -176,5 +178,9 @@
   <div class="ds-guide__cta">
     {{ link_button("Back to Use in AI", href=url_for('ai_landing')) }}
   </div>
+
+  {% with mcp_help_extra_class='ai-mcp-help--bottom' %}
+  {% include '_ai_mcp_help.html' %}
+  {% endwith %}
 </article>
 {% endblock %}

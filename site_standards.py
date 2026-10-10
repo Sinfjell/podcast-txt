@@ -36,7 +36,7 @@ THEME_COLOR_DARK = '#0A0F0D'
 SITE_NAME = 'Podskrift'
 SITE_DESCRIPTION = ('Transcribe any podcast or Spotify episode to text and .srt '
                     'subtitles with OpenAI Whisper, in 28 languages.')
-CONTACT_URL = 'https://productivitytech.io/contact/'
+CONTACT_URL = 'mailto:hello@podskrift.com'
 SKILL_NAME = 'podskrift-transcript-api'
 
 #: Query parameters that never change what a page renders. Advertised with

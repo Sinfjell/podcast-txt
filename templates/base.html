@@ -1261,8 +1261,8 @@
         {% if posthog_key and not is_admin_page %}
         <button type="button" class="footer-text-btn" id="cookieSettingsLink">Cookie settings</button> &middot;
         {% endif %}
-        <a href="https://productivitytech.io/contact/" target="_blank">Contact</a> &middot;
-        <a href="https://productivitytech.io/contact/" target="_blank">Feedback / feature ideas</a>
+        <a href="{{ url_for('contact') }}">Contact</a> &middot;
+        <a href="{{ url_for('contact') }}">Feedback / feature ideas</a>
     </footer>
 
     {% if posthog_key and not is_admin_page %}

@@ -34,6 +34,8 @@
     <a href="https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp" rel="noopener" target="_blank">Claude custom connectors</a>.
   {% endcall %}
 
+  {% include '_ai_mcp_help.html' %}
+
   <section class="ds-guide__section" aria-labelledby="claude-setup">
     <h2 id="claude-setup">Set it up</h2>
     <ol class="ds-guide__steps">
@@ -207,5 +209,9 @@
   <div class="ds-guide__cta">
     {{ link_button("Back to Use in AI", href=url_for('ai_landing')) }}
   </div>
+
+  {% with mcp_help_extra_class='ai-mcp-help--bottom' %}
+  {% include '_ai_mcp_help.html' %}
+  {% endwith %}
 </article>
 {% endblock %}

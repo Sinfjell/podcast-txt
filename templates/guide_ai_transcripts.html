@@ -34,6 +34,8 @@
         <a href="{{ url_for('guides_index') }}">All guides</a>
     </div>
 
+    {% include '_ai_mcp_help.html' %}
+
     <h2>How it works</h2>
     <p>
         Podskrift adds tools to your AI. You don't need to name them. Just ask in plain language.
@@ -146,6 +148,10 @@
         </details>
         {% endfor %}
     </div>
+
+    {% with mcp_help_extra_class='ai-mcp-help--bottom' %}
+    {% include '_ai_mcp_help.html' %}
+    {% endwith %}
 
     <div class="cta">
         <a href="{{ url_for('register') }}" class="btn btn-primary">Create a free account</a>

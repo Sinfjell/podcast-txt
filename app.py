@@ -8942,6 +8942,7 @@ USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscripti
 - [Connect Podskrift to ChatGPT]({public_url('guide_chatgpt')}): Plugins → custom MCP server → OAuth
 - [Connect Podskrift to Claude]({public_url('guide_claude')}): Customize → Connectors → custom connector
 - [Guide: podcast transcripts in ChatGPT and Claude]({public_url('guide_ai_transcripts')}): step-by-step connector setup, example asks, and what it costs
+- [Contact]({public_url('contact')}): hello@podskrift.com — we reply fast
 - [What's new]({public_url('whats_new')}): dated feature list, newest first (build in public)
 - [API docs]({public_url('api_docs')}): customer HTTP API (resolve → transcribe → transcript)
 - [How to find an RSS feed]({public_url('rss_help')}): for podcasts outside the search index
@@ -8979,6 +8980,7 @@ def sitemap_xml():
              public_url('guide_chatgpt'),
              public_url('guide_claude'),
              public_url('guide_ai_transcripts'),
+             public_url('contact'),
              public_url('whats_new'),
              public_url('api_docs'),
              public_url('rss_help'),
@@ -9489,6 +9491,12 @@ def guide_ai_transcripts():
         trial_minutes=advertised_trial_minutes(),
         stripe_configured=stripe_checkout_enabled(),
     )
+
+
+@app.route('/contact')
+def contact():
+    """Public contact page — hello@podskrift.com is the support address."""
+    return render_template('contact.html')
 
 
 @app.route('/pricing')

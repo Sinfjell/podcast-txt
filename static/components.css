@@ -449,6 +449,75 @@
 }
 
 /* ---------------------------------------------------------------------------
+   AI / connector landing layout (shared by /ai, guides, /contact)
+   --------------------------------------------------------------------------- */
+.ai-wrap {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: var(--space-6) 0 var(--space-10);
+}
+.ai-title {
+    font-size: clamp(30px, 5vw, 44px);
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    line-height: 1.05;
+    margin: 0 0 var(--space-3);
+}
+.ai-lead {
+    font-size: 1.0625rem;
+    line-height: 1.55;
+    color: var(--muted);
+    margin: 0 0 var(--space-6);
+    max-width: 36em;
+}
+.ai-dev {
+    font-size: 0.9375rem;
+    color: var(--muted);
+    margin: var(--space-7) 0 0;
+    line-height: 1.55;
+}
+.ai-section {
+    border-top: 1px solid var(--line);
+    padding: var(--space-8) 0;
+}
+.ai-section--end {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+.ai-section h2 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    line-height: 1.2;
+    margin: 0 0 var(--space-6);
+}
+.guide-app-steps {
+    margin: 0;
+    padding-left: 1.5rem;
+    font-size: 1.0625rem;
+    line-height: 1.55;
+    color: var(--ink);
+}
+.guide-app-steps li {
+    margin-bottom: var(--space-3);
+}
+.guide-app-steps li:last-child {
+    margin-bottom: 0;
+}
+.guide-app-steps code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.9375rem;
+    background: var(--surface);
+    border-radius: var(--radius-sm, var(--radius));
+    padding: 2px 6px;
+    overflow-wrap: anywhere;
+}
+@media (max-width: 640px) {
+    .ai-wrap { padding-bottom: var(--space-8); }
+    .ai-section { padding: var(--space-7) 0; }
+}
+
+/* ---------------------------------------------------------------------------
    AI ask prompts — copyable example asks on /ai and the ChatGPT/Claude guide
    --------------------------------------------------------------------------- */
 .ai-ask {
@@ -509,6 +578,36 @@
 .ai-ask-row .btn {
     flex: none;
     margin-top: 2px;
+}
+
+/* MCP troubleshooting notice on /ai and connector guides */
+.ai-mcp-help {
+    margin: var(--space-5) 0 0;
+}
+.ai-mcp-help--bottom {
+    margin: var(--space-7) 0 0;
+}
+.ai-mcp-help .ds-notice a {
+    font-weight: 700;
+    color: inherit;
+}
+
+/* Contact page — email as the hero signal */
+.contact-email {
+    font-size: clamp(1.5rem, 4vw, 2rem);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+    margin: 0 0 var(--space-4);
+    overflow-wrap: anywhere;
+}
+.contact-email a {
+    color: var(--ink);
+    text-decoration: underline;
+    text-underline-offset: 4px;
+}
+.contact-email a:hover {
+    color: var(--accent);
 }
 
 /* ---------------------------------------------------------------------------

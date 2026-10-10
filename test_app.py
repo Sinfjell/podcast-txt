@@ -3727,6 +3727,10 @@ def test_ai_landing_page_renders_and_has_faq_json_ld(trial_on):
     assert 'List everything I transcribed this week' in body
     assert 'data-ds-copy' in body
     assert 'Podskrift returns the transcript' in body
+    # Having trouble? help near setup + bottom (mailto, no second primary).
+    assert body.count('Having trouble?') >= 2
+    assert 'mailto:hello@podskrift.com?subject=Podskrift%20MCP%20help' in body
+    assert 'We reply fast' in body
     groups = A.ai_ask_prompt_groups()
     n_prompts = sum(len(g['prompts']) for g in groups)
     assert 6 <= n_prompts <= 10
@@ -3843,6 +3847,8 @@ def test_guide_ai_transcripts_page_renders(trial_on):
     assert 'get_my_transcript' in body
     assert 'List everything I transcribed this week' in body
     assert 'Every Monday' in body
+    assert body.count('Having trouble?') >= 2
+    assert 'mailto:hello@podskrift.com?subject=Podskrift%20MCP%20help' in body
     faq_pairs = A.guide_ai_faq_entries()
     assert len(faq_pairs) == 5
     for question, answer in faq_pairs:
@@ -3861,6 +3867,43 @@ def test_guide_ai_transcripts_page_renders(trial_on):
     assert path in sitemap
     llms = A.app.test_client().get('/llms.txt').data.decode()
     assert path in llms
+
+
+
+def test_guide_chatgpt_and_claude_pages_have_help(trial_on):
+    """Illustrated setup guides include Having trouble? top + bottom."""
+    for path in ('/guides/chatgpt', '/guides/claude'):
+        body = A.app.test_client().get(path).data.decode()
+        assert body.count('Having trouble?') >= 2, path
+        assert 'mailto:hello@podskrift.com?subject=Podskrift%20MCP%20help' in body
+        assert 'hello@podskrift.com' in body
+        # Help is an info notice; the page keeps its one primary CTA.
+        assert 'ai-mcp-help' in body
+        assert body.count('class="btn btn-primary"') == 1, path
+        assert '/mcp' in body
+    chatgpt = A.app.test_client().get('/guides/chatgpt').data.decode()
+    assert 'chatgpt.com/plugins' in chatgpt
+    claude = A.app.test_client().get('/guides/claude').data.decode()
+    assert 'Add custom connector' in claude
+    sitemap = A.app.test_client().get('/sitemap.xml').data.decode()
+    assert '/guides/chatgpt' in sitemap
+    assert '/guides/claude' in sitemap
+
+
+def test_contact_page_shows_hello_email_and_footer_links(trial_on):
+    """Site Contact points at /contact with hello@podskrift.com prominent."""
+    resp = A.app.test_client().get('/contact')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'hello@podskrift.com' in body
+    assert 'contact-email' in body
+    assert 'mailto:hello@podskrift.com' in body
+    home = A.app.test_client().get('/').data.decode()
+    footer = home[home.index('<footer'):home.index('</footer>')]
+    assert 'href="/contact"' in footer
+    assert 'productivitytech.io/contact' not in footer
+    sec = A.app.test_client().get('/.well-known/security.txt').data.decode()
+    assert 'mailto:hello@podskrift.com' in sec
 
 
 def test_ai_in_llms_txt(trial_on):
@@ -10372,7 +10415,8 @@ def test_terms_page_mentions_refunds():
     body = A.app.test_client().get('/terms').data.decode().lower()
     assert 'refund' in body
     assert '14 days' in body or '14-day' in body
-    assert 'productivitytech.io/contact' in body
+    assert 'hello@podskrift.com' in body
+    assert '/contact' in body
 
 
 def test_offer_shown_no_longer_server_fired_on_limit(stripe_on, ph_events, monkeypatch):
