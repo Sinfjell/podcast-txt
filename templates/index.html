@@ -16,7 +16,6 @@
     .hp-lang-select { max-width: 220px; }
     .hp-window { margin-top: 160px; }
     .hp-fine { max-width: 44rem; margin: 24px auto 0; text-align: left; }
-    .hp-hint { max-width: 36rem; margin: 0 auto; }
     .hp-hero .ds-hero__left .form-hint { margin-top: 0; }
     .hp-hero { padding-bottom: 72px; }
 
@@ -48,7 +47,6 @@
 
     @media (max-width: 640px) {
         .hp-window { margin-top: 96px; }
-        .hp-hint { display: none; }
         .hp-hero { padding-bottom: 48px; }
         .hp-section { padding: 48px 0; }
     }
@@ -151,7 +149,7 @@
                                 examples=['Paste a Spotify episode link', 'open.spotify.com/episode/…',
                                           'Search “Hard Fork”', 'Search “Huberman Lab”',
                                           'Paste an Apple Podcasts link'],
-                                attrs='aria-describedby="searchHint" enterkeyhint="search"' ~ (' autofocus' if first_run and current_user.is_authenticated else '')) %}
+                                attrs='enterkeyhint="search"' ~ (' autofocus' if first_run and current_user.is_authenticated else '')) %}
             <div class="ds-seg" id="searchTabs" role="group" aria-label="Search for">
                 <button type="button" class="tab active" data-type="show" aria-pressed="true">Podcasts</button>
                 <button type="button" class="tab" data-type="episode" aria-pressed="false">Episodes</button>
@@ -163,9 +161,6 @@
                              language_count ~ ' languages, powered by OpenAI Whisper',
                              'Keeps running if you close the page'] %}
             {{ proof_list(assure, class='ds-proof--inline', attrs='aria-label="Why Podskrift"') }}
-            <p class="form-hint hp-hint" id="searchHint">
-                Works with open.spotify.com/episode/… links and any public podcast. Apple Podcasts and RSS feed links work too. Spotify-exclusive shows can't be transcribed.
-            </p>
             <div class="ds-hero__left">
                 <div id="episodeLangRow" class="hidden hp-lang-row">
                     <label class="form-label" for="searchLanguage">Spoken language</label>
@@ -380,7 +375,6 @@
     var searchBtn = document.getElementById('searchBtn');
     var resultsDiv = document.getElementById('searchResults');
     var tabs = document.getElementById('searchTabs');
-    var hint = document.getElementById('searchHint');
     var debounceTimer = null;
     var searchType = 'show';
     var langRow = document.getElementById('episodeLangRow');
@@ -1065,9 +1059,6 @@
         searchInput.placeholder = searchType === 'episode'
             ? 'Search episodes by title or topic...'
             : 'https://open.spotify.com/episode/\u2026  or  podcast name';
-        hint.textContent = searchType === 'episode'
-            ? 'Finds individual episodes and starts transcribing the one you pick.'
-            : 'Works with open.spotify.com/episode/\u2026 links and any public podcast. Spotify-exclusive shows can\'t be transcribed.';
         if (searchInput.value.trim().length >= 2) doSearch();
     });
 

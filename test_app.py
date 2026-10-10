@@ -15581,8 +15581,9 @@ def test_home_has_no_separate_rss_control():
     assert 'class="hp-rss"' not in body
     assert 'Or paste an RSS feed URL' not in body
     assert 'Get Episodes' not in body
-    # Low-key hint that RSS links work in the main box.
-    assert 'RSS feed links work too' in body
+    # Low-key signal that RSS links work in the main box: the hero's
+    # "Works with" strip names it.
+    assert '<span class="ds-works__item">RSS</span>' in body
 
 
 def _home_rss_hint_re():
