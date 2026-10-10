@@ -3072,7 +3072,9 @@ def test_the_menu_panel_is_hidden_by_an_attribute_not_by_opacity(trial_on):
     assert '.nav-links.open { pointer-events: auto; }' in body
     # The deferred hide specifically: hiding immediately would make the panel
     # vanish instead of sliding out, and not hiding at all is the defect.
-    assert 'closeTimer = setTimeout(function () { panel.hidden = true; }' in body
+    # (Also clears nav-menu-open so a deferred What's new toast can return.)
+    assert 'closeTimer = setTimeout(function () {' in body
+    assert 'panel.hidden = true;' in body
     assert 'panel.hidden = false;' in body, 'nothing reveals the panel on open'
     # A declaration, not the word: the comments explaining this defect mention
     # visibility, and matching those would make the test unfailable.
@@ -3112,6 +3114,44 @@ def test_the_menu_degrades_without_javascript(trial_on):
     # holds the computed opacity at 0 and the whole menu stays invisible.
     assert 'opacity: 1 !important' in noscript
     assert 'transition: none !important' in noscript
+
+
+def test_whats_new_toast_defers_while_mobile_menu_is_open(trial_on):
+    """On iPhone Safari the What's new sheet sat on top of the open mobile menu
+    and covered Admin (and anything below). The toast must hide for the life of
+    the menu, the open panel must stack above it, and Escape must not dismiss
+    a toast that is only deferred.
+    """
+    import re as _re
+    body = A.app.test_client().get('/').data.decode()
+    assert 'body.nav-menu-open .whats-new-toast[data-open="1"]' in body
+    assert 'document.body.classList.add(\'nav-menu-open\')' in body
+    assert 'document.body.classList.remove(\'nav-menu-open\')' in body
+    # Class stays until the close animation finishes — dropping it immediately
+    # would flash the toast over the sliding-out panel.
+    assert (
+        'closeTimer = setTimeout(function () {\n'
+        '                    panel.hidden = true;\n'
+        '                    document.body.classList.remove(\'nav-menu-open\');\n'
+        '                }, 160);'
+    ) in body
+    assert "if (document.body.classList.contains('nav-menu-open')) return;" in body
+
+    toast_block = body[body.index('.whats-new-toast {'):
+                       body.index('.whats-new-toast[data-open="1"]')]
+    toast_z = int(_re.search(r'z-index:\s*(\d+)', toast_block).group(1))
+    mobile = body[body.index('@media (max-width: 640px)'):]
+    panel_rules = mobile[:mobile.index('@media (prefers-reduced-motion')]
+    open_block = panel_rules[panel_rules.index('.nav-links.open {'):]
+    # Second .nav-links.open block carries transform/opacity/z-index.
+    open_block = open_block[open_block.index('.nav-links.open {', 1):]
+    open_block = open_block[:open_block.index('}')]
+    panel_z = int(_re.search(r'z-index:\s*(\d+)', open_block).group(1))
+    assert panel_z > toast_z, (
+        f'open menu panel z-index ({panel_z}) must beat the What\'s new toast '
+        f'({toast_z})'
+    )
+    assert 'z-index: 125' in panel_rules or '.nav-scrim.open { z-index: 125; }' in body
 
 
 def test_the_stop_button_handler_is_reachable_from_its_onclick(trial_on):

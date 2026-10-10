@@ -547,12 +547,14 @@
         .footer a { color: var(--muted); }
         .footer a:hover { color: var(--ink); }
 
-        /* What's new popup — returning visitors only; localStorage-gated. */
+        /* What's new popup — returning visitors only; localStorage-gated.
+           z-index stays above the closed mobile panel (95) so the toast stays
+           tappable when the menu is shut; the open panel/scrim rise above it. */
         .whats-new-toast {
             position: fixed;
             z-index: 120;
             right: 16px;
-            bottom: 16px;
+            bottom: calc(16px + env(safe-area-inset-bottom, 0px));
             width: min(360px, calc(100vw - 32px));
             background: var(--surface);
             border: 1px solid var(--line-strong);
@@ -633,8 +635,10 @@
             .whats-new-toast {
                 left: 12px;
                 right: 12px;
-                bottom: 12px;
+                bottom: calc(12px + env(safe-area-inset-bottom, 0px));
                 width: auto;
+                /* Leave room for primary page content above the sheet. */
+                max-height: min(50dvh, 360px);
             }
         }
         /* Animation uses the later prefers-reduced-motion: reduce block near
@@ -703,12 +707,17 @@
             color: var(--ink);
         }
         body.cookie-banner-open .whats-new-toast[data-open="1"] {
-            bottom: 88px;
+            bottom: calc(88px + env(safe-area-inset-bottom, 0px));
         }
         @media (max-width: 480px) {
             body.cookie-banner-open .whats-new-toast[data-open="1"] {
-                bottom: 120px;
+                bottom: calc(120px + env(safe-area-inset-bottom, 0px));
             }
+        }
+        /* Mobile menu owns the viewport — defer the toast until it closes so
+           menu items stay tappable. data-open stays set so it reappears. */
+        body.nav-menu-open .whats-new-toast[data-open="1"] {
+            display: none;
         }
         .footer-text-btn {
             background: none;
@@ -794,7 +803,11 @@
             .nav-links.open {
                 transform: translateY(0);
                 opacity: 1;
+                /* Above .whats-new-toast (120) so menu items stay on top even if
+                   the toast is briefly visible during open/close. */
+                z-index: 130;
             }
+            .nav-scrim.open { z-index: 125; }
             .nav-links a {
                 display: flex;
                 align-items: center;
@@ -1816,6 +1829,10 @@
                 // out of the accessibility tree while the menu is closed.
                 panel.hidden = false;
                 void panel.offsetHeight;
+                // Defers the What's new toast (CSS) for the life of the menu,
+                // including the close animation — drop the class only after
+                // the panel is hidden again so the toast never covers links.
+                document.body.classList.add('nav-menu-open');
             }
             panel.classList.toggle('open', open);
             scrim.classList.toggle('open', open);
@@ -1830,7 +1847,12 @@
             } else if (isMobile()) {
                 // Hide only once the slide has finished, or it would vanish
                 // rather than animate out.
-                closeTimer = setTimeout(function () { panel.hidden = true; }, 160);
+                closeTimer = setTimeout(function () {
+                    panel.hidden = true;
+                    document.body.classList.remove('nav-menu-open');
+                }, 160);
+            } else {
+                document.body.classList.remove('nav-menu-open');
             }
         }
 
@@ -1946,9 +1968,11 @@
         if (closeBtn) closeBtn.addEventListener('click', closeToast);
         if (gotIt) gotIt.addEventListener('click', closeToast);
         document.addEventListener('keydown', function (ev) {
-            if (ev.key === 'Escape' && toast.getAttribute('data-open') === '1') {
-                closeToast();
-            }
+            if (ev.key !== 'Escape' || toast.getAttribute('data-open') !== '1') return;
+            // Menu Escape closes the panel first; do not also dismiss the toast
+            // while it is only deferred behind nav-menu-open.
+            if (document.body.classList.contains('nav-menu-open')) return;
+            closeToast();
         });
     })();
     </script>
