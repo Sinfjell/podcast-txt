@@ -6186,11 +6186,20 @@ def test_mcp_initialize_and_tools_list(mcp_on):
     assert result['serverInfo']['name'] == 'podskrift'
 
     listed = _mcp_rpc(mcp_on['key_a'], 'tools/list', {})
-    names = {t['name'] for t in listed.get_json()['result']['tools']}
-    assert names == {
+    tools = listed.get_json()['result']['tools']
+    by_name = {t['name']: t for t in tools}
+    assert set(by_name) == {
         'search_podcasts', 'list_episodes', 'get_transcript',
         'get_transcript_status',
     }
+    for name in ('search_podcasts', 'list_episodes', 'get_transcript_status'):
+        ann = by_name[name]['annotations']
+        assert ann['readOnlyHint'] is True
+        assert ann['openWorldHint'] is True
+    gt = by_name['get_transcript']['annotations']
+    assert gt['readOnlyHint'] is False
+    assert gt['destructiveHint'] is False
+    assert gt['idempotentHint'] is True
 
 
 def test_mcp_search_podcasts_tool(mcp_on, monkeypatch):
@@ -6477,6 +6486,17 @@ def _oauth_register(redirect_uris=None, client_name='Test Connector'):
     return r
 
 
+def _oauth_csrf_from_consent_html(html: bytes | str) -> str:
+    """CSRF token from the consent form hidden input (not a session side-channel)."""
+    text = html.decode() if isinstance(html, (bytes, bytearray)) else html
+    m = re.search(
+        r'name=["\']csrf_token["\']\s+value=["\']([^"\']+)["\']',
+        text,
+    )
+    assert m, 'consent page missing csrf_token hidden input'
+    return m.group(1)
+
+
 def _oauth_approve(client, *, client_id, redirect_uri, verifier_challenge,
                    state='xyz'):
     """GET consent + POST approve; return (response, code|None)."""
@@ -6496,9 +6516,7 @@ def _oauth_approve(client, *, client_id, redirect_uri, verifier_challenge,
     assert page.status_code == 200, page.data[:500]
     assert b'Allow' in page.data
     assert b'to use Podskrift?' in page.data
-    with client.session_transaction() as sess:
-        token = sess.get('_csrf_token') or 'tok'
-        sess['_csrf_token'] = token
+    token = _oauth_csrf_from_consent_html(page.data)
     approved = client.post('/oauth/authorize', data={
         'csrf_token': token,
         'decision': 'approve',
@@ -14065,3 +14083,91 @@ def test_oauth_settings_revoke_confirm_is_not_injectable(mcp_oauth_on):
         """<form onsubmit='return confirm({{ ("Revoke access for " ~ name ~ "?")|tojson }});'>"""
     ).render(name=evil)
     assert "'" not in html.split("onsubmit='", 1)[1].split("'>", 1)[0]
+
+
+def test_oauth_consent_renders_with_buy_modal_and_csrf_callable(mcp_oauth_on, monkeypatch):
+    """Regression for Sentry PODSKRIFT-J: csrf_token=str shadowed csrf_token().
+
+    base.html always includes _buy_modal.html; when Stripe is on and the user
+    can buy minutes, that partial calls csrf_token(). Passing a string into
+    render_template made that a TypeError on every consent GET.
+    """
+    monkeypatch.setattr(A, 'STRIPE_SECRET_KEY', 'sk_test_csrf_shadow')
+    monkeypatch.setattr(A, 'STRIPE_WEBHOOK_SECRET', 'whsec_csrf_shadow')
+    assert A.stripe_checkout_enabled()
+
+    reg = _oauth_register(
+        redirect_uris=['http://127.0.0.1/callback'],
+        client_name='Cursor').get_json()
+    client = _login(mcp_oauth_on['a'])
+    verifier, challenge = _pkce_pair()
+    q = {
+        'response_type': 'code',
+        'client_id': reg['client_id'],
+        'redirect_uri': 'http://127.0.0.1/callback',
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+        'resource': OAUTH.mcp_resource_url(),
+        'scope': 'mcp offline_access',
+        'state': 'csrf-check',
+    }
+    page = client.get('/oauth/authorize', query_string=q)
+    assert page.status_code == 200, page.data[:800]
+    body = page.data.decode()
+    assert 'Allow Cursor to use Podskrift?' in body
+    assert 'buyModal' in body or 'buy-modal' in body
+    # Hidden CSRF in consent form must be a real token string, not a crash.
+    csrf = _oauth_csrf_from_consent_html(page.data)
+    assert len(csrf) >= 16
+
+    approved = client.post('/oauth/authorize', data={
+        'csrf_token': csrf,
+        'decision': 'approve',
+        'client_id': reg['client_id'],
+        'redirect_uri': 'http://127.0.0.1/callback',
+        'response_type': 'code',
+        'state': 'csrf-check',
+        'scope': 'mcp offline_access',
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+        'resource': OAUTH.mcp_resource_url(),
+    }, follow_redirects=False)
+    assert approved.status_code in (302, 303), approved.data[:500]
+    from urllib.parse import urlparse, parse_qs
+    params = parse_qs(urlparse(approved.headers['Location']).query)
+    assert params.get('code')
+    assert params.get('state') == ['csrf-check']
+
+
+def test_oauth_authorize_redirects_anonymous_to_login(mcp_oauth_on):
+    reg = _oauth_register(redirect_uris=['http://127.0.0.1/callback']).get_json()
+    _, challenge = _pkce_pair()
+    r = A.app.test_client().get('/oauth/authorize', query_string={
+        'response_type': 'code',
+        'client_id': reg['client_id'],
+        'redirect_uri': 'http://127.0.0.1/callback',
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+        'resource': OAUTH.mcp_resource_url(),
+    }, follow_redirects=False)
+    assert r.status_code in (302, 303)
+    loc = r.headers['Location']
+    assert '/login' in loc
+    assert 'next=' in loc
+    assert 'oauth%2Fauthorize' in loc or '/oauth/authorize' in loc
+
+
+def test_oauth_settings_connected_apps_renders_with_stripe_buy_modal(
+        mcp_oauth_on, monkeypatch):
+    """Settings + Connected apps + buy modal must not shadow csrf_token()."""
+    monkeypatch.setattr(A, 'STRIPE_SECRET_KEY', 'sk_test_settings_csrf')
+    monkeypatch.setattr(A, 'STRIPE_WEBHOOK_SECRET', 'whsec_settings_csrf')
+    client, client_id, _, _, _tokens = _oauth_login_and_tokens(mcp_oauth_on)
+    page = client.get('/settings')
+    assert page.status_code == 200, page.data[:500]
+    body = page.data.decode()
+    assert 'Connected apps' in body
+    assert 'buyModal' in body or 'buy-modal' in body
+    # Revoke form must call csrf_token() successfully (hidden input present).
+    assert 'settings/oauth/revoke' in body
+    assert 'name="csrf_token"' in body
