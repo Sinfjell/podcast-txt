@@ -312,17 +312,32 @@ There is none. No `box-shadow`, no `backdrop-filter`, no gradients. Hierarchy co
 
 ## Components
 
-Reference markup for every component is in `design-reference.html`.
+Reference markup for every component is in `design-reference.html`. **Runnable Jinja macros** live in `templates/components/macros.html` with styles in `static/components.css` (tokens stay in `templates/base.html`). The live gallery is `/design/components` (DEBUG or admin only, noindex).
 
-- **Buttons.** Primary: `accent` fill, `on-accent` text, 48px tall (56px beside the hero search field), hover `accent-hover`. Secondary: `paper` fill, 1px `line-strong` border, `ink` text. Tertiary: plain `accent` text (hover: `surface` fill). Danger (cancel only): `paper` fill, 1px `danger` border and text. Disabled: `surface` fill, `muted` text, no border. All share `radius-md` and `control` type. Hover always pins `color` as well as background. **One accent-filled button per screen.**
+- **Buttons.** Primary: `accent` fill, `on-accent` text, 48px tall (56px beside the hero search field), hover `accent-hover`. Secondary: `paper` fill, 1px `line-strong` border, `ink` text. Tertiary / ghost: plain `accent` text (hover: `surface` fill). Danger (cancel only): `paper` fill, 1px `danger` border and text. Disabled: `surface` fill, `muted` text, no border. All share `radius-md` and `control` type. Hover always pins `color` as well as background. **One accent-filled button per screen.**
 - **Nav call to action.** The desktop nav "Sign up" link is ink-filled (`ink` background, `paper` text, 44px tall, `radius-md`, hover pins both colours). It is the ONE allowed non-accent filled button and does not count against the one-accent-button rule. In the mobile menu panel the same link is the accent button (`accent` fill, `on-accent` text).
-- **Tabs and search.** Underline tabs: 44px tall, 3px bottom border, `accent` on the active tab and transparent on the others; active text is `ink`, inactive `muted`, state exposed with `aria-pressed`. The search field is 56px tall, `line-strong` border, with its primary button beside it.
+- **Tabs and search.** Underline tabs: 44px tall, 3px bottom border, `accent` on the active tab and transparent on the others; active text is `ink`, inactive `muted`, state exposed with `aria-selected` / `aria-pressed`. The search field is 56px tall, `line-strong` border, with its primary button beside it.
 - **Form fields.** Label above (`small`, weight 700), hint above the field in `small`/`muted`, field 48px tall with a 1px `line-strong` border. Invalid state: 2px `danger` border, and above the field an error icon plus the message in `danger` text, linked with `aria-invalid` and `aria-describedby`. Required and optional are both marked.
+- **Checklist row.** Pending (empty circle), active (accent ring), done (calm `accent` fill + check in `on-accent`), error (`danger` ring + icon). Title in body/700; detail in small/`muted`.
+- **Snippet / secret.** Code samples and shown-once keys use monospace only inside `<code>`/`<pre>` (or the secret `code` value), with a secondary Copy button — never monospace on the Copy label itself.
 - **Episode row.** Title (`body`, 700) over a meta line (`small`, `muted`, `tabular-nums`), a 1px `line` top border, 16px vertical padding, `surface-hover` on hover. Right side: one action, either a primary "Transcribe" button or a "View transcript" link. Only one row on a screen may carry the accent button.
 - **Job card.** `surface` fill, `radius-md`, 24px padding. Status line, 8px progress bar (`line` track, `accent` fill, `radius-sm`, `role="progressbar"`), the reassurance "It keeps going if you close the page.", and a danger Cancel button.
 - **Transcript block.** Header row with Copy, .txt and .srt as secondary buttons, then lines: a 48px timestamp column (`timestamp`, `accent`) and the text in Newsreader 20px. Newsreader appears nowhere else.
 - **Credit pack.** `paper` fill, 1px `line-strong` border, figure ("300 minutes") in a heading weight, price on the button.
-- **Alerts.** Tint fill with its `on-…` text, `radius-md`, 12px/16px padding, always an icon plus text (colour is never the only signal). Links inside inherit the `on-…` colour and are bold.
+- **Alerts / notices.** Tint fill with its `on-…` text, `radius-md`, 12px/16px padding, always an icon plus text (colour is never the only signal). Links inside inherit the `on-…` colour and are bold.
+- **Status chip.** Optional `accent-tint` / `warning-tint` chip at `radius-md` (8px). **No pills** (`9999px` / `999px` are banned).
+
+## How to build a page
+
+1. **Compose from macros.** Import from `templates/components/macros.html` (`button`, `link_button`, `section`/`card`, `page_header`, `tabs`/`tab_panel`, `checklist`/`checklist_row`, `snippet`, `secret_field`, `notice`, `empty_state`, `form_field`, `chip`). Prefer existing class names in `base.html` (`.btn`, `.form-input`, `.card`) when a macro is not needed yet — do not invent parallel styles.
+2. **Never hand-roll component CSS.** No page-local `<style>` block in a new template, no `style=` attributes, no hard-coded hex or `rgb()`/`hsl()` colours, no new colours or fonts, no `box-shadow`, gradients, or pill radii. Put shared rules in `static/components.css` using the tokens already defined in `base.html`. Layout spacing uses `--space-*`.
+3. **One primary button.** Exactly one `btn-primary` / accent-filled control per screen (the desktop nav Sign up CTA does not count). Demote everything else to secondary, ghost, or a link-button.
+4. **Behaviour ships with the library.** `static/components.js` (loaded from `base.html`) drives tabs (click, arrow keys, Home/End) and copy buttons. Do not write per-page handlers for them. `notice()` escapes its message; pass a link with `{% call notice(variant=...) %}`.
+5. **Check the gallery.** Open `/design/components` (app.debug or an ADMIN user) and match states there before shipping. The gallery is noindex.
+6. **Light and dark.** Follow `prefers-color-scheme`. PRs that change UI must include light + dark screenshots (desktop and ~390px where layout matters). Home and pricing are the visual baselines — do not change their look unless the task says so.
+7. **CI guardrails.** `test_design_system.py` fails the build on `<style>` blocks or inline styles in new templates, hex outside the token section, forbidden elevation/shape/type rules, and extra primary buttons. Legacy `style=` counts are ratcheted down only.
+
+Anti-pattern (do not repeat): the rejected `/connect` draft used pill CTAs, monospace on a Copy control, ad-hoc grey boxes, and inconsistent tabs — none of that is in this system.
 
 ## Motion / Texture
 
@@ -577,3 +592,4 @@ Variable names equal the token names. The Flask app keeps them in `templates/bas
 | 2026-10-09 | Component paddings snapped to the spacing scale (button 22px to 24px, search 18px to 16px, alert 14px to 12px) | The prototypes use 22/18/14px, which are not spacing tokens. The scale wins. |
 | 2026-10-09 | Prototype drift: transcript 19px in `Komponenter`, 20px elsewhere; cover thumbnail radius 6px | Token file says 20px and `radius-sm` 4px; the tokens win. |
 | 2026-10-09 | Open: PNG icons and `og-image.png` still need regenerating | Predate the redesign. |
+| 2026-10-10 | Added Jinja macros (`templates/components/`), `static/components.css`, `/design/components` gallery, `test_design_system.py`, and "How to build a page" | Stop agent drift from DESIGN.md; rejected /connect draft is the anti-pattern. |

@@ -43,6 +43,7 @@
        visitor's IP, and no render-blocking cross-origin stylesheet. #}
     <link rel="preload" href="{{ asset_url('fonts/schibsted-grotesk-latin.woff2') }}" as="font" type="font/woff2" crossorigin>
     <style>
+        /* === Design tokens (locked — see DESIGN.md / docs/design/tokens.json) === */
         @font-face {
             font-family: 'Schibsted Grotesk';
             font-style: normal;
@@ -98,9 +99,23 @@
             --on-danger-tint: #8A1C12;
             --radius: 8px;
             --radius-sm: 4px;
+            --radius-md: 8px; /* alias; DESIGN.md name — same as --radius */
             --transition: 0.15s ease;
             --font-sans: 'Schibsted Grotesk', system-ui, sans-serif;
             --font-serif: 'Newsreader', Georgia, serif;
+            /* Spacing scale (DESIGN.md). Prefer these over ad-hoc px in new CSS. */
+            --space-1: 0.25rem;
+            --space-2: 0.5rem;
+            --space-3: 0.75rem;
+            --space-4: 1rem;
+            --space-6: 1.5rem;
+            --space-9: 2.25rem;
+            --space-12: 3rem;
+            --space-24: 6rem;
+            --width-page: 70rem;
+            --width-prose: 47.5rem;
+            --display-fluid: clamp(2.5rem, 6vw, 4rem);
+            --title-fluid: clamp(1.875rem, 5vw, 2.75rem);
         }
         @media (prefers-color-scheme: dark) {
             :root {
@@ -289,6 +304,10 @@
             padding: 32px 24px;
             flex: 1;
         }
+
+        /* === Shared components (legacy class names kept for existing pages) ===
+           New screens should prefer templates/components macros + components.css.
+           Do not add colours, fonts, pills, shadows or gradients here. */
 
         /* Cards */
         .card {
@@ -1073,6 +1092,9 @@
             .episode-card.selected, .tab.active { outline: 3px solid Highlight; }
         }
     </style>
+    {# Shared component library (macros in templates/components/). Loaded after
+       the token/base rules so .btn.btn-ghost and friends can override .btn. #}
+    <link rel="stylesheet" href="{{ asset_url('components.css') }}">
 </head>
 <body{% if current_user.is_authenticated %} data-authenticated="1"{% endif %}>
     <a class="skip-link" href="#content">Skip to main content</a>
@@ -1501,6 +1523,8 @@
     <script type="speculationrules">
     {"prefetch": [{"where": {"href_matches": ["/", "/pricing", "/whats-new", "/docs/api", "/rss-help", "/privacy", "/terms", "/podcasts"]}, "eagerness": "moderate"}]}
     </script>
+    {# Tabs and copy buttons for templates/components macros. #}
+    <script src="{{ asset_url('components.js') }}" defer></script>
     {% block scripts %}{% endblock %}
     <script>
     // Live job bar. Polls a small endpoint so a transcription that keeps running

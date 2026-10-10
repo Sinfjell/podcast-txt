@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import button, link_button, section, page_header, tabs, tab_panel, checklist, checklist_row, snippet, secret_field, notice, empty_state, form_field, chip %}
+
+{% block title %}Component gallery — Podskrift{% endblock %}
+{% block robots_meta %}<meta name="robots" content="noindex, nofollow">{% endblock %}
+{% block canonical_link %}{% endblock %}
+
+{% block container_class %}container-wide{% endblock %}
+
+{# data-ds-gallery marks this template as exempt from the one-primary-button lint. #}
+{% block content %}
+<div data-ds-gallery="1">
+  {{ page_header(
+    "Component gallery",
+    "Dev-only reference for templates/components macros. One composition rule still applies on real screens: one accent-filled button. This page shows every variant on purpose."
+  ) }}
+
+  <p class="ds-gallery-note">
+    Open this page with your system set to light, then dark. Compose new screens from these macros; do not hand-roll component CSS. Rejected anti-pattern: the /connect draft that used pill buttons, monospace UI labels, and ad-hoc grey boxes.
+  </p>
+
+  <section class="ds-gallery-section" aria-labelledby="g-buttons">
+    <h2 id="g-buttons" class="ds-gallery-label">BUTTONS</h2>
+    <div class="ds-row">
+      {{ button("Primary", variant="primary") }}
+      {{ button("Secondary", variant="secondary") }}
+      {{ button("Ghost", variant="ghost") }}
+      {{ button("Danger", variant="danger") }}
+      {{ button("Disabled", variant="primary", disabled=true) }}
+      {{ button("Disabled link", variant="secondary", href="#g-buttons", disabled=true) }}
+      {{ button("Small", variant="secondary", size="sm") }}
+      {{ button("Large", variant="secondary", size="lg") }}
+      {{ link_button("Link button", href="#g-buttons") }}
+    </div>
+    <p class="ds-gallery-note">Primary is accent-filled. Ghost is tertiary text. Danger is outline only. Never use border-radius pills.</p>
+  </section>
+
+  <section class="ds-gallery-section" aria-labelledby="g-header">
+    <h2 id="g-header" class="ds-gallery-label">PAGE HEADER</h2>
+    {{ page_header("Connect Podskrift to your AI app", "Create a key, pick a client, finish the checklist. The title uses the title scale; the lede is muted body.") }}
+  </section>
+
+  <section class="ds-gallery-section" aria-labelledby="g-tabs">
+    <h2 id="g-tabs" class="ds-gallery-label">TABS</h2>
+    {{ tabs("Clients", [
+      {"id": "tab-cursor", "label": "Cursor", "selected": true},
+      {"id": "tab-vscode", "label": "VS Code", "selected": false},
+      {"id": "tab-claude", "label": "Claude", "selected": false}
+    ]) }}
+    {% call tab_panel("tab-cursor", selected=true) %}
+      <p class="text-muted">Cursor panel. Tabs expose aria-selected and 44px targets.</p>
+    {% endcall %}
+    {% call tab_panel("tab-vscode", selected=false) %}
+      <p class="text-muted">VS Code panel.</p>
+    {% endcall %}
+    {% call tab_panel("tab-claude", selected=false) %}
+      <p class="text-muted">Claude panel.</p>
+    {% endcall %}
+  </section>
+
+  <section class="ds-gallery-section" aria-labelledby="g-section">
+    <h2 id="g-section" class="ds-gallery-label">CARD / SECTION</h2>
+    <div class="ds-stack ds-stack-4">
+      {% call section(title="Surface section") %}
+        <p class="text-muted">Surface fill on paper. No shadow, no gradient.</p>
+        {{ button("Add to Cursor", variant="primary") }}
+      {% endcall %}
+      {% call section(title="Bordered section", variant="bordered") %}
+        <p class="text-muted">Paper with a line border.</p>
+        {{ link_button("Not working? Set it up by hand.", href="#g-section") }}
+      {% endcall %}
+      {% call section(title="Strong border", variant="strong") %}
+        <p class="text-muted">Credit-pack style: line-strong border.</p>
+      {% endcall %}
+    </div>
+  </section>
+
+  <section class="ds-gallery-section" aria-labelledby="g-check">
+    <h2 id="g-check" class="ds-gallery-label">CHECKLIST</h2>
+    <p class="section-label" aria-live="polite">1 of 4 done</p>
+    {{ checklist(items=[
+      {"title": "Logged in", "detail": "as shot@example.com", "state": "done"},
+      {"title": "Key created", "detail": "Not created yet", "state": "pending"},
+      {"title": "Cursor connected", "detail": "Waiting", "state": "active"},
+      {"title": "First transcript", "detail": "Could not reach the client", "state": "error"}
+    ], live=true) }}
+  </section>
+
+  <section class="ds-gallery-section" aria-labelledby="g-snippet">
+    <h2 id="g-snippet" class="ds-gallery-label">SNIPPET + SECRET</h2>
+    <div class="ds-stack ds-stack-6">
+      {{ snippet("Try: Transcribe the latest episode of Hard Fork and summarise it.") }}
+      {{ secret_field("sk-live-example-key-shown-once") }}
+    </div>
+    <p class="ds-gallery-note">Monospace is allowed only inside code/pre (and the secret value, which is a code element).</p>
+  </section>
+
+  <section class="ds-gallery-section" aria-labelledby="g-notice">
+    <h2 id="g-notice" class="ds-gallery-label">NOTICE</h2>
+    <div class="ds-stack ds-stack-3">
+      {{ notice("Free trial: 46 minutes of audio left, on our key.", variant="info") }}
+      {{ notice("Key saved. You can close this page.", variant="success") }}
+      {{ notice("Your free trial is used up. Add your own OpenAI API key to keep transcribing.", variant="warning") }}
+      {{ notice("We could not fetch this feed. Check that the RSS link is public.", variant="error") }}
+      {% call notice(variant="warning") %}Out of minutes. <a href="/pricing">See pricing</a>.{% endcall %}
+    </div>
+  </section>
+
+  <section class="ds-gallery-section" aria-labelledby="g-empty">
+    <h2 id="g-empty" class="ds-gallery-label">EMPTY STATE</h2>
+    {% call empty_state("No transcripts yet", "Search for a podcast and pick an episode to get started.") %}
+      {{ button("Search podcasts", variant="primary", href="/") }}
+      {{ button("See pricing", variant="secondary", href="/pricing") }}
+    {% endcall %}
+  </section>
+
+  <section class="ds-gallery-section" aria-labelledby="g-form">
+    <h2 id="g-form" class="ds-gallery-label">FORM FIELD</h2>
+    <form class="ds-max-ch-28" onsubmit="return false" novalidate>
+      {% call form_field("Spoken language", "gallery-lang", help="Leave on auto unless the result is in the wrong language.", optional=true) %}
+        <select class="form-input" id="gallery-lang" aria-describedby="gallery-lang-help">
+          <option>Auto-detect</option>
+          <option>English</option>
+          <option>Norwegian</option>
+        </select>
+      {% endcall %}
+      {% call form_field("OpenAI API key", "gallery-key", error="OpenAI rejected this key. Check that it is active and has billing set up.", required=true) %}
+        <input class="form-input" id="gallery-key" type="text" value="sk-proj-…" required aria-invalid="true" aria-describedby="gallery-key-error" autocomplete="off">
+      {% endcall %}
+      {{ button("Save key", variant="secondary", type="submit") }}
+    </form>
+  </section>
+
+  <section class="ds-gallery-section" aria-labelledby="g-chip">
+    <h2 id="g-chip" class="ds-gallery-label">STATUS CHIP</h2>
+    <div class="ds-row">
+      {{ chip("46 min left") }}
+      {{ chip("Needs key", variant="warning") }}
+      {{ chip("Idle", variant="muted") }}
+    </div>
+    <p class="ds-gallery-note">Chips use radius-md (8px), never 9999px pills. Prefer the nav balance pattern for account minutes.</p>
+  </section>
+</div>
+{% endblock %}
