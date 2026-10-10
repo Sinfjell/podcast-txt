@@ -62,9 +62,19 @@ SUPPORTED_SCOPES = frozenset({'mcp', 'offline_access'})
 # Claude.ai hosted MCP OAuth callback (must pass redirect_uri validation).
 CLAUDE_AI_CALLBACK = 'https://claude.ai/api/mcp/auth_callback'
 
-# CIMD fetch limits (SSRF-hardened outbound HTTP).
+# CIMD / JWKS fetch limits (SSRF-hardened outbound HTTP).
 CIMD_FETCH_TIMEOUT_SEC = 5
 CIMD_FETCH_MAX_BYTES = 64 * 1024
+JWKS_CACHE_SECONDS = int(os.getenv('OAUTH_JWKS_CACHE_SECONDS', '300'))
+JWT_ASSERTION_LEEWAY_SEC = 30
+JWT_ASSERTION_MAX_LIFETIME_SEC = 300
+CLIENT_ASSERTION_TYPE = (
+    'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'
+)
+SUPPORTED_CLIENT_AUTH_METHODS = frozenset({'none', 'private_key_jwt',
+                                           'client_secret_post'})
+CIMD_CLIENT_AUTH_METHODS = frozenset({'none', 'private_key_jwt'})
+JWT_ALLOWED_ALGS = ('RS256', 'ES256')
 
 _OAUTH_DOC_BEGIN = '<!-- mcp-oauth-section -->'
 _OAUTH_DOC_END = '<!-- /mcp-oauth-section -->'
@@ -72,6 +82,9 @@ _OAUTH_DOC_END = '<!-- /mcp-oauth-section -->'
 _register_attempts: dict[str, list[float]] = collections.defaultdict(list)
 _token_attempts: dict[str, list[float]] = collections.defaultdict(list)
 _rate_lock = threading.Lock()
+# jwks_uri → (fetched_at_monotonic, jwks_dict)
+_jwks_cache: dict[str, tuple[float, dict]] = {}
+_jwks_cache_lock = threading.Lock()
 
 
 def mcp_oauth_enabled() -> bool:
@@ -418,8 +431,9 @@ def authorization_server_metadata() -> dict:
         'response_types_supported': ['code'],
         'grant_types_supported': ['authorization_code', 'refresh_token'],
         'code_challenge_methods_supported': ['S256'],
-        # CIMD public clients use none; DCR may use client_secret_post.
-        'token_endpoint_auth_methods_supported': ['none', 'client_secret_post'],
+        # ChatGPT CIMD uses none / private_key_jwt; DCR may still use client_secret_post.
+        'token_endpoint_auth_methods_supported': ['none', 'private_key_jwt'],
+        'token_endpoint_auth_signing_alg_values_supported': ['RS256'],
         'authorization_response_iss_parameter_supported': True,
     }
 
@@ -480,16 +494,27 @@ def _cimd_host_is_safe(hostname: str) -> bool:
     return True
 
 
-def fetch_cimd_document(client_id_url: str) -> tuple[dict | None, str | None]:
-    """GET a Client ID Metadata Document. Returns (doc, error_description)."""
-    if not looks_like_cimd_client_id(client_id_url):
-        return None, 'client_id is not a valid CIMD HTTPS URL.'
-    parsed = urlparse(client_id_url)
+def _fetch_https_json(url: str, *, label: str) -> tuple[dict | None, str | None]:
+    """SSRF-safe HTTPS GET of a small JSON object (CIMD / JWKS)."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None, f'{label} URL is invalid.'
+    if parsed.scheme.lower() != 'https' or not parsed.netloc:
+        return None, f'{label} must be an HTTPS URL.'
+    if parsed.username or parsed.password or parsed.fragment:
+        return None, f'{label} URL is invalid.'
+    try:
+        port = parsed.port
+    except ValueError:
+        return None, f'{label} URL is invalid.'
+    if port not in (None, 443):
+        return None, f'{label} host is not allowed.'
     if not _cimd_host_is_safe(parsed.hostname or ''):
-        return None, 'CIMD host is not allowed.'
+        return None, f'{label} host is not allowed.'
     try:
         resp = requests.get(
-            client_id_url,
+            url,
             timeout=CIMD_FETCH_TIMEOUT_SEC,
             allow_redirects=False,
             headers={
@@ -499,32 +524,41 @@ def fetch_cimd_document(client_id_url: str) -> tuple[dict | None, str | None]:
             stream=True,
         )
     except requests.RequestException:
-        return None, 'Could not fetch client metadata document.'
+        return None, f'Could not fetch {label}.'
     if resp.status_code != 200:
         resp.close()
-        return None, f'CIMD fetch returned HTTP {resp.status_code}.'
-    # Cap body size before json parse.
+        return None, f'{label} fetch returned HTTP {resp.status_code}.'
     chunks = []
     total = 0
     deadline = time.monotonic() + CIMD_FETCH_TIMEOUT_SEC
     try:
         for chunk in resp.iter_content(chunk_size=4096):
             if time.monotonic() > deadline:
-                return None, 'CIMD fetch timed out.'
+                return None, f'{label} fetch timed out.'
             if not chunk:
                 continue
             total += len(chunk)
             if total > CIMD_FETCH_MAX_BYTES:
-                return None, 'CIMD document too large.'
+                return None, f'{label} document too large.'
             chunks.append(chunk)
     finally:
         resp.close()
     try:
         doc = json.loads(b''.join(chunks).decode('utf-8'))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return None, 'CIMD document is not valid JSON.'
+        return None, f'{label} document is not valid JSON.'
     if not isinstance(doc, dict):
-        return None, 'CIMD document must be a JSON object.'
+        return None, f'{label} document must be a JSON object.'
+    return doc, None
+
+
+def fetch_cimd_document(client_id_url: str) -> tuple[dict | None, str | None]:
+    """GET a Client ID Metadata Document. Returns (doc, error_description)."""
+    if not looks_like_cimd_client_id(client_id_url):
+        return None, 'client_id is not a valid CIMD HTTPS URL.'
+    doc, err = _fetch_https_json(client_id_url, label='CIMD')
+    if err:
+        return None, err
     doc_client_id = doc.get('client_id')
     if not isinstance(doc_client_id, str) or doc_client_id != client_id_url:
         return None, 'CIMD client_id must exactly match the document URL.'
@@ -540,19 +574,270 @@ def fetch_cimd_document(client_id_url: str) -> tuple[dict | None, str | None]:
     return doc, None
 
 
+def _same_https_origin(url_a: str, url_b: str) -> bool:
+    try:
+        a = urlparse(url_a)
+        b = urlparse(url_b)
+    except ValueError:
+        return False
+    if a.scheme.lower() != 'https' or b.scheme.lower() != 'https':
+        return False
+    host_a = (a.hostname or '').lower().rstrip('.')
+    host_b = (b.hostname or '').lower().rstrip('.')
+    if not host_a or host_a != host_b:
+        return False
+    port_a = a.port or 443
+    port_b = b.port or 443
+    return port_a == port_b
+
+
+def _cimd_jwks_uri(doc: dict, client_id_url: str) -> str | None:
+    """Return a same-origin HTTPS jwks_uri, or None when absent/invalid."""
+    jwks_uri = doc.get('jwks_uri')
+    if not isinstance(jwks_uri, str) or not jwks_uri.strip():
+        return None
+    jwks_uri = jwks_uri.strip()
+    if len(jwks_uri) > 512:
+        return None
+    if not _same_https_origin(jwks_uri, client_id_url):
+        return None
+    try:
+        parsed = urlparse(jwks_uri)
+    except ValueError:
+        return None
+    if parsed.username or parsed.password or parsed.fragment:
+        return None
+    if (parsed.path or '') in ('', '/'):
+        return None
+    return jwks_uri
+
+
 def _cimd_auth_method(doc: dict) -> str | None:
-    """Prefer public-client none; reject unsupported methods."""
-    methods = doc.get('token_endpoint_auth_methods')
-    if isinstance(methods, list) and methods:
-        str_methods = [str(m) for m in methods]
-        if 'none' in str_methods:
+    """Accept none or private_key_jwt from primary method or methods_supported."""
+    collected: list[str] = []
+    for key in ('token_endpoint_auth_methods_supported',
+                'token_endpoint_auth_methods'):
+        methods = doc.get(key)
+        if isinstance(methods, list) and methods:
+            for m in methods:
+                if isinstance(m, str) and m.strip():
+                    collected.append(m.strip())
+    single = doc.get('token_endpoint_auth_method')
+    if isinstance(single, str) and single.strip():
+        primary = single.strip()
+    else:
+        primary = None
+        # OIDC default for public clients when the field is omitted.
+        if not collected:
             return 'none'
-    single = (doc.get('token_endpoint_auth_method') or 'none')
-    if isinstance(single, str) and single.strip() == 'none':
-        return 'none'
-    # private_key_jwt is advertised by ChatGPT but not implemented here yet;
-    # accept the client when none is also listed (handled above).
+    if primary is not None:
+        collected.append(primary)
+    allowed = [m for m in collected if m in CIMD_CLIENT_AUTH_METHODS]
+    if not allowed:
+        return None
+    if primary in CIMD_CLIENT_AUTH_METHODS:
+        return primary
+    if 'private_key_jwt' in allowed:
+        return 'private_key_jwt'
+    return 'none'
+
+
+def fetch_jwks(jwks_uri: str, *, force_refresh: bool = False) -> tuple[dict | None, str | None]:
+    """Fetch + cache a JWKS document (short TTL)."""
+    now = time.monotonic()
+    if not force_refresh:
+        with _jwks_cache_lock:
+            cached = _jwks_cache.get(jwks_uri)
+            if cached is not None:
+                fetched_at, jwks = cached
+                if now - fetched_at < JWKS_CACHE_SECONDS:
+                    return jwks, None
+    jwks, err = _fetch_https_json(jwks_uri, label='JWKS')
+    if err:
+        return None, err
+    keys = jwks.get('keys')
+    if not isinstance(keys, list):
+        return None, 'JWKS document must contain a keys array.'
+    with _jwks_cache_lock:
+        _jwks_cache[jwks_uri] = (time.monotonic(), jwks)
+    return jwks, None
+
+
+def _jwk_to_key(jwk: dict):
+    """Convert a JWK dict to a cryptography key (RS*/ES* only)."""
+    import jwt
+    from jwt.algorithms import ECAlgorithm, RSAAlgorithm
+
+    kty = jwk.get('kty')
+    if kty == 'RSA':
+        return RSAAlgorithm.from_jwk(jwk)
+    if kty == 'EC':
+        return ECAlgorithm.from_jwk(jwk)
+    raise jwt.InvalidKeyError(f'Unsupported JWK kty: {kty!r}')
+
+
+def _find_jwk(jwks: dict, kid: str | None) -> dict | None:
+    keys = jwks.get('keys') or []
+    if not isinstance(keys, list):
+        return None
+    if kid:
+        for key in keys:
+            if isinstance(key, dict) and key.get('kid') == kid:
+                return key
+        return None
+    # No kid: only unambiguous when the set has a single signing key.
+    usable = [
+        k for k in keys
+        if isinstance(k, dict) and k.get('kty') in ('RSA', 'EC')
+        and k.get('use', 'sig') in ('sig', None)
+    ]
+    if len(usable) == 1:
+        return usable[0]
     return None
+
+
+def _consume_jti(jti: str, expires_at: datetime) -> bool:
+    """Record jti as used. Returns False if already seen (replay)."""
+    from sqlalchemy.exc import IntegrityError
+    from models import OAuthJwtJti, db
+
+    digest = _hash_token(jti)
+    # Drop expired rows opportunistically (best-effort; not required for correctness).
+    now = _utc_now()
+    try:
+        OAuthJwtJti.query.filter(OAuthJwtJti.expires_at < now).delete(
+            synchronize_session=False)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+
+    row = OAuthJwtJti(jti_hash=digest, expires_at=expires_at)
+    db.session.add(row)
+    try:
+        db.session.commit()
+        return True
+    except IntegrityError:
+        db.session.rollback()
+        return False
+
+
+def verify_private_key_jwt(client, assertion: str) -> tuple[bool, str | None]:
+    """Verify a private_key_jwt client_assertion (RFC 7523 / OIDC core)."""
+    import jwt
+
+    if not assertion or not isinstance(assertion, str) or len(assertion) > 8192:
+        return False, 'client_assertion is required.'
+    jwks_uri = getattr(client, 'jwks_uri', None)
+    if not jwks_uri:
+        return False, 'Client has no jwks_uri for private_key_jwt.'
+
+    try:
+        header = jwt.get_unverified_header(assertion)
+    except jwt.PyJWTError:
+        return False, 'client_assertion is not a valid JWT.'
+    alg = header.get('alg')
+    if alg not in JWT_ALLOWED_ALGS:
+        return False, 'Unsupported client_assertion signing algorithm.'
+    kid = header.get('kid')
+
+    jwks, err = fetch_jwks(jwks_uri)
+    if err:
+        return False, err
+    jwk = _find_jwk(jwks, kid if isinstance(kid, str) else None)
+    if jwk is None and kid:
+        # Unknown kid → refetch once (key rotation).
+        jwks, err = fetch_jwks(jwks_uri, force_refresh=True)
+        if err:
+            return False, err
+        jwk = _find_jwk(jwks, kid)
+    if jwk is None:
+        return False, 'No matching JWK for client_assertion.'
+
+    issuer = oauth_issuer()
+    token_endpoint = f'{issuer}/oauth/token'
+    audience_ok = {token_endpoint, issuer}
+    try:
+        key = _jwk_to_key(jwk)
+        claims = jwt.decode(
+            assertion,
+            key=key,
+            algorithms=[alg],
+            audience=list(audience_ok),
+            options={
+                'require': ['exp', 'iat', 'iss', 'sub', 'jti'],
+                'verify_aud': True,
+            },
+            leeway=JWT_ASSERTION_LEEWAY_SEC,
+        )
+    except jwt.PyJWTError:
+        return False, 'client_assertion signature or claims invalid.'
+
+    if claims.get('iss') != client.client_id:
+        return False, 'client_assertion iss must equal client_id.'
+    if claims.get('sub') != client.client_id:
+        return False, 'client_assertion sub must equal client_id.'
+    aud = claims.get('aud')
+    aud_values = aud if isinstance(aud, list) else [aud]
+    if not any(a in audience_ok for a in aud_values):
+        return False, 'client_assertion aud is not this token endpoint.'
+
+    now = _utc_now()
+    try:
+        exp_ts = int(claims['exp'])
+        iat_ts = int(claims['iat'])
+    except (TypeError, ValueError, KeyError):
+        return False, 'client_assertion exp/iat invalid.'
+    if exp_ts - iat_ts > JWT_ASSERTION_MAX_LIFETIME_SEC + JWT_ASSERTION_LEEWAY_SEC:
+        return False, 'client_assertion lifetime too long.'
+    nbf = claims.get('nbf')
+    if nbf is not None:
+        try:
+            nbf_ts = int(nbf)
+        except (TypeError, ValueError):
+            return False, 'client_assertion nbf invalid.'
+        if nbf_ts > int(now.timestamp()) + JWT_ASSERTION_LEEWAY_SEC:
+            return False, 'client_assertion not yet valid.'
+    # iat must not be far in the future or ancient.
+    now_ts = int(now.timestamp())
+    if iat_ts > now_ts + JWT_ASSERTION_LEEWAY_SEC:
+        return False, 'client_assertion iat is in the future.'
+    if now_ts - iat_ts > JWT_ASSERTION_MAX_LIFETIME_SEC + JWT_ASSERTION_LEEWAY_SEC:
+        return False, 'client_assertion iat is too old.'
+
+    jti = claims.get('jti')
+    if not isinstance(jti, str) or not jti.strip() or len(jti) > 256:
+        return False, 'client_assertion jti is required.'
+    expires_at = datetime.fromtimestamp(exp_ts, tz=timezone.utc)
+    if not _consume_jti(jti.strip(), expires_at):
+        return False, 'client_assertion jti has already been used.'
+    return True, None
+
+
+def authenticate_oauth_client(client, data: dict) -> tuple[bool, str | None]:
+    """Authenticate the client at the token endpoint. Returns (ok, error_description)."""
+    method = (client.token_endpoint_auth_method or 'none').strip()
+    assertion = (data.get('client_assertion') or '').strip()
+    assertion_type = (data.get('client_assertion_type') or '').strip()
+
+    if method == 'client_secret_post':
+        secret = (data.get('client_secret') or '').strip()
+        if not secret or not client.client_secret_hash:
+            return False, 'client_secret required.'
+        if not hmac.compare_digest(_hash_token(secret), client.client_secret_hash):
+            return False, 'Invalid client_secret.'
+        return True, None
+
+    if method == 'private_key_jwt':
+        if not assertion:
+            return False, 'client_assertion required for private_key_jwt.'
+        if assertion_type != CLIENT_ASSERTION_TYPE:
+            return False, 'client_assertion_type must be jwt-bearer.'
+        return verify_private_key_jwt(client, assertion)
+
+    # Public client (none): PKCE alone; ignore stray assertions.
+    if method == 'none':
+        return True, None
+    return False, 'Unsupported token_endpoint_auth_method.'
 
 
 def upsert_cimd_client(client_id_url: str, doc: dict):
@@ -560,7 +845,12 @@ def upsert_cimd_client(client_id_url: str, doc: dict):
     from models import OAuthClient, db
     auth_method = _cimd_auth_method(doc)
     if auth_method is None:
-        return None, 'CIMD token_endpoint_auth_method must include none.'
+        return None, (
+            'CIMD token_endpoint_auth_method must include none or private_key_jwt.'
+        )
+    jwks_uri = _cimd_jwks_uri(doc, client_id_url)
+    if auth_method == 'private_key_jwt' and not jwks_uri:
+        return None, 'CIMD private_key_jwt requires a same-origin https jwks_uri.'
     uris = [u.strip() for u in doc['redirect_uris'] if isinstance(u, str)]
     grant_types = _json_list(
         doc.get('grant_types'),
@@ -585,6 +875,7 @@ def upsert_cimd_client(client_id_url: str, doc: dict):
             grant_types_json=json.dumps(grant_types),
             response_types_json=json.dumps(response_types),
             token_endpoint_auth_method=auth_method,
+            jwks_uri=jwks_uri,
             registration_source='cimd',
         )
         db.session.add(row)
@@ -594,6 +885,7 @@ def upsert_cimd_client(client_id_url: str, doc: dict):
         row.grant_types_json = json.dumps(grant_types)
         row.response_types_json = json.dumps(response_types)
         row.token_endpoint_auth_method = auth_method
+        row.jwks_uri = jwks_uri
         if not row.registration_source:
             row.registration_source = 'cimd'
     db.session.commit()
@@ -933,19 +1225,17 @@ def register_oauth(app_flask):
                             OAuthRefreshToken, db)
 
         # No outbound CIMD fetch from this unauthenticated endpoint: a client
-        # that completed /oauth/authorize is already stored.
+        # that completed /oauth/authorize is already stored. JWKS fetch for
+        # private_key_jwt still happens below via the cached jwks_uri.
         client, client_err = resolve_oauth_client(client_id, allow_fetch=False)
         if client is None:
             return _oauth_error(
                 'invalid_client', client_err or 'Unknown client_id.', 401)
 
-        if client.token_endpoint_auth_method == 'client_secret_post':
-            secret = (data.get('client_secret') or '').strip()
-            if not secret or not client.client_secret_hash:
-                return _oauth_error('invalid_client', 'client_secret required.', 401)
-            if not hmac.compare_digest(
-                    _hash_token(secret), client.client_secret_hash):
-                return _oauth_error('invalid_client', 'Invalid client_secret.', 401)
+        ok, auth_err = authenticate_oauth_client(client, data)
+        if not ok:
+            return _oauth_error(
+                'invalid_client', auth_err or 'Client authentication failed.', 401)
 
         if not _rate_limit(
                 _token_attempts, f'client:{client_id}',
@@ -1148,9 +1438,17 @@ def ensure_oauth_tables():
                 grant_types_json TEXT NOT NULL,
                 response_types_json TEXT NOT NULL,
                 token_endpoint_auth_method VARCHAR(64) NOT NULL DEFAULT 'none',
+                jwks_uri VARCHAR(512),
                 registration_source VARCHAR(16),
                 created_at DATETIME
             )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS oauth_jwt_jtis (
+            jti_hash VARCHAR(64) NOT NULL PRIMARY KEY,
+            expires_at DATETIME NOT NULL,
+            created_at DATETIME
+        )
         """,
         """
         CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
@@ -1265,6 +1563,9 @@ def ensure_oauth_tables():
         ('ix_oauth_refresh_tokens_user_id',
          'CREATE INDEX IF NOT EXISTS ix_oauth_refresh_tokens_user_id '
          'ON oauth_refresh_tokens (user_id)'),
+        ('ix_oauth_jwt_jtis_expires_at',
+         'CREATE INDEX IF NOT EXISTS ix_oauth_jwt_jtis_expires_at '
+         'ON oauth_jwt_jtis (expires_at)'),
     ]
     for name, ddl in index_specs:
         if 'oauth_authorization_codes' in ddl:
@@ -1273,6 +1574,8 @@ def ensure_oauth_tables():
             table_name = 'oauth_access_tokens'
         elif 'oauth_refresh_tokens' in ddl:
             table_name = 'oauth_refresh_tokens'
+        elif 'oauth_jwt_jtis' in ddl:
+            table_name = 'oauth_jwt_jtis'
         else:
             table_name = 'oauth_clients'
         if not A._live_columns(table_name):

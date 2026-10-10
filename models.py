@@ -435,6 +435,8 @@ class OAuthClient(db.Model):
     response_types_json = db.Column(db.Text, nullable=False)
     token_endpoint_auth_method = db.Column(db.String(64), nullable=False,
                                            default='none', server_default='none')
+    # CIMD jwks_uri for private_key_jwt (same host as client_id).
+    jwks_uri = db.Column(db.String(512), nullable=True)
     # 'dcr' | 'cimd' — how this client was first learned.
     registration_source = db.Column(db.String(16), nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
@@ -494,10 +496,20 @@ class OAuthRefreshToken(db.Model):
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class OAuthJwtJti(db.Model):
+    """Single-use jti values from private_key_jwt client assertions (RFC 7523)."""
+    __tablename__ = 'oauth_jwt_jtis'
+
+    jti_hash = db.Column(db.String(64), primary_key=True)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 #: Additive columns for oauth_* tables (future ALTERs). Applied by
 #: ensure_oauth_tables AFTER CREATE TABLE IF NOT EXISTS.
 OAUTH_CLIENT_COLUMN_MIGRATIONS = {
     'registration_source': 'VARCHAR(16)',
+    'jwks_uri': 'VARCHAR(512)',
 }
 OAUTH_AUTHORIZATION_CODE_COLUMN_MIGRATIONS = {}
 OAUTH_ACCESS_TOKEN_COLUMN_MIGRATIONS = {}

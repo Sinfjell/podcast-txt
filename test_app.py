@@ -6575,6 +6575,7 @@ def mcp_oauth_on(mcp_on, monkeypatch):
     monkeypatch.setenv('PUBLIC_BASE_URL', 'https://podskrift.com')
     OAUTH._register_attempts.clear()
     OAUTH._token_attempts.clear()
+    OAUTH._jwks_cache.clear()
     return mcp_on
 
 
@@ -6671,11 +6672,15 @@ def test_oauth_metadata_and_www_authenticate(mcp_oauth_on):
     meta = asm.get_json()
     assert meta['issuer'] == 'https://podskrift.com'
     assert 'S256' in meta['code_challenge_methods_supported']
+    assert 'mcp' in meta['scopes_supported']
     assert 'offline_access' in meta['scopes_supported']
     assert meta['registration_endpoint'].endswith('/oauth/register')
     assert meta['client_id_metadata_document_supported'] is True
     assert meta['authorization_response_iss_parameter_supported'] is True
-    assert 'none' in meta['token_endpoint_auth_methods_supported']
+    assert meta['token_endpoint_auth_methods_supported'] == [
+        'none', 'private_key_jwt',
+    ]
+    assert meta['token_endpoint_auth_signing_alg_values_supported'] == ['RS256']
 
     # URL-only MCP clients (Cursor / VS Code / ChatGPT) start OAuth from this 401.
     unauth = c.post('/mcp', json={
@@ -6960,9 +6965,230 @@ def test_oauth_tables_ensure_is_idempotent():
         OAUTH.ensure_oauth_tables()
         OAUTH.ensure_oauth_tables()
         assert 'client_id' in A._live_columns('oauth_clients')
+        assert 'jwks_uri' in A._live_columns('oauth_clients')
+        assert 'jti_hash' in A._live_columns('oauth_jwt_jtis')
         cols = A._live_columns('oauth_refresh_tokens')
         assert 'token_hash' in cols
         assert 'replaced_by_hash' in cols
+
+
+def _chatgpt_cimd_doc(*, cimd_url, redirect_uri, jwks_uri=None):
+    """Shape of ChatGPT's real CIMD document (fetched 2026-03)."""
+    return {
+        'client_id': cimd_url,
+        'client_uri': 'https://chatgpt.com/',
+        'redirect_uris': [redirect_uri],
+        'token_endpoint_auth_method': 'private_key_jwt',
+        'token_endpoint_auth_methods_supported': ['none', 'private_key_jwt'],
+        'grant_types': ['authorization_code', 'refresh_token'],
+        'response_types': ['code'],
+        'client_name': 'ChatGPT',
+        'logo_uri': 'https://persistent.oaistatic.com/sonic/misc/openai-logo.png',
+        'token_endpoint_auth_signing_alg': 'RS256',
+        'jwks_uri': jwks_uri or 'https://chatgpt.com/oauth/jwks.json',
+    }
+
+
+def _rsa_keypair_and_jwk():
+    """Return (private_pem_or_key, jwk_dict with kid) for private_key_jwt tests."""
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives import serialization
+    import jwt
+    from jwt.algorithms import RSAAlgorithm
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_key = private_key.public_key()
+    jwk = json.loads(RSAAlgorithm.to_jwk(public_key))
+    jwk['kid'] = 'test-chatgpt-kid'
+    jwk['use'] = 'sig'
+    jwk['alg'] = 'RS256'
+    return private_key, jwk
+
+
+def _mint_client_assertion(private_key, *, client_id, aud=None, exp_delta=60,
+                           iat_delta=0, jti=None, iss=None, sub=None,
+                           kid='test-chatgpt-kid'):
+    import jwt
+    now = int(time.time())
+    payload = {
+        'iss': client_id if iss is None else iss,
+        'sub': client_id if sub is None else sub,
+        'aud': aud if aud is not None else f'{OAUTH.oauth_issuer()}/oauth/token',
+        'iat': now + iat_delta,
+        'exp': now + exp_delta,
+        'jti': jti or secrets.token_urlsafe(16),
+    }
+    headers = {'kid': kid, 'alg': 'RS256'}
+    return jwt.encode(payload, private_key, algorithm='RS256', headers=headers)
+
+
+def _patch_cimd_and_jwks(monkeypatch, *, cimd_url, doc, jwks):
+    """Mock SSRF-safe fetch for CIMD + JWKS URLs."""
+    bodies = {
+        cimd_url: doc,
+        doc['jwks_uri']: {'keys': [jwks] if jwks else []},
+    }
+
+    class _FakeResp:
+        def __init__(self, payload):
+            self.status_code = 200
+            self._payload = payload
+
+        def iter_content(self, chunk_size=4096):
+            yield json.dumps(self._payload).encode('utf-8')
+
+        def close(self):
+            return None
+
+    def _fake_get(url, *a, **k):
+        if url not in bodies:
+            raise AssertionError(f'unexpected fetch: {url}')
+        return _FakeResp(bodies[url])
+
+    monkeypatch.setattr(OAUTH, '_cimd_host_is_safe', lambda host: True)
+    monkeypatch.setattr(OAUTH.requests, 'get', _fake_get)
+
+
+def test_oauth_cimd_chatgpt_private_key_jwt_accepted(mcp_oauth_on, monkeypatch):
+    """Real ChatGPT CIMD shape (private_key_jwt primary) must authorize."""
+    cimd_url = 'https://chatgpt.com/oauth/client.json'
+    redirect_uri = 'https://chatgpt.com/connector_platform_oauth_redirect'
+    private_key, jwk = _rsa_keypair_and_jwk()
+    doc = _chatgpt_cimd_doc(cimd_url=cimd_url, redirect_uri=redirect_uri)
+    _patch_cimd_and_jwks(monkeypatch, cimd_url=cimd_url, doc=doc, jwks=jwk)
+
+    # Authorize accepts the CIMD document (this was the prod 400).
+    verifier, challenge = _pkce_pair()
+    client = _login(mcp_oauth_on['a'])
+    page = client.get('/oauth/authorize', query_string={
+        'response_type': 'code',
+        'client_id': cimd_url,
+        'redirect_uri': redirect_uri,
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+        'resource': OAUTH.mcp_resource_url(),
+    })
+    assert page.status_code == 200, page.data[:500]
+    assert b'Allow ChatGPT to use Podskrift?' in page.data
+
+    from models import db, OAuthClient
+    with A.app.app_context():
+        row = OAuthClient.query.filter_by(client_id=cimd_url).first()
+        assert row is not None
+        assert row.token_endpoint_auth_method == 'private_key_jwt'
+        assert row.jwks_uri == 'https://chatgpt.com/oauth/jwks.json'
+        assert row.registration_source == 'cimd'
+
+
+def test_oauth_private_key_jwt_token_success_and_rejects(mcp_oauth_on, monkeypatch):
+    """Valid assertion succeeds; wrong aud/iss/exp/jti/signature fail."""
+    cimd_url = 'https://chatgpt.com/oauth/client.json'
+    redirect_uri = 'https://chatgpt.com/connector_platform_oauth_redirect'
+    private_key, jwk = _rsa_keypair_and_jwk()
+    other_key, _ = _rsa_keypair_and_jwk()
+    doc = _chatgpt_cimd_doc(cimd_url=cimd_url, redirect_uri=redirect_uri)
+    _patch_cimd_and_jwks(monkeypatch, cimd_url=cimd_url, doc=doc, jwks=jwk)
+
+    def _code_for_token():
+        verifier, challenge = _pkce_pair()
+        browser = _login(mcp_oauth_on['a'])
+        _, code = _oauth_approve(
+            browser, client_id=cimd_url, redirect_uri=redirect_uri,
+            verifier_challenge=(verifier, challenge))
+        assert code
+        return code, verifier
+
+    def _token(code, verifier, assertion, assertion_type=OAUTH.CLIENT_ASSERTION_TYPE):
+        data = {
+            'grant_type': 'authorization_code',
+            'code': code,
+            'redirect_uri': redirect_uri,
+            'client_id': cimd_url,
+            'code_verifier': verifier,
+            'resource': 'https://podskrift.com/mcp',
+        }
+        if assertion is not None:
+            data['client_assertion'] = assertion
+            data['client_assertion_type'] = assertion_type
+        return A.app.test_client().post('/oauth/token', data=data)
+
+    # Missing assertion → reject
+    code, verifier = _code_for_token()
+    missing = _token(code, verifier, assertion=None)
+    assert missing.status_code == 401
+    assert missing.get_json()['error'] == 'invalid_client'
+
+    # Valid assertion → success
+    code, verifier = _code_for_token()
+    good_jti = secrets.token_urlsafe(12)
+    good = _mint_client_assertion(private_key, client_id=cimd_url, jti=good_jti)
+    ok = _token(code, verifier, good)
+    assert ok.status_code == 200, ok.get_json()
+    assert ok.get_json()['access_token'].startswith('poa_')
+
+    # Replayed jti → reject (new code, same jti)
+    code, verifier = _code_for_token()
+    replay = _mint_client_assertion(private_key, client_id=cimd_url, jti=good_jti)
+    bad_replay = _token(code, verifier, replay)
+    assert bad_replay.status_code == 401
+
+    # Wrong aud
+    code, verifier = _code_for_token()
+    bad_aud = _mint_client_assertion(
+        private_key, client_id=cimd_url, aud='https://evil.example/token')
+    assert _token(code, verifier, bad_aud).status_code == 401
+
+    # Wrong iss
+    code, verifier = _code_for_token()
+    bad_iss = _mint_client_assertion(
+        private_key, client_id=cimd_url, iss='https://evil.example/client.json')
+    assert _token(code, verifier, bad_iss).status_code == 401
+
+    # Expired
+    code, verifier = _code_for_token()
+    expired = _mint_client_assertion(
+        private_key, client_id=cimd_url, exp_delta=-120, iat_delta=-180)
+    assert _token(code, verifier, expired).status_code == 401
+
+    # Bad signature (wrong key)
+    code, verifier = _code_for_token()
+    bad_sig = _mint_client_assertion(other_key, client_id=cimd_url)
+    assert _token(code, verifier, bad_sig).status_code == 401
+
+
+def test_oauth_cimd_none_still_works_without_assertion(mcp_oauth_on, monkeypatch):
+    """CIMD clients that advertise none keep PKCE-only token auth."""
+    cimd_url = 'https://chatgpt.com/oauth/client-none.json'
+    redirect_uri = 'https://chatgpt.com/connector/oauth/xxxx/callback'
+    doc = {
+        'client_id': cimd_url,
+        'client_name': 'ChatGPT Public',
+        'redirect_uris': [redirect_uri],
+        'token_endpoint_auth_method': 'none',
+        'token_endpoint_auth_methods_supported': ['none'],
+        'grant_types': ['authorization_code', 'refresh_token'],
+        'response_types': ['code'],
+        'jwks_uri': 'https://chatgpt.com/oauth/jwks.json',
+    }
+    _patch_cimd_and_jwks(
+        monkeypatch, cimd_url=cimd_url, doc=doc,
+        jwks={'kty': 'RSA', 'kid': 'x', 'n': 'x', 'e': 'AQAB'})
+
+    verifier, challenge = _pkce_pair()
+    browser = _login(mcp_oauth_on['a'])
+    _, code = _oauth_approve(
+        browser, client_id=cimd_url, redirect_uri=redirect_uri,
+        verifier_challenge=(verifier, challenge))
+    assert code
+    tok = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': redirect_uri,
+        'client_id': cimd_url,
+        'code_verifier': verifier,
+        'resource': 'https://podskrift.com/mcp',
+    })
+    assert tok.status_code == 200, tok.get_json()
 
 
 # --------------------------------------------------------------------------
@@ -7587,22 +7813,23 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[1]['id'] == 'new-signup-120-min-trial'
-    assert entries[2]['id'] == 'new-look'
-    assert entries[3]['id'] == 'forgot-password'
-    assert entries[4]['id'] == 'share-listen-links'
-    assert entries[5]['id'] == 'keyboard-and-faster-loading'
-    assert entries[6]['id'] == 'show-landing-pages'
-    assert entries[7]['id'] == 'public-share-links'
-    assert entries[8]['id'] == 'unsubscribe-confirm-click'
-    assert entries[9]['id'] == 'partial-preview-minutes-wording'
-    assert entries[10]['id'] == 'partial-trial-preview'
-    assert entries[11]['id'] == 'own-key-billing-clarity'
-    assert entries[12]['id'] == 'clearer-missing-episode-audio'
-    assert entries[13]['id'] == 'new-signup-60-min-trial'
-    assert entries[14]['id'] == 'spotify-paste-robustness'
-    assert entries[15]['id'] == 'no-double-charge-restart'
+    assert entries[0]['id'] == 'chatgpt-oauth-private-key-jwt'
+    assert entries[1]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[2]['id'] == 'new-signup-120-min-trial'
+    assert entries[3]['id'] == 'new-look'
+    assert entries[4]['id'] == 'forgot-password'
+    assert entries[5]['id'] == 'share-listen-links'
+    assert entries[6]['id'] == 'keyboard-and-faster-loading'
+    assert entries[7]['id'] == 'show-landing-pages'
+    assert entries[8]['id'] == 'public-share-links'
+    assert entries[9]['id'] == 'unsubscribe-confirm-click'
+    assert entries[10]['id'] == 'partial-preview-minutes-wording'
+    assert entries[11]['id'] == 'partial-trial-preview'
+    assert entries[12]['id'] == 'own-key-billing-clarity'
+    assert entries[13]['id'] == 'clearer-missing-episode-audio'
+    assert entries[14]['id'] == 'new-signup-60-min-trial'
+    assert entries[15]['id'] == 'spotify-paste-robustness'
+    assert entries[16]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -11919,9 +12146,10 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[1]['id'] == 'new-signup-120-min-trial'
-    assert entries[2]['id'] == 'new-look'
+    assert entries[0]['id'] == 'chatgpt-oauth-private-key-jwt'
+    assert entries[1]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[2]['id'] == 'new-signup-120-min-trial'
+    assert entries[3]['id'] == 'new-look'
 
 
 # --------------------------------------------------------------------------
