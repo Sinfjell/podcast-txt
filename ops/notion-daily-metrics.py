@@ -48,7 +48,7 @@ NOTION_VERSION = '2022-06-28'
 # Matches app.py TRIAL_MINUTES default when users.trial_seconds_limit is NULL.
 DEFAULT_TRIAL_MINUTES = 180
 # Matches app.py TRIAL_DAILY_MINUTES — shared free-trial budget per Oslo day.
-DEFAULT_TRIAL_DAILY_MINUTES = 750
+DEFAULT_TRIAL_DAILY_MINUTES = 2000
 # Optional lifetime safety (app default: unset = off). Kept for ops that still
 # set TRIAL_GLOBAL_MINUTES.
 DEFAULT_TRIAL_GLOBAL_MINUTES = 0

@@ -1138,7 +1138,7 @@ def dashboard():
     from models import db
     import app as app_module
     # Live module constants so tests can monkeypatch TRIAL_DAILY_SECONDS.
-    trial_daily = getattr(app_module, 'TRIAL_DAILY_SECONDS', 750 * 60)
+    trial_daily = getattr(app_module, 'TRIAL_DAILY_SECONDS', 2000 * 60)
     trial_default = getattr(app_module, 'TRIAL_DEFAULT_SECONDS', 180 * 60)
 
     kpis = collect_kpis(db, trial_daily, trial_daily_seconds=trial_daily)

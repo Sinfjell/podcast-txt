@@ -329,7 +329,7 @@ the day when the shared daily budget is empty.
 
 | Var | Default | Notes |
 | --- | --- | --- |
-| `TRIAL_DAILY_MINUTES` | `750` | Shared free-trial budget for one Europe/Oslo calendar day. Resets at Oslo midnight. Reservations count immediately (`trial_budget_days`); refunds / failed-before-Whisper jobs release that day's row. |
+| `TRIAL_DAILY_MINUTES` | `2000` | Shared free-trial budget for one Europe/Oslo calendar day. Resets at Oslo midnight. Reservations count immediately (`trial_budget_days`); refunds / failed-before-Whisper jobs release that day's row. |
 | `TRIAL_GLOBAL_MINUTES` | unset (= off) | Optional lifetime safety ceiling across all accounts. Leave unset in normal operation; set only if you want a hard multi-day stop beyond the daily budget. |
 | `TRIAL_MINUTES` | `180` | Per-account fallback when `users.trial_seconds_limit` is NULL (legacy rows). |
 | `NEW_USER_TRIAL_MINUTES` | `120` | Stamped on `trial_seconds_limit` at registration. |
