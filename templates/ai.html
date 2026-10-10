@@ -112,6 +112,14 @@
 
         <div class="ai-app-panel" role="tabpanel" id="panel-cursor"
              aria-labelledby="tab-cursor" hidden>
+            {% if mcp_enabled %}
+            <p>
+                One-click install with a live checklist:
+                <a href="{{ url_for('connect_page', client='cursor') }}">Connect to Cursor</a>
+                or <a href="{{ url_for('connect_page', client='vscode') }}">VS Code</a>.
+                Or set it up by hand:
+            </p>
+            {% endif %}
             <ol>
                 <li>In Cursor, open Settings → MCP, or edit <code>~/.cursor/mcp.json</code> (project: <code>.cursor/mcp.json</code>). In VS Code, use MCP settings or your workspace MCP config.</li>
                 <li>Add a remote server with URL <code>{{ mcp_connector_url }}</code> — no API key required when OAuth is available.</li>
@@ -132,6 +140,13 @@
 
         <div class="ai-app-panel" role="tabpanel" id="panel-claude-code"
              aria-labelledby="tab-claude-code" hidden>
+            {% if mcp_enabled %}
+            <p>
+                Prefer one command with a key included?
+                <a href="{{ url_for('connect_page', client='claude_code') }}">Connect to Claude Code</a>
+                gives you one and confirms when it works.
+            </p>
+            {% endif %}
             <ol>
                 <li>In a terminal (outside a Claude Code session), add the remote HTTP server:</li>
             </ol>

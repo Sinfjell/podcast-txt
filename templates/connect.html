@@ -1,0 +1,547 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import button, link_button, section, page_header, tabs, tab_panel, checklist_row, snippet, secret_field, notice, icon_check %}
+{% block title %}Connect Podskrift to Cursor, VS Code or Claude Code | Podskrift{% endblock %}
+{% block meta_description %}Connect Podskrift to your AI app in one click. Ask for any podcast episode in Cursor, VS Code or Claude Code and get the transcript. Uses your Podskrift minutes.{% endblock %}
+{% block og_title %}Connect Podskrift to your AI app{% endblock %}
+{% block og_description %}One-click install for Cursor and VS Code, or a single command for Claude Code. A live checklist confirms each step.{% endblock %}
+
+{% block container_class %}container-prose{% endblock %}
+
+{# Built only from components/macros.html and static/components.css (DESIGN.md
+   "How to build a page"). Tabs and copy buttons are driven by components.js;
+   the script below only mints keys, opens deep links and polls the checklist. #}
+{% block content %}
+{% set logged_in = current_user.is_authenticated %}
+{% set apps = [
+  {'id': 'cursor', 'label': 'Cursor', 'live': true,
+   'heading': 'Add Podskrift to Cursor',
+   'lede': 'Cursor opens and asks you to confirm the install. That is all.',
+   'action': 'Add to Cursor',
+   'manual_hint': 'Add this to ~/.cursor/mcp.json (or .cursor/mcp.json in a project).'},
+  {'id': 'vscode', 'label': 'VS Code', 'live': true,
+   'heading': 'Add Podskrift to VS Code',
+   'lede': 'VS Code opens and asks you to install the MCP server.',
+   'action': 'Add to VS Code',
+   'manual_hint': 'Add this to your user or workspace mcp.json.'},
+  {'id': 'claude_code', 'label': 'Claude Code', 'live': true,
+   'heading': 'Add Podskrift to Claude Code',
+   'lede': 'We copy one command. Paste it in a terminal, then start a new Claude Code session.',
+   'action': 'Copy command',
+   'manual_hint': 'Use these values in any MCP client.'},
+  {'id': 'claude', 'label': 'Claude', 'live': false,
+   'heading': 'Add Podskrift to Claude',
+   'lede': 'Claude.ai and Claude Desktop connect with a custom connector and sign-in. No key to copy.',
+   'action': 'Open the Claude guide',
+   'guide': url_for('guide_claude')},
+  {'id': 'chatgpt', 'label': 'ChatGPT', 'live': false,
+   'heading': 'Add Podskrift to ChatGPT',
+   'lede': 'ChatGPT connects with a custom MCP connector and sign-in. No key to copy.',
+   'action': 'Open the ChatGPT guide',
+   'guide': url_for('guide_chatgpt')},
+] %}
+{% set steps = status.steps if status else {} %}
+{% macro step_state(key) -%}{{ 'done' if steps.get(key, {}).get('done') else 'pending' }}{%- endmacro %}
+
+<div class="connect" id="connectPage"
+     data-client="{{ client }}"
+     data-mcp-url="{{ mcp_url }}"
+     data-logged-in="{{ '1' if logged_in else '0' }}"
+     data-csrf="{{ csrf_token() }}"
+     data-status-url="{{ url_for('connect_status') }}"
+     data-mint-url="{{ url_for('connect_mint_credential') }}"
+     data-login-url="{{ url_for('login') }}">
+
+  {{ page_header(
+    "Connect Podskrift to your AI app",
+    "Ask your AI app for any podcast episode and get the transcript. It uses your Podskrift minutes" ~ (", and you get " ~ trial_minutes ~ " free minutes to start." if trial_minutes else ".")
+  ) }}
+
+  <div class="ds-stack ds-stack-6">
+    {{ tabs("AI apps", [
+      {'id': 'app-cursor', 'label': 'Cursor', 'selected': client == 'cursor'},
+      {'id': 'app-vscode', 'label': 'VS Code', 'selected': client == 'vscode'},
+      {'id': 'app-claude_code', 'label': 'Claude Code', 'selected': client == 'claude_code'},
+      {'id': 'app-claude', 'label': 'Claude', 'selected': client == 'claude'},
+      {'id': 'app-chatgpt', 'label': 'ChatGPT', 'selected': client == 'chatgpt'},
+    ], attrs='id="connectTabs"') }}
+
+    <div id="connectAlerts" aria-live="polite" hidden></div>
+
+    {% for app in apps %}
+    {% call tab_panel('app-' ~ app.id, selected=(client == app.id), attrs='data-app="' ~ app.id ~ '"') %}
+      {% call section(title=app.heading) %}
+        <p class="connect__lede">{{ app.lede }}</p>
+        {% if app.live and not logged_in %}
+          {% set action_label = 'Log in to connect' %}
+          {% set action_href = url_for('login', next=url_for('connect_page', client=app.id)) %}
+        {% elif app.live %}
+          {% set action_label = app.action %}
+          {% set action_href = None %}
+        {% else %}
+          {% set action_label = app.action %}
+          {% set action_href = app.guide %}
+        {% endif %}
+        <div class="ds-row">
+          {{ button(action_label, variant='primary', href=action_href,
+                    attrs=('data-connect-action' if app.live and logged_in else '')) }}
+          {% if app.live and not logged_in %}
+            {{ link_button('No account? Sign up' ~ (', ' ~ trial_minutes ~ ' free minutes' if trial_minutes else ''),
+                           href=url_for('register', next=url_for('connect_page', client=app.id))) }}
+          {% endif %}
+          {% if app.id == 'vscode' and logged_in %}
+            {{ link_button('Using VS Code Insiders?', attrs='data-connect-insiders aria-pressed="false"') }}
+          {% endif %}
+        </div>
+
+        {% if app.live and logged_in %}
+          {% if app.id != 'claude_code' %}
+          <div class="connect__reveal" data-connect-key hidden>
+            {{ secret_field('psk_…', label='Your key', hint='We show this key once. It is already in the install link; copy it only if you set it up by hand.') }}
+          </div>
+          {% else %}
+          <div class="connect__reveal" data-connect-command hidden>
+            {{ snippet('claude mcp add …', what='command') }}
+          </div>
+          {% endif %}
+        {% endif %}
+
+        {% if app.live %}
+          <div class="connect__manual">
+            {{ link_button('Not working? Set it up by hand', attrs='data-connect-manual-toggle aria-expanded="false" aria-controls="manual-' ~ app.id ~ '"') }}
+            <div class="ds-stack ds-stack-3 connect__reveal" id="manual-{{ app.id }}" data-connect-manual hidden>
+              <p class="connect__hint">{{ app.manual_hint }}</p>
+              {{ snippet('', what='settings') }}
+              {% if logged_in %}
+              <div class="ds-row">
+                {{ button('Create a key for this', variant='secondary', size='sm', attrs='data-connect-manual-mint') }}
+              </div>
+              {% endif %}
+            </div>
+          </div>
+        {% else %}
+          <div class="ds-stack ds-stack-2">
+            <p class="connect__hint">Connector URL</p>
+            {{ snippet(mcp_connector_url, what='connector URL') }}
+          </div>
+        {% endif %}
+      {% endcall %}
+    {% endcall %}
+    {% endfor %}
+
+    <section class="connect__setup ds-stack ds-stack-3" id="setupSection" aria-labelledby="setupHeading"
+             {% if not (client in live_clients) %}hidden{% endif %}>
+      <div class="ds-stack ds-stack-1">
+        <h2 class="connect__h2" id="setupHeading">Setup</h2>
+        <p class="connect__hint" id="setupProgress" aria-live="polite">0 of 5 done</p>
+      </div>
+      <div id="allDone" hidden>
+        {% call notice(variant='success') %}
+          <span id="allDoneText">Podskrift is connected. Ask for any episode.</span>
+        {% endcall %}
+      </div>
+      <ul class="ds-checklist" id="checklist">
+        {{ checklist_row('Logged in', state=step_state('logged_in'), attrs='data-step="logged_in"') }}
+        {{ checklist_row('Key created', state=step_state('authorized'), attrs='data-step="authorized"') }}
+        {{ checklist_row('App connected', state=step_state('connected'), attrs='data-step="connected"') }}
+        {{ checklist_row('First tool call', state=step_state('first_tool'), attrs='data-step="first_tool"') }}
+        {{ checklist_row('First transcript', state=step_state('first_transcript'), attrs='data-step="first_transcript"') }}
+      </ul>
+      <div class="ds-stack ds-stack-2" id="tryPrompt">
+        <p class="connect__hint">When the app is connected, try this:</p>
+        <div class="ai-ask-row connect__prompt" data-ds-copy-root>
+          <p class="ai-ask-prompt" data-ds-copy-source>Transcribe the latest episode of Hard Fork and summarise it.</p>
+          <button type="button" class="btn btn-secondary btn-sm"
+                  data-ds-copy data-ds-copy-label="Copy" data-ds-copied-label="Copied"
+                  aria-label="Copy prompt">Copy</button>
+          <span class="sr-only" role="status" data-ds-copy-status></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="ds-stack ds-stack-3" id="connectionsSection" aria-labelledby="connectionsHeading" hidden>
+      <h2 class="connect__h2" id="connectionsHeading">Your connections</h2>
+      <ul class="ds-key-list" id="connectionsList"></ul>
+    </section>
+  </div>
+
+  {# Pieces the script clones, so it never writes markup as strings. #}
+  <template id="tplCheck">{{ icon_check() }}</template>
+  <template id="tplNoticeWarning">{{ notice(' ', variant='warning') }}</template>
+  <template id="tplNoticeError">{{ notice(' ', variant='error') }}</template>
+</div>
+
+<script>
+(function () {
+  var root = document.getElementById('connectPage');
+  if (!root) return;
+
+  var APPS = {
+    cursor: { label: 'Cursor', live: true, action: 'Add to Cursor',
+      waiting: 'Waiting for Cursor. Confirm the install in Cursor.',
+      waitingLong: 'Still waiting. Restart Cursor, or check that Settings, MCP lists Podskrift.' },
+    vscode: { label: 'VS Code', live: true, action: 'Add to VS Code',
+      waiting: 'Waiting for VS Code. Confirm the install in VS Code.',
+      waitingLong: 'Still waiting. Restart VS Code, or check that the MCP list shows Podskrift.' },
+    claude_code: { label: 'Claude Code', live: true, action: 'Copy command', copyCommand: true,
+      waiting: 'Waiting. Start a new Claude Code session.',
+      waitingLong: 'Still waiting. Run the command again, then start a new session.' },
+    claude: { label: 'Claude', live: false },
+    chatgpt: { label: 'ChatGPT', live: false }
+  };
+  var STEPS = ['logged_in', 'authorized', 'connected', 'first_tool', 'first_transcript'];
+
+  var state = {
+    client: root.getAttribute('data-client') || 'cursor',
+    mcpUrl: root.getAttribute('data-mcp-url'),
+    loggedIn: root.getAttribute('data-logged-in') === '1',
+    csrf: root.getAttribute('data-csrf'),
+    statusUrl: root.getAttribute('data-status-url'),
+    mintUrl: root.getAttribute('data-mint-url'),
+    key: null,
+    insiders: false,
+    clickAt: 0,
+    authorizeAt: 0,
+    pollStarted: Date.now(),
+    timer: null,
+    status: null
+  };
+
+  function $(sel, scope) { return (scope || root).querySelector(sel); }
+  function panel(client) { return $('[data-app="' + (client || state.client) + '"]'); }
+
+  /* ---- install payloads ------------------------------------------------ */
+  function encodeBase64Json(obj) {
+    return btoa(unescape(encodeURIComponent(JSON.stringify(obj))));
+  }
+  function cursorDeepLink(key) {
+    var config = encodeBase64Json({ url: state.mcpUrl, headers: { Authorization: 'Bearer ' + key } });
+    return 'cursor://anysphere.cursor-deeplink/mcp/install?name=podskrift&config=' +
+      encodeURIComponent(config);
+  }
+  function vscodeDeepLink(key, insiders) {
+    var obj = { name: 'podskrift', type: 'http', url: state.mcpUrl,
+      headers: { Authorization: 'Bearer ' + key } };
+    var scheme = insiders ? 'vscode-insiders' : 'vscode';
+    return scheme + ':mcp/install?' + encodeURIComponent(JSON.stringify(obj));
+  }
+  function claudeCommand(key) {
+    return 'claude mcp add --transport http --scope user podskrift ' +
+      state.mcpUrl + ' --header "Authorization: Bearer ' + key + '"';
+  }
+  function manualSnippet(client, key) {
+    var k = key || 'psk_…';
+    if (client === 'cursor') {
+      return '{\n  "mcpServers": {\n    "podskrift": {\n      "url": "' + state.mcpUrl +
+        '",\n      "headers": { "Authorization": "Bearer ' + k + '" }\n    }\n  }\n}';
+    }
+    if (client === 'vscode') {
+      return '{\n  "servers": {\n    "podskrift": {\n      "type": "http",\n      "url": "' +
+        state.mcpUrl + '",\n      "headers": { "Authorization": "Bearer ' + k + '" }\n    }\n  }\n}';
+    }
+    return 'Server URL: ' + state.mcpUrl + '\nHeader: Authorization: Bearer ' + k;
+  }
+
+  /* ---- notices --------------------------------------------------------- */
+  function clearAlert() {
+    var box = $('#connectAlerts');
+    box.textContent = '';
+    box.hidden = true;
+  }
+  function showAlert(kind, text, linkText, onLink) {
+    var tpl = document.getElementById(kind === 'warning' ? 'tplNoticeWarning' : 'tplNoticeError');
+    var node = tpl.content.firstElementChild.cloneNode(true);
+    var body = node.querySelector('.ds-notice__body');
+    body.textContent = text;
+    if (linkText) {
+      body.appendChild(document.createTextNode(' '));
+      var a = document.createElement('a');
+      a.href = typeof onLink === 'string' ? onLink : '#';
+      a.textContent = linkText;
+      if (typeof onLink === 'function') {
+        a.addEventListener('click', function (e) { e.preventDefault(); onLink(); });
+      }
+      body.appendChild(a);
+    }
+    var box = $('#connectAlerts');
+    box.textContent = '';
+    box.appendChild(node);
+    box.hidden = false;
+  }
+
+  /* ---- tabs: components.js switches panels; we follow the selection ----- */
+  function currentTab() {
+    var t = $('#connectTabs [role="tab"][aria-selected="true"]');
+    return t ? t.id.replace(/^app-/, '').replace(/-tab$/, '') : state.client;
+  }
+  function onClientChange() {
+    var next = currentTab();
+    if (!APPS[next] || next === state.client) return;
+    state.client = next;
+    state.clickAt = 0;
+    try { localStorage.setItem('podskrift_connect_client', next); } catch (e) {}
+    var u = new URL(location.href);
+    u.searchParams.set('client', next);
+    history.replaceState({}, '', u.pathname + '?' + u.searchParams.toString());
+    $('#setupSection').hidden = !APPS[next].live;
+    clearAlert();
+    if (APPS[next].live) pollStatus(true);
+  }
+  new MutationObserver(onClientChange).observe($('#connectTabs'), {
+    attributes: true, subtree: true, attributeFilter: ['aria-selected']
+  });
+
+  /* ---- keys ------------------------------------------------------------ */
+  function mintKey() {
+    return fetch(state.mintUrl, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf,
+        'Accept': 'application/json' },
+      body: JSON.stringify({ client: state.client })
+    }).then(function (r) {
+      if (!r.ok) throw new Error('mint failed');
+      return r.json();
+    }).then(function (data) {
+      state.key = data.key;
+      state.authorizeAt = Date.now();
+      var box = $('[data-connect-key]', panel());
+      if (box) {
+        $('[data-ds-copy-source]', box).textContent = data.key;
+        box.hidden = false;
+      }
+      fillManual(state.client);
+      return data.key;
+    });
+  }
+
+  function fillManual(client) {
+    var p = panel(client);
+    var code = p && $('[data-connect-manual] [data-ds-copy-source] code', p);
+    if (code) code.textContent = manualSnippet(client, state.key);
+    var mint = p && $('[data-connect-manual-mint]', p);
+    if (mint) mint.parentNode.hidden = !!state.key;
+  }
+
+  function runAction() {
+    var cfg = APPS[state.client];
+    if (!cfg.live) return;
+    mintKey().then(function (key) {
+      state.clickAt = Date.now();
+      if (cfg.copyCommand) {
+        var cmd = claudeCommand(key);
+        var box = $('[data-connect-command]', panel());
+        $('[data-ds-copy-source] code', box).textContent = cmd;
+        box.hidden = false;
+        if (navigator.clipboard) navigator.clipboard.writeText(cmd).catch(function () {});
+      } else if (state.client === 'cursor') {
+        location.href = cursorDeepLink(key);
+      } else if (state.client === 'vscode') {
+        location.href = vscodeDeepLink(key, state.insiders);
+      }
+      pollStatus(true);
+      setTimeout(checkDeepLinkMiss, 4000);
+    }).catch(function () {
+      showAlert('error', 'Could not create a key. Refresh the page and try again.');
+    });
+  }
+
+  function openManual(client, mint) {
+    var p = panel(client);
+    var box = $('[data-connect-manual]', p);
+    var toggle = $('[data-connect-manual-toggle]', p);
+    box.hidden = false;
+    if (toggle) toggle.setAttribute('aria-expanded', 'true');
+    fillManual(client);
+    if (mint && state.loggedIn && !state.key) mintKey();
+  }
+
+  function checkDeepLinkMiss() {
+    var cfg = APPS[state.client];
+    if (!cfg.live || cfg.copyCommand || !document.hasFocus()) return;
+    var st = state.status && state.status.steps;
+    if (st && st.connected && st.connected.done) return;
+    showAlert('warning', cfg.label + ' did not open. Install ' + cfg.label + ', or',
+      'set it up by hand.', function () { openManual(state.client, true); });
+  }
+
+  /* ---- checklist ------------------------------------------------------- */
+  function setRow(key, rowState, detail) {
+    var row = $('#checklist [data-step="' + key + '"]');
+    if (!row) return;
+    row.className = row.className.replace(/\bis-\w+\b/g, '').trim() + ' is-' + rowState;
+    var marker = $('.ds-checklist__marker', row);
+    marker.textContent = '';
+    if (rowState === 'done') {
+      marker.appendChild(document.getElementById('tplCheck').content.firstElementChild.cloneNode(true));
+    }
+    var sr = $('.ds-checklist__title .sr-only', row);
+    if (sr) {
+      sr.textContent = rowState === 'done' ? ' (done)' :
+        rowState === 'active' ? ' (in progress)' : ' (not started)';
+    }
+    var d = $('.ds-checklist__detail', row);
+    if (!d) {
+      d = document.createElement('p');
+      d.className = 'ds-checklist__detail';
+      $('.ds-checklist__body', row).appendChild(d);
+    }
+    d.textContent = detail || '';
+    d.hidden = !detail;
+  }
+
+  function renderStatus(data) {
+    state.status = data;
+    var steps = data.steps || {};
+    var cfg = APPS[state.client];
+    var done = 0;
+    STEPS.forEach(function (k) { if (steps[k] && steps[k].done) done += 1; });
+
+    var s = steps.logged_in || {};
+    setRow('logged_in', s.done ? 'done' : 'active',
+      s.done ? 'As ' + (s.email || 'you') : 'Log in to connect your AI app.');
+    s = steps.authorized || {};
+    setRow('authorized', s.done ? 'done' : 'pending',
+      s.done ? (s.label || cfg.label + ' key') + (s.prefix ? ', ' + s.prefix + '…' : '') : '');
+    s = steps.connected || {};
+    var connectedTitle = $('#checklist [data-step="connected"] .ds-checklist__title');
+    if (connectedTitle && connectedTitle.firstChild) {
+      connectedTitle.firstChild.textContent = cfg.label + ' connected';
+    }
+    if (s.done) {
+      setRow('connected', 'done', s.client_name ? 'Connected from ' + s.client_name : 'Connected');
+    } else if (steps.authorized && steps.authorized.done && state.authorizeAt) {
+      var long = Date.now() - state.authorizeAt > 3 * 60 * 1000;
+      setRow('connected', 'active', long ? cfg.waitingLong : cfg.waiting);
+    } else {
+      setRow('connected', 'pending', '');
+    }
+    s = steps.first_tool || {};
+    setRow('first_tool', s.done ? 'done' : (steps.connected && steps.connected.done ? 'active' : 'pending'),
+      s.done ? 'Podskrift answered your app.' : '');
+    s = steps.first_transcript || {};
+    setRow('first_transcript', s.done ? 'done' : (steps.first_tool && steps.first_tool.done ? 'active' : 'pending'),
+      s.done ? 'Transcript ready.' : '');
+
+    $('#setupProgress').textContent = done + ' of 5 done';
+    var allDone = done === 5;
+    $('#allDone').hidden = !allDone;
+    $('#allDoneText').textContent = 'Podskrift is connected to ' + cfg.label + '. Ask for any episode.';
+    $('#tryPrompt').hidden = !!(steps.first_transcript && steps.first_transcript.done);
+
+    if (data.problem === 'revoked_key_in_use') {
+      showAlert('error', cfg.label + ' is using a key you disconnected. Press ' +
+        cfg.action + ' again to replace it.');
+    } else if (data.problem === 'no_minutes') {
+      showAlert('warning', 'Your free minutes are used up.',
+        '{{ credit_pack_minutes }} minutes for ${{ credit_pack_price_usd }}',
+        '{{ url_for("pricing") }}');
+    } else if (data.problem === 'tool_errors') {
+      showAlert('error', 'Podskrift got requests from ' + cfg.label +
+        ' but they failed. Try the prompt below, or contact support.');
+    } else if (!state.clickAt) {
+      clearAlert();
+    }
+    renderConnections(data.connections || []);
+    return allDone;
+  }
+
+  function renderConnections(conns) {
+    var list = $('#connectionsList');
+    list.textContent = '';
+    $('#connectionsSection').hidden = !conns.length;
+    conns.forEach(function (c) {
+      var li = document.createElement('li');
+      li.className = 'ds-key-row';
+      var info = document.createElement('div');
+      info.className = 'ds-key-row__body';
+      var strong = document.createElement('strong');
+      strong.textContent = c.label || c.client || '';
+      info.appendChild(strong);
+      var bits = [];
+      bits.push(c.connected ? 'Connected' : 'Not connected yet');
+      if (c.prefix) bits.push(String(c.prefix) + '…');
+      var meta = document.createElement('span');
+      meta.className = 'ds-key-row__meta';
+      meta.textContent = bits.join(' · ');
+      info.appendChild(meta);
+      li.appendChild(info);
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-danger btn-sm';
+      btn.textContent = 'Disconnect';
+      btn.setAttribute('aria-label', 'Disconnect ' + (c.label || 'key'));
+      btn.addEventListener('click', function () {
+        if (!confirm('Disconnect ' + (c.label || 'this key') +
+            '? It stops working with Podskrift until you connect again.')) return;
+        fetch('/connect/credentials/' + encodeURIComponent(c.id) + '/revoke', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'X-CSRF-Token': state.csrf, 'Accept': 'application/json' }
+        }).then(function () { pollStatus(true); });
+      });
+      li.appendChild(btn);
+      list.appendChild(li);
+    });
+  }
+
+  /* ---- polling --------------------------------------------------------- */
+  function pollInterval() {
+    var elapsed = Date.now() - state.pollStarted;
+    if (elapsed > 15 * 60 * 1000) return null;
+    return elapsed > 2 * 60 * 1000 ? 10000 : 2000;
+  }
+  function pollStatus(immediate) {
+    if (!state.loggedIn || !APPS[state.client].live) return;
+    if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+    function schedule() {
+      var ms = pollInterval();
+      if (ms != null) state.timer = setTimeout(tick, ms);
+    }
+    function tick() {
+      if (document.hidden) { schedule(); return; }
+      fetch(state.statusUrl + '?client=' + encodeURIComponent(state.client),
+        { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.status === 401 ? null : r.json(); })
+        .then(function (data) { if (data && !renderStatus(data)) schedule(); })
+        .catch(schedule);
+    }
+    if (immediate) tick(); else schedule();
+  }
+
+  /* ---- wiring ---------------------------------------------------------- */
+  root.addEventListener('click', function (e) {
+    var t = e.target;
+    if (t.closest('[data-connect-action]')) { runAction(); return; }
+    var toggle = t.closest('[data-connect-manual-toggle]');
+    if (toggle) {
+      var box = document.getElementById(toggle.getAttribute('aria-controls'));
+      if (box.hidden) openManual(state.client, false);
+      else { box.hidden = true; toggle.setAttribute('aria-expanded', 'false'); }
+      return;
+    }
+    if (t.closest('[data-connect-manual-mint]')) { openManual(state.client, true); return; }
+    var ins = t.closest('[data-connect-insiders]');
+    if (ins) {
+      state.insiders = !state.insiders;
+      ins.setAttribute('aria-pressed', state.insiders ? 'true' : 'false');
+      ins.textContent = state.insiders ? 'Using VS Code (stable)?' : 'Using VS Code Insiders?';
+    }
+  });
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) pollStatus(true);
+  });
+
+  Object.keys(APPS).forEach(function (c) { if (APPS[c].live) fillManual(c); });
+  {% if status %}renderStatus({{ status | tojson }});{% endif %}
+  pollStatus(false);
+
+  window.__podskriftConnect = {
+    cursorDeepLink: cursorDeepLink,
+    vscodeDeepLink: vscodeDeepLink,
+    claudeCommand: claudeCommand,
+    encodeBase64Json: encodeBase64Json,
+    manualSnippet: manualSnippet
+  };
+})();
+</script>
+{% endblock %}
