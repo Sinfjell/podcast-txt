@@ -74,7 +74,10 @@ CLIENT_ASSERTION_TYPE = (
 SUPPORTED_CLIENT_AUTH_METHODS = frozenset({'none', 'private_key_jwt',
                                            'client_secret_post'})
 CIMD_CLIENT_AUTH_METHODS = frozenset({'none', 'private_key_jwt'})
-JWT_ALLOWED_ALGS = ('RS256', 'ES256')
+# Asymmetric RS256 only (what ChatGPT signs with). Never none / HS*.
+JWT_ALLOWED_ALGS = ('RS256',)
+# Min seconds between forced JWKS refetches (unknown kid) per jwks_uri.
+JWKS_FORCE_REFRESH_MIN_INTERVAL_SEC = 60
 
 _OAUTH_DOC_BEGIN = '<!-- mcp-oauth-section -->'
 _OAUTH_DOC_END = '<!-- /mcp-oauth-section -->'
@@ -85,6 +88,7 @@ _rate_lock = threading.Lock()
 # jwks_uri → (fetched_at_monotonic, jwks_dict)
 _jwks_cache: dict[str, tuple[float, dict]] = {}
 _jwks_cache_lock = threading.Lock()
+_jwks_last_forced: dict[str, float] = {}
 
 
 def mcp_oauth_enabled() -> bool:
@@ -431,8 +435,10 @@ def authorization_server_metadata() -> dict:
         'response_types_supported': ['code'],
         'grant_types_supported': ['authorization_code', 'refresh_token'],
         'code_challenge_methods_supported': ['S256'],
-        # ChatGPT CIMD uses none / private_key_jwt; DCR may still use client_secret_post.
-        'token_endpoint_auth_methods_supported': ['none', 'private_key_jwt'],
+        # ChatGPT CIMD uses none / private_key_jwt; DCR clients registered with
+        # client_secret_post keep working (do not drop it from discovery).
+        'token_endpoint_auth_methods_supported': [
+            'none', 'private_key_jwt', 'client_secret_post'],
         'token_endpoint_auth_signing_alg_values_supported': ['RS256'],
         'authorization_response_iss_parameter_supported': True,
     }
@@ -645,7 +651,16 @@ def _cimd_auth_method(doc: dict) -> str | None:
 def fetch_jwks(jwks_uri: str, *, force_refresh: bool = False) -> tuple[dict | None, str | None]:
     """Fetch + cache a JWKS document (short TTL)."""
     now = time.monotonic()
-    if not force_refresh:
+    if force_refresh:
+        # Unknown-kid refetches are attacker-triggerable: throttle them.
+        with _jwks_cache_lock:
+            last = _jwks_last_forced.get(jwks_uri)
+            if last is not None and now - last < JWKS_FORCE_REFRESH_MIN_INTERVAL_SEC:
+                cached = _jwks_cache.get(jwks_uri)
+                if cached is not None:
+                    return cached[1], None
+            _jwks_last_forced[jwks_uri] = now
+    else:
         with _jwks_cache_lock:
             cached = _jwks_cache.get(jwks_uri)
             if cached is not None:
@@ -664,16 +679,21 @@ def fetch_jwks(jwks_uri: str, *, force_refresh: bool = False) -> tuple[dict | No
 
 
 def _jwk_to_key(jwk: dict):
-    """Convert a JWK dict to a cryptography key (RS*/ES* only)."""
+    """Convert a public RSA JWK dict to a cryptography key (RS256 only)."""
     import jwt
-    from jwt.algorithms import ECAlgorithm, RSAAlgorithm
+    from jwt.algorithms import RSAAlgorithm
 
     kty = jwk.get('kty')
-    if kty == 'RSA':
-        return RSAAlgorithm.from_jwk(jwk)
-    if kty == 'EC':
-        return ECAlgorithm.from_jwk(jwk)
-    raise jwt.InvalidKeyError(f'Unsupported JWK kty: {kty!r}')
+    if kty != 'RSA':
+        raise jwt.InvalidKeyError(f'Unsupported JWK kty: {kty!r}')
+    if jwk.get('use') not in (None, 'sig'):
+        raise jwt.InvalidKeyError('JWK is not a signing key.')
+    if jwk.get('alg') not in (None, 'RS256'):
+        raise jwt.InvalidKeyError('JWK alg is not RS256.')
+    if 'd' in jwk:
+        # Never accept a published private key as a verification key.
+        raise jwt.InvalidKeyError('JWK must be a public key.')
+    return RSAAlgorithm.from_jwk(jwk)
 
 
 def _find_jwk(jwks: dict, kid: str | None) -> dict | None:
@@ -688,7 +708,7 @@ def _find_jwk(jwks: dict, kid: str | None) -> dict | None:
     # No kid: only unambiguous when the set has a single signing key.
     usable = [
         k for k in keys
-        if isinstance(k, dict) and k.get('kty') in ('RSA', 'EC')
+        if isinstance(k, dict) and k.get('kty') == 'RSA'
         and k.get('use', 'sig') in ('sig', None)
     ]
     if len(usable) == 1:
@@ -764,7 +784,8 @@ def verify_private_key_jwt(client, assertion: str) -> tuple[bool, str | None]:
             algorithms=[alg],
             audience=list(audience_ok),
             options={
-                'require': ['exp', 'iat', 'iss', 'sub', 'jti'],
+                # iat is optional in RFC 7523; lifetime is bounded below.
+                'require': ['exp', 'iss', 'sub', 'aud', 'jti'],
                 'verify_aud': True,
             },
             leeway=JWT_ASSERTION_LEEWAY_SEC,
@@ -781,36 +802,57 @@ def verify_private_key_jwt(client, assertion: str) -> tuple[bool, str | None]:
     if not any(a in audience_ok for a in aud_values):
         return False, 'client_assertion aud is not this token endpoint.'
 
-    now = _utc_now()
+    now_ts = int(_utc_now().timestamp())
     try:
         exp_ts = int(claims['exp'])
-        iat_ts = int(claims['iat'])
     except (TypeError, ValueError, KeyError):
-        return False, 'client_assertion exp/iat invalid.'
-    if exp_ts - iat_ts > JWT_ASSERTION_MAX_LIFETIME_SEC + JWT_ASSERTION_LEEWAY_SEC:
+        return False, 'client_assertion exp invalid.'
+    # Short-lived only: exp may be at most MAX_LIFETIME in the future.
+    if exp_ts - now_ts > JWT_ASSERTION_MAX_LIFETIME_SEC + JWT_ASSERTION_LEEWAY_SEC:
         return False, 'client_assertion lifetime too long.'
+    iat = claims.get('iat')
+    if iat is not None:
+        try:
+            iat_ts = int(iat)
+        except (TypeError, ValueError):
+            return False, 'client_assertion iat invalid.'
+        if iat_ts > now_ts + JWT_ASSERTION_LEEWAY_SEC:
+            return False, 'client_assertion iat is in the future.'
+        if exp_ts - iat_ts > JWT_ASSERTION_MAX_LIFETIME_SEC + JWT_ASSERTION_LEEWAY_SEC:
+            return False, 'client_assertion lifetime too long.'
+        if now_ts - iat_ts > JWT_ASSERTION_MAX_LIFETIME_SEC + JWT_ASSERTION_LEEWAY_SEC:
+            return False, 'client_assertion iat is too old.'
     nbf = claims.get('nbf')
     if nbf is not None:
         try:
             nbf_ts = int(nbf)
         except (TypeError, ValueError):
             return False, 'client_assertion nbf invalid.'
-        if nbf_ts > int(now.timestamp()) + JWT_ASSERTION_LEEWAY_SEC:
+        if nbf_ts > now_ts + JWT_ASSERTION_LEEWAY_SEC:
             return False, 'client_assertion not yet valid.'
-    # iat must not be far in the future or ancient.
-    now_ts = int(now.timestamp())
-    if iat_ts > now_ts + JWT_ASSERTION_LEEWAY_SEC:
-        return False, 'client_assertion iat is in the future.'
-    if now_ts - iat_ts > JWT_ASSERTION_MAX_LIFETIME_SEC + JWT_ASSERTION_LEEWAY_SEC:
-        return False, 'client_assertion iat is too old.'
 
     jti = claims.get('jti')
     if not isinstance(jti, str) or not jti.strip() or len(jti) > 256:
         return False, 'client_assertion jti is required.'
-    expires_at = datetime.fromtimestamp(exp_ts, tz=timezone.utc)
-    if not _consume_jti(jti.strip(), expires_at):
+    # Keep the jti until the assertion can no longer pass exp+leeway.
+    expires_at = datetime.fromtimestamp(
+        exp_ts + JWT_ASSERTION_LEEWAY_SEC + 60, tz=timezone.utc)
+    if not _consume_jti(f'{client.client_id}\n{jti.strip()}', expires_at):
         return False, 'client_assertion jti has already been used.'
     return True, None
+
+
+def _unverified_assertion_subject(assertion: str) -> str | None:
+    """Lookup-only sub claim from an unverified JWT (never trusted alone)."""
+    import jwt
+    if not assertion or len(assertion) > 8192:
+        return None
+    try:
+        claims = jwt.decode(assertion, options={'verify_signature': False})
+    except jwt.PyJWTError:
+        return None
+    sub = claims.get('sub')
+    return sub if isinstance(sub, str) and len(sub) <= 512 else None
 
 
 def authenticate_oauth_client(client, data: dict) -> tuple[bool, str | None]:
@@ -1220,6 +1262,12 @@ def register_oauth(app_flask):
 
         grant_type = (data.get('grant_type') or '').strip()
         client_id = (data.get('client_id') or '').strip()
+        if not client_id and (data.get('client_assertion') or '').strip():
+            # RFC 7523 §3.1: client_id may be omitted with an assertion. Use the
+            # unverified sub only as a lookup key; verify_private_key_jwt then
+            # requires iss == sub == the stored client's client_id + signature.
+            client_id = _unverified_assertion_subject(
+                (data.get('client_assertion') or '').strip()) or ''
 
         from models import (OAuthAccessToken, OAuthAuthorizationCode,
                             OAuthRefreshToken, db)
