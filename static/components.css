@@ -651,3 +651,42 @@
         outline: 3px solid Highlight;
     }
 }
+
+/* MCP discovery: shared by the home hero, promotion and setup guides. */
+.ds-mcp-hero {
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-4);
+  margin: var(--space-6) 0;
+}
+.ds-mcp-hero h2 { font-size: 1.0625rem; line-height: 1.4; margin-bottom: var(--space-2); }
+.ds-mcp-hero p, .ds-mcp-lead { color: var(--muted); max-width: 42em; }
+.ds-mcp-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
+.ds-mcp-hero .ds-mcp-actions { margin-top: var(--space-3); }
+.ds-mcp-actions > a:not(.btn) { display: inline-flex; align-items: center; min-height: 44px; }
+.ds-mcp-start { margin: var(--space-6) 0 var(--space-9); }
+.ds-mcp-start > p { margin: var(--space-4) 0; color: var(--muted); }
+.ds-mcp-start .btn { max-width: 100%; }
+.ds-mcp-promotion > p { margin: var(--space-4) 0; }
+.ds-mcp-flow {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-6);
+  padding: 0;
+  list-style-position: inside;
+  margin: var(--space-9) 0;
+}
+.ds-mcp-flow li { border-top: 1px solid var(--line); padding-top: var(--space-4); }
+.ds-mcp-flow span { display: block; margin-top: var(--space-2); color: var(--muted); }
+.ds-mcp-guides { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-6); }
+.ds-mcp-guide { display: block; color: var(--ink); text-decoration: none; }
+.ds-mcp-guide img { display: block; width: 100%; height: auto; border-radius: var(--radius); }
+.ds-mcp-guide h3 { font-size: 1.5rem; margin: var(--space-4) 0 var(--space-2); }
+.ds-mcp-guide p { color: var(--muted); }
+.ds-mcp-guide:hover h3 { text-decoration: underline; }
+.ds-mcp-example { background: var(--surface); padding: var(--space-6); border-radius: var(--radius); margin: var(--space-9) 0; }
+.ds-mcp-example h3 { margin-bottom: var(--space-4); }
+.ds-mcp-example > p { color: var(--muted); margin-top: var(--space-4); }
+@media (max-width: 640px) {
+  .ds-mcp-flow, .ds-mcp-guides { grid-template-columns: minmax(0, 1fr); }
+}
+.ds-guide__figure--detail { max-width: 22rem; }

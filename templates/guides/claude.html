@@ -13,6 +13,14 @@
     "Add Podskrift as a custom connector, sign in once, then ask Claude to summarise or quote any podcast episode."
   ) }}
 
+  <div class="ds-mcp-start">
+    {{ button("Open Claude Connectors", variant="primary", href="https://claude.ai/customize/connectors", attrs='rel="noopener" target="_blank"') }}
+    <p>Keep this guide open beside your app. Use this exact server URL:</p>
+    {{ snippet(mcp_connector_url, copy_label='Copy server URL', what='connector URL') }}
+    <p><a href="{{ url_for('register') }}">Create a Podskrift account</a> if you don't have one.
+       Already registered? <a href="{{ url_for('login') }}">Sign in to Podskrift</a> before connecting.</p>
+  </div>
+
   <div class="ds-guide__intro">
     <p>
       Works on Claude Free (one custom connector), Pro, Max, Team and Enterprise,
@@ -31,13 +39,13 @@
     <ol class="ds-guide__steps">
       <li class="ds-guide__step">
         <h3>Open Customize → Connectors</h3>
-        <p>In Claude on the web or Desktop, open <strong>Customize</strong>, then <strong>Connectors</strong>.</p>
+        <p>Open <a href="https://claude.ai/customize/connectors" rel="noopener" target="_blank">Claude Connectors</a> on the web, or open <strong>Customize → Connectors</strong> in Desktop.</p>
         {% if shots.get('01-customize-connectors') %}
-        <figure class="ds-guide__figure">
+        <figure class="ds-guide__figure ds-guide__figure--detail">
           <picture>
             <source type="image/webp" srcset="{{ url_for('static', filename='guides/claude/01-customize-connectors.webp') }}">
             <img src="{{ url_for('static', filename='guides/claude/01-customize-connectors.png') }}"
-                 width="1100" height="600" loading="lazy"
+                 width="172" height="96" loading="lazy"
                  alt="Claude Customize menu with Connectors selected.">
           </picture>
           <figcaption>Customize → Connectors.</figcaption>
@@ -53,8 +61,8 @@
           <picture>
             <source type="image/webp" srcset="{{ url_for('static', filename='guides/claude/02-add-custom-connector.webp') }}">
             <img src="{{ url_for('static', filename='guides/claude/02-add-custom-connector.png') }}"
-                 width="1100" height="600" loading="lazy"
-                 alt="Claude Add menu with Add custom connector highlighted.">
+                 width="690" height="196" loading="lazy"
+                 alt="Claude Add menu with Add custom connector visible.">
           </picture>
           <figcaption>Choose Add custom connector.</figcaption>
         </figure>
@@ -66,7 +74,9 @@
         <p>
           Name: <strong>Podskrift</strong>.
           URL: <code>{{ mcp_connector_url }}</code>.
-          Keep sign-in (OAuth), then click <strong>Add</strong>.
+          Click <strong>Continue</strong>. Review the detected authentication settings and keep OAuth sign-in enabled.
+          Continue to finish adding the connector. If you see an OAuth client choice, keep the recommended option;
+          you do not need to enter a client ID, secret or API key.
         </p>
         {{ snippet(mcp_connector_url, copy_label='Copy', what='connector URL') }}
         {% if shots.get('03-connector-form') %}
@@ -74,7 +84,7 @@
           <picture>
             <source type="image/webp" srcset="{{ url_for('static', filename='guides/claude/03-connector-form.webp') }}">
             <img src="{{ url_for('static', filename='guides/claude/03-connector-form.png') }}"
-                 width="800" height="600" loading="lazy"
+                 width="536" height="449" loading="lazy"
                  alt="Claude custom connector form with Name Podskrift and URL https://podskrift.com/mcp.">
           </picture>
           <figcaption>Name and remote MCP URL.</figcaption>
@@ -88,6 +98,16 @@
           Click <strong>Connect</strong>. Claude opens Podskrift’s sign-in.
           Log in (or create an account), then click <strong>Allow</strong>.
         </p>
+        {% if shots.get('04-connected') %}
+        <figure class="ds-guide__figure">
+          <picture>
+            <source type="image/webp" srcset="{{ url_for('static', filename='guides/claude/04-connected.webp') }}">
+            <img src="{{ url_for('static', filename='guides/claude/04-connected.png') }}"
+                 width="690" height="196" loading="lazy" alt="Podskrift in Claude's connectors list with Connected status.">
+          </picture>
+          <figcaption>After sign-in and Allow, Podskrift shows Connected.</figcaption>
+        </figure>
+        {% endif %}
         {% if shots.get('04-connect-allow') %}
         <figure class="ds-guide__figure">
           <picture>
@@ -109,11 +129,11 @@
         </p>
         {{ snippet("Summarise the latest episode of Hard Fork", copy_label='Copy', what='prompt') }}
         {% if shots.get('05-enable-in-chat') %}
-        <figure class="ds-guide__figure">
+        <figure class="ds-guide__figure ds-guide__figure--detail">
           <picture>
             <source type="image/webp" srcset="{{ url_for('static', filename='guides/claude/05-enable-in-chat.webp') }}">
             <img src="{{ url_for('static', filename='guides/claude/05-enable-in-chat.png') }}"
-                 width="800" height="600" loading="lazy"
+                 width="290" height="34" loading="lazy"
                  alt="Claude chat tools menu with Podskrift enabled.">
           </picture>
           <figcaption>Enable Podskrift from the tools menu in a chat.</figcaption>
@@ -121,6 +141,15 @@
         {% endif %}
       </li>
     </ol>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="claude-check">
+    <h2 id="claude-check">Check that it worked</h2>
+    <p>Podskrift should appear as connected in your app. In a new chat, enable Podskrift from the tools menu.
+       Ask “Use Podskrift to find the latest episode of Hard Fork.” Look for a Podskrift tool call,
+       then ask for a summary or a quote with timestamps.</p>
+    <p>If the reply says it cannot access podcasts, check that Podskrift is enabled in this conversation.
+       A long episode may need time to transcribe; ask your AI to check the transcription status before summarising.</p>
   </section>
 
   <section class="ds-guide__section" aria-labelledby="claude-ask">
@@ -145,6 +174,8 @@
   <section class="ds-guide__section" aria-labelledby="claude-trouble">
     <h2 id="claude-trouble">Troubleshooting</h2>
     <ul class="ds-guide__list">
+      <li><strong>Connector already exists</strong> — Search for Podskrift under Customize → Connectors.
+        Use the existing connector instead of adding the same URL again.</li>
       <li>
         <strong>Sign-in loop</strong> —
         Finish Allow in the Podskrift window; if it keeps bouncing, open
@@ -174,7 +205,6 @@
   </section>
 
   <div class="ds-guide__cta">
-    {{ button("Open Claude", variant="primary", href="https://claude.ai", attrs='rel="noopener" target="_blank"') }}
     {{ link_button("Back to Use in AI", href=url_for('ai_landing')) }}
   </div>
 </article>

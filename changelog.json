@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "mcp-visual-setup-guides",
+      "date": "2026-10-10",
+      "title": "Connect your AI with illustrated setup guides",
+      "summary": "Find ChatGPT and Claude setup from the homepage. Follow screenshots, copy the server URL, and check that Podskrift is enabled before your first podcast question."
+    },
+    {
       "id": "use-in-chatgpt-claude-cursor",
       "date": "2026-10-10",
       "title": "Use Podskrift inside ChatGPT, Claude and Cursor",

@@ -9155,8 +9155,8 @@ def guide_claude():
             {
                 'name': 'Name it Podskrift and paste the URL',
                 'text': (
-                    f'Name it Podskrift, paste {mcp_url}, keep OAuth sign-in, '
-                    'then click Add.'
+                    f'Name it Podskrift, paste {mcp_url}, click Continue, '
+                    'review the detected OAuth settings and finish adding it.'
                 ),
                 'image': _guide_static_url('claude', '03-connector-form'),
             },

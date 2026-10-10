@@ -13,6 +13,14 @@
     "Add Podskrift as a custom MCP server, sign in once, then ask ChatGPT to summarise or quote any podcast episode."
   ) }}
 
+  <div class="ds-mcp-start">
+    {{ button("Open ChatGPT Plugins", variant="primary", href="https://chatgpt.com/plugins", attrs='rel="noopener" target="_blank"') }}
+    <p>Keep this guide open beside your app. Use this exact server URL:</p>
+    {{ snippet(mcp_connector_url, copy_label='Copy server URL', what='connector URL') }}
+    <p><a href="{{ url_for('register') }}">Create a Podskrift account</a> if you don't have one.
+       Already registered? <a href="{{ url_for('login') }}">Sign in to Podskrift</a> before connecting.</p>
+  </div>
+
   <div class="ds-guide__intro">
     <p>
       Works on ChatGPT on the web. Full MCP is a beta for Business, Enterprise and Edu;
@@ -105,6 +113,15 @@
     </ol>
   </section>
 
+  <section class="ds-guide__section" aria-labelledby="chatgpt-check">
+    <h2 id="chatgpt-check">Check that it worked</h2>
+    <p>Podskrift should appear as connected in your app. In a new chat, enable Podskrift from the tools menu.
+       Ask “Use Podskrift to find the latest episode of Hard Fork.” Look for a Podskrift tool call,
+       then ask for a summary or a quote with timestamps.</p>
+    <p>If the reply says it cannot access podcasts, check that Podskrift is enabled in this conversation.
+       A long episode may need time to transcribe; ask your AI to check the transcription status before summarising.</p>
+  </section>
+
   <section class="ds-guide__section" aria-labelledby="chatgpt-ask">
     <h2 id="chatgpt-ask">What you can ask</h2>
     <p class="ds-guide__muted">Copy a prompt and paste it into ChatGPT after Podskrift is connected.</p>
@@ -157,7 +174,6 @@
   </section>
 
   <div class="ds-guide__cta">
-    {{ button("Open ChatGPT Plugins", variant="primary", href="https://chatgpt.com/plugins", attrs='rel="noopener" target="_blank"') }}
     {{ link_button("Back to Use in AI", href=url_for('ai_landing')) }}
   </div>
 </article>

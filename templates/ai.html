@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "components/macros.html" import button %}
 {% block title %}Use Podskrift in ChatGPT and Claude — Podskrift{% endblock %}
 {% block meta_description %}Connect Podskrift to ChatGPT, Claude, Cursor or Claude Code. Ask your AI to summarise or quote any podcast episode. Uses your minutes; episodes you've already transcribed cost nothing.{% endblock %}
 {% block og_title %}Use Podskrift in ChatGPT and Claude{% endblock %}
@@ -101,6 +102,12 @@
         Ask your AI to summarise, quote or search a podcast episode — Podskrift fetches or transcribes it for you.
     </p>
 
+    <div class="ds-mcp-actions ds-mcp-start">
+        {{ button("ChatGPT setup with screenshots", variant="secondary", href=url_for('guide_chatgpt')) }}
+        {{ button("Claude setup with screenshots", variant="secondary", href=url_for('guide_claude')) }}
+    </div>
+    <p class="ai-lead">MCP connects your AI app to Podskrift, so it can find episodes and read transcripts for you.
+        Choose your app for the full walkthrough, or copy the URL below if you already know the setup.</p>
     <div class="ai-example">
         <p class="ai-example-label">Ask your AI</p>
         <p>“Summarise the latest episode of Hard Fork”</p>
@@ -171,9 +178,9 @@
         <div class="ai-app-panel" role="tabpanel" id="panel-claude"
              aria-labelledby="tab-claude" hidden>
             <ol>
-                <li>Go to Customize → Connectors, then <strong>+ Add</strong> → <strong>Add custom connector</strong>.</li>
+                <li>Open <a href="https://claude.ai/customize/connectors" rel="noopener" target="_blank">Claude Connectors</a>, then <strong>+ Add</strong> → <strong>Add custom connector</strong>.</li>
                 <li>Name it Podskrift, paste <code>{{ mcp_connector_url }}</code>, and continue.</li>
-                <li>Keep sign-in (OAuth), add the connector, then Connect — log in to Podskrift and click Allow.</li>
+                <li>Click Continue, review the detected OAuth settings, and keep sign-in enabled. Finish adding it, then Connect — log in to Podskrift and click Allow.</li>
             </ol>
             <p>
                 Works on Claude Free (one connector), Pro, Max, Team and Enterprise, and in Claude Desktop.

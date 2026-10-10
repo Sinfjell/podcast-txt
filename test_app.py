@@ -7671,22 +7671,23 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[1]['id'] == 'new-signup-120-min-trial'
-    assert entries[2]['id'] == 'new-look'
-    assert entries[3]['id'] == 'forgot-password'
-    assert entries[4]['id'] == 'share-listen-links'
-    assert entries[5]['id'] == 'keyboard-and-faster-loading'
-    assert entries[6]['id'] == 'show-landing-pages'
-    assert entries[7]['id'] == 'public-share-links'
-    assert entries[8]['id'] == 'unsubscribe-confirm-click'
-    assert entries[9]['id'] == 'partial-preview-minutes-wording'
-    assert entries[10]['id'] == 'partial-trial-preview'
-    assert entries[11]['id'] == 'own-key-billing-clarity'
-    assert entries[12]['id'] == 'clearer-missing-episode-audio'
-    assert entries[13]['id'] == 'new-signup-60-min-trial'
-    assert entries[14]['id'] == 'spotify-paste-robustness'
-    assert entries[15]['id'] == 'no-double-charge-restart'
+    assert entries[0]['id'] == 'mcp-visual-setup-guides'
+    assert entries[1]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[2]['id'] == 'new-signup-120-min-trial'
+    assert entries[3]['id'] == 'new-look'
+    assert entries[4]['id'] == 'forgot-password'
+    assert entries[5]['id'] == 'share-listen-links'
+    assert entries[6]['id'] == 'keyboard-and-faster-loading'
+    assert entries[7]['id'] == 'show-landing-pages'
+    assert entries[8]['id'] == 'public-share-links'
+    assert entries[9]['id'] == 'unsubscribe-confirm-click'
+    assert entries[10]['id'] == 'partial-preview-minutes-wording'
+    assert entries[11]['id'] == 'partial-trial-preview'
+    assert entries[12]['id'] == 'own-key-billing-clarity'
+    assert entries[13]['id'] == 'clearer-missing-episode-audio'
+    assert entries[14]['id'] == 'new-signup-60-min-trial'
+    assert entries[15]['id'] == 'spotify-paste-robustness'
+    assert entries[16]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -12003,9 +12004,10 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[1]['id'] == 'new-signup-120-min-trial'
-    assert entries[2]['id'] == 'new-look'
+    assert entries[0]['id'] == 'mcp-visual-setup-guides'
+    assert entries[1]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[2]['id'] == 'new-signup-120-min-trial'
+    assert entries[3]['id'] == 'new-look'
 
 
 # --------------------------------------------------------------------------
@@ -14368,3 +14370,44 @@ def test_oauth_settings_connected_apps_renders_with_stripe_buy_modal(
     # Revoke form must call csrf_token() successfully (hidden input present).
     assert 'settings/oauth/revoke' in body
     assert 'name="csrf_token"' in body
+
+
+def test_mcp_discovery_links_are_in_home_hero(trial_on):
+    from bs4 import BeautifulSoup
+    client = A.app.test_client()
+    page = BeautifulSoup(client.get('/').data, 'html.parser')
+    hero = page.select_one('.hp-hero')
+    for path in ('/guides/chatgpt', '/guides/claude'):
+        assert hero.select_one(f'a[href="{path}"]'), path
+        assert client.get(path).status_code == 200
+    promotion = page.select_one('#use-in-ai')
+    assert 'MCP is the connection' in promotion.get_text()
+    for image in promotion.select('img'):
+        assert client.get(image['src']).status_code == 200
+    assert 'Summarise the latest episode of Hard Fork' in promotion.get_text()
+
+
+@pytest.mark.parametrize('path, destination', [
+    ('/guides/chatgpt', 'https://chatgpt.com/plugins'),
+    ('/guides/claude', 'https://claude.ai/customize/connectors'),
+])
+def test_mcp_guides_start_with_app_link_and_copyable_url(trial_on, monkeypatch, path, destination):
+    from bs4 import BeautifulSoup
+    client = A.app.test_client()
+    page = BeautifulSoup(client.get(path).data, 'html.parser')
+    start = page.select_one('.ds-mcp-start')
+    assert start.select_one(f'a[href="{destination}"]')
+    with A.app.test_request_context(path):
+        expected_url = A._mcp_connector_url()
+    assert start.select_one('[data-ds-copy-source]').get_text().strip() == expected_url
+    assert start.select_one('[data-ds-copy]')
+    assert start.select_one('a[href="/register"]')
+    assert page.find('h2', string='Check that it worked')
+    for image in page.select('.ds-guide__figure img'):
+        assert client.get(image['src']).status_code == 200
+    for source in page.select('.ds-guide__figure source'):
+        assert client.get(source['srcset']).status_code == 200
+    if path.endswith('claude'):
+        assert 'Continue' in page.get_text()
+        assert 'Connector already exists' in page.get_text()
+        assert len(page.select('.ds-guide__figure')) >= 4
