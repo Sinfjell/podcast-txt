@@ -11890,8 +11890,9 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'new-signup-120-min-trial'
-    assert entries[1]['id'] == 'new-look'
+    assert entries[0]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[1]['id'] == 'new-signup-120-min-trial'
+    assert entries[2]['id'] == 'new-look'
 
 
 # --------------------------------------------------------------------------
