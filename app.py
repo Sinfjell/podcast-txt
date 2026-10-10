@@ -60,6 +60,8 @@ from models import (db, User, SavedFeed, TranscriptionTask, CreditPurchase,
                     TranscriptShare, EmailSentLog, SummaryEmailJob, SummaryEmailBudgetDay,
                     TrialBudgetDay,
                     PasswordResetToken,
+                    OAuthClient, OAuthAuthorizationCode, OAuthAccessToken,
+                    OAuthRefreshToken,
                     TASK_COLUMN_MIGRATIONS, USER_COLUMN_MIGRATIONS,
                     CREDIT_PURCHASE_COLUMN_MIGRATIONS,
                     SAVED_FEED_COLUMN_MIGRATIONS,
@@ -72,6 +74,7 @@ import email_notify
 import mail as mailer
 import summary as summary_mod
 import mcp_server as mcp_server_mod
+import oauth_server as oauth_server_mod
 from admin_dashboard import admin_bp, ensure_admin_indexes
 
 try:
@@ -199,6 +202,9 @@ def _canonical_host_exempt(path):
     # Remote MCP (Streamable HTTP) — same host-bounce exemption as /api/*.
     if path == '/mcp' or path.startswith('/mcp/'):
         return True
+    # OAuth discovery + token endpoints must not bounce (clients cache issuer).
+    if path.startswith('/.well-known/') or path.startswith('/oauth/'):
+        return True
     if path.startswith('/email/unsubscribe'):
         return True
     if path.startswith('/internal/'):
@@ -287,6 +293,8 @@ SUMMARY_MODEL = summary_mod.summary_model()
 
 # Remote MCP at /mcp (off until MCP_ENABLED=1). Tools reuse /api/v1 helpers.
 MCP_ENABLED = mcp_server_mod.mcp_enabled()
+# OAuth 2.1 for ChatGPT / Claude.ai connectors (off until MCP_OAUTH_ENABLED=1).
+MCP_OAUTH_ENABLED = oauth_server_mod.mcp_oauth_enabled()
 
 
 def openai_whisper_cost_usd(minutes):
@@ -4351,6 +4359,9 @@ def settings():
     trial_ctx = _trial_context()
     buy_source = (
         'header_pill' if request.args.get('from') == 'header_pill' else 'settings')
+    connected_apps = []
+    if oauth_server_mod.mcp_oauth_enabled():
+        connected_apps = oauth_server_mod.list_connected_apps(current_user.id)
     return render_template(
         'settings.html',
         trial=trial_ctx,
@@ -4358,6 +4369,8 @@ def settings():
         openai_key_hint=_openai_key_hint(current_user),
         buy_source=buy_source,
         no_billing_warning=no_billing_warning,
+        mcp_oauth_enabled=oauth_server_mod.mcp_oauth_enabled(),
+        connected_apps=connected_apps,
     )
 
 
@@ -7508,9 +7521,9 @@ def _agent_write_user():
 
 
 def _api_write_user():
-    """User row for API writes (customer key owner or CoS agent scope)."""
+    """User row for API writes (customer/OAuth owner or CoS agent scope)."""
     kind = getattr(g, 'api_auth_kind', None)
-    if kind == 'customer':
+    if kind in ('customer', 'oauth'):
         uid = getattr(g, 'api_user_id', None)
         user = db.session.get(User, uid) if uid is not None else None
         if user is None:
@@ -7523,12 +7536,12 @@ def _api_write_user():
 def _api_write_rate_limit_ok():
     """True if this process still has room for another API write.
 
-    CoS agent shares one bucket; each customer is limited separately so one
-    account cannot starve another inside the same gunicorn worker.
+    CoS agent shares one bucket; each customer/OAuth user is limited separately
+    so one account cannot starve another inside the same gunicorn worker.
     """
     now = time.time()
     kind = getattr(g, 'api_auth_kind', None)
-    if kind == 'customer':
+    if kind in ('customer', 'oauth'):
         bucket = f'customer:{getattr(g, "api_user_id", None)}'
     else:
         bucket = 'agent'
@@ -8645,7 +8658,7 @@ def robots_txt():
     """
     disallow = ['Disallow: ' + path for path in (
         '/settings', '/history', '/transcription/', '/download/',
-        '/api/', '/status/', '/active-jobs', '/cancel/', '/t/', '/admin',
+        '/api/', '/oauth/', '/status/', '/active-jobs', '/cancel/', '/t/', '/admin',
     )]
     lines = [
         '# Podskrift -- podcast transcription',
@@ -8888,6 +8901,13 @@ def load_customer_api_markdown():
     # MCP connect docs are gated on MCP_ENABLED (default off).
     text = mcp_server_mod.filter_mcp_docs_section(
         text, enabled=mcp_server_mod.mcp_enabled())
+    # OAuth connector steps are nested inside that section; also require
+    # MCP_OAUTH_ENABLED so the page stays quiet until OAuth is flipped on.
+    text = oauth_server_mod.filter_mcp_oauth_docs_section(
+        text, enabled=(
+            mcp_server_mod.mcp_enabled()
+            and oauth_server_mod.mcp_oauth_enabled()
+        ))
     # Defence in depth: the public page must not document the host CoS secret,
     # even if someone reintroduces that line in the markdown.
     kept = []
@@ -8994,6 +9014,8 @@ def api_docs():
 # Remote MCP (Streamable HTTP). Route always exists; returns 404 when the flag
 # is off so clients and probes get a stable path once MCP_ENABLED is flipped.
 mcp_server_mod.register_mcp(app)
+# OAuth 2.1 AS + PRM well-known (404 until MCP_OAUTH_ENABLED=1).
+oauth_server_mod.register_oauth(app)
 
 
 init_site_standards(
@@ -10390,6 +10412,7 @@ with app.app_context():
     ensure_summary_email_tables()
     ensure_trial_budget_days_table()
     ensure_password_reset_tokens_table()
+    oauth_server_mod.ensure_oauth_tables()
 
     apply_column_migrations()
     raise_60_minute_trial_cohort()
