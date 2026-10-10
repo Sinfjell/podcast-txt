@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "chatgpt-oauth-private-key-jwt",
+      "date": "2026-10-10",
+      "title": "ChatGPT connector sign-in fixed",
+      "summary": "Connecting Podskrift from ChatGPT no longer fails during OAuth. We now accept ChatGPT's client authentication (including private_key_jwt) so the connector can finish signing in."
+    },
+    {
       "id": "use-in-chatgpt-claude-cursor",
       "date": "2026-10-10",
       "title": "Use Podskrift inside ChatGPT, Claude and Cursor",
