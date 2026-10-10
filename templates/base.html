@@ -39,9 +39,6 @@
     <link rel="alternate" type="application/rss+xml" href="/whats-new/feed.xml" title="Podskrift: what's new">
     <link rel="api-catalog" type="application/linkset+json" href="/.well-known/api-catalog">
     {% block head_links %}{% endblock %}
-    {# Shared component library (macros in templates/components/). Tokens stay
-       in the block below; component-only rules live in components.css. #}
-    <link rel="stylesheet" href="{{ asset_url('components.css') }}">
     {# Self-hosted (was Google Fonts): no third-party request carrying the
        visitor's IP, and no render-blocking cross-origin stylesheet. #}
     <link rel="preload" href="{{ asset_url('fonts/schibsted-grotesk-latin.woff2') }}" as="font" type="font/woff2" crossorigin>
@@ -1095,6 +1092,9 @@
             .episode-card.selected, .tab.active { outline: 3px solid Highlight; }
         }
     </style>
+    {# Shared component library (macros in templates/components/). Loaded after
+       the token/base rules so .btn.btn-ghost and friends can override .btn. #}
+    <link rel="stylesheet" href="{{ asset_url('components.css') }}">
 </head>
 <body{% if current_user.is_authenticated %} data-authenticated="1"{% endif %}>
     <a class="skip-link" href="#content">Skip to main content</a>

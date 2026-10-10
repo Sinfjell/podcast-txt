@@ -57,15 +57,21 @@
 /* ---------------------------------------------------------------------------
    Buttons — variants map onto existing .btn rules; ghost = tertiary text
    --------------------------------------------------------------------------- */
-.btn-ghost {
+.btn.btn-ghost {
     background: transparent;
     color: var(--accent);
     border-color: transparent;
     padding: 0 1rem;
 }
-.btn-ghost:hover {
+.btn.btn-ghost:hover {
     background: var(--surface);
     color: var(--accent-hover);
+    border-color: transparent;
+}
+.btn.btn-ghost:disabled,
+.btn.btn-ghost[disabled] {
+    background: var(--surface);
+    color: var(--muted);
     border-color: transparent;
 }
 a.ds-link-button {
