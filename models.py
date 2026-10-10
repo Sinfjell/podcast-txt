@@ -424,7 +424,8 @@ class OAuthClient(db.Model):
     __tablename__ = 'oauth_clients'
 
     id = db.Column(db.Integer, primary_key=True)
-    client_id = db.Column(db.String(64), unique=True, nullable=False)
+    # DCR mint is short (poc_…); CIMD client_ids are HTTPS metadata URLs.
+    client_id = db.Column(db.String(512), unique=True, nullable=False)
     # NULL for public clients; SHA-256 hex when a secret was issued.
     client_secret_hash = db.Column(db.String(64), nullable=True)
     client_name = db.Column(db.String(255), nullable=True)
@@ -434,6 +435,8 @@ class OAuthClient(db.Model):
     response_types_json = db.Column(db.Text, nullable=False)
     token_endpoint_auth_method = db.Column(db.String(64), nullable=False,
                                            default='none', server_default='none')
+    # 'dcr' | 'cimd' — how this client was first learned.
+    registration_source = db.Column(db.String(16), nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -443,7 +446,7 @@ class OAuthAuthorizationCode(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     code_hash = db.Column(db.String(64), unique=True, nullable=False)
-    client_id = db.Column(db.String(64), nullable=False, index=True)
+    client_id = db.Column(db.String(512), nullable=False, index=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False,
                         index=True)
     redirect_uri = db.Column(db.String(1024), nullable=False)
@@ -463,7 +466,7 @@ class OAuthAccessToken(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     token_hash = db.Column(db.String(64), unique=True, nullable=False)
-    client_id = db.Column(db.String(64), nullable=False, index=True)
+    client_id = db.Column(db.String(512), nullable=False, index=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False,
                         index=True)
     scope = db.Column(db.String(255), nullable=True)
@@ -479,7 +482,7 @@ class OAuthRefreshToken(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     token_hash = db.Column(db.String(64), unique=True, nullable=False)
-    client_id = db.Column(db.String(64), nullable=False, index=True)
+    client_id = db.Column(db.String(512), nullable=False, index=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False,
                         index=True)
     scope = db.Column(db.String(255), nullable=True)
@@ -493,7 +496,9 @@ class OAuthRefreshToken(db.Model):
 
 #: Additive columns for oauth_* tables (future ALTERs). Applied by
 #: ensure_oauth_tables AFTER CREATE TABLE IF NOT EXISTS.
-OAUTH_CLIENT_COLUMN_MIGRATIONS = {}
+OAUTH_CLIENT_COLUMN_MIGRATIONS = {
+    'registration_source': 'VARCHAR(16)',
+}
 OAUTH_AUTHORIZATION_CODE_COLUMN_MIGRATIONS = {}
 OAUTH_ACCESS_TOKEN_COLUMN_MIGRATIONS = {}
 OAUTH_REFRESH_TOKEN_COLUMN_MIGRATIONS = {

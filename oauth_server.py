@@ -20,16 +20,19 @@ import base64
 import collections
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
 import secrets
+import socket
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode, urlparse, urlunparse
 
+import requests
 from flask import (Response, flash, g, jsonify, redirect, render_template,
                    request, session, url_for)
 from flask_login import current_user
@@ -55,6 +58,13 @@ CLIENT_ID_PREFIX = 'poc_'
 
 DEFAULT_SCOPE = 'mcp'
 SUPPORTED_SCOPES = frozenset({'mcp', 'offline_access'})
+
+# Claude.ai hosted MCP OAuth callback (must pass redirect_uri validation).
+CLAUDE_AI_CALLBACK = 'https://claude.ai/api/mcp/auth_callback'
+
+# CIMD fetch limits (SSRF-hardened outbound HTTP).
+CIMD_FETCH_TIMEOUT_SEC = 5
+CIMD_FETCH_MAX_BYTES = 64 * 1024
 
 _OAUTH_DOC_BEGIN = '<!-- mcp-oauth-section -->'
 _OAUTH_DOC_END = '<!-- /mcp-oauth-section -->'
@@ -402,14 +412,200 @@ def authorization_server_metadata() -> dict:
         'authorization_endpoint': f'{issuer}/oauth/authorize',
         'token_endpoint': f'{issuer}/oauth/token',
         'registration_endpoint': f'{issuer}/oauth/register',
+        # ChatGPT prefers CIMD when advertised; DCR remains via registration_endpoint.
+        'client_id_metadata_document_supported': True,
         'scopes_supported': sorted(SUPPORTED_SCOPES),
         'response_types_supported': ['code'],
         'grant_types_supported': ['authorization_code', 'refresh_token'],
         'code_challenge_methods_supported': ['S256'],
+        # CIMD public clients use none; DCR may use client_secret_post.
         'token_endpoint_auth_methods_supported': ['none', 'client_secret_post'],
         'authorization_response_iss_parameter_supported': True,
         'revocation_endpoint_auth_methods_supported': ['none'],
     }
+
+
+def looks_like_cimd_client_id(client_id: str) -> bool:
+    """True when client_id is an HTTPS URL with a path (CIMD identifier)."""
+    if not client_id or not isinstance(client_id, str) or len(client_id) > 512:
+        return False
+    try:
+        parsed = urlparse(client_id.strip())
+    except ValueError:
+        return False
+    if parsed.scheme.lower() != 'https' or not parsed.netloc:
+        return False
+    if parsed.username or parsed.password or parsed.fragment:
+        return False
+    path = parsed.path or ''
+    return bool(path) and path != '/'
+
+
+def _ip_is_public(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return bool(ip.is_global)
+
+
+def _cimd_host_is_safe(hostname: str) -> bool:
+    """Reject localhost / private / link-local hosts before fetching CIMD."""
+    host = (hostname or '').lower().rstrip('.')
+    if not host or _is_localhost_host(host):
+        return False
+    if host.endswith('.local') or host.endswith('.internal'):
+        return False
+    try:
+        infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        addr = info[4][0]
+        if not _ip_is_public(addr):
+            return False
+    return True
+
+
+def fetch_cimd_document(client_id_url: str) -> tuple[dict | None, str | None]:
+    """GET a Client ID Metadata Document. Returns (doc, error_description)."""
+    if not looks_like_cimd_client_id(client_id_url):
+        return None, 'client_id is not a valid CIMD HTTPS URL.'
+    parsed = urlparse(client_id_url)
+    if not _cimd_host_is_safe(parsed.hostname or ''):
+        return None, 'CIMD host is not allowed.'
+    try:
+        resp = requests.get(
+            client_id_url,
+            timeout=CIMD_FETCH_TIMEOUT_SEC,
+            allow_redirects=False,
+            headers={
+                'Accept': 'application/json',
+                'User-Agent': 'Podskrift-OAuth/1.0',
+            },
+            stream=True,
+        )
+    except requests.RequestException:
+        return None, 'Could not fetch client metadata document.'
+    if resp.status_code != 200:
+        resp.close()
+        return None, f'CIMD fetch returned HTTP {resp.status_code}.'
+    # Cap body size before json parse.
+    chunks = []
+    total = 0
+    try:
+        for chunk in resp.iter_content(chunk_size=4096):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > CIMD_FETCH_MAX_BYTES:
+                return None, 'CIMD document too large.'
+            chunks.append(chunk)
+    finally:
+        resp.close()
+    try:
+        doc = json.loads(b''.join(chunks).decode('utf-8'))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, 'CIMD document is not valid JSON.'
+    if not isinstance(doc, dict):
+        return None, 'CIMD document must be a JSON object.'
+    doc_client_id = doc.get('client_id')
+    if not isinstance(doc_client_id, str) or doc_client_id != client_id_url:
+        return None, 'CIMD client_id must exactly match the document URL.'
+    name = doc.get('client_name')
+    if not isinstance(name, str) or not name.strip():
+        return None, 'CIMD document requires client_name.'
+    uris = doc.get('redirect_uris')
+    if not isinstance(uris, list) or not uris:
+        return None, 'CIMD document requires redirect_uris.'
+    for uri in uris:
+        if not isinstance(uri, str) or not validate_redirect_uri(uri):
+            return None, 'CIMD redirect_uris failed validation.'
+    return doc, None
+
+
+def _cimd_auth_method(doc: dict) -> str | None:
+    """Prefer public-client none; reject unsupported methods."""
+    methods = doc.get('token_endpoint_auth_methods')
+    if isinstance(methods, list) and methods:
+        str_methods = [str(m) for m in methods]
+        if 'none' in str_methods:
+            return 'none'
+    single = (doc.get('token_endpoint_auth_method') or 'none')
+    if isinstance(single, str) and single.strip() == 'none':
+        return 'none'
+    # private_key_jwt is advertised by ChatGPT but not implemented here yet;
+    # accept the client when none is also listed (handled above).
+    return None
+
+
+def upsert_cimd_client(client_id_url: str, doc: dict):
+    """Persist / refresh a CIMD client row from a validated metadata document."""
+    from models import OAuthClient, db
+    auth_method = _cimd_auth_method(doc)
+    if auth_method is None:
+        return None, 'CIMD token_endpoint_auth_method must include none.'
+    uris = [u.strip() for u in doc['redirect_uris'] if isinstance(u, str)]
+    grant_types = _json_list(
+        doc.get('grant_types'),
+        default=['authorization_code', 'refresh_token'],
+    )
+    if 'authorization_code' not in grant_types:
+        grant_types.append('authorization_code')
+    if 'refresh_token' not in grant_types:
+        grant_types.append('refresh_token')
+    response_types = _json_list(doc.get('response_types'), default=['code'])
+    if 'code' not in response_types:
+        response_types = ['code']
+    name = (doc.get('client_name') or '').strip()[:255]
+
+    row = OAuthClient.query.filter_by(client_id=client_id_url).first()
+    if row is None:
+        row = OAuthClient(
+            client_id=client_id_url,
+            client_secret_hash=None,
+            client_name=name,
+            redirect_uris_json=json.dumps(uris),
+            grant_types_json=json.dumps(grant_types),
+            response_types_json=json.dumps(response_types),
+            token_endpoint_auth_method=auth_method,
+            registration_source='cimd',
+        )
+        db.session.add(row)
+    else:
+        row.client_name = name
+        row.redirect_uris_json = json.dumps(uris)
+        row.grant_types_json = json.dumps(grant_types)
+        row.response_types_json = json.dumps(response_types)
+        row.token_endpoint_auth_method = auth_method
+        if not row.registration_source:
+            row.registration_source = 'cimd'
+    db.session.commit()
+    return row, None
+
+
+def resolve_oauth_client(client_id: str, *, allow_fetch: bool = True,
+                         force_refresh: bool = False):
+    """Load a DCR or CIMD client. Fetches CIMD metadata when unknown (or forced)."""
+    from models import OAuthClient
+    client_id = (client_id or '').strip()
+    if not client_id:
+        return None, 'Missing client_id.'
+    row = OAuthClient.query.filter_by(client_id=client_id).first()
+    if row is not None and not force_refresh:
+        return row, None
+    if not allow_fetch or not looks_like_cimd_client_id(client_id):
+        if row is not None:
+            return row, None
+        return None, 'Unknown client_id.'
+    doc, err = fetch_cimd_document(client_id)
+    if err:
+        if row is not None:
+            return row, None
+        return None, err
+    return upsert_cimd_client(client_id, doc)
 
 
 def _redirect_with_params(redirect_uri: str, params: dict):
@@ -537,6 +733,7 @@ def register_oauth(app_flask):
             grant_types_json=json.dumps(grant_types),
             response_types_json=json.dumps(response_types),
             token_endpoint_auth_method=auth_method,
+            registration_source='dcr',
         )
         db.session.add(row)
         db.session.commit()
@@ -583,14 +780,19 @@ def register_oauth(app_flask):
         code_challenge_method = (src.get('code_challenge_method') or '').strip()
         resource = (src.get('resource') or '').strip() or mcp_resource_url()
 
-        from models import OAuthAuthorizationCode, OAuthClient, db
+        from models import OAuthAuthorizationCode, db
 
-        client = OAuthClient.query.filter_by(client_id=client_id).first()
+        client, client_err = resolve_oauth_client(client_id)
         if client is None:
-            return _oauth_error('invalid_request', 'Unknown client_id.', 400)
+            return _oauth_error(
+                'invalid_request', client_err or 'Unknown client_id.', 400)
 
         allowed = _client_redirect_uris(client)
-        if redirect_uri not in allowed:
+        if redirect_uri not in allowed and looks_like_cimd_client_id(client_id):
+            # Redirect URIs may have rotated in the client's published CIMD.
+            client, _ = resolve_oauth_client(client_id, force_refresh=True)
+            allowed = _client_redirect_uris(client) if client else []
+        if client is None or redirect_uri not in allowed:
             return _oauth_error(
                 'invalid_request',
                 'redirect_uri is not registered for this client.',
@@ -700,11 +902,12 @@ def register_oauth(app_flask):
         client_id = (data.get('client_id') or '').strip()
 
         from models import (OAuthAccessToken, OAuthAuthorizationCode,
-                            OAuthClient, OAuthRefreshToken, db)
+                            OAuthRefreshToken, db)
 
-        client = OAuthClient.query.filter_by(client_id=client_id).first()
+        client, client_err = resolve_oauth_client(client_id)
         if client is None:
-            return _oauth_error('invalid_client', 'Unknown client_id.', 401)
+            return _oauth_error(
+                'invalid_client', client_err or 'Unknown client_id.', 401)
 
         if client.token_endpoint_auth_method == 'client_secret_post':
             secret = (data.get('client_secret') or '').strip()
@@ -899,23 +1102,24 @@ def ensure_oauth_tables():
     A = _app()
     statements = [
         """
-        CREATE TABLE IF NOT EXISTS oauth_clients (
-            id INTEGER NOT NULL PRIMARY KEY,
-            client_id VARCHAR(64) NOT NULL UNIQUE,
-            client_secret_hash VARCHAR(64),
-            client_name VARCHAR(255),
-            redirect_uris_json TEXT NOT NULL,
-            grant_types_json TEXT NOT NULL,
-            response_types_json TEXT NOT NULL,
-            token_endpoint_auth_method VARCHAR(64) NOT NULL DEFAULT 'none',
-            created_at DATETIME
-        )
+            CREATE TABLE IF NOT EXISTS oauth_clients (
+                id INTEGER NOT NULL PRIMARY KEY,
+                client_id VARCHAR(512) NOT NULL UNIQUE,
+                client_secret_hash VARCHAR(64),
+                client_name VARCHAR(255),
+                redirect_uris_json TEXT NOT NULL,
+                grant_types_json TEXT NOT NULL,
+                response_types_json TEXT NOT NULL,
+                token_endpoint_auth_method VARCHAR(64) NOT NULL DEFAULT 'none',
+                registration_source VARCHAR(16),
+                created_at DATETIME
+            )
         """,
         """
         CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
             id INTEGER NOT NULL PRIMARY KEY,
             code_hash VARCHAR(64) NOT NULL UNIQUE,
-            client_id VARCHAR(64) NOT NULL,
+            client_id VARCHAR(512) NOT NULL,
             user_id INTEGER NOT NULL,
             redirect_uri VARCHAR(1024) NOT NULL,
             code_challenge VARCHAR(128) NOT NULL,
@@ -932,7 +1136,7 @@ def ensure_oauth_tables():
         CREATE TABLE IF NOT EXISTS oauth_access_tokens (
             id INTEGER NOT NULL PRIMARY KEY,
             token_hash VARCHAR(64) NOT NULL UNIQUE,
-            client_id VARCHAR(64) NOT NULL,
+            client_id VARCHAR(512) NOT NULL,
             user_id INTEGER NOT NULL,
             scope VARCHAR(255),
             resource VARCHAR(512) NOT NULL,
@@ -946,7 +1150,7 @@ def ensure_oauth_tables():
         CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
             id INTEGER NOT NULL PRIMARY KEY,
             token_hash VARCHAR(64) NOT NULL UNIQUE,
-            client_id VARCHAR(64) NOT NULL,
+            client_id VARCHAR(512) NOT NULL,
             user_id INTEGER NOT NULL,
             scope VARCHAR(255),
             resource VARCHAR(512) NOT NULL,

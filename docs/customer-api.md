@@ -279,7 +279,14 @@ authorization server on the same host — no third-party IdP.
 `https://podskrift.com/.well-known/oauth-protected-resource`
 (and authorization-server metadata at
 `/.well-known/oauth-authorization-server`). Unauthenticated `/mcp` calls
-return `401` with a `WWW-Authenticate` header pointing at that metadata.
+return `401` with a `WWW-Authenticate` header pointing at that metadata —
+enough for URL-only configs such as Cursor / VS Code
+`{"url":"https://podskrift.com/mcp"}` to start OAuth (DCR or CIMD) without a
+pre-pasted API key.
+
+The authorization server advertises PKCE `S256`, `offline_access` (refresh
+tokens), Dynamic Client Registration, and
+`client_id_metadata_document_supported` (Client ID Metadata Documents).
 
 #### ChatGPT
 
@@ -293,8 +300,9 @@ and [plugin authentication](https://developers.openai.com/plugins/build/auth)
    creating an app from Workspace settings → Apps → Create.
 2. Create a custom MCP app (Workspace settings → Apps → Create, or user
    Settings → Apps → Create). Endpoint: `https://podskrift.com/mcp`.
-3. Choose OAuth. ChatGPT uses discovery + dynamic client registration, then
-   opens Podskrift’s consent page — log in if needed, then **Allow**.
+3. Choose OAuth. ChatGPT prefers CIMD when advertised (stable
+   `https://chatgpt.com/oauth/…/client.json` as `client_id`) and can fall back
+   to DCR. Complete Podskrift’s consent page — log in if needed, then **Allow**.
 4. After the tool scan, create the app. Manage it under Settings → Apps
    (Dev / custom label). Revoke also from Podskrift **Settings → Connected apps**.
 

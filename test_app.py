@@ -6450,6 +6450,7 @@ def _oauth_approve(client, *, client_id, redirect_uri, verifier_challenge,
     page = client.get('/oauth/authorize', query_string=q)
     assert page.status_code == 200, page.data[:500]
     assert b'Allow' in page.data
+    assert b'to use Podskrift?' in page.data
     with client.session_transaction() as sess:
         token = sess.get('_csrf_token') or 'tok'
         sess['_csrf_token'] = token
@@ -6504,9 +6505,13 @@ def test_oauth_metadata_and_www_authenticate(mcp_oauth_on):
     meta = asm.get_json()
     assert meta['issuer'] == 'https://podskrift.com'
     assert 'S256' in meta['code_challenge_methods_supported']
+    assert 'offline_access' in meta['scopes_supported']
     assert meta['registration_endpoint'].endswith('/oauth/register')
+    assert meta['client_id_metadata_document_supported'] is True
     assert meta['authorization_response_iss_parameter_supported'] is True
+    assert 'none' in meta['token_endpoint_auth_methods_supported']
 
+    # URL-only MCP clients (Cursor / VS Code / ChatGPT) start OAuth from this 401.
     unauth = c.post('/mcp', json={
         'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {},
     })
@@ -6514,6 +6519,86 @@ def test_oauth_metadata_and_www_authenticate(mcp_oauth_on):
     www = unauth.headers.get('WWW-Authenticate', '')
     assert 'resource_metadata=' in www
     assert '/.well-known/oauth-protected-resource' in www
+
+
+def test_oauth_claude_callback_and_https_redirects_allowed(mcp_oauth_on):
+    assert OAUTH.validate_redirect_uri(OAUTH.CLAUDE_AI_CALLBACK)
+    assert OAUTH.validate_redirect_uri('https://chatgpt.com/connector/oauth/callback')
+    assert OAUTH.validate_redirect_uri('http://127.0.0.1:8787/callback')
+    assert OAUTH.validate_redirect_uri('http://localhost/callback')
+    # Claude callback registers cleanly via DCR.
+    reg = _oauth_register(
+        redirect_uris=[OAUTH.CLAUDE_AI_CALLBACK],
+        client_name='Claude')
+    assert reg.status_code == 201
+    assert reg.get_json()['client_name'] == 'Claude'
+
+
+def test_oauth_cimd_client_authorize_and_token(mcp_oauth_on, monkeypatch):
+    """ChatGPT-style Client ID Metadata Document as client_id."""
+    cimd_url = 'https://chatgpt.com/oauth/client.json'
+    redirect_uri = 'https://chatgpt.com/connector/oauth/xxxx/callback'
+    doc = {
+        'client_id': cimd_url,
+        'client_name': 'ChatGPT',
+        'redirect_uris': [redirect_uri],
+        'token_endpoint_auth_method': 'none',
+        'grant_types': ['authorization_code', 'refresh_token'],
+        'response_types': ['code'],
+    }
+
+    class _FakeResp:
+        status_code = 200
+
+        def iter_content(self, chunk_size=4096):
+            yield json.dumps(doc).encode('utf-8')
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(OAUTH, '_cimd_host_is_safe', lambda host: True)
+    monkeypatch.setattr(
+        OAUTH.requests, 'get',
+        lambda *a, **k: _FakeResp())
+
+    verifier, challenge = _pkce_pair()
+    client = _login(mcp_oauth_on['a'])
+    _, code = _oauth_approve(
+        client, client_id=cimd_url, redirect_uri=redirect_uri,
+        verifier_challenge=(verifier, challenge))
+    assert code
+    page = client.get(
+        '/oauth/authorize',
+        query_string={
+            'response_type': 'code',
+            'client_id': cimd_url,
+            'redirect_uri': redirect_uri,
+            'code_challenge': challenge,
+            'code_challenge_method': 'S256',
+            'resource': OAUTH.mcp_resource_url(),
+        })
+    # Second visit uses cached CIMD row; consent shows stored client_name.
+    assert page.status_code == 200
+    assert b'Allow ChatGPT to use Podskrift?' in page.data
+
+    tok = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': redirect_uri,
+        'client_id': cimd_url,
+        'code_verifier': verifier,
+        'resource': 'https://podskrift.com/mcp',
+    })
+    assert tok.status_code == 200, tok.get_json()
+    assert tok.get_json()['refresh_token'].startswith('por_')
+    assert 'offline_access' in tok.get_json()['scope']
+
+    from models import db, OAuthClient
+    with A.app.app_context():
+        row = OAuthClient.query.filter_by(client_id=cimd_url).first()
+        assert row is not None
+        assert row.client_name == 'ChatGPT'
+        assert row.registration_source == 'cimd'
 
 
 def test_oauth_full_flow_register_authorize_token_mcp_refresh_revoke(mcp_oauth_on):
