@@ -6966,10 +6966,54 @@ def test_oauth_tables_ensure_is_idempotent():
         OAUTH.ensure_oauth_tables()
         assert 'client_id' in A._live_columns('oauth_clients')
         assert 'jwks_uri' in A._live_columns('oauth_clients')
+        assert 'token_endpoint_auth_methods_json' in A._live_columns('oauth_clients')
         assert 'jti_hash' in A._live_columns('oauth_jwt_jtis')
         cols = A._live_columns('oauth_refresh_tokens')
         assert 'token_hash' in cols
         assert 'replaced_by_hash' in cols
+
+
+def test_pyjwt_in_prod_requirements_and_rs256_roundtrip():
+    """PODSKRIFT-N: PyJWT must be importable from the prod requirements file.
+
+    Deploy runs `.venv/bin/pip install -r requirements.txt` before restart.
+    If jwt is missing there, ChatGPT's /oauth/token crashes with ModuleNotFoundError.
+    """
+    from pathlib import Path
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    req = Path(__file__).resolve().parent.joinpath('requirements.txt').read_text()
+    assert 'PyJWT' in req, 'PyJWT must be pinned in requirements.txt (prod install)'
+    assert 'cryptography' in req, 'cryptography must be pinned for PyJWT[crypto]'
+    deploy = Path(__file__).resolve().parent.joinpath(
+        '.github/workflows/deploy.yml').read_text()
+    assert '.venv/bin/pip install -r requirements.txt' in deploy
+
+    import jwt
+    from jwt.algorithms import RSAAlgorithm
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwk = json.loads(RSAAlgorithm.to_jwk(private_key.public_key()))
+    now = int(time.time())
+    token = jwt.encode(
+        {
+            'iss': 'https://chatgpt.com/oauth/client.json',
+            'sub': 'https://chatgpt.com/oauth/client.json',
+            'aud': 'https://podskrift.com/oauth/token',
+            'iat': now,
+            'exp': now + 60,
+            'jti': secrets.token_urlsafe(8),
+        },
+        private_key,
+        algorithm='RS256',
+    )
+    claims = jwt.decode(
+        token,
+        key=RSAAlgorithm.from_jwk(jwk),
+        algorithms=['RS256'],
+        audience='https://podskrift.com/oauth/token',
+    )
+    assert claims['sub'] == 'https://chatgpt.com/oauth/client.json'
 
 
 def _chatgpt_cimd_doc(*, cimd_url, redirect_uri, jwks_uri=None):
@@ -7112,11 +7156,11 @@ def test_oauth_private_key_jwt_token_success_and_rejects(mcp_oauth_on, monkeypat
             data['client_assertion_type'] = assertion_type
         return A.app.test_client().post('/oauth/token', data=data)
 
-    # Missing assertion → reject
+    # ChatGPT advertises none + private_key_jwt → PKCE without assertion works.
     code, verifier = _code_for_token()
     missing = _token(code, verifier, assertion=None)
-    assert missing.status_code == 401
-    assert missing.get_json()['error'] == 'invalid_client'
+    assert missing.status_code == 200, missing.get_json()
+    assert missing.get_json()['access_token'].startswith('poa_')
 
     # Valid assertion → success
     code, verifier = _code_for_token()
@@ -7236,11 +7280,11 @@ def test_oauth_private_key_jwt_hardening(mcp_oauth_on, monkeypatch):
     assert ok.status_code == 200, ok.get_json()
     refresh = ok.get_json()['refresh_token']
 
-    # Refresh without assertion → invalid_client.
-    r_missing = _post({'grant_type': 'refresh_token', 'refresh_token': refresh,
-                       'client_id': cimd_url})
-    assert r_missing.status_code == 401
-    assert r_missing.get_json()['error'] == 'invalid_client'
+    # ChatGPT dual auth: refresh without assertion is allowed (none).
+    r_none = _post({'grant_type': 'refresh_token', 'refresh_token': refresh,
+                    'client_id': cimd_url})
+    assert r_none.status_code == 200, r_none.get_json()
+    refresh = r_none.get_json()['refresh_token']
     # Refresh with valid assertion → rotated pair.
     r_ok = _post({
         'grant_type': 'refresh_token', 'refresh_token': refresh,
@@ -7293,6 +7337,166 @@ def test_oauth_cimd_none_still_works_without_assertion(mcp_oauth_on, monkeypatch
         'resource': 'https://podskrift.com/mcp',
     })
     assert tok.status_code == 200, tok.get_json()
+
+
+def test_oauth_private_key_jwt_only_requires_assertion(mcp_oauth_on, monkeypatch):
+    """Clients that only declare private_key_jwt cannot use public-client auth."""
+    cimd_url = 'https://chatgpt.com/oauth/client-jwt-only.json'
+    redirect_uri = 'https://chatgpt.com/connector_platform_oauth_redirect'
+    private_key, jwk = _rsa_keypair_and_jwk()
+    doc = _chatgpt_cimd_doc(cimd_url=cimd_url, redirect_uri=redirect_uri)
+    doc['token_endpoint_auth_methods_supported'] = ['private_key_jwt']
+    _patch_cimd_and_jwks(monkeypatch, cimd_url=cimd_url, doc=doc, jwks=jwk)
+
+    verifier, challenge = _pkce_pair()
+    browser = _login(mcp_oauth_on['a'])
+    _, code = _oauth_approve(
+        browser, client_id=cimd_url, redirect_uri=redirect_uri,
+        verifier_challenge=(verifier, challenge))
+    assert code
+    missing = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': redirect_uri,
+        'client_id': cimd_url,
+        'code_verifier': verifier,
+        'resource': 'https://podskrift.com/mcp',
+    })
+    assert missing.status_code == 401
+    assert 'client_assertion' in (missing.get_json().get('error_description') or '')
+
+    verifier2, challenge2 = _pkce_pair()
+    _, code2 = _oauth_approve(
+        browser, client_id=cimd_url, redirect_uri=redirect_uri,
+        verifier_challenge=(verifier2, challenge2))
+    ok = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code',
+        'code': code2,
+        'redirect_uri': redirect_uri,
+        'client_id': cimd_url,
+        'code_verifier': verifier2,
+        'resource': 'https://podskrift.com/mcp',
+        'client_assertion': _mint_client_assertion(
+            private_key, client_id=cimd_url),
+        'client_assertion_type': OAUTH.CLIENT_ASSERTION_TYPE,
+    })
+    assert ok.status_code == 200, ok.get_json()
+
+
+def test_oauth_chatgpt_exact_flow_both_auth_styles(mcp_oauth_on, monkeypatch):
+    """End-to-end ChatGPT CIMD: consent CSP + token with assertion and without."""
+    cimd_url = 'https://chatgpt.com/oauth/client.json'
+    redirect_uri = 'https://chatgpt.com/connector_platform_oauth_redirect'
+    private_key, jwk = _rsa_keypair_and_jwk()
+    doc = _chatgpt_cimd_doc(cimd_url=cimd_url, redirect_uri=redirect_uri)
+    _patch_cimd_and_jwks(monkeypatch, cimd_url=cimd_url, doc=doc, jwks=jwk)
+
+    browser = _login(mcp_oauth_on['a'])
+    verifier, challenge = _pkce_pair()
+    page = browser.get('/oauth/authorize', query_string={
+        'response_type': 'code',
+        'client_id': cimd_url,
+        'redirect_uri': redirect_uri,
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+        'resource': OAUTH.mcp_resource_url(),
+        'state': 'chatgpt-state',
+    })
+    assert page.status_code == 200
+    csp = page.headers['Content-Security-Policy']
+    assert 'https://chatgpt.com' in csp
+    assert "form-action" in csp
+    assert 'https://chatgpt.com' in page.headers.get(
+        'Content-Security-Policy-Report-Only', '')
+
+    from models import db, OAuthClient
+    with A.app.app_context():
+        row = OAuthClient.query.filter_by(client_id=cimd_url).first()
+        assert row is not None
+        assert row.token_endpoint_auth_method == 'private_key_jwt'
+        methods = json.loads(row.token_endpoint_auth_methods_json)
+        assert set(methods) == {'none', 'private_key_jwt'}
+
+    _, code = _oauth_approve(
+        browser, client_id=cimd_url, redirect_uri=redirect_uri,
+        verifier_challenge=(verifier, challenge))
+    assert code
+
+    # Style A: private_key_jwt (omit client_id; iss/sub in assertion).
+    tok_jwt = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': redirect_uri,
+        'code_verifier': verifier,
+        'resource': 'https://podskrift.com/mcp',
+        'client_assertion': _mint_client_assertion(
+            private_key, client_id=cimd_url),
+        'client_assertion_type': OAUTH.CLIENT_ASSERTION_TYPE,
+    })
+    assert tok_jwt.status_code == 200, tok_jwt.get_json()
+    assert tok_jwt.get_json()['access_token'].startswith('poa_')
+
+    # Style B: public none + PKCE only.
+    verifier2, challenge2 = _pkce_pair()
+    _, code2 = _oauth_approve(
+        browser, client_id=cimd_url, redirect_uri=redirect_uri,
+        verifier_challenge=(verifier2, challenge2))
+    tok_none = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code',
+        'code': code2,
+        'redirect_uri': redirect_uri,
+        'client_id': cimd_url,
+        'code_verifier': verifier2,
+        'resource': 'https://podskrift.com/mcp',
+    })
+    assert tok_none.status_code == 200, tok_none.get_json()
+
+
+def test_oauth_refusal_reports_to_sentry(mcp_oauth_on, monkeypatch):
+    """Refused token/authorize requests emit a non-sensitive Sentry warning."""
+    import sentry_sdk
+    captured = []
+
+    def _capture_message(message, **kwargs):
+        captured.append({'message': message, **kwargs})
+
+    monkeypatch.setattr(sentry_sdk, 'capture_message', _capture_message)
+
+    bad = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code',
+        'code': 'nope',
+        'redirect_uri': 'http://127.0.0.1/cb',
+        'client_id': 'poc_unknown',
+        'code_verifier': 'a' * 64,
+    })
+    assert bad.status_code == 401
+    assert captured, 'expected capture_message for refused token'
+    event = captured[-1]
+    assert event.get('level') == 'warning'
+    tags = event.get('tags') or {}
+    assert tags.get('oauth_step') == 'token'
+    assert tags.get('client_id_host') == 'dcr'
+    assert 'reason' in tags
+    blob = json.dumps(event)
+    assert 'client_assertion' not in blob
+    assert 'eyJ' not in blob
+
+    # Authorize refusal also reports (bad redirect for known client).
+    captured.clear()
+    reg = _oauth_register(redirect_uris=['http://127.0.0.1/cb']).get_json()
+    client = _login(mcp_oauth_on['a'])
+    _, challenge = _pkce_pair()
+    denied = client.get('/oauth/authorize', query_string={
+        'response_type': 'code',
+        'client_id': reg['client_id'],
+        'redirect_uri': 'https://evil.example/not-registered',
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+        'resource': OAUTH.mcp_resource_url(),
+    })
+    assert denied.status_code == 400
+    assert captured
+    assert captured[-1]['tags']['oauth_step'] == 'authorize'
 
 
 # --------------------------------------------------------------------------
@@ -14515,7 +14719,13 @@ def test_oauth_consent_not_frameable_and_shows_destination(mcp_oauth_on):
         'code_challenge_method': 'S256', 'resource': OAUTH.mcp_resource_url()})
     assert page.status_code == 200
     assert page.headers['X-Frame-Options'] == 'DENY'
-    assert "frame-ancestors 'none'" in page.headers['Content-Security-Policy']
+    csp = page.headers['Content-Security-Policy']
+    assert "frame-ancestors 'none'" in csp
+    # PODSKRIFT-M: form-action must allow the validated redirect origin.
+    assert "form-action" in csp
+    assert 'https://evil.example' in csp
+    ro = page.headers.get('Content-Security-Policy-Report-Only', '')
+    assert 'https://evil.example' in ro
     assert b'evil.example' in page.data
     assert b'not verified' in page.data
 

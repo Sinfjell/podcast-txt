@@ -32,9 +32,8 @@ clear “server restarted” message instead of blaming the audio file.
 
 Manual re-run: Actions → **Deploy production** → **Run workflow**.
 
-No `pip install` — same as the current pull+restart. If a change needs new
-Python deps, install them on the host once (as the app user / into `.venv`)
-before or right after that deploy; see Sentry / PostHog install notes below.
+Deploy runs `.venv/bin/pip install -r requirements.txt` after `git pull` and
+before restart, so new pins (e.g. PyJWT) land without a manual host step.
 
 ### Gunicorn graceful shutdown
 

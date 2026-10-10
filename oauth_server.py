@@ -272,7 +272,47 @@ def _client_ip() -> str:
     return A._client_ip()
 
 
-def _oauth_error(error: str, description: str | None = None, status: int = 400):
+def _client_id_host(client_id: str | None) -> str:
+    """Hostname for Sentry tags — never the full client_id URL (may be long)."""
+    if not client_id:
+        return 'unknown'
+    if looks_like_cimd_client_id(client_id):
+        return (urlparse(client_id).hostname or 'unknown')[:120]
+    return 'dcr'
+
+
+def _report_oauth_refusal(*, step: str, reason: str, error: str | None = None,
+                          client_id: str | None = None) -> None:
+    """Surface refused authorize/token to Sentry without secrets. Never raises."""
+    try:
+        import sentry_sdk
+        safe_reason = (reason or error or 'refused')[:160]
+        # Strip anything that looks like a token/code/assertion fragment.
+        if any(p in safe_reason.lower() for p in (
+                'poa_', 'por_', 'poc_', 'psk_', 'bearer ', 'eyj')):
+            safe_reason = error or 'refused'
+        sentry_sdk.capture_message(
+            f'OAuth {step} refused: {safe_reason}',
+            level='warning',
+            tags={
+                'oauth_step': (step or 'unknown')[:64],
+                'reason': safe_reason[:120],
+                'client_id_host': _client_id_host(client_id),
+                'oauth_error': (error or '')[:64],
+            },
+            fingerprint=['oauth-refusal', step or 'unknown', (error or '')[:64]],
+        )
+    except Exception:  # noqa: BLE001 — reporting must never break OAuth
+        pass
+
+
+def _oauth_error(error: str, description: str | None = None, status: int = 400,
+                 *, step: str | None = None, client_id: str | None = None):
+    # Prefer explicit args; fall back to request-scoped context set by handlers.
+    step = step or getattr(g, 'oauth_step', None) or 'token'
+    client_id = client_id or getattr(g, 'oauth_client_id', None)
+    _report_oauth_refusal(
+        step=step, reason=description or error, error=error, client_id=client_id)
     body = {'error': error}
     if description:
         body['error_description'] = description
@@ -618,8 +658,8 @@ def _cimd_jwks_uri(doc: dict, client_id_url: str) -> str | None:
     return jwks_uri
 
 
-def _cimd_auth_method(doc: dict) -> str | None:
-    """Accept none or private_key_jwt from primary method or methods_supported."""
+def _cimd_auth_methods(doc: dict) -> tuple[str | None, list[str]]:
+    """Return (primary_method, allowed_methods) for none / private_key_jwt."""
     collected: list[str] = []
     for key in ('token_endpoint_auth_methods_supported',
                 'token_endpoint_auth_methods'):
@@ -635,17 +675,26 @@ def _cimd_auth_method(doc: dict) -> str | None:
         primary = None
         # OIDC default for public clients when the field is omitted.
         if not collected:
-            return 'none'
+            return 'none', ['none']
     if primary is not None:
         collected.append(primary)
-    allowed = [m for m in collected if m in CIMD_CLIENT_AUTH_METHODS]
+    allowed: list[str] = []
+    for m in collected:
+        if m in CIMD_CLIENT_AUTH_METHODS and m not in allowed:
+            allowed.append(m)
     if not allowed:
-        return None
+        return None, []
     if primary in CIMD_CLIENT_AUTH_METHODS:
-        return primary
+        return primary, allowed
     if 'private_key_jwt' in allowed:
-        return 'private_key_jwt'
-    return 'none'
+        return 'private_key_jwt', allowed
+    return 'none', allowed
+
+
+def _cimd_auth_method(doc: dict) -> str | None:
+    """Back-compat: primary CIMD auth method only."""
+    primary, _allowed = _cimd_auth_methods(doc)
+    return primary
 
 
 def fetch_jwks(jwks_uri: str, *, force_refresh: bool = False) -> tuple[dict | None, str | None]:
@@ -843,7 +892,7 @@ def verify_private_key_jwt(client, assertion: str) -> tuple[bool, str | None]:
 
 
 def _unverified_assertion_subject(assertion: str) -> str | None:
-    """Lookup-only sub claim from an unverified JWT (never trusted alone)."""
+    """Lookup-only iss/sub from an unverified JWT (never trusted alone)."""
     import jwt
     if not assertion or len(assertion) > 8192:
         return None
@@ -852,16 +901,35 @@ def _unverified_assertion_subject(assertion: str) -> str | None:
     except jwt.PyJWTError:
         return None
     sub = claims.get('sub')
-    return sub if isinstance(sub, str) and len(sub) <= 512 else None
+    iss = claims.get('iss')
+    if isinstance(sub, str) and len(sub) <= 512:
+        return sub
+    if isinstance(iss, str) and len(iss) <= 512:
+        return iss
+    return None
+
+
+def _client_allowed_auth_methods(client) -> set[str]:
+    """Auth methods this client may use at the token endpoint."""
+    raw = getattr(client, 'token_endpoint_auth_methods_json', None)
+    if raw:
+        listed = _json_list(raw, default=[])
+        allowed = {m for m in listed if m in SUPPORTED_CLIENT_AUTH_METHODS}
+        if allowed:
+            return allowed
+    method = (client.token_endpoint_auth_method or 'none').strip()
+    if method in SUPPORTED_CLIENT_AUTH_METHODS:
+        return {method}
+    return {'none'}
 
 
 def authenticate_oauth_client(client, data: dict) -> tuple[bool, str | None]:
     """Authenticate the client at the token endpoint. Returns (ok, error_description)."""
-    method = (client.token_endpoint_auth_method or 'none').strip()
+    allowed = _client_allowed_auth_methods(client)
     assertion = (data.get('client_assertion') or '').strip()
     assertion_type = (data.get('client_assertion_type') or '').strip()
 
-    if method == 'client_secret_post':
+    if 'client_secret_post' in allowed and 'private_key_jwt' not in allowed and 'none' not in allowed:
         secret = (data.get('client_secret') or '').strip()
         if not secret or not client.client_secret_hash:
             return False, 'client_secret required.'
@@ -869,29 +937,41 @@ def authenticate_oauth_client(client, data: dict) -> tuple[bool, str | None]:
             return False, 'Invalid client_secret.'
         return True, None
 
-    if method == 'private_key_jwt':
-        if not assertion:
-            return False, 'client_assertion required for private_key_jwt.'
+    if assertion:
+        if 'private_key_jwt' not in allowed:
+            return False, 'client_assertion not accepted for this client.'
         if assertion_type != CLIENT_ASSERTION_TYPE:
             return False, 'client_assertion_type must be jwt-bearer.'
         return verify_private_key_jwt(client, assertion)
 
-    # Public client (none): PKCE alone; ignore stray assertions.
-    if method == 'none':
+    # No assertion: public-client path only when 'none' is an allowed method
+    # (ChatGPT advertises both none and private_key_jwt).
+    if 'none' in allowed:
         return True, None
+
+    if 'client_secret_post' in allowed:
+        secret = (data.get('client_secret') or '').strip()
+        if not secret or not client.client_secret_hash:
+            return False, 'client_secret required.'
+        if not hmac.compare_digest(_hash_token(secret), client.client_secret_hash):
+            return False, 'Invalid client_secret.'
+        return True, None
+
+    if 'private_key_jwt' in allowed:
+        return False, 'client_assertion required for private_key_jwt.'
     return False, 'Unsupported token_endpoint_auth_method.'
 
 
 def upsert_cimd_client(client_id_url: str, doc: dict):
     """Persist / refresh a CIMD client row from a validated metadata document."""
     from models import OAuthClient, db
-    auth_method = _cimd_auth_method(doc)
-    if auth_method is None:
+    auth_method, allowed_methods = _cimd_auth_methods(doc)
+    if auth_method is None or not allowed_methods:
         return None, (
             'CIMD token_endpoint_auth_method must include none or private_key_jwt.'
         )
     jwks_uri = _cimd_jwks_uri(doc, client_id_url)
-    if auth_method == 'private_key_jwt' and not jwks_uri:
+    if 'private_key_jwt' in allowed_methods and not jwks_uri:
         return None, 'CIMD private_key_jwt requires a same-origin https jwks_uri.'
     uris = [u.strip() for u in doc['redirect_uris'] if isinstance(u, str)]
     grant_types = _json_list(
@@ -906,6 +986,7 @@ def upsert_cimd_client(client_id_url: str, doc: dict):
     if 'code' not in response_types:
         response_types = ['code']
     name = (doc.get('client_name') or '').strip()[:255]
+    methods_json = json.dumps(allowed_methods)
 
     row = OAuthClient.query.filter_by(client_id=client_id_url).first()
     if row is None:
@@ -917,6 +998,7 @@ def upsert_cimd_client(client_id_url: str, doc: dict):
             grant_types_json=json.dumps(grant_types),
             response_types_json=json.dumps(response_types),
             token_endpoint_auth_method=auth_method,
+            token_endpoint_auth_methods_json=methods_json,
             jwks_uri=jwks_uri,
             registration_source='cimd',
         )
@@ -927,6 +1009,7 @@ def upsert_cimd_client(client_id_url: str, doc: dict):
         row.grant_types_json = json.dumps(grant_types)
         row.response_types_json = json.dumps(response_types)
         row.token_endpoint_auth_method = auth_method
+        row.token_endpoint_auth_methods_json = methods_json
         row.jwks_uri = jwks_uri
         if not row.registration_source:
             row.registration_source = 'cimd'
@@ -970,13 +1053,60 @@ def _redirect_with_params(redirect_uri: str, params: dict):
 
 
 def _authorize_error_redirect(redirect_uri: str | None, error: str,
-                              description: str, state: str | None):
+                              description: str, state: str | None,
+                              *, client_id: str | None = None):
     if not redirect_uri or not validate_redirect_uri(redirect_uri):
-        return _oauth_error(error, description, status=400)
+        return _oauth_error(
+            error, description, status=400, step='authorize', client_id=client_id)
+    _report_oauth_refusal(
+        step='authorize', reason=description or error, error=error,
+        client_id=client_id)
     params = {'error': error, 'error_description': description, 'iss': oauth_issuer()}
     if state is not None:
         params['state'] = state
     return _redirect_with_params(redirect_uri, params)
+
+
+def _https_origin(uri: str) -> str | None:
+    """Return scheme://host[:port] for a validated https redirect_uri."""
+    try:
+        parsed = urlparse(uri)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() != 'https' or not parsed.hostname:
+        return None
+    host = parsed.hostname.lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if port and port != 443:
+        return f'https://{host}:{port}'
+    return f'https://{host}'
+
+
+def _consent_csp_headers(redirect_uri: str) -> dict[str, str]:
+    """CSP for consent: deny framing; allow form-action to redirect origin (PODSKRIFT-M)."""
+    from site_standards import csp_report_only
+
+    form_parts = ["'self'", 'https://checkout.stripe.com']
+    origin = _https_origin(redirect_uri)
+    if origin and origin not in form_parts:
+        form_parts.append(origin)
+    form_action = 'form-action ' + ' '.join(form_parts)
+    enforced = (
+        "frame-ancestors 'none'; base-uri 'self'; object-src 'none'; "
+        f'{form_action}'
+    )
+    report_only = csp_report_only()
+    if 'form-action' in report_only:
+        report_only = re.sub(r'form-action[^;]*', form_action, report_only)
+    else:
+        report_only = f'{report_only}; {form_action}'
+    return {
+        'Content-Security-Policy': enforced,
+        'Content-Security-Policy-Report-Only': report_only,
+    }
 
 
 def register_oauth(app_flask):
@@ -1081,6 +1211,7 @@ def register_oauth(app_flask):
             grant_types_json=json.dumps(grant_types),
             response_types_json=json.dumps(response_types),
             token_endpoint_auth_method=auth_method,
+            token_endpoint_auth_methods_json=json.dumps([auth_method]),
             registration_source='dcr',
         )
         db.session.add(row)
@@ -1127,13 +1258,16 @@ def register_oauth(app_flask):
         code_challenge = (src.get('code_challenge') or '').strip()
         code_challenge_method = (src.get('code_challenge_method') or '').strip()
         resource = (src.get('resource') or '').strip() or mcp_resource_url()
+        g.oauth_step = 'authorize'
+        g.oauth_client_id = client_id or None
 
         from models import OAuthAuthorizationCode, db
 
         client, client_err = resolve_oauth_client(client_id)
         if client is None:
             return _oauth_error(
-                'invalid_request', client_err or 'Unknown client_id.', 400)
+                'invalid_request', client_err or 'Unknown client_id.', 400,
+                step='authorize', client_id=client_id or None)
 
         allowed = _client_redirect_uris(client)
         if redirect_uri not in allowed and looks_like_cimd_client_id(client_id):
@@ -1145,28 +1279,32 @@ def register_oauth(app_flask):
                 'invalid_request',
                 'redirect_uri is not registered for this client.',
                 400,
+                step='authorize', client_id=client_id or None,
             )
 
         if response_type != 'code':
             return _authorize_error_redirect(
                 redirect_uri, 'unsupported_response_type',
-                'Only response_type=code is supported.', state)
+                'Only response_type=code is supported.', state,
+                client_id=client_id)
 
         if code_challenge_method != 'S256' or not code_challenge:
             return _authorize_error_redirect(
                 redirect_uri, 'invalid_request',
                 'PKCE S256 (code_challenge + code_challenge_method=S256) is required.',
-                state)
+                state, client_id=client_id)
 
         if not re.fullmatch(r'[A-Za-z0-9_-]{43,128}', code_challenge):
             return _authorize_error_redirect(
                 redirect_uri, 'invalid_request',
-                'code_challenge must be a valid S256 challenge.', state)
+                'code_challenge must be a valid S256 challenge.', state,
+                client_id=client_id)
 
         if not resource_matches_mcp(resource):
             return _authorize_error_redirect(
                 redirect_uri, 'invalid_target',
-                f'resource must be {mcp_resource_url()}.', state)
+                f'resource must be {mcp_resource_url()}.', state,
+                client_id=client_id)
 
         scope_str = _scope_string(scope)
         client_label = client.client_name or client.client_id
@@ -1193,10 +1331,11 @@ def register_oauth(app_flask):
                 resource=normalize_resource(resource) or mcp_resource_url(),
             ), mimetype='text/html')
             # Consent must never be framed (clickjacking), not even by the
-            # PostHog toolbar origins the site-wide CSP allows.
+            # PostHog toolbar origins the site-wide CSP allows. form-action
+            # must allow the validated redirect_uri origin (PODSKRIFT-M).
             page.headers['X-Frame-Options'] = 'DENY'
-            page.headers['Content-Security-Policy'] = (
-                "frame-ancestors 'none'; base-uri 'self'; object-src 'none'")
+            for header, value in _consent_csp_headers(redirect_uri).items():
+                page.headers[header] = value
             page.headers['Cache-Control'] = 'no-store'
             return page
 
@@ -1209,12 +1348,14 @@ def register_oauth(app_flask):
         if decision != 'approve':
             return _authorize_error_redirect(
                 redirect_uri, 'access_denied',
-                'The user denied the request.', state)
+                'The user denied the request.', state, client_id=client_id)
 
         # Re-check redirect_uri from the form against the registered set.
         form_redirect = (request.form.get('redirect_uri') or '').strip()
         if form_redirect != redirect_uri or form_redirect not in allowed:
-            return _oauth_error('invalid_request', 'redirect_uri mismatch.', 400)
+            return _oauth_error(
+                'invalid_request', 'redirect_uri mismatch.', 400,
+                step='authorize', client_id=client_id)
 
         code_plain = secrets.token_urlsafe(32)
         now = _utc_now()
@@ -1268,6 +1409,8 @@ def register_oauth(app_flask):
             # requires iss == sub == the stored client's client_id + signature.
             client_id = _unverified_assertion_subject(
                 (data.get('client_assertion') or '').strip()) or ''
+        g.oauth_step = 'token'
+        g.oauth_client_id = client_id or None
 
         from models import (OAuthAccessToken, OAuthAuthorizationCode,
                             OAuthRefreshToken, db)
@@ -1280,10 +1423,11 @@ def register_oauth(app_flask):
             return _oauth_error(
                 'invalid_client', client_err or 'Unknown client_id.', 401)
 
+        g.oauth_client_id = client.client_id
         ok, auth_err = authenticate_oauth_client(client, data)
         if not ok:
             # Non-sensitive reason only (no assertion/secret), so a failed
-            # ChatGPT/Claude connect can be diagnosed from server logs.
+            # ChatGPT/Claude connect can be diagnosed from server logs + Sentry.
             current_app.logger.warning(
                 'oauth token client auth failed: client=%s method=%s grant=%s '
                 'reason=%s', client.client_id[:120],
@@ -1492,6 +1636,7 @@ def ensure_oauth_tables():
                 grant_types_json TEXT NOT NULL,
                 response_types_json TEXT NOT NULL,
                 token_endpoint_auth_method VARCHAR(64) NOT NULL DEFAULT 'none',
+                token_endpoint_auth_methods_json TEXT,
                 jwks_uri VARCHAR(512),
                 registration_source VARCHAR(16),
                 created_at DATETIME
