@@ -6678,7 +6678,7 @@ def test_oauth_metadata_and_www_authenticate(mcp_oauth_on):
     assert meta['client_id_metadata_document_supported'] is True
     assert meta['authorization_response_iss_parameter_supported'] is True
     assert meta['token_endpoint_auth_methods_supported'] == [
-        'none', 'private_key_jwt',
+        'none', 'private_key_jwt', 'client_secret_post',
     ]
     assert meta['token_endpoint_auth_signing_alg_values_supported'] == ['RS256']
 
@@ -7154,6 +7154,110 @@ def test_oauth_private_key_jwt_token_success_and_rejects(mcp_oauth_on, monkeypat
     code, verifier = _code_for_token()
     bad_sig = _mint_client_assertion(other_key, client_id=cimd_url)
     assert _token(code, verifier, bad_sig).status_code == 401
+
+
+def test_oauth_private_key_jwt_hardening(mcp_oauth_on, monkeypatch):
+    """alg allow-list, lifetime cap, omitted client_id, refresh needs assertion."""
+    import jwt as pyjwt
+    cimd_url = 'https://chatgpt.com/oauth/client.json'
+    redirect_uri = 'https://chatgpt.com/connector_platform_oauth_redirect'
+    private_key, jwk = _rsa_keypair_and_jwk()
+    doc = _chatgpt_cimd_doc(cimd_url=cimd_url, redirect_uri=redirect_uri)
+    _patch_cimd_and_jwks(monkeypatch, cimd_url=cimd_url, doc=doc, jwks=jwk)
+    OAUTH._jwks_cache.clear()
+
+    def _code():
+        verifier, challenge = _pkce_pair()
+        browser = _login(mcp_oauth_on['a'])
+        _, code = _oauth_approve(
+            browser, client_id=cimd_url, redirect_uri=redirect_uri,
+            verifier_challenge=(verifier, challenge))
+        assert code
+        return code, verifier
+
+    def _post(data):
+        return A.app.test_client().post('/oauth/token', data=data)
+
+    def _exchange(assertion, *, include_client_id=True, code_verifier=None):
+        code, verifier = _code()
+        data = {
+            'grant_type': 'authorization_code',
+            'code': code,
+            'redirect_uri': redirect_uri,
+            'code_verifier': code_verifier or verifier,
+            'client_assertion': assertion,
+            'client_assertion_type': OAUTH.CLIENT_ASSERTION_TYPE,
+        }
+        if include_client_id:
+            data['client_id'] = cimd_url
+        return _post(data)
+
+    now = int(time.time())
+    base = {'iss': cimd_url, 'sub': cimd_url,
+            'aud': f'{OAUTH.oauth_issuer()}/oauth/token'}
+
+    # HS256 signed with the public modulus as a secret (alg confusion) → reject.
+    hs = pyjwt.encode(dict(base, exp=now + 60, jti='hs1'), 'x' * 32,
+                      algorithm='HS256', headers={'kid': 'test-chatgpt-kid'})
+    assert _exchange(hs).status_code == 401
+    # alg=none → reject.
+    none_tok = pyjwt.encode(dict(base, exp=now + 60, jti='n1'), None,
+                            algorithm='none')
+    assert _exchange(none_tok).status_code == 401
+    # Long-lived assertion (exp 1h out) → reject.
+    long_tok = _mint_client_assertion(private_key, client_id=cimd_url,
+                                      exp_delta=3600)
+    assert _exchange(long_tok).status_code == 401
+    # Missing jti → reject.
+    no_jti = pyjwt.encode(dict(base, exp=now + 60), private_key,
+                          algorithm='RS256', headers={'kid': 'test-chatgpt-kid'})
+    assert _exchange(no_jti).status_code == 401
+    # Wrong assertion_type → reject.
+    code, verifier = _code()
+    bad_type = _post({
+        'grant_type': 'authorization_code', 'code': code,
+        'redirect_uri': redirect_uri, 'code_verifier': verifier,
+        'client_id': cimd_url,
+        'client_assertion': _mint_client_assertion(private_key, client_id=cimd_url),
+        'client_assertion_type': 'urn:example:other',
+    })
+    assert bad_type.status_code == 401
+    # Valid assertion but wrong PKCE verifier → still rejected.
+    wrong_pkce = _exchange(
+        _mint_client_assertion(private_key, client_id=cimd_url),
+        code_verifier='a' * 64)
+    assert wrong_pkce.status_code == 400
+    assert wrong_pkce.get_json()['error'] == 'invalid_grant'
+
+    # iat omitted + client_id omitted (RFC 7523 §3.1) → success.
+    no_iat = pyjwt.encode(dict(base, exp=now + 60, jti='noiat-1'), private_key,
+                          algorithm='RS256', headers={'kid': 'test-chatgpt-kid'})
+    ok = _exchange(no_iat, include_client_id=False)
+    assert ok.status_code == 200, ok.get_json()
+    refresh = ok.get_json()['refresh_token']
+
+    # Refresh without assertion → invalid_client.
+    r_missing = _post({'grant_type': 'refresh_token', 'refresh_token': refresh,
+                       'client_id': cimd_url})
+    assert r_missing.status_code == 401
+    assert r_missing.get_json()['error'] == 'invalid_client'
+    # Refresh with valid assertion → rotated pair.
+    r_ok = _post({
+        'grant_type': 'refresh_token', 'refresh_token': refresh,
+        'client_id': cimd_url,
+        'client_assertion': _mint_client_assertion(private_key, client_id=cimd_url),
+        'client_assertion_type': OAUTH.CLIENT_ASSERTION_TYPE,
+    })
+    assert r_ok.status_code == 200, r_ok.get_json()
+    assert r_ok.get_json()['refresh_token'] != refresh
+
+
+def test_oauth_metadata_keeps_client_secret_post_for_dcr():
+    with A.app.app_context(), A.app.test_request_context('/'):
+        meta = OAUTH.authorization_server_metadata()
+    methods = meta['token_endpoint_auth_methods_supported']
+    assert {'none', 'private_key_jwt', 'client_secret_post'} <= set(methods)
+    assert meta['token_endpoint_auth_signing_alg_values_supported'] == ['RS256']
 
 
 def test_oauth_cimd_none_still_works_without_assertion(mcp_oauth_on, monkeypatch):
