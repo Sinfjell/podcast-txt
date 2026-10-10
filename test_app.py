@@ -3769,7 +3769,13 @@ def test_ai_in_llms_txt(trial_on):
 def test_nav_and_footer_link_to_ai(trial_on):
     body = A.app.test_client().get('/').data.decode()
     assert 'href="/ai"' in body
-    assert 'Use in ChatGPT' in body
+    # Nav is short; footer stays descriptive.
+    nav = body[body.index('id="navLinks"'):body.index('</nav>')]
+    assert 'href="/ai"' in nav
+    assert 'MCP' in nav
+    assert 'Use in ChatGPT' not in nav
+    footer = body[body.index('<footer'):body.index('</footer>')]
+    assert 'Use in ChatGPT' in footer
     # Home discovery section below the main flow.
     assert 'id="use-in-ai"' in body
     assert '/guides/podcast-transcripts-in-chatgpt-and-claude' in body
@@ -9907,8 +9913,10 @@ def test_anon_nav_has_pricing_link(trial_on):
 
 def test_anon_nav_has_ai_link(trial_on):
     body = A.app.test_client().get('/').data.decode()
-    assert 'href="/ai"' in body
-    assert 'Use in ChatGPT' in body
+    nav = body[body.index('id="navLinks"'):body.index('</nav>')]
+    assert 'href="/ai"' in nav
+    assert 'MCP' in nav
+    assert 'Use in ChatGPT' not in nav
 
 
 def test_pricing_page_renders_without_stripe(trial_on):
