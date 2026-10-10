@@ -8,6 +8,12 @@
       "summary": "Find ChatGPT and Claude setup from the homepage. Follow screenshots, copy the server URL, and check that Podskrift is enabled before your first podcast question."
     },
     {
+      "id": "history-via-mcp",
+      "date": "2026-10-10",
+      "title": "See which transcripts came from ChatGPT or Claude",
+      "summary": "History now labels episodes you transcribed through an MCP connector, so you can tell website jobs from ChatGPT, Claude, or other AI clients."
+    },
+    {
       "id": "use-in-chatgpt-claude-cursor",
       "date": "2026-10-10",
       "title": "Use Podskrift inside ChatGPT, Claude and Cursor",

@@ -95,7 +95,24 @@
             Free preview
         </p>
         <p class="text-sm text-muted" id="partialPreviewNote" style="margin: 0 0 12px; line-height: 1.55;"></p>
-        <div style="display: flex; flex-wrap: wrap; gap: 8px;" id="partialPreviewActions"></div>
+        <div class="result-offer-actions" id="partialPreviewActions"></div>
+    </div>
+</div>
+
+<!-- Calm secondary offer after a full transcript (Copy stays the primary). -->
+<div id="resultOfferCard" class="hidden card mb-2 result-offer-card" data-testid="result-offer">
+    <div class="card-body">
+        <p class="result-offer-title">Keep going</p>
+        <p class="text-sm text-muted result-offer-note" id="resultOfferNote">
+            Transcribe your next episode: 300 min for $5
+        </p>
+        <div class="result-offer-actions">
+            <button type="button" class="btn btn-sm btn-secondary" id="resultOfferBuyBtn">
+                Buy 300 min for $5
+            </button>
+            <a href="{{ url_for('settings') }}#openai" class="ds-link-button" id="resultOfferByokLink"
+               data-paywall-byok="result_offer">Add your own OpenAI key</a>
+        </div>
     </div>
 </div>
 
@@ -142,6 +159,12 @@
     @media (max-width: 560px) {
         .next-ep { align-items: flex-start; }
         .next-ep .btn { width: 100%; justify-content: center; }
+    }
+    .result-offer-card { margin-top: 16px; }
+    .result-offer-title { font-weight: 700; font-size: 15px; margin: 0 0 6px; }
+    .result-offer-note { margin: 0 0 12px; line-height: 1.55; }
+    .result-offer-actions {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
     }
 </style>
 
@@ -284,6 +307,8 @@
     var PHASE_ORDER = ['downloading', 'splitting', 'transcribing', 'completed'];
     var STRIPE_BUY = {{ stripe_buy_enabled|tojson }};
     var BUY_LABEL = {{ credit_pack_label|tojson }};
+    var UNLOCK_LABEL = {{ ('Unlock the full episode')|tojson }};
+    var RESULT_OFFER_LABEL = {{ ('Transcribe your next episode: 300 min for $5')|tojson }};
     var BUY_URL = {{ url_for('billing_checkout')|tojson }};
     var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
     var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
@@ -292,6 +317,7 @@
     var SHARE_URL = {{ url_for('transcription_share', task_id=task_id)|tojson }};
     var SHARE_REVOKE_URL = {{ url_for('transcription_share_revoke', task_id=task_id)|tojson }};
     var resultViewed = false;
+    var resultOfferShown = false;
     var nextStepsLoaded = false;
     var taskHasRss = false;
     var RELATED_CLIENT_TIMEOUT_MS = 10000;
@@ -364,9 +390,16 @@
         el('partialPreviewTitle').textContent =
             'Free preview: first ' + d.partial_minutes + ' minutes of '
             + d.episode_minutes + ' minutes';
-        el('partialPreviewNote').textContent =
-            'This transcript covers the opening of the episode. Buy minutes to finish the rest on paid credit.';
+        var cover = '';
+        if (d.episode_minutes && STRIPE_BUY) {
+            cover = 'This episode is ' + d.episode_minutes
+                + ' min — 300 min for $5 covers it and more.';
+        }
+        el('partialPreviewNote').textContent = cover
+            ? ('This transcript covers the opening of the episode. ' + cover)
+            : 'This transcript covers the opening of the episode. Buy minutes to finish the rest on paid credit.';
         while (actions.firstChild) actions.removeChild(actions.firstChild);
+        show(el('resultOfferCard'), false);
 
         if (d.can_finish_full && d.finish && d.finish.audio_url) {
             var finishBtn = document.createElement('button');
@@ -389,7 +422,7 @@
             buyBtn.type = 'button';
             buyBtn.className = 'btn btn-sm btn-primary';
             demoteCopyButton();
-            buyBtn.textContent = 'Buy minutes to finish this episode';
+            buyBtn.textContent = d.unlock_label || d.buy_label || UNLOCK_LABEL;
             buyBtn.addEventListener('click', function() {
                 phCapture('finish_episode_clicked', {
                     task_id: taskId,
@@ -397,6 +430,9 @@
                     episode_minutes: d.episode_minutes,
                     action: 'buy',
                 });
+                if (typeof window.podskriftPaywallBuyClicked === 'function') {
+                    window.podskriftPaywallBuyClicked('partial_preview', 'partial');
+                }
                 postBuyForm('partial_preview', window.location.pathname);
             });
             actions.appendChild(buyBtn);
@@ -404,10 +440,41 @@
 
         var keyLink = document.createElement('a');
         keyLink.href = SETTINGS_OPENAI;
-        keyLink.className = 'btn btn-sm btn-secondary';
+        keyLink.className = 'ds-link-button';
         keyLink.textContent = 'Add OpenAI key →';
+        keyLink.setAttribute('data-paywall-byok', 'partial_preview');
         actions.appendChild(keyLink);
         show(card, true);
+    }
+
+    function renderResultOffer(d) {
+        var card = el('resultOfferCard');
+        if (!card) return;
+        if (!(d.result_offer && STRIPE_BUY)) {
+            show(card, false);
+            return;
+        }
+        var note = el('resultOfferNote');
+        if (note) note.textContent = d.result_offer_label || RESULT_OFFER_LABEL;
+        var buyBtn = el('resultOfferBuyBtn');
+        if (buyBtn && !buyBtn._bound) {
+            buyBtn._bound = true;
+            buyBtn.addEventListener('click', function() {
+                phCapture('result_offer_clicked', {
+                    task_id: taskId,
+                    location: 'result',
+                });
+                if (typeof window.podskriftPaywallBuyClicked === 'function') {
+                    window.podskriftPaywallBuyClicked('result_offer', 'result');
+                }
+                postBuyForm('result_offer', window.location.pathname);
+            });
+        }
+        show(card, true);
+        if (!resultOfferShown) {
+            resultOfferShown = true;
+            phCapture('result_offer_shown', { task_id: taskId, location: 'result' });
+        }
     }
 
     function finishFullEpisode(finish, d) {
@@ -439,19 +506,27 @@
     function renderMinutesActions(d) {
         var actions = el('errorActions');
         while (actions.firstChild) actions.removeChild(actions.firstChild);
-        var showActions = !!(d.minutes_error || d.buy_available || d.no_billing);
+        var showActions = !!(d.minutes_error || d.buy_available || d.no_billing || d.own_key_invalid);
         if (!showActions) {
             show(actions, false);
             return;
         }
-        if (d.no_billing) {
-            var billingLink = document.createElement('a');
-            billingLink.href = 'https://platform.openai.com/account/billing';
-            billingLink.target = '_blank';
-            billingLink.rel = 'noopener';
-            billingLink.className = 'btn btn-sm btn-primary';
-            billingLink.textContent = 'Add credit at OpenAI';
-            actions.appendChild(billingLink);
+        if (d.no_billing || d.own_key_invalid) {
+            if (d.buy_available && STRIPE_BUY) {
+                var buyBtn = document.createElement('button');
+                buyBtn.type = 'button';
+                buyBtn.className = 'btn btn-sm btn-primary';
+                buyBtn.textContent = d.buy_label || BUY_LABEL;
+                buyBtn.addEventListener('click', function() {
+                    if (typeof window.podskriftPaywallBuyClicked === 'function') {
+                        window.podskriftPaywallBuyClicked(
+                            'transcription_no_billing',
+                            d.no_billing ? 'own_key_no_credit' : 'own_key_invalid');
+                    }
+                    postBuyForm('transcription_no_billing');
+                });
+                actions.appendChild(buyBtn);
+            }
 
             if (d.retry && d.retry.audio_url) {
                 var retryBtn = document.createElement('button');
@@ -462,14 +537,13 @@
                 actions.appendChild(retryBtn);
             }
 
-            if (d.buy_available && STRIPE_BUY) {
-                var buyBtn = document.createElement('button');
-                buyBtn.type = 'button';
-                buyBtn.className = 'btn btn-sm btn-secondary';
-                buyBtn.textContent = d.buy_label || BUY_LABEL;
-                buyBtn.addEventListener('click', function() { postBuyForm('transcription_no_billing'); });
-                actions.appendChild(buyBtn);
-            }
+            var billingLink = document.createElement('a');
+            billingLink.href = 'https://platform.openai.com/account/billing';
+            billingLink.target = '_blank';
+            billingLink.rel = 'noopener';
+            billingLink.className = 'ds-link-button';
+            billingLink.textContent = 'Add credit at OpenAI';
+            actions.appendChild(billingLink);
             show(actions, true);
             return;
         }
@@ -478,7 +552,13 @@
             buyBtn.type = 'button';
             buyBtn.className = 'btn btn-sm btn-primary';
             buyBtn.textContent = d.buy_label || BUY_LABEL;
-            buyBtn.addEventListener('click', function() { postBuyForm('transcription_error'); });
+            buyBtn.addEventListener('click', function() {
+                if (typeof window.podskriftPaywallBuyClicked === 'function') {
+                    window.podskriftPaywallBuyClicked(
+                        'transcription_error', d.paywall_reason || 'trial_exhausted');
+                }
+                postBuyForm('transcription_error');
+            });
             actions.appendChild(buyBtn);
             if (typeof window.podskriftPaywallShown === 'function') {
                 window.podskriftPaywallShown(
@@ -494,7 +574,8 @@
         var keyLink = document.createElement('a');
         keyLink.href = SETTINGS_OPENAI;
         keyLink.textContent = 'Add OpenAI key →';
-        keyLink.className = 'btn btn-sm btn-secondary';
+        keyLink.className = 'ds-link-button';
+        keyLink.setAttribute('data-paywall-byok', 'transcription_error');
         actions.appendChild(keyLink);
         show(actions, true);
     }
@@ -683,10 +764,15 @@
             show(el('errorContainer'), true);
             hideTranscriptIfEmpty();
             if (d.no_billing) {
-                el('errorMessage').textContent =
+                var nobillMsg =
                     'Your OpenAI account has no credit, so transcription cannot start. '
                     + 'Add credit at OpenAI, then retry this episode — or remove the key in '
                     + 'Settings to use Podskrift free or paid minutes instead.';
+                if (d.pack_offer) nobillMsg += ' ' + d.pack_offer + '.';
+                else if (d.error && d.error.indexOf('Podskrift minutes') !== -1) {
+                    nobillMsg = d.error;
+                }
+                el('errorMessage').textContent = nobillMsg;
             } else {
                 el('errorMessage').textContent = d.error || 'Unknown error';
             }
@@ -711,6 +797,7 @@
             } else {
                 el('completionTitle').textContent = 'Transcription complete';
                 show(el('partialPreviewCard'), false);
+                renderResultOffer(d);
             }
             renderSummary(d);
             scheduleSummaryRefresh(d);

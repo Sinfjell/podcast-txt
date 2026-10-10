@@ -599,6 +599,29 @@ def test_partial_preview_email_wording(monkeypatch):
         assert 'free preview' in pairs['text'].lower()
         assert 'finish the rest' in pairs['text'].lower()
         assert 'Your transcript of' not in pairs['text']
+        assert '300 min for $5' in pairs['text']
+        assert 'utm_content=pack_offer' in pairs['text']
+        assert 'ref=email_pack' in pairs['text']
+        assert 'unsubscribe' in pairs['text'].lower()
+
+
+def test_transcript_ready_email_includes_pack_offer_line():
+    subject, text, html = email_notify.build_transcript_ready_bodies(
+        podcast_name='Show',
+        episode_title='Ep One',
+        transcript_url='https://podskrift.com/transcription/abc',
+        unsub_url='https://podskrift.com/email/unsubscribe/tok',
+        pack_url='https://podskrift.com/pricing',
+    )
+    assert subject.startswith('Transcript ready:')
+    assert 'Need more minutes? 300 min for $5:' in text
+    assert 'utm_source=email' in text
+    assert 'utm_content=pack_offer' in text
+    assert 'ref=email_pack' in text
+    assert '/pricing' in text
+    assert 'unsubscribe' in text.lower()
+    assert '300 min for $5' in html
+    assert 'utm_content=pack_offer' in html
 
 
 def test_changelog_hides_email_keeps_user_visible_first():

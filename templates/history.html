@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "components/macros.html" import chip %}
 {% block title %}History — Podskrift{% endblock %}
 
 {% block content %}
@@ -65,6 +66,8 @@
                     {{ (t.completed_at or t.started_at).strftime('%Y-%m-%d %H:%M') }}
                     {% if t.audio_duration %} · {{ (t.audio_duration / 60)|round(1) }} min · ~${{ "%.3f"|format(t.audio_duration / 60 * cost_per_minute) }}{% endif %}
                     {% if t.language %} · {{ display_language(t.language) }}{% endif %}
+                    {% set via = task_source_via_label(t.source, t.source_client) %}
+                    {% if via %} · {{ chip(via, variant='muted') }}{% endif %}
                 </div>
             </div>
             <div class="flex-center" style="gap: 8px; flex-wrap: wrap;">

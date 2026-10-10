@@ -1172,6 +1172,12 @@
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                     MCP
                 </a>
+                {% if show_admin_nav %}
+                <a href="{{ url_for('admin.dashboard') }}" data-nav="admin">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                    Admin
+                </a>
+                {% endif %}
                 <a href="{{ url_for('settings') }}">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                     Settings
@@ -1477,6 +1483,49 @@
             } catch (e) { /* ignore */ }
         };
 
+        window.podskriftPaywallBuyClicked = function (location, reason) {
+            try {
+                if (!window.posthog || !location) return;
+                var opts = {};
+                if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+                    opts.transport = 'sendBeacon';
+                }
+                posthog.capture('paywall_buy_clicked', {
+                    location: location,
+                    reason: reason || ''
+                }, opts);
+            } catch (e) { /* ignore */ }
+        };
+
+        window.podskriftPaywallByokClicked = function (location, reason) {
+            try {
+                if (!window.posthog || !location) return;
+                posthog.capture('paywall_byok_clicked', {
+                    location: location,
+                    reason: reason || ''
+                });
+            } catch (e) { /* ignore */ }
+        };
+
+        // Email pack CTA landing: utm_content=pack_offer or ref=email_pack.
+        try {
+            var offerParams = new URLSearchParams(window.location.search);
+            var utmContent = offerParams.get('utm_content') || '';
+            var offerRef = offerParams.get('ref') || '';
+            if (window.posthog && (
+                utmContent === 'pack_offer'
+                || offerRef === 'email_pack'
+            )) {
+                posthog.capture('email_offer_clicked', {
+                    utm_source: offerParams.get('utm_source') || '',
+                    utm_campaign: offerParams.get('utm_campaign') || '',
+                    utm_content: utmContent,
+                    ref: offerRef,
+                    path: window.location.pathname
+                });
+            }
+        } catch (e) { /* ignore */ }
+
         // Buy form: stamp ph_sid only after Accept (cookie session id).
         // buy_clicked itself may fire anonymously in cookieless mode.
         document.addEventListener('submit', function (ev) {
@@ -1505,6 +1554,26 @@
                     opts.transport = 'sendBeacon';
                 }
                 posthog.capture('buy_clicked', {location: loc, transport: 'sendBeacon'}, opts);
+                if (form.getAttribute('data-paywall-buy')) {
+                    posthog.capture('paywall_buy_clicked', {
+                        location: form.getAttribute('data-paywall-buy') || loc,
+                        reason: ''
+                    }, opts);
+                }
+            } catch (e) { /* ignore */ }
+        }, true);
+
+        // BYOK text links on paywall surfaces (delegated; works for static markup).
+        document.addEventListener('click', function (ev) {
+            try {
+                var t = ev.target;
+                if (!t || !t.closest) return;
+                var byok = t.closest('[data-paywall-byok]');
+                if (!byok || !window.posthog) return;
+                posthog.capture('paywall_byok_clicked', {
+                    location: byok.getAttribute('data-paywall-byok') || '',
+                    reason: ''
+                });
             } catch (e) { /* ignore */ }
         }, true);
         // buy_clicked fires only on checkout form submit — opening the Buy

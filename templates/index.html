@@ -103,43 +103,38 @@
         Today's free minutes are used up — they refill at midnight (Norway time).
         {% if trial.stripe_buy %}
         Buy {{ credit_pack_minutes }} min for ${{ credit_pack_price_usd }} to continue now.
-        <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;">
+        <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;" data-paywall-buy="home_banner">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="source" value="home_banner">
             <input type="hidden" name="ph_sid" value="">
             <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
         </form>
-        or
         {% endif %}
-        <a href="{{ url_for('settings') }}#openai">Add your own OpenAI API key</a>
-        — the app is free; OpenAI bills you.
+        <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_banner">Add your own OpenAI key</a>
         {% elif trial.exhausted %}
         Your free trial is used up.
         {% if trial.stripe_buy %}
-        <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;">
+        <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;" data-paywall-buy="home_banner">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="source" value="home_banner">
             <input type="hidden" name="ph_sid" value="">
-            <button type="submit" class="btn btn-sm btn-secondary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
+            <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
         </form>
         <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
-        or
         {% endif %}
-        <a href="{{ url_for('settings') }}#openai">Add your own OpenAI API key</a>
-        — the app is free; OpenAI bills you.
+        <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_banner">Add your own OpenAI key</a>
         {% elif trial.low_balance %}
         Running low — <strong>{{ trial.total_minutes }} minutes</strong> left.
         {% if trial.stripe_buy %}
-        <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;">
+        <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;" data-paywall-buy="home_low_balance">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="source" value="home_low_balance">
             <input type="hidden" name="ph_sid" value="">
-            <button type="submit" class="btn btn-sm btn-secondary" style="margin: 0 6px;">Buy minutes</button>
+            <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
         </form>
         <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
-        or
         {% endif %}
-        <a href="{{ url_for('settings') }}#openai">add your own key</a>.
+        <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_low_balance">Add your own OpenAI key</a>
         {% else %}
         Free trial: <strong>{{ trial.remaining_minutes }} minutes</strong> left on our key.
         {% if trial.paid_minutes %}
@@ -518,25 +513,37 @@
 
     var lastEpisodeForBuy = { duration: null, title: '' };
 
-    function setError(text, actionUrl, actionLabel, buyAvailable, paywallReason) {        clearResults();
+    function setError(text, actionUrl, actionLabel, buyAvailable, paywallReason, coverLine) {        clearResults();
         resultsDiv.style.color = 'var(--danger)';
         resultsDiv.style.padding = '12px 0';
         var wrap = document.createElement('div');
         wrap.style.lineHeight = '1.6';
         wrap.textContent = text;
         resultsDiv.appendChild(wrap);
+        if (coverLine) {
+            var cover = document.createElement('p');
+            cover.className = 'form-hint';
+            cover.style.margin = '8px 0 0';
+            cover.style.color = 'var(--muted)';
+            cover.textContent = coverLine;
+            resultsDiv.appendChild(cover);
+        }
         var actions = document.createElement('div');
         actions.style.marginTop = '10px';
         actions.style.display = 'flex';
         actions.style.flexWrap = 'wrap';
-        actions.style.gap = '8px';
+        actions.style.alignItems = 'center';
+        actions.style.gap = '12px';
         var showBuy = (typeof buyAvailable === 'boolean') ? buyAvailable : false;
         if (showBuy && STRIPE_BUY) {
             var buyBtn = document.createElement('button');
             buyBtn.type = 'button';
-            buyBtn.className = 'btn btn-sm btn-secondary';
+            buyBtn.className = 'btn btn-sm btn-primary';
             buyBtn.textContent = BUY_LABEL;
             buyBtn.addEventListener('click', function() {
+                if (typeof window.podskriftPaywallBuyClicked === 'function') {
+                    window.podskriftPaywallBuyClicked('home_error', paywallReason || 'trial_exhausted');
+                }
                 postBuyForm('home_error', lastEpisodeForBuy.duration, lastEpisodeForBuy.title);
             });
             actions.appendChild(buyBtn);
@@ -557,7 +564,8 @@
         var link = document.createElement('a');
         link.href = keyUrl;
         link.textContent = keyLabel;
-        link.className = 'btn btn-sm btn-secondary';
+        link.className = 'ds-link-button';
+        link.setAttribute('data-paywall-byok', 'home_error');
         actions.appendChild(link);
         resultsDiv.appendChild(actions);
     }
@@ -688,7 +696,8 @@
                             res.data.action_url,
                             res.data.action_label,
                             res.data.buy_available,
-                            res.data.paywall_reason
+                            res.data.paywall_reason,
+                            res.data.paywall_cover_line
                         );
                     }
                 })
