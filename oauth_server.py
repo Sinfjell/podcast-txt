@@ -281,8 +281,21 @@ def _client_id_host(client_id: str | None) -> str:
     return 'dcr'
 
 
+def _safe_tag_value(value: Any, *, limit: int = 120) -> str:
+    """Truncate a tag/log field; drop anything that looks like a secret."""
+    if value is None:
+        return ''
+    text = str(value)
+    lower = text.lower()
+    if any(p in lower for p in (
+            'poa_', 'por_', 'poc_', 'psk_', 'bearer ', 'eyj')):
+        return '[redacted]'
+    return text[:limit]
+
+
 def _report_oauth_refusal(*, step: str, reason: str, error: str | None = None,
-                          client_id: str | None = None) -> None:
+                          client_id: str | None = None,
+                          extra_tags: dict[str, str] | None = None) -> None:
     """Surface refused authorize/token to Sentry without secrets. Never raises."""
     try:
         import sentry_sdk
@@ -291,15 +304,29 @@ def _report_oauth_refusal(*, step: str, reason: str, error: str | None = None,
         if any(p in safe_reason.lower() for p in (
                 'poa_', 'por_', 'poc_', 'psk_', 'bearer ', 'eyj')):
             safe_reason = error or 'refused'
+        tags = {
+            'oauth_step': (step or 'unknown')[:64],
+            'reason': safe_reason[:120],
+            'client_id_host': _client_id_host(client_id),
+            'oauth_error': (error or '')[:64],
+        }
+        # Prefer explicit extra_tags; also pick up request-scoped JWT diag
+        # set by verify_private_key_jwt (PODSKRIFT-P).
+        merged: dict[str, str] = {}
+        try:
+            merged.update(getattr(g, 'oauth_jwt_diag', None) or {})
+        except RuntimeError:
+            pass
+        if extra_tags:
+            merged.update(extra_tags)
+        for key, value in merged.items():
+            if not isinstance(key, str) or not key:
+                continue
+            tags[key[:64]] = _safe_tag_value(value, limit=120)
         sentry_sdk.capture_message(
             f'OAuth {step} refused: {safe_reason}',
             level='warning',
-            tags={
-                'oauth_step': (step or 'unknown')[:64],
-                'reason': safe_reason[:120],
-                'client_id_host': _client_id_host(client_id),
-                'oauth_error': (error or '')[:64],
-            },
+            tags=tags,
             fingerprint=['oauth-refusal', step or 'unknown', (error or '')[:64]],
         )
     except Exception:  # noqa: BLE001 — reporting must never break OAuth
@@ -790,6 +817,102 @@ def _consume_jti(jti: str, expires_at: datetime) -> bool:
         return False
 
 
+def _unverified_assertion_diag(assertion: str) -> dict[str, str]:
+    """Safe unverified JWT fields for Sentry/logs. Never includes the assertion."""
+    import jwt
+
+    out: dict[str, str] = {}
+    if not assertion or not isinstance(assertion, str) or len(assertion) > 8192:
+        return out
+    try:
+        header = jwt.get_unverified_header(assertion)
+    except Exception:  # noqa: BLE001 — diagnostics must never break verify
+        header = {}
+    for key in ('alg', 'kid'):
+        value = header.get(key)
+        if isinstance(value, str) and value:
+            out[f'jwt_{key}'] = _safe_tag_value(value, limit=80)
+
+    try:
+        claims = jwt.decode(
+            assertion,
+            options={
+                'verify_signature': False,
+                'verify_aud': False,
+                'verify_exp': False,
+                'verify_nbf': False,
+                'verify_iss': False,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        return out
+
+    iss = claims.get('iss')
+    if isinstance(iss, str) and iss:
+        out['jwt_iss'] = _safe_tag_value(iss, limit=200)
+
+    aud = claims.get('aud')
+    if isinstance(aud, str) and aud:
+        out['jwt_aud'] = _safe_tag_value(aud, limit=200)
+    elif isinstance(aud, list):
+        parts = [
+            _safe_tag_value(a, limit=100)
+            for a in aud[:5]
+            if isinstance(a, str) and a
+        ]
+        if parts:
+            out['jwt_aud'] = ','.join(parts)[:200]
+
+    # Presence-only: helps spot MissingRequiredClaimError without logging jti.
+    out['jwt_has_jti'] = '1' if claims.get('jti') else '0'
+    for key in ('exp', 'iat'):
+        value = claims.get(key)
+        if isinstance(value, (int, float)) or (
+                isinstance(value, str) and value.isdigit()):
+            out[f'jwt_{key}'] = str(int(value))[:32]
+    return out
+
+
+def _record_jwt_verify_failure(
+        *,
+        assertion: str,
+        exc: BaseException,
+        expected_aud: set[str],
+        client_id: str | None = None,
+        stage: str = 'decode',
+) -> None:
+    """Attach diagnosable JWT-failure tags for the upcoming OAuth refusal report.
+
+    Client response stays generic; this only enriches logs + Sentry tags.
+    Never stores or logs the assertion itself.
+    """
+    diag = _unverified_assertion_diag(assertion)
+    diag['jwt_error'] = type(exc).__name__[:80]
+    diag['jwt_stage'] = stage[:40]
+    # Exception message can name a missing claim (e.g. jti) — never a secret.
+    msg = str(exc) or ''
+    if msg and not any(p in msg.lower() for p in ('eyj', 'bearer ', '-----')):
+        diag['jwt_error_detail'] = _safe_tag_value(msg, limit=160)
+    diag['jwt_expected_aud'] = ','.join(sorted(expected_aud))[:200]
+    try:
+        g.oauth_jwt_diag = diag
+    except RuntimeError:
+        # Outside a request context (unit tests calling verify directly).
+        pass
+    try:
+        current_app.logger.warning(
+            'private_key_jwt verify failed: error=%s stage=%s aud=%s '
+            'expected_aud=%s iss=%s alg=%s kid=%s has_jti=%s client=%s',
+            diag.get('jwt_error'), diag.get('jwt_stage'),
+            diag.get('jwt_aud'), diag.get('jwt_expected_aud'),
+            diag.get('jwt_iss'), diag.get('jwt_alg'), diag.get('jwt_kid'),
+            diag.get('jwt_has_jti'),
+            _safe_tag_value(client_id, limit=120) if client_id else '',
+        )
+    except Exception:  # noqa: BLE001 — logging must never break verify
+        pass
+
+
 def verify_private_key_jwt(client, assertion: str) -> tuple[bool, str | None]:
     """Verify a private_key_jwt client_assertion (RFC 7523 / OIDC core)."""
     import jwt
@@ -825,8 +948,16 @@ def verify_private_key_jwt(client, assertion: str) -> tuple[bool, str | None]:
     issuer = oauth_issuer()
     token_endpoint = f'{issuer}/oauth/token'
     audience_ok = {token_endpoint, issuer}
+    client_id = getattr(client, 'client_id', None)
     try:
-        key = _jwk_to_key(jwk)
+        try:
+            key = _jwk_to_key(jwk)
+        except (jwt.PyJWTError, ValueError, TypeError) as exc:
+            _record_jwt_verify_failure(
+                assertion=assertion, exc=exc, expected_aud=audience_ok,
+                client_id=client_id, stage='jwk_to_key')
+            # Keep the client-facing message generic (PODSKRIFT-P).
+            return False, 'client_assertion signature or claims invalid.'
         claims = jwt.decode(
             assertion,
             key=key,
@@ -839,7 +970,10 @@ def verify_private_key_jwt(client, assertion: str) -> tuple[bool, str | None]:
             },
             leeway=JWT_ASSERTION_LEEWAY_SEC,
         )
-    except jwt.PyJWTError:
+    except jwt.PyJWTError as exc:
+        _record_jwt_verify_failure(
+            assertion=assertion, exc=exc, expected_aud=audience_ok,
+            client_id=client_id, stage='decode')
         return False, 'client_assertion signature or claims invalid.'
 
     if claims.get('iss') != client.client_id:

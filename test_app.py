@@ -7499,6 +7499,134 @@ def test_oauth_refusal_reports_to_sentry(mcp_oauth_on, monkeypatch):
     assert captured[-1]['tags']['oauth_step'] == 'authorize'
 
 
+def test_oauth_private_key_jwt_rejection_diagnosable(mcp_oauth_on, monkeypatch):
+    """PODSKRIFT-P: jwt.decode failures expose exception class + safe claims.
+
+    Client still sees the generic invalid_client description; Sentry/logs get
+    jwt_error / unverified aud/iss/alg/kid / expected aud — never the assertion.
+    """
+    import jwt as pyjwt
+    import sentry_sdk
+
+    cimd_url = 'https://chatgpt.com/oauth/client-diag.json'
+    redirect_uri = 'https://chatgpt.com/connector_platform_oauth_redirect'
+    private_key, jwk = _rsa_keypair_and_jwk()
+    other_key, _ = _rsa_keypair_and_jwk()
+    doc = _chatgpt_cimd_doc(cimd_url=cimd_url, redirect_uri=redirect_uri)
+    # private_key_jwt only so the assertion path is required.
+    doc['token_endpoint_auth_methods_supported'] = ['private_key_jwt']
+    _patch_cimd_and_jwks(monkeypatch, cimd_url=cimd_url, doc=doc, jwks=jwk)
+    OAUTH._jwks_cache.clear()
+
+    captured = []
+
+    def _capture_message(message, **kwargs):
+        captured.append({'message': message, **kwargs})
+
+    monkeypatch.setattr(sentry_sdk, 'capture_message', _capture_message)
+
+    def _code():
+        verifier, challenge = _pkce_pair()
+        browser = _login(mcp_oauth_on['a'])
+        _, code = _oauth_approve(
+            browser, client_id=cimd_url, redirect_uri=redirect_uri,
+            verifier_challenge=(verifier, challenge))
+        assert code
+        return code, verifier
+
+    def _exchange(assertion):
+        code, verifier = _code()
+        return A.app.test_client().post('/oauth/token', data={
+            'grant_type': 'authorization_code',
+            'code': code,
+            'redirect_uri': redirect_uri,
+            'client_id': cimd_url,
+            'code_verifier': verifier,
+            'resource': 'https://podskrift.com/mcp',
+            'client_assertion': assertion,
+            'client_assertion_type': OAUTH.CLIENT_ASSERTION_TYPE,
+        })
+
+    expected_token_aud = f'{OAUTH.oauth_issuer()}/oauth/token'
+    expected_issuer = OAUTH.oauth_issuer()
+
+    cases = [
+        # Wrong audience → InvalidAudienceError
+        (
+            _mint_client_assertion(
+                private_key, client_id=cimd_url,
+                aud='https://evil.example/token'),
+            'InvalidAudienceError',
+            'https://evil.example/token',
+        ),
+        # Expired → ExpiredSignatureError
+        (
+            _mint_client_assertion(
+                private_key, client_id=cimd_url,
+                exp_delta=-120, iat_delta=-180),
+            'ExpiredSignatureError',
+            expected_token_aud,
+        ),
+        # Wrong key → InvalidSignatureError
+        (
+            _mint_client_assertion(other_key, client_id=cimd_url),
+            'InvalidSignatureError',
+            expected_token_aud,
+        ),
+        # Missing jti (required claim) → MissingRequiredClaimError
+        (
+            pyjwt.encode(
+                {
+                    'iss': cimd_url, 'sub': cimd_url,
+                    'aud': expected_token_aud,
+                    'exp': int(time.time()) + 60,
+                },
+                private_key, algorithm='RS256',
+                headers={'kid': 'test-chatgpt-kid'},
+            ),
+            'MissingRequiredClaimError',
+            expected_token_aud,
+        ),
+    ]
+
+    for assertion, error_cls, got_aud in cases:
+        captured.clear()
+        resp = _exchange(assertion)
+        assert resp.status_code == 401, (error_cls, resp.get_json())
+        body = resp.get_json()
+        assert body['error'] == 'invalid_client'
+        assert body.get('error_description') == (
+            'client_assertion signature or claims invalid.')
+        assert captured, f'expected Sentry for {error_cls}'
+        tags = captured[-1].get('tags') or {}
+        assert tags.get('jwt_error') == error_cls, tags
+        assert tags.get('jwt_aud') == got_aud, tags
+        assert tags.get('jwt_iss') == cimd_url, tags
+        assert tags.get('jwt_alg') == 'RS256', tags
+        assert tags.get('jwt_kid') == 'test-chatgpt-kid', tags
+        expected_aud_tag = tags.get('jwt_expected_aud') or ''
+        assert expected_token_aud in expected_aud_tag
+        assert expected_issuer in expected_aud_tag
+        blob = json.dumps(captured[-1])
+        assert 'eyJ' not in blob
+        assert assertion not in blob
+
+    # JWK conversion failure (alg not RS256) → InvalidKeyError at jwk_to_key.
+    captured.clear()
+    bad_alg_jwk = dict(jwk, alg='RS384')
+    _patch_cimd_and_jwks(
+        monkeypatch, cimd_url=cimd_url, doc=doc, jwks=bad_alg_jwk)
+    OAUTH._jwks_cache.clear()
+    resp = _exchange(_mint_client_assertion(private_key, client_id=cimd_url))
+    assert resp.status_code == 401
+    assert resp.get_json().get('error_description') == (
+        'client_assertion signature or claims invalid.')
+    tags = captured[-1].get('tags') or {}
+    assert tags.get('jwt_error') == 'InvalidKeyError', tags
+    assert tags.get('jwt_stage') == 'jwk_to_key', tags
+    assert 'eyJ' not in json.dumps(captured[-1])
+
+
 # --------------------------------------------------------------------------
 # Product analytics (PostHog)
 # --------------------------------------------------------------------------
