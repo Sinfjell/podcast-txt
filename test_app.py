@@ -14057,6 +14057,83 @@ def test_oauth_consent_not_frameable_and_shows_destination(mcp_oauth_on):
     assert b'not verified' in page.data
 
 
+def test_oauth_consent_renders_when_buy_modal_included(mcp_oauth_on, monkeypatch):
+    """PODSKRIFT-J: consent extends base.html → _buy_modal.html calls csrf_token().
+
+    Passing csrf_token=<str> into render_template shadows that callable and 500s
+    whenever Stripe buy is enabled for a metered (logged-in) user. Logged-out
+    authorize redirects to login and never hits oauth_consent.html.
+    """
+    monkeypatch.setattr(A, 'STRIPE_SECRET_KEY', 'sk_test_fake')
+    monkeypatch.setattr(A, 'STRIPE_WEBHOOK_SECRET', 'whsec_test_fake')
+    assert A.stripe_checkout_enabled()
+
+    reg = _oauth_register(redirect_uris=['http://127.0.0.1/callback'],
+                          client_name='ChatGPT').get_json()
+    redirect_uri = 'http://127.0.0.1/callback'
+    _, challenge = _pkce_pair()
+    q = {
+        'response_type': 'code',
+        'client_id': reg['client_id'],
+        'redirect_uri': redirect_uri,
+        'state': 'st',
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+        'resource': OAUTH.mcp_resource_url(),
+        'scope': 'mcp offline_access',
+    }
+
+    anon = A.app.test_client().get('/oauth/authorize', query_string=q,
+                                   follow_redirects=False)
+    assert anon.status_code in (302, 303)
+    assert '/login' in (anon.headers.get('Location') or '')
+
+    client = _login(mcp_oauth_on['a'])
+    page = client.get('/oauth/authorize', query_string=q)
+    assert page.status_code == 200, page.data[:800]
+    assert b'Allow' in page.data
+    assert b'to use Podskrift?' in page.data
+    assert b'id="buyModalForm"' in page.data
+    assert page.headers['X-Frame-Options'] == 'DENY'
+    assert "frame-ancestors 'none'" in page.headers['Content-Security-Policy']
+
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    assert token
+    approved = client.post('/oauth/authorize', data={
+        'csrf_token': token,
+        'decision': 'approve',
+        'client_id': reg['client_id'],
+        'redirect_uri': redirect_uri,
+        'response_type': 'code',
+        'state': 'st',
+        'scope': 'mcp offline_access',
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+        'resource': OAUTH.mcp_resource_url(),
+    }, follow_redirects=False)
+    assert approved.status_code in (302, 303), approved.data[:500]
+    from urllib.parse import urlparse, parse_qs
+    params = parse_qs(urlparse(approved.headers['Location']).query)
+    assert params.get('code')
+
+    denied = client.post('/oauth/authorize', data={
+        'csrf_token': 'wrong-token',
+        'decision': 'approve',
+        'client_id': reg['client_id'],
+        'redirect_uri': redirect_uri,
+        'response_type': 'code',
+        'state': 'st',
+        'scope': 'mcp offline_access',
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+        'resource': OAUTH.mcp_resource_url(),
+    }, follow_redirects=False)
+    assert denied.status_code in (302, 303)
+    loc = denied.headers.get('Location') or ''
+    assert 'code=' not in loc
+
+
 def test_oauth_settings_revoke_confirm_is_not_injectable(mcp_oauth_on):
     evil = "x');alert(document.domain);('"
     _oauth_register(client_name=evil)
