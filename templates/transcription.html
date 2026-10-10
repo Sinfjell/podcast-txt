@@ -86,6 +86,8 @@
         <strong id="completionTitle">Transcription complete</strong>
         <span id="completionInfo" class="text-sm" style="margin-top: 4px;"></span>
     </div>
+    <p id="balanceFactLine" class="text-sm text-muted hidden" data-testid="balance-fact"
+       style="margin: 10px 0 0;"></p>
 </div>
 
 <!-- Partial free preview: buy / finish full episode -->
@@ -791,6 +793,16 @@
             if (d.language) bits.push('Language: ' + d.language);
             if (d.actual_transcription_time) bits.push('Took ' + d.actual_transcription_time);
             el('completionInfo').textContent = bits.join(' · ');
+            var balLine = el('balanceFactLine');
+            if (balLine) {
+                if (d.balance_fact && d.balance_fact.line) {
+                    balLine.textContent = d.balance_fact.line;
+                    show(balLine, true);
+                } else {
+                    balLine.textContent = '';
+                    show(balLine, false);
+                }
+            }
             if (d.partial) {
                 el('completionTitle').textContent = 'Free preview ready';
                 renderPartialPreview(d);
