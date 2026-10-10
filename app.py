@@ -800,8 +800,39 @@ def _env_minutes_optional(name):
 TRIAL_DEFAULT_SECONDS = _env_minutes('TRIAL_MINUTES', 180) * 60
 #: Minutes stamped onto users.trial_seconds_limit at registration. Existing
 #: rows keep their stored limit (or NULL → TRIAL_MINUTES); only new signups
-#: get this grant, except the one-off 60 → 120 cohort lift below.
+#: get this grant, except the one-off 60 → 120 cohort lift below. When the
+#: trial split is on, new signups get a hashed 50/50 variant instead.
 NEW_USER_TRIAL_SECONDS = _env_minutes('NEW_USER_TRIAL_MINUTES', 120) * 60
+#: A/B new-user trial grant. Hash of user id → one of TRIAL_SPLIT_VARIANTS.
+#: Off → stamp NEW_USER_TRIAL_MINUTES and leave trial_variant NULL.
+TRIAL_SPLIT_ENABLED = os.getenv('TRIAL_SPLIT_ENABLED', '1').strip().lower() not in (
+    '0', 'false', 'no', 'off')
+
+
+def _parse_trial_split_variants(raw):
+    """Comma-separated minute labels → unique positive ints as strings."""
+    out = []
+    seen = set()
+    for part in (raw or '').split(','):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            minutes = int(part)
+        except (TypeError, ValueError):
+            continue
+        if minutes <= 0:
+            continue
+        label = str(minutes)
+        if label in seen:
+            continue
+        seen.add(label)
+        out.append(label)
+    return out or ['60', '120']
+
+
+TRIAL_SPLIT_VARIANTS = _parse_trial_split_variants(
+    os.getenv('TRIAL_SPLIT_VARIANTS', '60,120'))
 #: The 60-minute signup grant (PR #54) ran from 2026-10-09 ~06:40 UTC until
 #: the 120-minute default shipped. raise_60_minute_trial_cohort() lifts those
 #: rows once at boot. Bounds are UTC, matching how users.created_at is stored;
@@ -1071,10 +1102,51 @@ def advertised_trial_minutes():
     """Minutes promised to new signups on marketing surfaces, or None when off.
 
     Distinct from TRIAL_DEFAULT_SECONDS (NULL-limit fallback for existing rows).
+    Marketing quotes NEW_USER_TRIAL_MINUTES; after signup, user-facing copy
+    must use the account's stamped trial_seconds_limit (see trial_status).
     """
     if not trial_available() or NEW_USER_TRIAL_SECONDS <= 0:
         return None
     return NEW_USER_TRIAL_SECONDS // 60
+
+
+def assign_trial_variant(user_id):
+    """Deterministic (variant_label, seconds) for a new signup.
+
+    When TRIAL_SPLIT_ENABLED, hash the user id into TRIAL_SPLIT_VARIANTS
+    (stable across processes). When off, return (None, NEW_USER_TRIAL_SECONDS)
+    so legacy behaviour and NULL trial_variant are preserved.
+    """
+    if not TRIAL_SPLIT_ENABLED or not TRIAL_SPLIT_VARIANTS:
+        return None, NEW_USER_TRIAL_SECONDS
+    digest = hashlib.sha256(
+        f'podskrift-trial-split:{int(user_id)}'.encode('utf-8')
+    ).digest()
+    idx = int.from_bytes(digest[:8], 'big') % len(TRIAL_SPLIT_VARIANTS)
+    label = TRIAL_SPLIT_VARIANTS[idx]
+    return label, int(label) * 60
+
+
+def user_trial_variant(user):
+    """Stored trial_variant string, or None."""
+    if user is None:
+        return None
+    raw = getattr(user, 'trial_variant', None)
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+def trial_variant_props(user_or_id):
+    """{'trial_variant': …} for analytics, or {} when unknown / unset."""
+    user = user_or_id
+    if isinstance(user_or_id, int):
+        user = db.session.get(User, user_or_id)
+    variant = user_trial_variant(user)
+    if not variant:
+        return {}
+    return {'trial_variant': variant}
 
 
 def trial_oslo_day_str(when=None):
@@ -3666,20 +3738,30 @@ def register():
             ), 'error')
             return _register_template()
 
-        user = User(email=email, trial_seconds_limit=NEW_USER_TRIAL_SECONDS)
+        # Flush first so we have a stable user id for deterministic split
+        # assignment; then stamp limit + variant before commit.
+        user = User(email=email)
         user.set_password(password)
         db.session.add(user)
+        db.session.flush()
+        variant, grant_seconds = assign_trial_variant(user.id)
+        user.trial_seconds_limit = grant_seconds
+        user.trial_variant = variant
         db.session.commit()
         created = True
 
         _persist_login(user)
+        granted_min = grant_seconds // 60
         signup_props = {
             # Coarse intent buckets only (never the raw next path / episode).
             'next_type': _auth_next_type(),
             'has_pending_transcript': bool(
                 session.get(PENDING_TRANSCRIPTION_KEY)),
-            'trial_granted_min': NEW_USER_TRIAL_SECONDS // 60,
+            'trial_granted_min': granted_min,
         }
+        if variant:
+            signup_props['trial_variant'] = variant
+            signup_props['$set'] = {'trial_variant': variant}
         utm = _utm_source_for_signup()
         if utm:
             signup_props['utm_source'] = utm
@@ -3691,9 +3773,8 @@ def register():
         if session.get(PENDING_TRANSCRIPTION_KEY):
             flash('Account created — starting your transcript.', 'success')
         else:
-            minutes = NEW_USER_TRIAL_SECONDS // 60
             flash(
-                f'Account created — you have {minutes} free minutes. '
+                f'Account created — you have {granted_min} free minutes. '
                 'Paste your link again to start.',
                 'success',
             )
@@ -4493,6 +4574,10 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
     amount_total_cents = _int_or_none(total)
     amount_subtotal_cents = _int_or_none(subtotal)
     amount_tax_cents = _int_or_none(tax)
+    person_set = {'has_purchased': True}
+    variant_props = trial_variant_props(user_id)
+    if variant_props.get('trial_variant'):
+        person_set['trial_variant'] = variant_props['trial_variant']
     completed_props = {
         'amount_cents': amount_for_legacy,
         'amount_total_cents': amount_total_cents,
@@ -4507,8 +4592,9 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
         'location': location,
         'is_first_purchase': prior_credited == 0,
         'revenue': (amount_total_cents or amount_for_legacy or 0) / 100.0,
-        '$set': {'has_purchased': True},
+        '$set': person_set,
     }
+    completed_props.update(variant_props)
     if ph_sid:
         completed_props['$session_id'] = ph_sid
     product_analytics.capture(
@@ -4960,6 +5046,7 @@ def billing_checkout():
         'trial_remaining_min': trial_remaining_min,
         'paid_remaining_min': paid_remaining_min,
     }
+    started_props.update(trial_variant_props(current_user))
     if ph_sid:
         started_props['$session_id'] = ph_sid
     product_analytics.capture(
@@ -5670,6 +5757,7 @@ def _capture_trial_limit_hit(user_id, scope, stage, source,
         props['estimate_min'] = int(estimate_min)
     if remaining_min is not None:
         props['remaining_min'] = int(remaining_min)
+    props.update(trial_variant_props(user_id))
     product_analytics.capture('trial_limit_hit', user_id, props)
 
 
@@ -8994,6 +9082,10 @@ def inject_trial_badge():
         'nav_minutes_left': nav['nav_minutes_left'],
         'nav_daily_exhausted': nav['nav_daily_exhausted'],
         'nav_show_buy': nav['nav_show_buy'],
+        'trial_variant': (
+            user_trial_variant(current_user)
+            if current_user.is_authenticated else None
+        ),
         'csrf_token': generate_csrf_token,
     }
 

@@ -1325,6 +1325,7 @@
     <script>
     (function () {
         var POSTHOG_USER_ID = {{ posthog_user_id | tojson }};
+        var TRIAL_VARIANT = {{ trial_variant | tojson }};
         var REPLAY = {
             maskAllInputs: true,
             maskInputOptions: { password: true, email: true },
@@ -1358,7 +1359,12 @@
             if (choice() !== 'accepted') return;
             try {
                 // Internal user id only — never email or name as person properties.
-                posthog.identify(POSTHOG_USER_ID);
+                // trial_variant is a non-PII experiment label (e.g. '60' / '120').
+                if (TRIAL_VARIANT) {
+                    posthog.identify(POSTHOG_USER_ID, {trial_variant: TRIAL_VARIANT});
+                } else {
+                    posthog.identify(POSTHOG_USER_ID);
+                }
             } catch (e) { /* ignore */ }
         }
 
@@ -1491,6 +1497,7 @@
                     trial_remaining_min: p.trial_remaining_min != null ? p.trial_remaining_min : null,
                     paid_remaining_min: p.paid_remaining_min != null ? p.paid_remaining_min : null
                 };
+                if (TRIAL_VARIANT) payload.trial_variant = TRIAL_VARIANT;
                 posthog.capture('paywall_shown', payload);
                 posthog.capture('offer_shown', Object.assign({variant: 'buy_or_key'}, payload));
             } catch (e) { /* ignore */ }
@@ -1503,10 +1510,12 @@
                 if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
                     opts.transport = 'sendBeacon';
                 }
-                posthog.capture('paywall_buy_clicked', {
+                var buyPayload = {
                     location: location,
                     reason: reason || ''
-                }, opts);
+                };
+                if (TRIAL_VARIANT) buyPayload.trial_variant = TRIAL_VARIANT;
+                posthog.capture('paywall_buy_clicked', buyPayload, opts);
             } catch (e) { /* ignore */ }
         };
 
@@ -1568,10 +1577,12 @@
                 }
                 posthog.capture('buy_clicked', {location: loc, transport: 'sendBeacon'}, opts);
                 if (form.getAttribute('data-paywall-buy')) {
-                    posthog.capture('paywall_buy_clicked', {
+                    var formBuy = {
                         location: form.getAttribute('data-paywall-buy') || loc,
                         reason: ''
-                    }, opts);
+                    };
+                    if (TRIAL_VARIANT) formBuy.trial_variant = TRIAL_VARIANT;
+                    posthog.capture('paywall_buy_clicked', formBuy, opts);
                 }
             } catch (e) { /* ignore */ }
         }, true);
