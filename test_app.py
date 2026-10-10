@@ -6919,6 +6919,12 @@ def test_recent_transcription_rates_from_fixtures(trial_on):
     now = datetime.now(timezone.utc)
     with A.app.app_context():
         uid = _make_user('eta-rates@test.com')
+        # Own the sample window — earlier suite rows would otherwise dilute rates.
+        (TranscriptionTask.query
+         .filter(TranscriptionTask.status == 'completed')
+         .delete(synchronize_session=False))
+        db.session.commit()
+        expected = []
         for i, (audio_min, wall_min) in enumerate([
             (60, 15), (60, 20), (30, 8), (45, 12), (90, 30),
             (60, 18),
@@ -6931,13 +6937,16 @@ def test_recent_transcription_rates_from_fixtures(trial_on):
                 completed_at=now - timedelta(hours=i + 2) + timedelta(minutes=wall_min),
                 transcript_text='done',
             ))
+            expected.append((wall_min * 60.0) / audio_min)
         db.session.commit()
         rates = A.recent_transcription_rates(limit=50, lookback_days=7)
-    assert len(rates) >= 6
+    assert len(rates) == 6
     assert rates == sorted(rates)
     # 15 wall min / 60 audio min = 15 sec per audio minute
     assert min(rates) >= 10
     assert max(rates) <= 40
+    for rate in expected:
+        assert any(abs(r - rate) < 0.01 for r in rates), (rate, rates)
 
 
 def test_balance_fact_byok_large_and_typical(trial_on):
