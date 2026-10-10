@@ -5136,9 +5136,43 @@ def test_history_list_titles_link_to_transcription_page(library):
     assert '>Weather report</a>' in body
     assert 'href="/transcription/lib-2"' in body
     assert '>Cooking hour</a>' in body
-    # Default list is completed-only; in-progress must not appear.
-    assert 'Still running' not in body
-    assert 'href="/transcription/lib-3"' not in body
+    # In-progress jobs appear at the top with a Transcribing… status.
+    assert 'Still running' in body
+    assert 'href="/transcription/lib-3"' in body
+    assert 'Transcribing' in body
+
+
+def test_history_shows_in_progress_via_label_and_failed(library, monkeypatch, trial_on):
+    """Queued/MCP jobs and recent failures render with status + via chip."""
+    from models import TranscriptionTask, db
+    owner, _ = library
+    with A.app.app_context():
+        t = db.session.get(TranscriptionTask, 'lib-3')
+        t.source = 'mcp'
+        t.source_client = 'ChatGPT'
+        t.progress = 40
+        t.phase = 'transcribing'
+        t.chunk_index = 0
+        t.chunk_total = 2
+        t.audio_duration = 600.0
+        db.session.add(TranscriptionTask(
+            id='lib-fail-1', user_id=owner, status='error',
+            episode_title='Broken episode', podcast_name='Show',
+            error_message='Download timed out.',
+            source='mcp', source_client='Claude',
+            started_at=datetime.now(timezone.utc),
+        ))
+        db.session.commit()
+    body = _login(owner).get('/history').data.decode()
+    assert 'Still running' in body
+    assert 'Transcribing' in body
+    assert 'via ChatGPT' in body
+    assert 'Broken episode' in body
+    assert 'Failed' in body
+    assert 'Download timed out.' in body
+    assert 'via Claude' in body
+    assert 'data-history-task="lib-3"' in body
+    assert 'fetch(\'/active-jobs\')' in body or 'fetch("/active-jobs")' in body
 
 
 def test_history_search_with_no_hits_says_so(library):
@@ -6304,6 +6338,8 @@ import mcp_server as MCP  # noqa: E402 — after app import / test DB wiring
 def mcp_on(customer_api, monkeypatch):
     """MCP_ENABLED + customer key; catalog/enqueue stubs from customer_api."""
     monkeypatch.setenv('MCP_ENABLED', '1')
+    # Default tests should not sleep up to MCP_WAIT_SECONDS on every poll.
+    monkeypatch.setenv('MCP_WAIT_SECONDS', '0')
     MCP._mcp_rate_attempts.clear()
     A._agent_write_attempts.clear()
     return customer_api
@@ -6391,17 +6427,27 @@ def test_mcp_initialize_and_tools_list(mcp_on):
     tools = listed.get_json()['result']['tools']
     by_name = {t['name']: t for t in tools}
     assert set(by_name) == {
-        'search_podcasts', 'list_episodes', 'get_transcript',
-        'get_transcript_status',
+        'search_podcasts', 'list_episodes', 'list_my_transcripts',
+        'get_my_transcript', 'get_transcript', 'get_transcript_status',
     }
-    for name in ('search_podcasts', 'list_episodes', 'get_transcript_status'):
+    for name in ('search_podcasts', 'list_episodes', 'get_transcript_status',
+                 'list_my_transcripts', 'get_my_transcript'):
         ann = by_name[name]['annotations']
         assert ann['readOnlyHint'] is True
-        assert ann['openWorldHint'] is True
+    assert by_name['list_my_transcripts']['annotations']['openWorldHint'] is False
+    assert by_name['get_my_transcript']['annotations']['openWorldHint'] is False
     gt = by_name['get_transcript']['annotations']
     assert gt['readOnlyHint'] is False
     assert gt['destructiveHint'] is False
     assert gt['idempotentHint'] is True
+    # Tool copy steers models toward list_my_transcripts + self-polling.
+    list_desc = by_name['list_my_transcripts']['description'].lower()
+    assert 'my transcript' in list_desc
+    gt_desc = by_name['get_transcript']['description'].lower()
+    assert 'free' in gt_desc or 'cost_minutes 0' in gt_desc
+    assert 'list_my_transcripts' in gt_desc
+    status_desc = by_name['get_transcript_status']['description'].lower()
+    assert '30' in status_desc and 'remind' in status_desc
 
 
 def test_mcp_search_podcasts_tool(mcp_on, monkeypatch):
@@ -6568,6 +6614,161 @@ def test_mcp_get_transcript_by_list_id_does_not_charge_twice(mcp_on):
     assert second['cost_minutes'] == 0
     assert (second['balance']['remaining_minutes']
             == first['balance_after']['remaining_minutes'])
+
+
+def test_mcp_list_my_transcripts_and_get_my_transcript(mcp_on, ph_events):
+    """list/get past transcripts; user A cannot see B; never charges."""
+    from models import TranscriptionTask, db
+
+    with A.app.app_context():
+        a_task = db.session.get(TranscriptionTask, 'cust-a-ep')
+        a_task.source = 'mcp'
+        a_task.source_client = 'ChatGPT'
+        a_task.audio_duration = 300.0
+        a_task.language = 'en'
+        a_task.transcript_text = ('Alpha word. ' * 200)  # long enough to page
+        db.session.add(TranscriptionTask(
+            id='cust-a-run', user_id=mcp_on['a'], status='transcribing',
+            episode_title='Running now', podcast_name='Forklaringssaften',
+            source='mcp', source_client='Claude',
+            started_at=datetime.now(timezone.utc), progress=20,
+        ))
+        db.session.commit()
+
+    listed, result = _mcp_tool(mcp_on['key_a'], 'list_my_transcripts', {
+        'status': 'all', 'limit': 20,
+    })
+    assert result.get('isError') is False, listed
+    ids = {t['task_id'] for t in listed['transcripts']}
+    assert 'cust-a-ep' in ids
+    assert 'cust-a-run' in ids
+    assert 'cust-b-ep' not in ids
+    by_id = {t['task_id']: t for t in listed['transcripts']}
+    assert by_id['cust-a-ep']['status'] == 'completed'
+    assert by_id['cust-a-ep']['source'] == 'via ChatGPT'
+    assert '/transcription/cust-a-ep' in by_id['cust-a-ep']['url']
+    assert by_id['cust-a-run']['status'] == 'in_progress'
+    assert by_id['cust-a-run']['source'] == 'via Claude'
+    # Newest-first: running job (just now) before completed Sept task.
+    assert listed['transcripts'][0]['task_id'] == 'cust-a-run'
+
+    # User B isolation
+    b_list, _ = _mcp_tool(mcp_on['key_b'], 'list_my_transcripts', {})
+    b_ids = {t['task_id'] for t in b_list['transcripts']}
+    assert 'cust-b-ep' in b_ids
+    assert 'cust-a-ep' not in b_ids
+    assert 'cust-a-run' not in b_ids
+
+    stolen, stolen_res = _mcp_tool(mcp_on['key_b'], 'get_my_transcript', {
+        'task_id': 'cust-a-ep',
+    })
+    assert stolen_res.get('isError') is True
+    assert stolen['error'] == 'Transcript not found'
+
+    got, got_res = _mcp_tool(mcp_on['key_a'], 'get_my_transcript', {
+        'task_id': 'cust-a-ep', 'max_chars': 40,
+    })
+    assert got_res.get('isError') is False, got
+    assert got['charged'] is False
+    assert got['cost_minutes'] == 0
+    assert got['format'] == 'txt'
+    assert got['text'].startswith('Alpha word.')
+    assert got['offset'] == 0
+    assert got['next_offset'] == 40
+    assert got['total_chars'] > 40
+    page2, _ = _mcp_tool(mcp_on['key_a'], 'get_my_transcript', {
+        'task_id': 'cust-a-ep', 'offset': got['next_offset'], 'max_chars': 40,
+    })
+    assert page2['offset'] == 40
+    assert page2['text']
+    assert page2['text'] != got['text'] or page2['next_offset'] is None
+
+    called = [e for e in ph_events.events if e['event'] == 'mcp_tool_called']
+    tools = {e['properties']['tool'] for e in called}
+    assert 'list_my_transcripts' in tools
+    assert 'get_my_transcript' in tools
+
+
+def test_mcp_list_my_transcripts_filters_and_cursor(mcp_on):
+    from models import TranscriptionTask, db
+
+    with A.app.app_context():
+        for i in range(3):
+            db.session.add(TranscriptionTask(
+                id=f'cust-a-page-{i}', user_id=mcp_on['a'], status='completed',
+                episode_title=f'Paged {i}', podcast_name='Paging Show',
+                transcript_text=f'body {i}',
+                completed_at=datetime(2026, 8, 1 + i, tzinfo=timezone.utc),
+                started_at=datetime(2026, 8, 1 + i, tzinfo=timezone.utc),
+            ))
+        db.session.commit()
+
+    page1, _ = _mcp_tool(mcp_on['key_a'], 'list_my_transcripts', {
+        'podcast': 'Paging Show', 'limit': 2, 'status': 'completed',
+    })
+    assert page1['count'] == 2
+    assert page1['next_cursor'] == '2'
+    page2, _ = _mcp_tool(mcp_on['key_a'], 'list_my_transcripts', {
+        'podcast': 'Paging Show', 'limit': 2, 'cursor': page1['next_cursor'],
+        'status': 'completed',
+    })
+    assert page2['count'] >= 1
+    ids1 = {t['task_id'] for t in page1['transcripts']}
+    ids2 = {t['task_id'] for t in page2['transcripts']}
+    assert ids1.isdisjoint(ids2)
+
+    qhit, _ = _mcp_tool(mcp_on['key_a'], 'list_my_transcripts', {
+        'query': 'private episode', 'status': 'completed',
+    })
+    assert any(t['task_id'] == 'cust-a-ep' for t in qhit['transcripts'])
+
+
+def test_mcp_get_transcript_status_waits_with_mocked_time(mcp_on, monkeypatch):
+    """Bounded wait polls DB with short sleeps; returns in_progress shape."""
+    from models import TranscriptionTask, db
+
+    monkeypatch.setenv('MCP_WAIT_SECONDS', '45')
+    monkeypatch.setenv('MCP_WAIT_POLL_SECONDS', '1')
+
+    sleeps = []
+    clock = {'t': 1000.0}
+
+    def fake_mono():
+        return clock['t']
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock['t'] += seconds
+        # After a couple of polls, leave the task pending (timeout path).
+        if len(sleeps) >= 2:
+            clock['t'] = 1000.0 + 50  # past deadline
+
+    monkeypatch.setattr(MCP.time, 'monotonic', fake_mono)
+    monkeypatch.setattr(MCP.time, 'sleep', fake_sleep)
+
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='cust-a-wait', user_id=mcp_on['a'], status='transcribing',
+            episode_title='Waiting ep', podcast_name='Show',
+            phase='transcribing', progress=30, chunk_index=0, chunk_total=4,
+            audio_duration=1200.0,
+            started_at=datetime.now(timezone.utc),
+            source='mcp', source_client='ChatGPT',
+        ))
+        db.session.commit()
+
+    payload, result = _mcp_tool(mcp_on['key_a'], 'get_transcript_status', {
+        'job_id': 'cust-a-wait',
+    })
+    assert result.get('isError') is False, payload
+    assert payload['transcript_status'] == 'pending'
+    assert payload['status'] == 'in_progress'
+    assert 'progress_pct' in payload
+    assert payload['history_url'].endswith('/history')
+    assert 'email' in (payload.get('email_note') or '').lower() or 'email' in payload['instruction'].lower()
+    assert 'do not ask the user to remind you' in payload['instruction'].lower()
+    assert sleeps, 'expected wait loop to sleep'
+    assert sum(sleeps) <= 45 + 1
 
 
 def test_mcp_list_episodes_spotify_show(mcp_on, monkeypatch):
@@ -8394,27 +8595,29 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'mcp-chat-example'
-    assert entries[1]['id'] == 'mcp-visual-setup-guides'
-    assert entries[2]['id'] == 'history-via-mcp'
-    assert entries[3]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[4]['id'] == 'new-signup-120-min-trial'
-    assert entries[5]['id'] == 'new-look'
-    assert entries[6]['id'] == 'forgot-password'
-    assert entries[7]['id'] == 'share-listen-links'
-    assert entries[8]['id'] == 'keyboard-and-faster-loading'
+    assert entries[0]['id'] == 'mcp-list-my-transcripts'
+    assert entries[1]['id'] == 'history-in-progress'
+    assert entries[2]['id'] == 'mcp-chat-example'
+    assert entries[3]['id'] == 'mcp-visual-setup-guides'
+    assert entries[4]['id'] == 'history-via-mcp'
+    assert entries[5]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[6]['id'] == 'new-signup-120-min-trial'
+    assert entries[7]['id'] == 'new-look'
+    assert entries[8]['id'] == 'forgot-password'
+    assert entries[9]['id'] == 'share-listen-links'
+    assert entries[10]['id'] == 'keyboard-and-faster-loading'
     # Internal / auth fixes never ship as user-facing changelog entries.
     assert all(e['id'] != 'chatgpt-oauth-private-key-jwt' for e in entries)
-    assert entries[9]['id'] == 'show-landing-pages'
-    assert entries[10]['id'] == 'public-share-links'
-    assert entries[11]['id'] == 'unsubscribe-confirm-click'
-    assert entries[12]['id'] == 'partial-preview-minutes-wording'
-    assert entries[13]['id'] == 'partial-trial-preview'
-    assert entries[14]['id'] == 'own-key-billing-clarity'
-    assert entries[15]['id'] == 'clearer-missing-episode-audio'
-    assert entries[16]['id'] == 'new-signup-60-min-trial'
-    assert entries[17]['id'] == 'spotify-paste-robustness'
-    assert entries[18]['id'] == 'no-double-charge-restart'
+    assert entries[11]['id'] == 'show-landing-pages'
+    assert entries[12]['id'] == 'public-share-links'
+    assert entries[13]['id'] == 'unsubscribe-confirm-click'
+    assert entries[14]['id'] == 'partial-preview-minutes-wording'
+    assert entries[15]['id'] == 'partial-trial-preview'
+    assert entries[16]['id'] == 'own-key-billing-clarity'
+    assert entries[17]['id'] == 'clearer-missing-episode-audio'
+    assert entries[18]['id'] == 'new-signup-60-min-trial'
+    assert entries[19]['id'] == 'spotify-paste-robustness'
+    assert entries[20]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -12869,12 +13072,14 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'mcp-chat-example'
-    assert entries[1]['id'] == 'mcp-visual-setup-guides'
-    assert entries[2]['id'] == 'history-via-mcp'
-    assert entries[3]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[4]['id'] == 'new-signup-120-min-trial'
-    assert entries[5]['id'] == 'new-look'
+    assert entries[0]['id'] == 'mcp-list-my-transcripts'
+    assert entries[1]['id'] == 'history-in-progress'
+    assert entries[2]['id'] == 'mcp-chat-example'
+    assert entries[3]['id'] == 'mcp-visual-setup-guides'
+    assert entries[4]['id'] == 'history-via-mcp'
+    assert entries[5]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[6]['id'] == 'new-signup-120-min-trial'
+    assert entries[7]['id'] == 'new-look'
 
 
 # --------------------------------------------------------------------------

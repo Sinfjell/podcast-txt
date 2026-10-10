@@ -5360,6 +5360,42 @@ def task_source_via_label(source, source_client=None):
     return f'via {name}'
 
 
+def task_source_label(source, source_client=None):
+    """MCP/list label: 'via ChatGPT' / 'via Claude' / 'via MCP' / 'web' / 'api'."""
+    via = task_source_via_label(source, source_client)
+    if via:
+        return via
+    s = (source or 'web').strip().lower()
+    if s == 'api':
+        return 'api'
+    return 'web'
+
+
+def history_list_status(task):
+    """User-facing History bucket: in_progress | failed | completed | None."""
+    status = agent_transcript_status(task)
+    if status == 'pending':
+        return 'in_progress'
+    if status == 'failed':
+        return 'failed'
+    if status == 'ready' or (task.status or '') == 'completed':
+        return 'completed'
+    return None
+
+
+def short_task_error(task, limit=120):
+    """Short, safe failure line for History (never echo raw key material)."""
+    raw = (getattr(task, 'error_message', None) or '').strip()
+    if not raw:
+        return 'Transcription failed.'
+    # Keys sometimes land in OpenAI 401 bodies; never show long opaque tokens.
+    if re.search(r'\bsk-[A-Za-z0-9_-]{8,}\b', raw) or 'api key' in raw.lower():
+        return 'Transcription failed.'
+    if len(raw) > limit:
+        return raw[: limit - 1].rstrip() + '…'
+    return raw
+
+
 def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
                           source_client=None):
     """Start Whisper for one episode on behalf of `user`.
@@ -7451,17 +7487,61 @@ def history():
         return render_template('history.html', query=query,
                                matches=search_transcripts(current_user.id, query),
                                transcriptions=[], total_cost=0,
-                               cost_per_minute=WHISPER_COST_PER_MINUTE)
-    tasks = TranscriptionTask.query.filter_by(
+                               cost_per_minute=WHISPER_COST_PER_MINUTE,
+                               has_active=False)
+    # In-progress first (so MCP/ChatGPT jobs are visible while Whisper runs),
+    # then recent failures, then completed — same page Sindre already checks.
+    active = active_tasks_for(current_user)
+    # active_tasks_for caps at 5 for the job bar; History can show a few more.
+    if len(active) >= 5:
+        more_active = (TranscriptionTask.query.filter(
+            TranscriptionTask.user_id == current_user.id,
+            ~TranscriptionTask.status.in_(['completed', *TERMINAL_STATUSES]),
+            ~TranscriptionTask.id.in_([t.id for t in active] or ['']),
+        ).order_by(TranscriptionTask.started_at.desc()).limit(15).all())
+        active = active + [t for t in more_active if not _fail_if_stale(t)]
+    failed = (TranscriptionTask.query.filter_by(
+        user_id=current_user.id, status='error'
+    ).order_by(TranscriptionTask.started_at.desc()).limit(20).all())
+    completed = (TranscriptionTask.query.filter_by(
         user_id=current_user.id, status='completed'
-    ).order_by(TranscriptionTask.completed_at.desc()).limit(50).all()
+    ).order_by(TranscriptionTask.completed_at.desc()).limit(50).all())
+
+    rows = []
+    for task in active:
+        percent, eta = compute_live_progress(task)
+        rows.append({
+            'task': task,
+            'kind': 'in_progress',
+            'progress': percent,
+            'eta_seconds': int(eta) if eta is not None else None,
+        })
+    for task in failed:
+        rows.append({
+            'task': task,
+            'kind': 'failed',
+            'progress': None,
+            'eta_seconds': None,
+            'error_short': short_task_error(task),
+        })
+    for task in completed:
+        rows.append({
+            'task': task,
+            'kind': 'completed',
+            'progress': None,
+            'eta_seconds': None,
+        })
+
     total_cost = sum(
         (t.audio_duration / 60) * WHISPER_COST_PER_MINUTE
-        for t in tasks if t.audio_duration
+        for t in completed if t.audio_duration
     )
-    return render_template('history.html', transcriptions=tasks, query='',
-                           total_cost=total_cost,
-                           cost_per_minute=WHISPER_COST_PER_MINUTE)
+    return render_template(
+        'history.html', transcriptions=rows, query='',
+        total_cost=total_cost,
+        cost_per_minute=WHISPER_COST_PER_MINUTE,
+        has_active=bool(active),
+    )
 
 
 # ---------------------------------------------------------------------------
