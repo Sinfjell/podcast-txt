@@ -445,6 +445,8 @@ class OAuthClient(db.Model):
     response_types_json = db.Column(db.Text, nullable=False)
     token_endpoint_auth_method = db.Column(db.String(64), nullable=False,
                                            default='none', server_default='none')
+    # JSON list of accepted methods (e.g. ["none","private_key_jwt"] for ChatGPT).
+    token_endpoint_auth_methods_json = db.Column(db.Text, nullable=True)
     # CIMD jwks_uri for private_key_jwt (same host as client_id).
     jwks_uri = db.Column(db.String(512), nullable=True)
     # 'dcr' | 'cimd' — how this client was first learned.
@@ -520,6 +522,7 @@ class OAuthJwtJti(db.Model):
 OAUTH_CLIENT_COLUMN_MIGRATIONS = {
     'registration_source': 'VARCHAR(16)',
     'jwks_uri': 'VARCHAR(512)',
+    'token_endpoint_auth_methods_json': 'TEXT',
 }
 OAUTH_AUTHORIZATION_CODE_COLUMN_MIGRATIONS = {}
 OAUTH_ACCESS_TOKEN_COLUMN_MIGRATIONS = {}
