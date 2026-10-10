@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "mcp-chat-example",
+      "date": "2026-10-10",
+      "title": "See how a podcast transcript appears in your AI chat",
+      "summary": "An illustrated chat shows how to ask Podskrift for a podcast transcript and read the response with timestamps. Find it on the homepage and the AI setup page."
+    },
+    {
       "id": "mcp-visual-setup-guides",
       "date": "2026-10-10",
       "title": "Connect your AI with illustrated setup guides",

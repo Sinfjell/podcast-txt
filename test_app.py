@@ -8394,26 +8394,27 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'mcp-visual-setup-guides'
-    assert entries[1]['id'] == 'history-via-mcp'
-    assert entries[2]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[3]['id'] == 'new-signup-120-min-trial'
-    assert entries[4]['id'] == 'new-look'
-    assert entries[5]['id'] == 'forgot-password'
-    assert entries[6]['id'] == 'share-listen-links'
-    assert entries[7]['id'] == 'keyboard-and-faster-loading'
+    assert entries[0]['id'] == 'mcp-chat-example'
+    assert entries[1]['id'] == 'mcp-visual-setup-guides'
+    assert entries[2]['id'] == 'history-via-mcp'
+    assert entries[3]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[4]['id'] == 'new-signup-120-min-trial'
+    assert entries[5]['id'] == 'new-look'
+    assert entries[6]['id'] == 'forgot-password'
+    assert entries[7]['id'] == 'share-listen-links'
+    assert entries[8]['id'] == 'keyboard-and-faster-loading'
     # Internal / auth fixes never ship as user-facing changelog entries.
     assert all(e['id'] != 'chatgpt-oauth-private-key-jwt' for e in entries)
-    assert entries[8]['id'] == 'show-landing-pages'
-    assert entries[9]['id'] == 'public-share-links'
-    assert entries[10]['id'] == 'unsubscribe-confirm-click'
-    assert entries[11]['id'] == 'partial-preview-minutes-wording'
-    assert entries[12]['id'] == 'partial-trial-preview'
-    assert entries[13]['id'] == 'own-key-billing-clarity'
-    assert entries[14]['id'] == 'clearer-missing-episode-audio'
-    assert entries[15]['id'] == 'new-signup-60-min-trial'
-    assert entries[16]['id'] == 'spotify-paste-robustness'
-    assert entries[17]['id'] == 'no-double-charge-restart'
+    assert entries[9]['id'] == 'show-landing-pages'
+    assert entries[10]['id'] == 'public-share-links'
+    assert entries[11]['id'] == 'unsubscribe-confirm-click'
+    assert entries[12]['id'] == 'partial-preview-minutes-wording'
+    assert entries[13]['id'] == 'partial-trial-preview'
+    assert entries[14]['id'] == 'own-key-billing-clarity'
+    assert entries[15]['id'] == 'clearer-missing-episode-audio'
+    assert entries[16]['id'] == 'new-signup-60-min-trial'
+    assert entries[17]['id'] == 'spotify-paste-robustness'
+    assert entries[18]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -12868,11 +12869,12 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'mcp-visual-setup-guides'
-    assert entries[1]['id'] == 'history-via-mcp'
-    assert entries[2]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[3]['id'] == 'new-signup-120-min-trial'
-    assert entries[4]['id'] == 'new-look'
+    assert entries[0]['id'] == 'mcp-chat-example'
+    assert entries[1]['id'] == 'mcp-visual-setup-guides'
+    assert entries[2]['id'] == 'history-via-mcp'
+    assert entries[3]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[4]['id'] == 'new-signup-120-min-trial'
+    assert entries[5]['id'] == 'new-look'
 
 
 # --------------------------------------------------------------------------
@@ -15457,3 +15459,22 @@ def test_mcp_guides_start_with_app_link_and_copyable_url(trial_on, monkeypatch, 
         assert 'Continue' in page.get_text()
         assert 'Connector already exists' in page.get_text()
         assert len(page.select('.ds-guide__figure')) >= 4
+
+
+def test_mcp_chat_illustration_is_readable_and_clearly_an_example():
+    from bs4 import BeautifulSoup
+    for path in ('/', '/ai'):
+        response = A.app.test_client().get(path)
+        assert response.status_code == 200
+        document = BeautifulSoup(response.data, 'html.parser')
+        illustrations = document.select('figure.ds-chat-example')
+        assert len(illustrations) == 1
+        illustration = illustrations[0]
+        assert illustration.select_one('.ds-chat-example__user p').get_text() == 'Give me the transcript of that.'
+        assert 'Example episode' in illustration.get_text()
+        assert 'Illustrated example.' in illustration.figcaption.get_text()
+        assert 'Podskrift' in illustration.select_one('.ds-chat-example__tool').get_text()
+        assert [element.get_text() for element in illustration.select('.ds-chat-example__timestamp')] == ['00:00', '00:18']
+        assert 'Today we’re talking about listening' in illustration.select_one('.ds-chat-example__transcript').get_text()
+        assert not illustration.select('button, input, form, [role="status"], [aria-live]')
+        assert not illustration.select('[style]')
