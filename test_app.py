@@ -7814,21 +7814,22 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
     assert entries[0]['id'] == 'chatgpt-oauth-private-key-jwt'
-    assert entries[1]['id'] == 'new-signup-120-min-trial'
-    assert entries[2]['id'] == 'new-look'
-    assert entries[3]['id'] == 'forgot-password'
-    assert entries[4]['id'] == 'share-listen-links'
-    assert entries[5]['id'] == 'keyboard-and-faster-loading'
-    assert entries[6]['id'] == 'show-landing-pages'
-    assert entries[7]['id'] == 'public-share-links'
-    assert entries[8]['id'] == 'unsubscribe-confirm-click'
-    assert entries[9]['id'] == 'partial-preview-minutes-wording'
-    assert entries[10]['id'] == 'partial-trial-preview'
-    assert entries[11]['id'] == 'own-key-billing-clarity'
-    assert entries[12]['id'] == 'clearer-missing-episode-audio'
-    assert entries[13]['id'] == 'new-signup-60-min-trial'
-    assert entries[14]['id'] == 'spotify-paste-robustness'
-    assert entries[15]['id'] == 'no-double-charge-restart'
+    assert entries[1]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[2]['id'] == 'new-signup-120-min-trial'
+    assert entries[3]['id'] == 'new-look'
+    assert entries[4]['id'] == 'forgot-password'
+    assert entries[5]['id'] == 'share-listen-links'
+    assert entries[6]['id'] == 'keyboard-and-faster-loading'
+    assert entries[7]['id'] == 'show-landing-pages'
+    assert entries[8]['id'] == 'public-share-links'
+    assert entries[9]['id'] == 'unsubscribe-confirm-click'
+    assert entries[10]['id'] == 'partial-preview-minutes-wording'
+    assert entries[11]['id'] == 'partial-trial-preview'
+    assert entries[12]['id'] == 'own-key-billing-clarity'
+    assert entries[13]['id'] == 'clearer-missing-episode-audio'
+    assert entries[14]['id'] == 'new-signup-60-min-trial'
+    assert entries[15]['id'] == 'spotify-paste-robustness'
+    assert entries[16]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -12146,8 +12147,9 @@ def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
     assert entries[0]['id'] == 'chatgpt-oauth-private-key-jwt'
-    assert entries[1]['id'] == 'new-signup-120-min-trial'
-    assert entries[2]['id'] == 'new-look'
+    assert entries[1]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[2]['id'] == 'new-signup-120-min-trial'
+    assert entries[3]['id'] == 'new-look'
 
 
 # --------------------------------------------------------------------------
