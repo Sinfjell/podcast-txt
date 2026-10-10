@@ -13433,6 +13433,133 @@ def test_signup_captures_country_and_first_touch(ph_events, trial_on):
     assert 'email' not in props
 
 
+def test_signup_keeps_first_touch_utm_from_landing_not_register(
+        ph_events, trial_on):
+    """ChatGPT land on /?utm_… then /register must not become 'direct'."""
+    A._register_attempts.clear()
+    client = A.app.test_client()
+    client.get(
+        '/?utm_source=chatgpt.com&utm_medium=referral',
+        headers={'Referer': 'https://chatgpt.com/'},
+    )
+    # Later pages (and even a different utm on /register) must not overwrite.
+    client.get('/pricing?utm_source=should-not-win')
+    client.get('/register?utm_source=also-not-win')
+    resp = client.post(
+        '/register',
+        data={'email': 'chatgpt-attr@example.com', 'password': 'password123'},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (302, 303)
+    events = [e for e in ph_events.events if e['event'] == 'user_signed_up']
+    assert len(events) == 1
+    props = events[0]['properties']
+    assert props['utm_source'] == 'chatgpt.com'
+    assert props['utm_medium'] == 'referral'
+    assert props['first_landing'] == '/'
+    assert props['first_referrer_source'] == 'chatgpt.com'
+    set_once = props.get('$set_once') or {}
+    assert set_once.get('utm_source') == 'chatgpt.com'
+    assert set_once.get('utm_medium') == 'referral'
+    assert set_once.get('first_landing') == '/'
+    assert set_once.get('first_referrer_source') == 'chatgpt.com'
+
+
+def test_first_touch_stash_is_write_once_on_any_page():
+    client = A.app.test_client()
+    client.get('/?utm_source=chatgpt.com')
+    with client.session_transaction() as sess:
+        assert sess.get(A.FIRST_LANDING_SESSION_KEY) == '/'
+        assert sess.get(A.UTM_SESSION_KEY) == 'chatgpt.com'
+        assert (sess.get(A.FIRST_UTM_SESSION_KEY) or {}).get(
+            'utm_source') == 'chatgpt.com'
+    client.get('/pricing?utm_source=other')
+    with client.session_transaction() as sess:
+        assert sess.get(A.FIRST_LANDING_SESSION_KEY) == '/'
+        assert sess.get(A.UTM_SESSION_KEY) == 'chatgpt.com'
+        assert (sess.get(A.FIRST_UTM_SESSION_KEY) or {}).get(
+            'utm_source') == 'chatgpt.com'
+
+
+def test_user_active_day_once_per_oslo_day_web(ph_events, trial_on):
+    uid = _make_user('active-day-web@example.com', limit=3600)
+    client = _login(uid)
+    assert client.get('/history').status_code == 200
+    assert client.get('/settings').status_code == 200
+    assert client.get('/pricing').status_code == 200
+    days = [e for e in ph_events.events if e['event'] == 'user_active_day']
+    assert len(days) == 1
+    assert days[0]['distinct_id'] == str(uid)
+    assert days[0]['properties']['source'] == 'web'
+    assert days[0]['properties']['day'] == A.trial_oslo_day_str()
+    with A.app.app_context():
+        from models import User, db
+        assert db.session.get(User, uid).last_active_day == A.trial_oslo_day_str()
+
+
+def test_user_active_day_mcp_source(ph_events, mcp_on):
+    key = mcp_on['key_a']
+    uid = mcp_on['a']
+    # Clear any prior day stamp from fixture setup / earlier web hits.
+    with A.app.app_context():
+        from models import User, db
+        u = db.session.get(User, uid)
+        u.last_active_day = None
+        db.session.commit()
+    ph_events.events.clear()
+    _mcp_tool(key, 'search_podcasts', {'query': 'test'})
+    # Second authenticated MCP call same day must not double-fire.
+    _mcp_tool(key, 'search_podcasts', {'query': 'again'})
+    days = [e for e in ph_events.events if e['event'] == 'user_active_day']
+    assert len(days) == 1
+    assert days[0]['distinct_id'] == str(uid)
+    assert days[0]['properties']['source'] == 'mcp'
+    assert days[0]['properties']['day'] == A.trial_oslo_day_str()
+
+
+def test_user_active_day_atomic_dedupe_across_sessions(ph_events, trial_on):
+    """DB claim wins even when a second browser session has no session key."""
+    uid = _make_user('active-day-race@example.com', limit=3600)
+    day = A.trial_oslo_day_str()
+    with A.app.app_context():
+        assert A.maybe_capture_user_active_day(uid, source='web') is True
+    # Simulate another worker/session with a fresh flask session.
+    with A.app.test_request_context('/history'):
+        assert A.maybe_capture_user_active_day(uid, source='web') is False
+    days = [e for e in ph_events.events if e['event'] == 'user_active_day']
+    assert len(days) == 1
+    assert days[0]['properties']['day'] == day
+
+
+def test_transcript_viewed_when_owner_opens_page(ph_events, trial_on):
+    from models import TranscriptionTask, db
+    uid = _make_user('view-transcript@example.com', limit=3600)
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='view-me',
+            user_id=uid,
+            episode_title='Viewed episode',
+            status='completed',
+            progress=100,
+            transcript_text='hello',
+        ))
+        db.session.commit()
+    client = _login(uid)
+    ph_events.events.clear()
+    resp = client.get('/transcription/view-me')
+    assert resp.status_code == 200
+    viewed = [e for e in ph_events.events if e['event'] == 'transcript_viewed']
+    assert len(viewed) == 1
+    assert viewed[0]['distinct_id'] == str(uid)
+    assert viewed[0]['properties'].get('status') == 'completed'
+    # Non-owner must not emit the event.
+    other = _make_user('not-owner-view@example.com', limit=3600)
+    other_client = _login(other)
+    ph_events.events.clear()
+    assert other_client.get('/transcription/view-me').status_code == 404
+    assert not [e for e in ph_events.events if e['event'] == 'transcript_viewed']
+
+
 def test_signup_country_skips_unknown_cf_uses_accept_language():
     with A.app.test_request_context(
             '/register',
