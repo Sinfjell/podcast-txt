@@ -3686,6 +3686,9 @@ def test_the_sitemap_lists_the_public_pages(trial_on):
     assert any(u.endswith('/docs/api') for u in locs)
     assert any(u.endswith('/whats-new') for u in locs)
     assert any(u.endswith('/ai') for u in locs)
+    assert any(u.endswith('/guides') for u in locs)
+    assert any(u.endswith('/guides/chatgpt') for u in locs)
+    assert any(u.endswith('/guides/claude') for u in locs)
     assert any(u.endswith('/guides/podcast-transcripts-in-chatgpt-and-claude') for u in locs)
     assert any(u.endswith('/register') for u in locs)
     assert not any('/settings' in u or '/history' in u for u in locs), (
@@ -3712,6 +3715,8 @@ def test_ai_landing_page_renders_and_has_faq_json_ld(trial_on):
     assert body.count('class="btn btn-primary"') == 1, 'one accent-filled button on /ai'
     assert '/docs/api' in body
     assert '/guides/podcast-transcripts-in-chatgpt-and-claude' in body
+    assert '/guides/chatgpt' in body
+    assert '/guides/claude' in body
     assert "you've already transcribed cost nothing" in body
     for question, _ in A.ai_faq_entries():
         assert question in body
@@ -3722,6 +3727,83 @@ def test_ai_landing_page_renders_and_has_faq_json_ld(trial_on):
     assert 'FAQPage' in types
     faq = next(n for n in data['@graph'] if n['@type'] == 'FAQPage')
     assert len(faq['mainEntity']) == len(A.ai_faq_entries())
+
+
+def test_guides_chatgpt_and_claude_pages(trial_on):
+    """Dedicated setup guides: HowTo + FAQPage JSON-LD, sitemap, llms.txt."""
+    import json as _json
+    import re as _re
+
+    client = A.app.test_client()
+    for path, title, faq_fn, must_contain in (
+        (
+            '/guides/chatgpt',
+            'Connect Podskrift to ChatGPT',
+            A.guide_chatgpt_faq_entries,
+            (
+                'Add custom MCP server',
+                'Create as a plugin',
+                'chatgpt.com/plugins',
+                'help.openai.com/en/articles/12584461',
+                'developers.openai.com/plugins/deploy/connect-chatgpt',
+                'Summarise the latest episode of Hard Fork',
+                "you've already transcribed are free",
+                'Settings → Connected apps',
+                'guides/chatgpt/01-customize-plugins',
+            ),
+        ),
+        (
+            '/guides/claude',
+            'Connect Podskrift to Claude',
+            A.guide_claude_faq_entries,
+            (
+                'Add custom connector',
+                'Customize',
+                'Connectors',
+                'support.claude.com/en/articles/11175166',
+                'Summarise the latest episode of Hard Fork',
+                "you've already transcribed are free",
+                'Settings → Connected apps',
+            ),
+        ),
+    ):
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        body = resp.data.decode()
+        assert title in body
+        assert body.count('class="btn btn-primary"') == 1, path
+        assert 'ds-guide' in body
+        for needle in must_contain:
+            assert needle in body, f'{path} missing {needle!r}'
+        faq_pairs = faq_fn()
+        for question, answer in faq_pairs:
+            assert question in body
+            assert answer in body
+        m = _re.search(r'<script type="application/ld\+json">(.*?)</script>', body, _re.S)
+        assert m, f'no JSON-LD on {path}'
+        data = _json.loads(m.group(1))
+        types = {n['@type'] for n in data['@graph']}
+        assert types >= {'WebPage', 'HowTo', 'FAQPage'}, types
+        howto = next(n for n in data['@graph'] if n['@type'] == 'HowTo')
+        assert len(howto['step']) >= 4
+        faq = next(n for n in data['@graph'] if n['@type'] == 'FAQPage')
+        assert len(faq['mainEntity']) == len(faq_pairs)
+        for entry, (question, answer) in zip(faq['mainEntity'], faq_pairs):
+            assert entry['name'] == question
+            assert entry['acceptedAnswer']['text'] == answer
+
+    hub = client.get('/guides')
+    assert hub.status_code == 200
+    hub_body = hub.data.decode()
+    assert '/guides/chatgpt' in hub_body and '/guides/claude' in hub_body
+    assert hub_body.count('class="btn btn-primary"') == 1
+
+    sitemap = client.get('/sitemap.xml').data.decode()
+    assert '/guides/chatgpt' in sitemap
+    assert '/guides/claude' in sitemap
+    assert '/guides<' in sitemap or '/guides</loc>' in sitemap or sitemap.count('/guides') >= 3
+    llms = client.get('/llms.txt').data.decode()
+    assert '/guides/chatgpt' in llms and '/guides/claude' in llms
 
 
 def test_guide_ai_transcripts_page_renders(trial_on):
@@ -3763,6 +3845,8 @@ def test_ai_in_llms_txt(trial_on):
     body = A.app.test_client().get('/llms.txt').data.decode()
     assert '/ai' in body
     assert '/guides/podcast-transcripts-in-chatgpt-and-claude' in body
+    assert '/guides/chatgpt' in body
+    assert '/guides/claude' in body
     assert 'ChatGPT' in body and 'Claude' in body
 
 
@@ -8210,25 +8294,26 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'history-via-mcp'
-    assert entries[1]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[2]['id'] == 'new-signup-120-min-trial'
-    assert entries[3]['id'] == 'new-look'
-    assert entries[4]['id'] == 'forgot-password'
-    assert entries[5]['id'] == 'share-listen-links'
-    assert entries[6]['id'] == 'keyboard-and-faster-loading'
+    assert entries[0]['id'] == 'mcp-visual-setup-guides'
+    assert entries[1]['id'] == 'history-via-mcp'
+    assert entries[2]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[3]['id'] == 'new-signup-120-min-trial'
+    assert entries[4]['id'] == 'new-look'
+    assert entries[5]['id'] == 'forgot-password'
+    assert entries[6]['id'] == 'share-listen-links'
+    assert entries[7]['id'] == 'keyboard-and-faster-loading'
     # Internal / auth fixes never ship as user-facing changelog entries.
     assert all(e['id'] != 'chatgpt-oauth-private-key-jwt' for e in entries)
-    assert entries[7]['id'] == 'show-landing-pages'
-    assert entries[8]['id'] == 'public-share-links'
-    assert entries[9]['id'] == 'unsubscribe-confirm-click'
-    assert entries[10]['id'] == 'partial-preview-minutes-wording'
-    assert entries[11]['id'] == 'partial-trial-preview'
-    assert entries[12]['id'] == 'own-key-billing-clarity'
-    assert entries[13]['id'] == 'clearer-missing-episode-audio'
-    assert entries[14]['id'] == 'new-signup-60-min-trial'
-    assert entries[15]['id'] == 'spotify-paste-robustness'
-    assert entries[16]['id'] == 'no-double-charge-restart'
+    assert entries[8]['id'] == 'show-landing-pages'
+    assert entries[9]['id'] == 'public-share-links'
+    assert entries[10]['id'] == 'unsubscribe-confirm-click'
+    assert entries[11]['id'] == 'partial-preview-minutes-wording'
+    assert entries[12]['id'] == 'partial-trial-preview'
+    assert entries[13]['id'] == 'own-key-billing-clarity'
+    assert entries[14]['id'] == 'clearer-missing-episode-audio'
+    assert entries[15]['id'] == 'new-signup-60-min-trial'
+    assert entries[16]['id'] == 'spotify-paste-robustness'
+    assert entries[17]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -12683,10 +12768,11 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'history-via-mcp'
-    assert entries[1]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[2]['id'] == 'new-signup-120-min-trial'
-    assert entries[3]['id'] == 'new-look'
+    assert entries[0]['id'] == 'mcp-visual-setup-guides'
+    assert entries[1]['id'] == 'history-via-mcp'
+    assert entries[2]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[3]['id'] == 'new-signup-120-min-trial'
+    assert entries[4]['id'] == 'new-look'
 
 
 # --------------------------------------------------------------------------
@@ -15230,3 +15316,44 @@ def test_oauth_settings_connected_apps_renders_with_stripe_buy_modal(
     # Revoke form must call csrf_token() successfully (hidden input present).
     assert 'settings/oauth/revoke' in body
     assert 'name="csrf_token"' in body
+
+
+def test_mcp_discovery_links_are_in_home_hero(trial_on):
+    from bs4 import BeautifulSoup
+    client = A.app.test_client()
+    page = BeautifulSoup(client.get('/').data, 'html.parser')
+    hero = page.select_one('.hp-hero')
+    for path in ('/guides/chatgpt', '/guides/claude'):
+        assert hero.select_one(f'a[href="{path}"]'), path
+        assert client.get(path).status_code == 200
+    promotion = page.select_one('#use-in-ai')
+    assert 'MCP is the connection' in promotion.get_text()
+    for image in promotion.select('img'):
+        assert client.get(image['src']).status_code == 200
+    assert 'Summarise the latest episode of Hard Fork' in promotion.get_text()
+
+
+@pytest.mark.parametrize('path, destination', [
+    ('/guides/chatgpt', 'https://chatgpt.com/plugins'),
+    ('/guides/claude', 'https://claude.ai/customize/connectors'),
+])
+def test_mcp_guides_start_with_app_link_and_copyable_url(trial_on, monkeypatch, path, destination):
+    from bs4 import BeautifulSoup
+    client = A.app.test_client()
+    page = BeautifulSoup(client.get(path).data, 'html.parser')
+    start = page.select_one('.ds-mcp-start')
+    assert start.select_one(f'a[href="{destination}"]')
+    with A.app.test_request_context(path):
+        expected_url = A._mcp_connector_url()
+    assert start.select_one('[data-ds-copy-source]').get_text().strip() == expected_url
+    assert start.select_one('[data-ds-copy]')
+    assert start.select_one('a[href="/register"]')
+    assert page.find('h2', string='Check that it worked')
+    for image in page.select('.ds-guide__figure img'):
+        assert client.get(image['src']).status_code == 200
+    for source in page.select('.ds-guide__figure source'):
+        assert client.get(source['srcset']).status_code == 200
+    if path.endswith('claude'):
+        assert 'Continue' in page.get_text()
+        assert 'Connector already exists' in page.get_text()
+        assert len(page.select('.ds-guide__figure')) >= 4

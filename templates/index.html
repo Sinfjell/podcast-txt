@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "components/macros.html" import snippet, button %}
 
 {% block title %}Spotify & podcast transcripts — Podskrift{% endblock %}
 {% block meta_description %}Paste a Spotify episode link or search any podcast, and get the full transcript as text and .srt. {{ language_count }} languages, powered by OpenAI Whisper.{% if trial_minutes %} First {{ trial_minutes }} minutes free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.{% endif %}{% endblock %}
@@ -167,6 +168,15 @@
         <p class="hp-sub">
             Paste a Spotify episode link, or search by podcast name. You get the full text and an .srt file in a few minutes.
         </p>
+        <section class="ds-mcp-hero" aria-labelledby="heroMcpHeading">
+            <h2 id="heroMcpHeading">Your podcasts, inside ChatGPT and Claude</h2>
+            <p>Connect Podskrift once. Ask for summaries, quotes and timestamps in your own chat.</p>
+            <div class="ds-mcp-actions">
+                {{ button("Set up in ChatGPT", variant="secondary", href=url_for('guide_chatgpt')) }}
+                {{ button("Set up in Claude", variant="secondary", href=url_for('guide_claude')) }}
+                <a href="#use-in-ai">See how it works ↓</a>
+            </div>
+        </section>
         {# Signup-trial marketing — anonymous only. Logged-in users have their own
            grant (often 180 for legacy accounts) and a balance banner above. #}
         {% if trial_minutes and not current_user.is_authenticated %}
@@ -278,23 +288,36 @@
     </div>
 </section>
 
-<section class="hp-section" aria-labelledby="aiHeading" id="use-in-ai">
-    <div>
-        <h2 id="aiHeading">Use it in ChatGPT and Claude</h2>
-        <p class="text-muted" style="margin-top: 8px; max-width: 36em;">
-            Add Podskrift as a connector and ask your AI to summarise or quote an episode.
-            Same minutes as the website — episodes you've already transcribed cost nothing to fetch again.
-        </p>
+<section class="hp-section ds-mcp-promotion" aria-labelledby="aiHeading" id="use-in-ai">
+    <h2 id="aiHeading">Ask your AI about a podcast</h2>
+    <p class="ds-mcp-lead">MCP is the connection that lets ChatGPT or Claude use Podskrift.
+        Your AI finds the episode, gets its transcript and answers your questions — without copying text between apps.</p>
+    <ol class="ds-mcp-flow">
+        <li><strong>Connect once</strong><span>Add Podskrift’s URL in your AI app and sign in to Podskrift.</span></li>
+        <li><strong>Ask for an episode</strong><span>Name a show or paste an episode link. Podskrift fetches or transcribes it.</span></li>
+        <li><strong>Keep the conversation going</strong><span>Ask for a summary, key ideas or quotes with timestamps.</span></li>
+    </ol>
+    <div class="ds-mcp-guides">
+        <a class="ds-mcp-guide" href="{{ url_for('guide_chatgpt') }}">
+            <img src="{{ url_for('static', filename='guides/chatgpt/02-add-custom-mcp-server.webp') }}"
+                 width="1100" height="319" loading="lazy" alt="ChatGPT Add menu showing Add custom MCP server.">
+            <h3>Connect to ChatGPT →</h3><p>Follow the illustrated setup guide on the web.</p>
+        </a>
+        <a class="ds-mcp-guide" href="{{ url_for('guide_claude') }}">
+            <img src="{{ url_for('static', filename='guides/claude/02-add-custom-connector.webp') }}"
+                 width="690" height="196" loading="lazy" alt="Claude Add menu showing Add custom connector.">
+            <h3>Connect to Claude →</h3><p>See where to add the URL, sign in and enable Podskrift.</p>
+        </a>
     </div>
-    <div class="hp-cta">
-        <p>
-            Connect once in ChatGPT, Claude, Cursor or Claude Code — then ask in plain language.
-            <a href="{{ url_for('guide_ai_transcripts') }}">Full guide</a>.
-        </p>
-        <div class="hp-cta-actions">
-            <a href="{{ url_for('ai_landing') }}" class="btn btn-secondary">Use in ChatGPT &amp; Claude</a>
-        </div>
+    <div class="ds-mcp-example">
+        <h3>Try this after connecting</h3>
+        {{ snippet("Summarise the latest episode of Hard Fork", copy_label='Copy prompt', what='prompt') }}
+        <p>Then ask: “Find three key quotes and include their timestamps.”</p>
     </div>
+    <p class="ds-mcp-lead">Uses the same Podskrift minutes as the website.
+        Episodes you've already transcribed cost nothing to fetch again on your account.
+        <a href="{{ url_for('pricing') }}">See pricing</a>.</p>
+    <p><a href="{{ url_for('ai_landing') }}">More apps: Cursor, VS Code and Claude Code →</a></p>
 </section>
 
 {# Three ways to use it. The trial card follows the conditions the page already

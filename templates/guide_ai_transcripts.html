@@ -6,79 +6,7 @@
 {% block canonical_url %}{% if public_base_url %}{{ public_base_url }}/guides/podcast-transcripts-in-chatgpt-and-claude{% else %}{{ request.base_url }}{% endif %}{% endblock %}
 
 {% block head_links %}
-<style>
-    .guide { max-width: 760px; margin: 24px auto 72px; }
-    .guide h1 {
-        font-size: clamp(30px, 5vw, 44px); font-weight: 800; letter-spacing: -0.03em;
-        line-height: 1.05; margin: 0 0 16px;
-    }
-    .guide .lead { font-size: 17px; line-height: 1.55; color: var(--ink); margin: 0 0 16px; }
-    .guide .lead-muted { font-size: 17px; line-height: 1.55; color: var(--muted); margin: 0 0 24px; }
-    .guide .connector {
-        display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
-        padding: 16px 0 0; margin: 0 0 48px; border-top: 1px solid var(--line);
-    }
-    .guide .connector strong { font-size: 14px; font-weight: 700; color: var(--muted); }
-    .guide .connector code {
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px;
-        background: var(--surface); border-radius: var(--radius-sm, 4px); padding: 6px 10px;
-        overflow-wrap: anywhere;
-    }
-    .guide h2 {
-        font-size: 24px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.2;
-        margin: 48px 0 16px; padding-top: 48px; border-top: 1px solid var(--line);
-    }
-    .guide h2:first-of-type { margin-top: 0; }
-    .guide p { font-size: 17px; line-height: 1.55; color: var(--ink); margin: 0 0 16px; }
-    .guide p.muted { color: var(--muted); }
-    .guide ol, .guide ul { margin: 0 0 16px; padding-left: 24px; font-size: 17px; line-height: 1.55; color: var(--ink); }
-    .guide li { margin-bottom: 10px; }
-    .guide li:last-child { margin-bottom: 0; }
-    .guide code {
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px;
-        background: var(--surface); border-radius: var(--radius-sm, 4px); padding: 2px 6px;
-        overflow-wrap: anywhere;
-    }
-    .guide pre {
-        background: var(--surface); border-radius: var(--radius); padding: 16px;
-        overflow-x: auto; margin: 0 0 16px; font-size: 14px; line-height: 1.55;
-    }
-    .guide pre code { background: none; padding: 0; font-size: inherit; }
-    .guide table {
-        width: 100%; border-collapse: collapse; margin: 0 0 24px; font-size: 15px;
-        display: block; overflow-x: auto;
-    }
-    .guide th, .guide td {
-        text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--line);
-        vertical-align: top;
-    }
-    .guide th {
-        color: var(--muted); font-weight: 700; font-size: 14px; background: var(--surface);
-        white-space: nowrap;
-    }
-    .guide td { color: var(--ink); }
-    .guide .note {
-        font-size: 15px; line-height: 1.5; color: var(--muted); margin: 16px 0 0;
-    }
-    .guide .try { list-style: none; padding: 0; margin: 0 0 16px; }
-    .guide .try li {
-        padding: 16px 0; border-top: 1px solid var(--line); margin: 0;
-        font-size: 17px; line-height: 1.55; color: var(--ink); font-weight: 500;
-    }
-    .guide .try li:last-child { border-bottom: 1px solid var(--line); }
-    .guide .faq details { border-top: 1px solid var(--line); }
-    .guide .faq details:last-child { border-bottom: 1px solid var(--line); }
-    .guide .faq summary {
-        cursor: pointer; display: flex; align-items: center; min-height: 52px;
-        padding: 4px 0; font-size: 17px; font-weight: 700;
-    }
-    .guide .faq details p { margin: 0 0 16px; color: var(--muted); }
-    .guide .cta {
-        display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px;
-        margin-top: 48px; padding-top: 48px; border-top: 1px solid var(--line);
-    }
-    .guide .cta .btn-text { min-height: 48px; }
-</style>
+<link rel="stylesheet" href="{{ url_for('static', filename='guide_ai_transcripts.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -102,6 +30,8 @@
         <strong>Connector URL</strong>
         <code>{{ mcp_connector_url }}</code>
         <a href="{{ url_for('ai_landing') }}">Quick start on /ai</a>
+        ·
+        <a href="{{ url_for('guides_index') }}">All guides</a>
     </div>
 
     <h2>How it works</h2>
@@ -136,6 +66,8 @@
         <li>In a new chat, type <code>@Podskrift</code> or just ask for an episode.</li>
     </ol>
     <p class="note">
+        Screenshots and a tighter walkthrough:
+        <a href="{{ url_for('guide_chatgpt') }}">Connect Podskrift to ChatGPT</a>.
         <strong>Availability:</strong> custom MCP servers depend on your ChatGPT plan and workspace.
         OpenAI currently lists full MCP support as a beta for Business, Enterprise and Edu.
         Pro can connect MCP servers with read/fetch permissions, and Free and Go don't have plugin extensions.
@@ -154,9 +86,11 @@
         <li>Go to <strong>Customize → Connectors</strong>.</li>
         <li>Click <strong>+ Add</strong>, then <strong>Add custom connector</strong>.</li>
         <li>Name it <strong>Podskrift</strong>, paste <code>{{ mcp_connector_url }}</code>, and click <strong>Continue</strong>.</li>
-        <li>Keep sign-in (OAuth), click <strong>Add</strong>, then <strong>Connect</strong>. Log in to Podskrift and click <strong>Allow</strong>.</li>
+        <li>Review the detected OAuth settings and keep sign-in enabled. Finish adding it, then click <strong>Connect</strong>. Log in to Podskrift and click <strong>Allow</strong>.</li>
     </ol>
     <p class="note">
+        Fuller walkthrough:
+        <a href="{{ url_for('guide_claude') }}">Connect Podskrift to Claude</a>.
         Custom connectors work on Claude Free (one connector), Pro, Max, Team and Enterprise,
         and in Claude Desktop on the same account.
         On Team and Enterprise, an Owner adds the connector under <strong>Organization settings → Connectors</strong> first.

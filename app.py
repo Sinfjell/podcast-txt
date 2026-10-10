@@ -8858,7 +8858,10 @@ USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscripti
 - [Podcasts]({public_url('podcasts_index')}): show landing pages for popular podcasts
 - [Pricing]({public_url('pricing')}): free trial, credit pack, or bring your own key
 - [Use in ChatGPT & Claude]({public_url('ai_landing')}): connect Podskrift MCP (`/mcp`) in ChatGPT, Claude, Cursor or Claude Code
-- [Guide: podcast transcripts in ChatGPT and Claude]({public_url('guide_ai_transcripts')}): step-by-step connector setup and what it costs
+- [Guides]({public_url('guides_index')}): setup walkthroughs for ChatGPT, Claude, and the long-form overview
+- [Connect Podskrift to ChatGPT]({public_url('guide_chatgpt')}): Plugins → custom MCP server → OAuth
+- [Connect Podskrift to Claude]({public_url('guide_claude')}): Customize → Connectors → custom connector
+- [Guide: podcast transcripts in ChatGPT and Claude]({public_url('guide_ai_transcripts')}): overview of connector setup and what it costs
 - [What's new]({public_url('whats_new')}): dated feature list, newest first (build in public)
 - [API docs]({public_url('api_docs')}): customer HTTP API (resolve → transcribe → transcript)
 - [How to find an RSS feed]({public_url('rss_help')}): for podcasts outside the search index
@@ -8892,6 +8895,9 @@ def sitemap_xml():
              public_url('podcasts_index'),
              public_url('pricing'),
              public_url('ai_landing'),
+             public_url('guides_index'),
+             public_url('guide_chatgpt'),
+             public_url('guide_claude'),
              public_url('guide_ai_transcripts'),
              public_url('whats_new'),
              public_url('api_docs'),
@@ -8989,40 +8995,146 @@ def guide_ai_faq_entries():
     ]
 
 
-def _faq_page_structured_data(page_url, page_name, page_description, faq_pairs):
-    """WebPage + FAQPage JSON-LD; FAQ answers must match the visible copy."""
+def _faq_page_structured_data(page_url, page_name, page_description, faq_pairs,
+                              howto=None):
+    """WebPage + FAQPage JSON-LD (optional HowTo). FAQ text must match the page."""
     import json as _json
-    data = {
-        '@context': 'https://schema.org',
-        '@graph': [
-            {
-                '@type': 'WebPage',
-                '@id': page_url + '#page',
-                'name': page_name,
-                'url': page_url,
-                'description': page_description,
-                'isPartOf': {
-                    '@type': 'WebSite',
-                    'name': 'Podskrift',
-                    'url': public_url('index'),
-                },
+    graph = [
+        {
+            '@type': 'WebPage',
+            '@id': page_url + '#page',
+            'name': page_name,
+            'url': page_url,
+            'description': page_description,
+            'isPartOf': {
+                '@type': 'WebSite',
+                'name': 'Podskrift',
+                'url': public_url('index'),
             },
-            {
-                '@type': 'FAQPage',
-                '@id': page_url + '#faq',
-                'mainEntity': [
-                    {
-                        '@type': 'Question',
-                        'name': question,
-                        'acceptedAnswer': {'@type': 'Answer', 'text': answer},
-                    }
-                    for question, answer in faq_pairs
-                ],
-            },
-        ],
-    }
+        },
+        {
+            '@type': 'FAQPage',
+            '@id': page_url + '#faq',
+            'mainEntity': [
+                {
+                    '@type': 'Question',
+                    'name': question,
+                    'acceptedAnswer': {'@type': 'Answer', 'text': answer},
+                }
+                for question, answer in faq_pairs
+            ],
+        },
+    ]
+    if howto:
+        howto_node = {
+            '@type': 'HowTo',
+            '@id': page_url + '#howto',
+            'name': howto['name'],
+            'description': howto.get('description') or page_description,
+            'step': [
+                {
+                    '@type': 'HowToStep',
+                    'position': i,
+                    'name': step['name'],
+                    'text': step['text'],
+                    **({'image': step['image']} if step.get('image') else {}),
+                }
+                for i, step in enumerate(howto['steps'], start=1)
+            ],
+        }
+        graph.insert(1, howto_node)
+    data = {'@context': 'https://schema.org', '@graph': graph}
     return (_json.dumps(data, ensure_ascii=False, indent=2)
             .replace('<', '\\u003c').replace('>', '\\u003e'))
+
+
+_GUIDE_EXAMPLE_PROMPTS = (
+    'Summarise the latest episode of Hard Fork',
+    'Get the last three episodes of Lenny\'s Podcast and list every book they mention',
+    'Find the exact sentence where the guest talks about pricing',
+    'Transcribe this episode and translate the summary into Norwegian',
+)
+
+
+def _guide_shot_stems(subdir):
+    """Return {stem: True} for PNG/WebP pairs under static/guides/<subdir>/."""
+    root = os.path.join(app.static_folder, 'guides', subdir)
+    found = {}
+    if not os.path.isdir(root):
+        return found
+    for name in os.listdir(root):
+        if name.endswith('.webp') or name.endswith('.png'):
+            stem, _ = os.path.splitext(name)
+            found[stem] = True
+    return found
+
+
+def _guide_static_url(subdir, stem):
+    """Absolute URL for a guide screenshot (webp preferred for JSON-LD)."""
+    folder = os.path.join(app.static_folder, 'guides', subdir)
+    for ext in ('.webp', '.png'):
+        if os.path.isfile(os.path.join(folder, stem + ext)):
+            return public_url('static', filename=f'guides/{subdir}/{stem}{ext}')
+    return None
+
+
+def guide_chatgpt_faq_entries():
+    """FAQ on /guides/chatgpt (mirrored in FAQPage JSON-LD)."""
+    return [
+        (
+            'Which ChatGPT plans can add Podskrift?',
+            'Full MCP is a beta for Business, Enterprise and Edu. Pro can '
+            'connect with read/fetch tools. Free and Go do not have plugin '
+            'extensions. Sources: OpenAI Help on developer mode and MCP apps, '
+            'and the Connect an MCP server docs.',
+        ),
+        (
+            'Do I need an API key?',
+            'No. You sign in to Podskrift with OAuth when you create the '
+            'plugin. ChatGPT never sees your OpenAI key.',
+        ),
+        (
+            'What does it cost?',
+            'Uses your Podskrift minutes. Episodes you\'ve already transcribed '
+            'are free to fetch again. ChatGPT\'s own reply is part of your '
+            'ChatGPT plan.',
+        ),
+        (
+            'How do I disconnect?',
+            'On Podskrift go to Settings → Connected apps and revoke access. '
+            'You can also remove the plugin under ChatGPT Customize → Plugins.',
+        ),
+    ]
+
+
+def guide_claude_faq_entries():
+    """FAQ on /guides/claude (mirrored in FAQPage JSON-LD)."""
+    return [
+        (
+            'Which Claude plans work?',
+            'Free (one custom connector), Pro, Max, Team and Enterprise, plus '
+            'Claude Desktop on the same account. On Team/Enterprise an Owner '
+            'adds the connector under Organization settings → Connectors first. '
+            'Source: Anthropic\'s custom connectors help article.',
+        ),
+        (
+            'Do I need an API key?',
+            'No. You sign in to Podskrift with OAuth when you Connect. Claude '
+            'never sees your OpenAI key.',
+        ),
+        (
+            'What does it cost?',
+            'Uses your Podskrift minutes. Episodes you\'ve already transcribed '
+            'are free to fetch again. Claude\'s own reply is part of your '
+            'Claude plan.',
+        ),
+        (
+            'How do I disconnect?',
+            'On Podskrift go to Settings → Connected apps and revoke access. '
+            'You can also remove the connector under Claude Customize → '
+            'Connectors.',
+        ),
+    ]
 
 
 @app.route('/ai')
@@ -9044,6 +9156,149 @@ def ai_landing():
     )
 
 
+@app.route('/guides')
+def guides_index():
+    """Hub for setup guides (ChatGPT, Claude, and the long-form overview)."""
+    return render_template('guides/index.html')
+
+
+@app.route('/guides/chatgpt')
+def guide_chatgpt():
+    """Setup guide: connect Podskrift to ChatGPT via custom MCP plugin."""
+    mcp_url = _mcp_connector_url()
+    faq = guide_chatgpt_faq_entries()
+    shots = _guide_shot_stems('chatgpt')
+    page_url = public_url('guide_chatgpt')
+    howto = {
+        'name': 'Connect Podskrift to ChatGPT',
+        'description': (
+            'Add Podskrift as a custom MCP server in ChatGPT Plugins, sign in, '
+            'and ask ChatGPT about any podcast episode.'
+        ),
+        'steps': [
+            {
+                'name': 'Open Customize, then Plugins',
+                'text': (
+                    'In ChatGPT on the web, open Customize in the sidebar and '
+                    'choose Plugins, or go to chatgpt.com/plugins.'
+                ),
+                'image': _guide_static_url('chatgpt', '01-customize-plugins'),
+            },
+            {
+                'name': 'Add a custom MCP server',
+                'text': 'Click Add, then choose Add custom MCP server.',
+                'image': _guide_static_url('chatgpt', '02-add-custom-mcp-server'),
+            },
+            {
+                'name': 'Fill in Podskrift and create the plugin',
+                'text': (
+                    f'Name it Podskrift, set Server URL to {mcp_url}, '
+                    'Authentication to OAuth, tick I understand and want to '
+                    'continue, then click Create as a plugin.'
+                ),
+                'image': _guide_static_url('chatgpt', '03-create-as-plugin'),
+            },
+            {
+                'name': 'Sign in to Podskrift and Allow',
+                'text': (
+                    'Log in to Podskrift when prompted and click Allow so '
+                    'ChatGPT can use your minutes.'
+                ),
+            },
+            {
+                'name': 'Try a prompt',
+                'text': 'In a new chat, ask: Summarise the latest episode of Hard Fork.',
+            },
+        ],
+    }
+    for step in howto['steps']:
+        if not step.get('image'):
+            step.pop('image', None)
+    return render_template(
+        'guides/chatgpt.html',
+        mcp_connector_url=mcp_url,
+        guide_faq=faq,
+        example_prompts=_GUIDE_EXAMPLE_PROMPTS,
+        shots=shots,
+        structured_data=_faq_page_structured_data(
+            page_url,
+            'Connect Podskrift to ChatGPT',
+            'Add Podskrift as a custom MCP server in ChatGPT Plugins. '
+            'Name it Podskrift, URL https://podskrift.com/mcp, Authentication OAuth.',
+            faq,
+            howto=howto,
+        ),
+    )
+
+
+@app.route('/guides/claude')
+def guide_claude():
+    """Setup guide: connect Podskrift to Claude via custom connector."""
+    mcp_url = _mcp_connector_url()
+    faq = guide_claude_faq_entries()
+    shots = _guide_shot_stems('claude')
+    page_url = public_url('guide_claude')
+    howto = {
+        'name': 'Connect Podskrift to Claude',
+        'description': (
+            'Add Podskrift as a custom connector in Claude, sign in, enable it '
+            'in a chat, and ask about any podcast episode.'
+        ),
+        'steps': [
+            {
+                'name': 'Open Customize → Connectors',
+                'text': 'In Claude, open Customize, then Connectors.',
+                'image': _guide_static_url('claude', '01-customize-connectors'),
+            },
+            {
+                'name': 'Add a custom connector',
+                'text': 'Click + Add, then Add custom connector.',
+                'image': _guide_static_url('claude', '02-add-custom-connector'),
+            },
+            {
+                'name': 'Name it Podskrift and paste the URL',
+                'text': (
+                    f'Name it Podskrift, paste {mcp_url}, click Continue, '
+                    'review the detected OAuth settings and finish adding it.'
+                ),
+                'image': _guide_static_url('claude', '03-connector-form'),
+            },
+            {
+                'name': 'Connect, sign in, and Allow',
+                'text': 'Click Connect, log in to Podskrift, and click Allow.',
+                'image': _guide_static_url('claude', '04-connect-allow'),
+            },
+            {
+                'name': 'Enable it in a chat',
+                'text': (
+                    'Open the tools menu in a chat, turn on Podskrift, then ask '
+                    'for an episode.'
+                ),
+                'image': _guide_static_url('claude', '05-enable-in-chat'),
+            },
+        ],
+    }
+    # Drop image keys that resolved to None so JSON-LD stays clean.
+    for step in howto['steps']:
+        if not step.get('image'):
+            step.pop('image', None)
+    return render_template(
+        'guides/claude.html',
+        mcp_connector_url=mcp_url,
+        guide_faq=faq,
+        example_prompts=_GUIDE_EXAMPLE_PROMPTS,
+        shots=shots,
+        structured_data=_faq_page_structured_data(
+            page_url,
+            'Connect Podskrift to Claude',
+            'Add Podskrift as a custom connector in Claude. Name it Podskrift, '
+            'URL https://podskrift.com/mcp — then ask Claude about any episode.',
+            faq,
+            howto=howto,
+        ),
+    )
+
+
 @app.route('/guides/podcast-transcripts-in-chatgpt-and-claude')
 def guide_ai_transcripts():
     """Long-form guide: podcast transcripts in ChatGPT and Claude via MCP."""
@@ -9057,7 +9312,7 @@ def guide_ai_transcripts():
             public_url('guide_ai_transcripts'),
             'Podcast Transcripts in ChatGPT and Claude',
             'Get podcast transcripts in ChatGPT and Claude: connect Podskrift '
-            'at podskrift.com/mcp, ask for any episode and let the chat '
+            'at podskrift.com/mcp, ask for an episode and let the chat '
             'summarise it.',
             faq,
         ),
