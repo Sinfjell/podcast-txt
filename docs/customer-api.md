@@ -283,29 +283,36 @@ return `401` with a `WWW-Authenticate` header pointing at that metadata.
 
 #### ChatGPT
 
-1. Turn on **Developer mode** (Settings → Apps → Advanced settings), or create
-   a custom app from workspace Apps settings. See OpenAI’s
-   [Developer mode and MCP apps](https://help.openai.com/en/articles/12584461)
-   and [plugin authentication](https://developers.openai.com/plugins/build/auth).
-2. Add a custom MCP server / plugin with URL `https://podskrift.com/mcp`.
-3. Choose OAuth. ChatGPT registers a client (dynamic client registration) and
+Verified against OpenAI’s
+[Developer mode and MCP apps](https://help.openai.com/en/articles/12584461)
+and [plugin authentication](https://developers.openai.com/plugins/build/auth)
+(Business / Enterprise / Edu; Pro has a narrower developer-mode path).
+
+1. Enable **Developer mode**: Settings → Apps → Advanced settings (Enterprise
+   members may need an admin to grant access first), or turn it on when
+   creating an app from Workspace settings → Apps → Create.
+2. Create a custom MCP app (Workspace settings → Apps → Create, or user
+   Settings → Apps → Create). Endpoint: `https://podskrift.com/mcp`.
+3. Choose OAuth. ChatGPT uses discovery + dynamic client registration, then
    opens Podskrift’s consent page — log in if needed, then **Allow**.
-4. Manage or disconnect the app under ChatGPT’s Apps settings; you can also
-   revoke it in Podskrift **Settings → Connected apps**.
+4. After the tool scan, create the app. Manage it under Settings → Apps
+   (Dev / custom label). Revoke also from Podskrift **Settings → Connected apps**.
 
 #### Claude.ai
 
-1. Open Claude → **Customize** / connectors → **Add custom connector** (wording
-   varies by plan). See Anthropic’s
-   [custom connectors](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
-   and [authentication for connectors](https://claude.com/docs/connectors/building/authentication).
-2. Set the MCP server URL to `https://podskrift.com/mcp`.
-3. Under authentication, choose sign-in (OAuth). Prefer **Register
-   automatically** (dynamic client registration) unless you already have a
-   client id. Claude’s hosted callback is
+Verified against Anthropic’s
+[custom connectors (remote MCP)](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
+and [authentication for connectors](https://claude.com/docs/connectors/building/authentication).
+
+1. Pro / Max: Customize → Connectors → **Add custom connector**. Team /
+   Enterprise: an Owner adds it under Organization settings → Connectors
+   (Custom → Web), then members Connect.
+2. Name the connector and set the MCP server URL to `https://podskrift.com/mcp`.
+3. Authentication: sign in (OAuth). OAuth client: **Register automatically**
+   (DCR) works with Podskrift; Claude’s hosted callback is
    `https://claude.ai/api/mcp/auth_callback`.
-4. Complete the Podskrift consent screen, then use tools in chat. Revoke from
-   Claude’s connector settings or Podskrift **Settings → Connected apps**.
+4. Complete the Podskrift consent screen, then enable the connector in chat.
+   Revoke from Claude’s connector settings or Podskrift **Settings → Connected apps**.
 
 OAuth access tokens last one hour; refresh tokens rotate and last 30 days.
 Transcription still uses your trial / paid minutes / BYOK — same metering as
