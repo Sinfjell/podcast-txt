@@ -479,20 +479,29 @@
                 : (d.result_offer_label || RESULT_OFFER_LABEL);
         }
         var buyBtn = el('resultOfferBuyBtn');
-        if (buyBtn && !buyBtn._bound) {
-            buyBtn._bound = true;
-            buyBtn.addEventListener('click', function() {
-                var pack = d.pack || MAIN_PACK;
-                phCapture('result_offer_clicked', {
-                    task_id: taskId,
-                    location: 'result',
-                    pack: pack,
+        if (buyBtn) {
+            // First-transcript dual offer: $5 is the one green button; Copy demotes.
+            if (d.next_episode_offer) {
+                buyBtn.className = 'btn btn-sm btn-primary';
+                demoteCopyButton();
+            } else {
+                buyBtn.className = 'btn btn-sm btn-secondary';
+            }
+            if (!buyBtn._bound) {
+                buyBtn._bound = true;
+                buyBtn.addEventListener('click', function() {
+                    var pack = d.pack || MAIN_PACK;
+                    phCapture('result_offer_clicked', {
+                        task_id: taskId,
+                        location: 'result',
+                        pack: pack,
+                    });
+                    if (typeof window.podskriftPaywallBuyClicked === 'function') {
+                        window.podskriftPaywallBuyClicked('result_offer', 'result', pack);
+                    }
+                    postBuyForm('result_offer', window.location.pathname, pack);
                 });
-                if (typeof window.podskriftPaywallBuyClicked === 'function') {
-                    window.podskriftPaywallBuyClicked('result_offer', 'result', pack);
-                }
-                postBuyForm('result_offer', window.location.pathname, pack);
-            });
+            }
         }
         var nextWrap = el('resultOfferNextWrap');
         var nextBtn = el('resultOfferNextBtn');
