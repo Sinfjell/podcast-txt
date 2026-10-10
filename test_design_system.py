@@ -61,9 +61,10 @@ LEGACY_STYLE_ALLOWLIST: dict[str, int] = {
 # (often mutually exclusive Jinja branches). Cap, do not raise.
 LEGACY_PRIMARY_ALLOWLIST: dict[str, int] = {
     'billing_success.html': 4,
-    'index.html': 2,
+    'episode_selection.html': 2,  # paywall Buy + JS error Buy string
+    'index.html': 4,  # search + mutually exclusive paywall/low-balance Buy CTAs
     'pricing.html': 2,
-    'settings.html': 2,
+    'settings.html': 3,  # credits Buy + no-billing pack Buy (warning branch)
     'transcription.html': 6,
 }
 

@@ -201,13 +201,14 @@
                 <p style="margin: 0 0 12px;">
                     Your OpenAI account still needs credit. Add it at
                     <a href="https://platform.openai.com/account/billing" target="_blank" rel="noopener">OpenAI billing</a>,
-                    or switch to Podskrift minutes instead (removes this OpenAI key):
+                    or use Podskrift minutes instead: {{ credit_pack_minutes }} min for ${{ credit_pack_price_usd }}
+                    (removes this OpenAI key):
                 </p>
-                <form method="POST" action="{{ url_for('billing_checkout') }}" style="margin: 0;">
+                <form method="POST" action="{{ url_for('billing_checkout') }}" style="margin: 0;" data-paywall-buy="openai_no_billing">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="source" value="openai_no_billing">
                     <input type="hidden" name="ph_sid" value="">
-                    <button type="submit" class="btn btn-secondary">{{ credit_pack_label }}</button>
+                    <button type="submit" class="btn btn-primary">{{ credit_pack_label }}</button>
                 </form>
                 <p style="margin: 12px 0 0; font-size: 14px;">{{ credit_pack_subline }}</p>
             </div>

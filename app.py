@@ -845,9 +845,15 @@ CREDIT_PACK_MINUTES = 300
 CREDIT_PACK_SECONDS = CREDIT_PACK_MINUTES * 60
 CREDIT_PACK_AMOUNT_CENTS = 500
 CREDIT_PACK_CURRENCY = 'usd'
-CREDIT_PACK_LABEL = 'Buy 5 hours for $5'
+CREDIT_PACK_LABEL = 'Buy 300 min for $5'
 #: Shown under Buy buttons — do not fold into CREDIT_PACK_LABEL (SKU/analytics).
 CREDIT_PACK_SUBLINE = 'One-time · 300 min · VAT incl.'
+#: Secondary result-page offer (not a second green primary when Copy is shown).
+RESULT_OFFER_LABEL = 'Transcribe your next episode: 300 min for $5'
+#: Partial-preview checkout CTA.
+UNLOCK_EPISODE_LABEL = 'Unlock the full episode'
+#: BYOK failure → pack offer (plain sentence; button uses CREDIT_PACK_LABEL).
+OWN_KEY_PACK_OFFER = 'Use Podskrift minutes instead: 300 min for $5'
 #: Trust line near Buy CTAs. Methods match Managed Payments dynamic PMs
 #: (cards + wallets); we never pass payment_method_types on the session.
 CREDIT_PACK_PAYMENT_HINT = (
@@ -1906,6 +1912,25 @@ def _is_openai_error(exc):
     return type(exc).__module__.split('.')[0] == 'openai'
 
 
+def pack_covers_episode_line(estimate_min):
+    """Episode-aware paywall subline when Stripe pack is available."""
+    if not estimate_min or estimate_min <= 0:
+        return ''
+    minutes = int(estimate_min)
+    price = f'{CREDIT_PACK_AMOUNT_CENTS / 100:.0f}'
+    return (
+        f'This episode is {minutes} min — {CREDIT_PACK_MINUTES} min for '
+        f'${price} covers it and more.'
+    )
+
+
+def _own_key_pack_offer_suffix():
+    """Appended to BYOK auth/billing errors when the credit pack is buyable."""
+    if not stripe_checkout_enabled():
+        return ''
+    return f' {OWN_KEY_PACK_OFFER}.'
+
+
 def describe_openai_error(exc, context='transcription', key_source=None):
     """Turn an OpenAI SDK exception into something a human can act on.
 
@@ -1915,20 +1940,23 @@ def describe_openai_error(exc, context='transcription', key_source=None):
     database. Never surface the provider's message verbatim.
 
     When `key_source` is ``'user'`` (BYOK), auth/billing copy also hints that
-    removing the key falls back to Podskrift free or paid minutes.
+    removing the key falls back to Podskrift free or paid minutes, and (when
+    Stripe is on) offers the credit pack so a zero-credit OpenAI account is
+    not a dead end.
     """
     byok = key_source == 'user'
     remove_hint = (
         ' Or remove the key in Settings to use Podskrift free or paid minutes '
         'instead.'
     )
+    pack_hint = _own_key_pack_offer_suffix() if byok else ''
     status = getattr(exc, 'status_code', None)
     if status == 401:
         msg = ('OpenAI rejected this key. It may have been deleted, or copied '
                'incompletely. Create a new one at platform.openai.com/api-keys '
                'and paste the whole thing.')
         if byok and context == 'transcription':
-            return msg + remove_hint
+            return msg + remove_hint + pack_hint
         return msg
     if status == 429:
         code = product_analytics.openai_error_code(exc)
@@ -1948,13 +1976,13 @@ def describe_openai_error(exc, context='transcription', key_source=None):
                'Add credit at platform.openai.com/account/billing — it can take a '
                'minute to activate — then retry this episode.')
         if byok:
-            msg += remove_hint
+            msg += remove_hint + pack_hint
         return msg + ' Nothing was charged by Podskrift.'
     if status == 403:
         msg = ('Your OpenAI key is not allowed to use the Whisper API. Check its '
                'permissions at platform.openai.com.')
         if byok and context == 'transcription':
-            return msg + remove_hint
+            return msg + remove_hint + pack_hint
         return msg
     if status and 500 <= status < 600:
         return 'OpenAI had a server error. Wait a moment and try again.'
@@ -5098,10 +5126,13 @@ def _show_openai_cost_estimates():
     )
 
 
-def _minutes_limit_actions(user_id, location='enqueue', reason=None):
+def _minutes_limit_actions(user_id, location='enqueue', reason=None,
+                           estimate_min=None):
     """CTA payload for out-of-minutes messages: Buy (if configured) + add key.
 
-    Analytics for paywall/offer are browser-side (paywall_shown / offer_shown).
+    Buy is the primary CTA when Stripe is on; BYOK is a secondary text link
+    in the browser. Analytics for paywall/offer are browser-side
+    (paywall_shown / offer_shown / paywall_buy_clicked / paywall_byok_clicked).
     """
     actions = []
     if stripe_checkout_enabled():
@@ -5109,14 +5140,17 @@ def _minutes_limit_actions(user_id, location='enqueue', reason=None):
             'label': CREDIT_PACK_LABEL,
             'url': url_for('billing_checkout'),
             'method': 'POST',
+            'primary': True,
         })
     actions.append({
         'label': 'Add OpenAI key →',
         'url': settings_openai_url(),
         'method': 'GET',
+        'primary': False,
     })
     # Keep the legacy single-action fields pointing at the primary CTA.
     primary = actions[0]
+    cover = pack_covers_episode_line(estimate_min) if estimate_min else ''
     return {
         'actions': actions,
         'action_url': primary['url'] if primary['method'] == 'GET' else settings_credits_url(),
@@ -5126,6 +5160,9 @@ def _minutes_limit_actions(user_id, location='enqueue', reason=None):
         'buy_url': url_for('billing_checkout') if stripe_checkout_enabled() else None,
         'paywall_reason': reason,
         'paywall_location': location,
+        'paywall_cover_line': cover if stripe_checkout_enabled() else '',
+        'byok_label': 'Add OpenAI key →',
+        'byok_url': settings_openai_url(),
     }
 
 
@@ -5459,17 +5496,20 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                             user_id, scope, 'start', source,
                             estimate_min=estimate_min, remaining_min=remaining // 60)
                         cost = openai_whisper_cost_usd(estimate_min)
+                        cover = pack_covers_episode_line(estimate_min)
+                        cover_bit = f' {cover}' if cover and stripe_checkout_enabled() else ''
                         payload = {
                             'error': (
                                 f'This episode is {estimate_min} minutes — too long for the '
                                 f'free trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). '
                                 f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
                                 f'or add your own OpenAI API key (about ${cost} at '
-                                f'OpenAI\'s rate).'
+                                f'OpenAI\'s rate).{cover_bit}'
                             ),
                         }
                         payload.update(_minutes_limit_actions(
-                            user_id, 'enqueue_episode_length', reason='episode_too_long'))
+                            user_id, 'enqueue_episode_length', reason='episode_too_long',
+                            estimate_min=estimate_min))
                         return payload, 402
 
                     scope = trial_refusal_scope(user, estimate)
@@ -5494,12 +5534,16 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                         buy_bit = (
                             f'{CREDIT_PACK_LABEL.lower()}, or '
                             if stripe_checkout_enabled() else '')
+                        cover = pack_covers_episode_line(estimate_min)
+                        cover_bit = (
+                            f' {cover}' if cover and stripe_checkout_enabled() else '')
                         message = (
                             f'This episode is about {estimate_min} minutes — longer than '
                             f'the {remaining // 60} free minutes you have left{paid_bit}. '
                             f'Pick a shorter episode, or {buy_bit}'
                             f'add your own OpenAI API key '
                             f'(about ${cost} for this one, billed by OpenAI).'
+                            f'{cover_bit}'
                         )
                         if remaining <= 0 and paid_left <= 0:
                             paywall_reason = (
@@ -5514,7 +5558,8 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web'):
                             _capture_trial_daily_budget_exhausted(user_id, source)
                     payload = {'error': message}
                     payload.update(_minutes_limit_actions(
-                        user_id, 'enqueue', reason=paywall_reason))
+                        user_id, 'enqueue', reason=paywall_reason,
+                        estimate_min=estimate_min))
                     return payload, 402
 
         task_id = str(uuid.uuid4())
@@ -6370,9 +6415,17 @@ def get_status(task_id):
     elif task.status == 'error':
         err = task.error_message or 'Unknown error'
         result['error'] = err
-        if _is_no_billing_error(err):
-            # Boolean only — never echo provider text or key material.
-            result['no_billing'] = True
+        own_key_pack = (
+            OWN_KEY_PACK_OFFER.lower() in err.lower()
+            or 'free or paid minutes' in err.lower()
+        )
+        if _is_no_billing_error(err) or (
+                own_key_pack and 'rejected this key' in err.lower()):
+            # BYOK auth/billing — offer pack + retry. Never echo key material.
+            if _is_no_billing_error(err):
+                result['no_billing'] = True
+            else:
+                result['own_key_invalid'] = True
             if task.source_audio_url:
                 duration_min = None
                 if task.audio_duration:
@@ -6392,6 +6445,7 @@ def get_status(task_id):
             if stripe_checkout_enabled():
                 result['buy_available'] = True
                 result['buy_label'] = CREDIT_PACK_LABEL
+                result['pack_offer'] = OWN_KEY_PACK_OFFER
         elif _is_minutes_limit_error(err):
             result['minutes_error'] = True
             reason = 'trial_exhausted'
@@ -6407,8 +6461,12 @@ def get_status(task_id):
                 reason = 'paid_exhausted'
             elif 'minutes you have left' in low:
                 reason = 'low_balance'
+            estimate_min = None
+            if task.audio_duration:
+                estimate_min = max(1, int(round(task.audio_duration / 60.0)))
             result.update(_minutes_limit_actions(
-                task.user_id, 'reconcile_status', reason=reason))
+                task.user_id, 'reconcile_status', reason=reason,
+                estimate_min=estimate_min))
 
     # Partial text so the page fills in as chunks land, rather than staying empty
     if task.transcript_text and task.status != 'completed':
@@ -6469,7 +6527,17 @@ def get_status(task_id):
                 getattr(current_user, 'openai_api_key', None))
             if stripe_checkout_enabled():
                 result['buy_available'] = True
-                result['buy_label'] = CREDIT_PACK_LABEL
+                result['buy_label'] = UNLOCK_EPISODE_LABEL
+                result['unlock_label'] = UNLOCK_EPISODE_LABEL
+        elif (
+            stripe_checkout_enabled()
+            and not bool(getattr(current_user, 'openai_api_key', None))
+        ):
+            # Calm secondary offer after a full transcript — not a second primary.
+            result['result_offer'] = True
+            result['result_offer_label'] = RESULT_OFFER_LABEL
+            result['buy_available'] = True
+            result['buy_label'] = CREDIT_PACK_LABEL
 
     return jsonify(result)
 

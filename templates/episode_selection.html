@@ -148,18 +148,17 @@
                 {# Buy submits via form= — must not nest a <form> inside episodeForm
                    or browsers drop the inner form and close episodeForm early,
                    leaving #transcribeBtn outside any form. JS opens the buy modal. #}
-                <button type="submit" class="btn btn-sm btn-secondary"
+                <button type="submit" class="btn btn-sm btn-primary"
                         form="buyFormEpisodeSelection"
                         id="paywallBuyBtn"
+                        data-paywall-buy="episode_selection"
                         style="display: inline-flex; margin: 8px 6px 8px 0;">
                     {{ credit_pack_label }}
                 </button>
                 <span class="form-hint" style="display: block; margin: 4px 0 2px;">{{ credit_pack_payment_hint }}</span>
                 <span style="display: block; margin: 0 0 8px;">{{ credit_pack_subline }}</span>
-                or
                 {% endif %}
-                <a href="{{ url_for('settings') }}#openai">Add your OpenAI API key</a>
-                — the app is free; OpenAI bills you.
+                <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="episode_selection">Add your own OpenAI key</a>
             </p>
         </div>
     </div>
@@ -352,9 +351,15 @@ document.addEventListener('DOMContentLoaded', function() {
         if (buyAvailable && STRIPE_BUY) {
             var buyBtn = document.createElement('button');
             buyBtn.type = 'button';
-            buyBtn.className = 'btn btn-sm btn-secondary';
+            buyBtn.className = 'btn btn-sm btn-primary';
             buyBtn.textContent = BUY_LABEL;
-            buyBtn.addEventListener('click', function() { postBuyForm('buy_modal_episode'); });
+            buyBtn.addEventListener('click', function() {
+                if (typeof window.podskriftPaywallBuyClicked === 'function') {
+                    window.podskriftPaywallBuyClicked(
+                        'episode_selection_error', paywallReason || 'trial_exhausted');
+                }
+                postBuyForm('buy_modal_episode');
+            });
             actions.appendChild(buyBtn);
             if (typeof window.podskriftPaywallShown === 'function') {
                 window.podskriftPaywallShown(
@@ -367,7 +372,8 @@ document.addEventListener('DOMContentLoaded', function() {
         var keyLink = document.createElement('a');
         keyLink.href = SETTINGS_OPENAI;
         keyLink.textContent = 'Add OpenAI key →';
-        keyLink.className = 'btn btn-sm btn-secondary';
+        keyLink.className = 'ds-link-button';
+        keyLink.setAttribute('data-paywall-byok', 'episode_selection_error');
         actions.appendChild(keyLink);
         box.appendChild(actions);
         startError.appendChild(box);
