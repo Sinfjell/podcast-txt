@@ -3685,10 +3685,96 @@ def test_the_sitemap_lists_the_public_pages(trial_on):
     assert any(u.endswith('/rss-help') for u in locs)
     assert any(u.endswith('/docs/api') for u in locs)
     assert any(u.endswith('/whats-new') for u in locs)
+    assert any(u.endswith('/ai') for u in locs)
+    assert any(u.endswith('/guides/podcast-transcripts-in-chatgpt-and-claude') for u in locs)
     assert any(u.endswith('/register') for u in locs)
     assert not any('/settings' in u or '/history' in u for u in locs), (
         'a session-only page is in the sitemap'
     )
+
+
+def test_ai_landing_page_renders_and_has_faq_json_ld(trial_on):
+    """ /ai is the public MCP discovery page — calm copy, one primary CTA."""
+    import json as _json
+    import re as _re
+    resp = A.app.test_client().get('/ai')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'Use Podskrift in ChatGPT and Claude' in body
+    assert 'Copy connector URL' in body
+    assert 'ai_page_viewed' in body
+    assert 'ai_connector_url_copied' in body
+    assert '/mcp' in body
+    assert 'chatgpt.com/plugins' in body
+    assert 'Add custom MCP server' in body
+    assert 'Add custom connector' in body
+    assert 'class="btn btn-primary"' in body
+    assert body.count('class="btn btn-primary"') == 1, 'one accent-filled button on /ai'
+    assert '/docs/api' in body
+    assert '/guides/podcast-transcripts-in-chatgpt-and-claude' in body
+    assert "you've already transcribed cost nothing" in body
+    for question, _ in A.ai_faq_entries():
+        assert question in body
+    m = _re.search(r'<script type="application/ld\+json">(.*?)</script>', body, _re.S)
+    assert m, 'no JSON-LD on /ai'
+    data = _json.loads(m.group(1))
+    types = {n['@type'] for n in data['@graph']}
+    assert 'FAQPage' in types
+    faq = next(n for n in data['@graph'] if n['@type'] == 'FAQPage')
+    assert len(faq['mainEntity']) == len(A.ai_faq_entries())
+
+
+def test_guide_ai_transcripts_page_renders(trial_on):
+    """Long-form guide: exact FAQ + Plugins ChatGPT steps + FAQPage JSON-LD."""
+    import json as _json
+    import re as _re
+    path = '/guides/podcast-transcripts-in-chatgpt-and-claude'
+    resp = A.app.test_client().get(path)
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'Podcast transcripts in ChatGPT and Claude' in body
+    assert 'chatgpt.com/plugins' in body
+    assert 'Add custom MCP server' in body
+    assert 'Create as a plugin' in body
+    assert 'Add custom connector' in body
+    assert 'Free (one connector)' in body or 'one connector' in body
+    assert "you've already transcribed cost nothing" in body
+    assert body.count('class="btn btn-primary"') == 1
+    faq_pairs = A.guide_ai_faq_entries()
+    assert len(faq_pairs) == 5
+    for question, answer in faq_pairs:
+        assert question in body
+        assert answer in body
+    m = _re.search(r'<script type="application/ld\+json">(.*?)</script>', body, _re.S)
+    assert m, 'no JSON-LD on the guide'
+    data = _json.loads(m.group(1))
+    faq = next(n for n in data['@graph'] if n['@type'] == 'FAQPage')
+    assert len(faq['mainEntity']) == 5
+    for entry, (question, answer) in zip(faq['mainEntity'], faq_pairs):
+        assert entry['name'] == question
+        assert entry['acceptedAnswer']['text'] == answer
+    sitemap = A.app.test_client().get('/sitemap.xml').data.decode()
+    assert path in sitemap
+    llms = A.app.test_client().get('/llms.txt').data.decode()
+    assert path in llms
+
+
+def test_ai_in_llms_txt(trial_on):
+    body = A.app.test_client().get('/llms.txt').data.decode()
+    assert '/ai' in body
+    assert '/guides/podcast-transcripts-in-chatgpt-and-claude' in body
+    assert 'ChatGPT' in body and 'Claude' in body
+
+
+def test_nav_and_footer_link_to_ai(trial_on):
+    body = A.app.test_client().get('/').data.decode()
+    assert 'href="/ai"' in body
+    assert 'Use in ChatGPT' in body
+    # Home discovery section below the main flow.
+    assert 'id="use-in-ai"' in body
+    assert '/guides/podcast-transcripts-in-chatgpt-and-claude' in body
+    pricing = A.app.test_client().get('/pricing').data.decode()
+    assert 'href="/ai"' in pricing
 
 
 def test_the_page_says_what_it_is_before_asking_for_anything(trial_on):
@@ -6405,26 +6491,34 @@ def test_mcp_batch_consumes_rate_limit(mcp_on, monkeypatch):
 
 
 def test_mcp_docs_section_only_when_flag_on(trial_on, monkeypatch):
+    # Assert against the markdown source, not the full HTML page: the What's
+    # new toast embeds changelog copy that can mention /mcp independently.
     monkeypatch.setenv('MCP_ENABLED', '0')
     monkeypatch.setenv('MCP_OAUTH_ENABLED', '0')
-    off = A.app.test_client().get('/docs/api').data.decode()
-    assert 'MCP' not in off
-    assert 'podskrift.com/mcp' not in off
+    off = A.load_customer_api_markdown()
+    assert 'MCP (ChatGPT / Claude / Cursor)' not in off
+    assert '## MCP' not in off
 
     monkeypatch.setenv('MCP_ENABLED', '1')
     monkeypatch.setenv('MCP_OAUTH_ENABLED', '0')
-    on = A.app.test_client().get('/docs/api').data.decode()
+    on = A.load_customer_api_markdown()
     assert 'MCP (ChatGPT / Claude / Cursor)' in on
     assert 'podskrift.com/mcp' in on
     assert 'search_podcasts' in on
     # OAuth connector steps stay hidden until MCP_OAUTH_ENABLED.
     assert 'OAuth for ChatGPT' not in on
     assert 'claude.ai/api/mcp/auth_callback' not in on
+    assert 'chatgpt.com/plugins' not in on
 
     monkeypatch.setenv('MCP_OAUTH_ENABLED', '1')
-    oauth_on = A.app.test_client().get('/docs/api').data.decode()
+    oauth_on = A.load_customer_api_markdown()
     assert 'OAuth for ChatGPT and Claude.ai' in oauth_on
     assert 'claude.ai/api/mcp/auth_callback' in oauth_on
+    assert 'chatgpt.com/plugins' in oauth_on
+    assert 'Add custom MCP server' in oauth_on
+    assert 'Create as a plugin' in oauth_on
+    assert 'Add custom' in oauth_on and 'connector' in oauth_on
+    assert 'Customize → Connectors' in oauth_on
 
 
 def test_mcp_path_not_redirected_off_canonical_host(monkeypatch):
@@ -7466,21 +7560,22 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'new-signup-120-min-trial'
-    assert entries[1]['id'] == 'new-look'
-    assert entries[2]['id'] == 'forgot-password'
-    assert entries[3]['id'] == 'share-listen-links'
-    assert entries[4]['id'] == 'keyboard-and-faster-loading'
-    assert entries[5]['id'] == 'show-landing-pages'
-    assert entries[6]['id'] == 'public-share-links'
-    assert entries[7]['id'] == 'unsubscribe-confirm-click'
-    assert entries[8]['id'] == 'partial-preview-minutes-wording'
-    assert entries[9]['id'] == 'partial-trial-preview'
-    assert entries[10]['id'] == 'own-key-billing-clarity'
-    assert entries[11]['id'] == 'clearer-missing-episode-audio'
-    assert entries[12]['id'] == 'new-signup-60-min-trial'
-    assert entries[13]['id'] == 'spotify-paste-robustness'
-    assert entries[14]['id'] == 'no-double-charge-restart'
+    assert entries[0]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[1]['id'] == 'new-signup-120-min-trial'
+    assert entries[2]['id'] == 'new-look'
+    assert entries[3]['id'] == 'forgot-password'
+    assert entries[4]['id'] == 'share-listen-links'
+    assert entries[5]['id'] == 'keyboard-and-faster-loading'
+    assert entries[6]['id'] == 'show-landing-pages'
+    assert entries[7]['id'] == 'public-share-links'
+    assert entries[8]['id'] == 'unsubscribe-confirm-click'
+    assert entries[9]['id'] == 'partial-preview-minutes-wording'
+    assert entries[10]['id'] == 'partial-trial-preview'
+    assert entries[11]['id'] == 'own-key-billing-clarity'
+    assert entries[12]['id'] == 'clearer-missing-episode-audio'
+    assert entries[13]['id'] == 'new-signup-60-min-trial'
+    assert entries[14]['id'] == 'spotify-paste-robustness'
+    assert entries[15]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -9808,6 +9903,12 @@ def test_anon_nav_has_pricing_link(trial_on):
     body = A.app.test_client().get('/').data.decode()
     assert 'href="/pricing"' in body or "/pricing" in body
     assert '>Pricing<' in body
+
+
+def test_anon_nav_has_ai_link(trial_on):
+    body = A.app.test_client().get('/').data.decode()
+    assert 'href="/ai"' in body
+    assert 'Use in ChatGPT' in body
 
 
 def test_pricing_page_renders_without_stripe(trial_on):

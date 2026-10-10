@@ -291,20 +291,22 @@ tokens), Dynamic Client Registration, and
 #### ChatGPT
 
 Verified against OpenAI’s
-[Developer mode and MCP apps](https://help.openai.com/en/articles/12584461)
-and [plugin authentication](https://developers.openai.com/plugins/build/auth)
-(Business / Enterprise / Edu; Pro has a narrower developer-mode path).
+[connect an MCP server](https://developers.openai.com/plugins/deploy/connect-chatgpt)
+and [developer mode and MCP apps](https://help.openai.com/en/articles/12584461).
 
-1. Enable **Developer mode**: Settings → Apps → Advanced settings (Enterprise
-   members may need an admin to grant access first), or turn it on when
-   creating an app from Workspace settings → Apps → Create.
-2. Create a custom MCP app (Workspace settings → Apps → Create, or user
-   Settings → Apps → Create). Endpoint: `https://podskrift.com/mcp`.
-3. Choose OAuth. ChatGPT prefers CIMD when advertised (stable
-   `https://chatgpt.com/oauth/…/client.json` as `client_id`) and can fall back
-   to DCR. Complete Podskrift’s consent page — log in if needed, then **Allow**.
-4. After the tool scan, create the app. Manage it under Settings → Apps
-   (Dev / custom label). Revoke also from Podskrift **Settings → Connected apps**.
+1. Go to [chatgpt.com/plugins](https://chatgpt.com/plugins), select **+**, then
+   **Add custom MCP server**.
+2. Name it Podskrift and set the URL to `https://podskrift.com/mcp`.
+3. Choose **OAuth**, accept the risk warning, and select **Create as a plugin**.
+4. Complete Podskrift’s consent page — log in if needed, then **Allow**.
+5. In a chat, type `@Podskrift` or ask for an episode.
+
+**Availability:** full MCP is a beta for Business, Enterprise and Edu. Pro can
+connect with read/fetch permissions. Free and Go don’t have plugin extensions.
+Web only (not mobile). Business/Enterprise workspaces may need an admin to
+allow custom MCP servers. On some personal accounts the option only appears
+after **Developer mode** under Settings → Security and login. Revoke from
+ChatGPT’s plugin settings or Podskrift **Settings → Connected apps**.
 
 #### Claude.ai
 
@@ -312,18 +314,27 @@ Verified against Anthropic’s
 [custom connectors (remote MCP)](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
 and [authentication for connectors](https://claude.com/docs/connectors/building/authentication).
 
-1. Pro / Max: Customize → Connectors → **Add custom connector**. Team /
-   Enterprise: an Owner adds it under Organization settings → Connectors
-   (Custom → Web), then members Connect.
-2. Name the connector and set the MCP server URL to `https://podskrift.com/mcp`.
-3. Authentication: sign in (OAuth). OAuth client: **Register automatically**
-   (DCR) works with Podskrift; Claude’s hosted callback is
-   `https://claude.ai/api/mcp/auth_callback`.
-4. Complete the Podskrift consent screen, then enable the connector in chat.
-   Revoke from Claude’s connector settings or Podskrift **Settings → Connected apps**.
+1. Go to **Customize → Connectors**, click **+ Add**, then **Add custom
+   connector**.
+2. Name it Podskrift and set the MCP server URL to `https://podskrift.com/mcp`.
+3. Keep sign-in (OAuth), click **Add**, then **Connect**. Complete Podskrift’s
+   consent screen.
+4. On Team / Enterprise, an Owner adds the connector under Organization
+   settings → Connectors first; members then Connect.
+
+Works on Claude Free (one custom connector), Pro, Max, Team and Enterprise,
+and in Claude Desktop on the same account. OAuth client registration (DCR)
+works with Podskrift; Claude’s hosted callback is
+`https://claude.ai/api/mcp/auth_callback`. Revoke from Claude’s connector
+settings or Podskrift **Settings → Connected apps**.
 
 OAuth access tokens last one hour; refresh tokens rotate and last 30 days.
 Transcription still uses your trial / paid minutes / BYOK — same metering as
-the website and the `psk_…` API key path.
+the website and the `psk_…` API key path. Episodes you’ve already transcribed
+cost nothing to fetch again on your account.
+
+A shorter setup page lives at
+[podskrift.com/ai](https://podskrift.com/ai); the full walkthrough is
+[podcast transcripts in ChatGPT and Claude](https://podskrift.com/guides/podcast-transcripts-in-chatgpt-and-claude).
 <!-- /mcp-oauth-section -->
 <!-- /mcp-section -->

@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+{% block title %}Podcast Transcripts in ChatGPT and Claude | Podskrift{% endblock %}
+{% block meta_description %}Get podcast transcripts in ChatGPT and Claude: connect Podskrift at podskrift.com/mcp, ask for any episode and let the chat summarise it.{% if trial_minutes %} {{ trial_minutes }} free minutes.{% endif %}{% endblock %}
+{% block og_title %}Podcast Transcripts in ChatGPT and Claude | Podskrift{% endblock %}
+{% block og_description %}Connect Podskrift to ChatGPT or Claude, ask for any episode by name, and let the chat summarise the transcript.{% endblock %}
+{% block canonical_url %}{% if public_base_url %}{{ public_base_url }}/guides/podcast-transcripts-in-chatgpt-and-claude{% else %}{{ request.base_url }}{% endif %}{% endblock %}
+
+{% block head_links %}
+<style>
+    .guide { max-width: 760px; margin: 24px auto 72px; }
+    .guide h1 {
+        font-size: clamp(30px, 5vw, 44px); font-weight: 800; letter-spacing: -0.03em;
+        line-height: 1.05; margin: 0 0 16px;
+    }
+    .guide .lead { font-size: 17px; line-height: 1.55; color: var(--ink); margin: 0 0 16px; }
+    .guide .lead-muted { font-size: 17px; line-height: 1.55; color: var(--muted); margin: 0 0 24px; }
+    .guide .connector {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+        padding: 16px 0 0; margin: 0 0 48px; border-top: 1px solid var(--line);
+    }
+    .guide .connector strong { font-size: 14px; font-weight: 700; color: var(--muted); }
+    .guide .connector code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px;
+        background: var(--surface); border-radius: var(--radius-sm, 4px); padding: 6px 10px;
+        overflow-wrap: anywhere;
+    }
+    .guide h2 {
+        font-size: 24px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.2;
+        margin: 48px 0 16px; padding-top: 48px; border-top: 1px solid var(--line);
+    }
+    .guide h2:first-of-type { margin-top: 0; }
+    .guide p { font-size: 17px; line-height: 1.55; color: var(--ink); margin: 0 0 16px; }
+    .guide p.muted { color: var(--muted); }
+    .guide ol, .guide ul { margin: 0 0 16px; padding-left: 24px; font-size: 17px; line-height: 1.55; color: var(--ink); }
+    .guide li { margin-bottom: 10px; }
+    .guide li:last-child { margin-bottom: 0; }
+    .guide code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px;
+        background: var(--surface); border-radius: var(--radius-sm, 4px); padding: 2px 6px;
+        overflow-wrap: anywhere;
+    }
+    .guide pre {
+        background: var(--surface); border-radius: var(--radius); padding: 16px;
+        overflow-x: auto; margin: 0 0 16px; font-size: 14px; line-height: 1.55;
+    }
+    .guide pre code { background: none; padding: 0; font-size: inherit; }
+    .guide table {
+        width: 100%; border-collapse: collapse; margin: 0 0 24px; font-size: 15px;
+        display: block; overflow-x: auto;
+    }
+    .guide th, .guide td {
+        text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--line);
+        vertical-align: top;
+    }
+    .guide th {
+        color: var(--muted); font-weight: 700; font-size: 14px; background: var(--surface);
+        white-space: nowrap;
+    }
+    .guide td { color: var(--ink); }
+    .guide .note {
+        font-size: 15px; line-height: 1.5; color: var(--muted); margin: 16px 0 0;
+    }
+    .guide .try { list-style: none; padding: 0; margin: 0 0 16px; }
+    .guide .try li {
+        padding: 16px 0; border-top: 1px solid var(--line); margin: 0;
+        font-size: 17px; line-height: 1.55; color: var(--ink); font-weight: 500;
+    }
+    .guide .try li:last-child { border-bottom: 1px solid var(--line); }
+    .guide .faq details { border-top: 1px solid var(--line); }
+    .guide .faq details:last-child { border-bottom: 1px solid var(--line); }
+    .guide .faq summary {
+        cursor: pointer; display: flex; align-items: center; min-height: 52px;
+        padding: 4px 0; font-size: 17px; font-weight: 700;
+    }
+    .guide .faq details p { margin: 0 0 16px; color: var(--muted); }
+    .guide .cta {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px;
+        margin-top: 48px; padding-top: 48px; border-top: 1px solid var(--line);
+    }
+    .guide .cta .btn-text { min-height: 48px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<article class="guide">
+    <h1>Podcast transcripts in ChatGPT and Claude</h1>
+    <p class="lead">
+        Connect Podskrift to ChatGPT or Claude and you can ask for any podcast episode by name:
+        “Summarise the latest episode of Lenny's Podcast.”
+        Your AI finds the show and the episode through Podskrift, Podskrift transcribes the audio,
+        and the chat writes the summary. It also works in Cursor, VS Code and Claude Code.
+    </p>
+    <p class="lead-muted">
+        Transcription uses your Podskrift minutes.
+        {% if trial_minutes %}
+        New accounts get {{ trial_minutes }} free minutes, and
+        {% endif %}
+        episodes you've already transcribed cost nothing to fetch again.
+    </p>
+
+    <div class="connector">
+        <strong>Connector URL</strong>
+        <code>{{ mcp_connector_url }}</code>
+        <a href="{{ url_for('ai_landing') }}">Quick start on /ai</a>
+    </div>
+
+    <h2>How it works</h2>
+    <p>
+        Podskrift adds four tools to your AI. You don't need to name them. Just ask in plain language.
+    </p>
+    <table>
+        <thead>
+            <tr><th scope="col">Tool</th><th scope="col">What it does</th></tr>
+        </thead>
+        <tbody>
+            <tr><td><code>search_podcasts</code></td><td>Finds a show by name</td></tr>
+            <tr><td><code>list_episodes</code></td><td>Lists a show's recent episodes</td></tr>
+            <tr><td><code>get_transcript</code></td><td>Returns the transcript, or starts transcription and shows the cost in minutes</td></tr>
+            <tr><td><code>get_transcript_status</code></td><td>Checks a running job until the text is ready</td></tr>
+        </tbody>
+    </table>
+    <p class="muted">
+        Before a new transcription starts, your AI sees what it costs and how many minutes you'll have left.
+        A one-hour episode takes a few minutes. If you don't have enough minutes, nothing starts, and you get a link to buy more.
+    </p>
+    <p class="muted">
+        Podskrift only makes the transcript. The summary, translation or Q&amp;A comes from your chat app, in whatever style you ask for.
+    </p>
+
+    <h2>Connect Podskrift to ChatGPT</h2>
+    <ol>
+        <li>Go to <a href="https://chatgpt.com/plugins" rel="noopener" target="_blank">chatgpt.com/plugins</a>, select <strong>+</strong>, then <strong>Add custom MCP server</strong>.</li>
+        <li>Name it <strong>Podskrift</strong> and enter <code>{{ mcp_connector_url }}</code>.</li>
+        <li>Choose <strong>OAuth</strong>, accept the risk warning, and select <strong>Create as a plugin</strong>.</li>
+        <li>Log in to Podskrift and click <strong>Allow</strong>.</li>
+        <li>In a new chat, type <code>@Podskrift</code> or just ask for an episode.</li>
+    </ol>
+    <p class="note">
+        <strong>Availability:</strong> custom MCP servers depend on your ChatGPT plan and workspace.
+        OpenAI currently lists full MCP support as a beta for Business, Enterprise and Edu.
+        Pro can connect MCP servers with read/fetch permissions, and Free and Go don't have plugin extensions.
+        MCP apps work on the web, not in the mobile app.
+        In a Business or Enterprise workspace, an admin has to allow custom MCP servers.
+        On some personal accounts, the option only appears after you turn on <strong>Developer mode</strong>
+        under Settings → Security and login.
+        Sources:
+        <a href="https://developers.openai.com/plugins/deploy/connect-chatgpt" rel="noopener" target="_blank">OpenAI: connect an MCP server</a>
+        ·
+        <a href="https://help.openai.com/en/articles/12584461" rel="noopener" target="_blank">OpenAI Help: developer mode and MCP apps</a>.
+    </p>
+
+    <h2>Connect Podskrift to Claude (claude.ai and Desktop)</h2>
+    <ol>
+        <li>Go to <strong>Customize → Connectors</strong>.</li>
+        <li>Click <strong>+ Add</strong>, then <strong>Add custom connector</strong>.</li>
+        <li>Name it <strong>Podskrift</strong>, paste <code>{{ mcp_connector_url }}</code>, and click <strong>Continue</strong>.</li>
+        <li>Keep sign-in (OAuth), click <strong>Add</strong>, then <strong>Connect</strong>. Log in to Podskrift and click <strong>Allow</strong>.</li>
+    </ol>
+    <p class="note">
+        Custom connectors work on Claude Free (one connector), Pro, Max, Team and Enterprise,
+        and in Claude Desktop on the same account.
+        On Team and Enterprise, an Owner adds the connector under <strong>Organization settings → Connectors</strong> first.
+        Source:
+        <a href="https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp" rel="noopener" target="_blank">Anthropic: custom connectors using remote MCP</a>.
+    </p>
+
+    <h2>Connect Cursor, VS Code or Claude Code</h2>
+    <p>
+        Use the URL and sign in, or create an API key under <a href="{{ url_for('settings') }}">Settings</a> and send it as a header.
+    </p>
+    <ul>
+        <li><strong>Claude Code:</strong> <code>claude mcp add --transport http podskrift {{ mcp_connector_url }}</code>, then run <code>/mcp</code> to sign in.</li>
+        <li><strong>Cursor:</strong> add <code>{{ mcp_connector_url }}</code> to <code>~/.cursor/mcp.json</code>, optionally with <code>"headers": { "Authorization": "Bearer psk_…" }</code>.</li>
+        <li><strong>VS Code:</strong> run <strong>MCP: Add Server</strong>, choose HTTP and enter <code>{{ mcp_connector_url }}</code>.</li>
+    </ul>
+    <p class="muted">Full configuration examples are in the <a href="{{ url_for('api_docs') }}">API docs</a>.</p>
+
+    <h2>What it costs</h2>
+    <table>
+        <thead>
+            <tr><th scope="col">Option</th><th scope="col">Price</th></tr>
+        </thead>
+        <tbody>
+            {% if trial_minutes %}
+            <tr><td>Free trial</td><td>{{ trial_minutes }} minutes on signup</td></tr>
+            {% endif %}
+            {% if stripe_configured %}
+            <tr><td>Minute pack</td><td>${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} minutes, one-time</td></tr>
+            {% endif %}
+            <tr><td>Your own OpenAI key</td><td>Pay OpenAI directly, about ${{ openai_hourly_cost }} per hour of audio</td></tr>
+        </tbody>
+    </table>
+    <p class="muted">
+        Fetching an episode you've already transcribed costs 0 minutes, in any connected app.
+        The chat app's summary is part of your ChatGPT or Claude plan.
+        See <a href="{{ url_for('pricing') }}">pricing</a>.
+    </p>
+
+    <h2>Things to try</h2>
+    <ul class="try">
+        <li>“Summarise the newest episode of [show] in five bullets.”</li>
+        <li>“Get the last three episodes of [show] and list every book they mention.”</li>
+        <li>“Find the exact sentence where the guest talks about pricing.”</li>
+        <li>“Transcribe this episode and translate the summary into Norwegian.”</li>
+    </ul>
+
+    <h2>FAQ</h2>
+    <div class="faq">
+        {% for question, answer in guide_faq %}
+        <details>
+            <summary>{{ question }}</summary>
+            <p>{{ answer }}</p>
+        </details>
+        {% endfor %}
+    </div>
+
+    <div class="cta">
+        <a href="{{ url_for('register') }}" class="btn btn-primary">Create a free account</a>
+        <a href="{{ url_for('api_docs') }}" class="btn btn-text">Read the API docs</a>
+    </div>
+</article>
+{% endblock %}

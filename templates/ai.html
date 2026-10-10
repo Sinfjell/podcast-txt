@@ -1,0 +1,337 @@
+{% extends "base.html" %}
+{% block title %}Use Podskrift in ChatGPT and Claude — Podskrift{% endblock %}
+{% block meta_description %}Connect Podskrift to ChatGPT, Claude, Cursor or Claude Code. Ask your AI to summarise or quote any podcast episode. Uses your minutes; episodes you've already transcribed cost nothing.{% endblock %}
+{% block og_title %}Use Podskrift in ChatGPT and Claude{% endblock %}
+{% block og_description %}Add https://podskrift.com/mcp as a connector, sign in, and ask your AI about any podcast.{% endblock %}
+{% block container_class %}container-wide{% endblock %}
+
+{% block head_links %}
+<style>
+    .ai-wrap { max-width: 760px; margin: 0 auto; padding: 24px 0 72px; }
+    .ai-title {
+        font-size: clamp(30px, 5vw, 44px); font-weight: 800; letter-spacing: -0.03em;
+        line-height: 1.05; margin: 0 0 12px;
+    }
+    .ai-lead { font-size: 17px; line-height: 1.55; color: var(--muted); margin: 0 0 24px; max-width: 36em; }
+    .ai-example {
+        background: var(--surface); border-radius: var(--radius); padding: 20px 24px; margin: 0 0 36px;
+    }
+    .ai-example-label {
+        font-size: 12px; font-weight: 700; letter-spacing: 0.08em; color: var(--muted);
+        margin: 0 0 8px; text-transform: none;
+    }
+    .ai-example p {
+        margin: 0; font-size: 17px; line-height: 1.55; color: var(--ink); font-weight: 500;
+    }
+    .ai-cta { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 0 0 48px; }
+    .ai-cta .form-hint { margin: 0; }
+
+    .ai-section { border-top: 1px solid var(--line); padding: 48px 0; }
+    .ai-section h2 {
+        font-size: 24px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.2;
+        margin: 0 0 24px;
+    }
+    .ai-section > p { font-size: 17px; line-height: 1.55; color: var(--muted); margin: 0 0 24px; max-width: 36em; }
+
+    .ai-steps { display: flex; flex-direction: column; gap: 0; }
+    .ai-step {
+        display: grid; grid-template-columns: 1fr; gap: 8px;
+        padding: 20px 0; border-top: 1px solid var(--line);
+    }
+    .ai-step:first-child { border-top: none; padding-top: 0; }
+    .ai-step h3 { font-size: 17px; font-weight: 700; margin: 0; line-height: 1.4; }
+    .ai-step p { margin: 0; font-size: 15px; line-height: 1.5; color: var(--muted); }
+    .ai-url-row {
+        display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; margin-top: 4px;
+    }
+    .ai-url-row code {
+        flex: 1 1 220px; display: flex; align-items: center; min-height: 48px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px;
+        background: var(--paper); border: 1px solid var(--line-strong); border-radius: var(--radius);
+        padding: 0 16px; color: var(--ink); overflow-wrap: anywhere;
+    }
+
+    .ai-app-panel { display: none; }
+    .ai-app-panel.active { display: block; }
+    .ai-app-panel ol { margin: 0; padding-left: 24px; color: var(--ink); font-size: 17px; line-height: 1.55; }
+    .ai-app-panel li { margin-bottom: 12px; }
+    .ai-app-panel li:last-child { margin-bottom: 0; }
+    .ai-app-panel p { margin: 16px 0 0; font-size: 15px; line-height: 1.5; color: var(--muted); }
+    .ai-app-panel pre {
+        background: var(--surface); border-radius: var(--radius); padding: 16px;
+        overflow-x: auto; margin: 16px 0 0; font-size: 14px; line-height: 1.55;
+    }
+    .ai-app-panel pre code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        background: none; padding: 0; font-size: inherit;
+    }
+    .ai-app-panel code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px;
+        background: var(--surface); border-radius: var(--radius-sm, 4px); padding: 2px 6px;
+    }
+
+    .ai-price {
+        font-size: 17px; line-height: 1.55; color: var(--ink); margin: 0;
+        max-width: 36em;
+    }
+
+    .ai-faq details { border-top: 1px solid var(--line); }
+    .ai-faq details:last-child { border-bottom: 1px solid var(--line); }
+    .ai-faq summary {
+        cursor: pointer; display: flex; align-items: center; min-height: 52px;
+        padding: 4px 0; font-size: 17px; font-weight: 700;
+    }
+    .ai-faq details p { margin: 0 0 16px; color: var(--muted); font-size: 17px; line-height: 1.55; }
+
+    .ai-dev { font-size: 15px; color: var(--muted); margin: 0; }
+
+    @media (max-width: 640px) {
+        .ai-wrap { padding-bottom: 48px; }
+        .ai-section { padding: 36px 0; }
+        .tabs { gap: 16px; overflow-x: auto; }
+        .tab { white-space: nowrap; flex-shrink: 0; }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="ai-wrap">
+    <h1 class="ai-title">Use Podskrift in ChatGPT and Claude</h1>
+    <p class="ai-lead">
+        Ask your AI to summarise, quote or search a podcast episode — Podskrift fetches or transcribes it for you.
+    </p>
+
+    <div class="ai-example">
+        <p class="ai-example-label">Ask your AI</p>
+        <p>“Summarise the latest episode of Hard Fork”</p>
+    </div>
+
+    <div class="ai-cta">
+        <button type="button" class="btn btn-primary" id="aiCopyUrl" data-url="{{ mcp_connector_url }}">
+            Copy connector URL
+        </button>
+        <span class="form-hint" id="aiCopyStatus" aria-live="polite"></span>
+    </div>
+
+    <section class="ai-section" aria-labelledby="aiStepsHeading">
+        <h2 id="aiStepsHeading">How to connect</h2>
+        <div class="ai-steps">
+            <div class="ai-step">
+                <h3>Copy the connector URL</h3>
+                <p>Your app needs this address to reach Podskrift.</p>
+                <div class="ai-url-row">
+                    <code id="aiMcpUrl">{{ mcp_connector_url }}</code>
+                </div>
+            </div>
+            <div class="ai-step">
+                <h3>Add it as a connector in your app</h3>
+                <p>Paste the URL where your app asks for an MCP server. Steps for each app are below.</p>
+            </div>
+            <div class="ai-step">
+                <h3>Sign in to Podskrift</h3>
+                <p>Approve access when prompted. Transcription uses the same minutes as the website.</p>
+            </div>
+        </div>
+    </section>
+
+    <section class="ai-section" aria-labelledby="aiAppsHeading">
+        <h2 id="aiAppsHeading">Per app</h2>
+        <div class="tabs" id="aiAppTabs" role="tablist" aria-label="Apps">
+            <button type="button" class="tab active" role="tab" id="tab-chatgpt"
+                    aria-selected="true" aria-controls="panel-chatgpt" data-panel="chatgpt">ChatGPT</button>
+            <button type="button" class="tab" role="tab" id="tab-claude"
+                    aria-selected="false" aria-controls="panel-claude" data-panel="claude">Claude</button>
+            <button type="button" class="tab" role="tab" id="tab-cursor"
+                    aria-selected="false" aria-controls="panel-cursor" data-panel="cursor">Cursor / VS Code</button>
+            <button type="button" class="tab" role="tab" id="tab-claude-code"
+                    aria-selected="false" aria-controls="panel-claude-code" data-panel="claude-code">Claude Code</button>
+        </div>
+
+        <div class="ai-app-panel active" role="tabpanel" id="panel-chatgpt"
+             aria-labelledby="tab-chatgpt">
+            <ol>
+                <li>Go to <a href="https://chatgpt.com/plugins" rel="noopener" target="_blank">chatgpt.com/plugins</a>, select <strong>+</strong>, then <strong>Add custom MCP server</strong>.</li>
+                <li>Name it Podskrift and enter <code>{{ mcp_connector_url }}</code>.</li>
+                <li>Choose <strong>OAuth</strong>, accept the risk warning, and select <strong>Create as a plugin</strong>.</li>
+                <li>Log in to Podskrift and click Allow, then ask for an episode in a new chat.</li>
+            </ol>
+            <p>
+                Full MCP is a beta for Business, Enterprise and Edu. Pro can connect with read/fetch.
+                Free and Go don’t have plugin extensions. Web only — not the mobile app.
+                Business/Enterprise may need an admin to allow custom MCP servers; some personal accounts need Developer mode under Settings → Security and login.
+                Sources:
+                <a href="https://developers.openai.com/plugins/deploy/connect-chatgpt" rel="noopener" target="_blank">Connect an MCP server</a>
+                ·
+                <a href="https://help.openai.com/en/articles/12584461" rel="noopener" target="_blank">Developer mode and MCP apps</a>.
+            </p>
+        </div>
+
+        <div class="ai-app-panel" role="tabpanel" id="panel-claude"
+             aria-labelledby="tab-claude" hidden>
+            <ol>
+                <li>Go to Customize → Connectors, then <strong>+ Add</strong> → <strong>Add custom connector</strong>.</li>
+                <li>Name it Podskrift, paste <code>{{ mcp_connector_url }}</code>, and continue.</li>
+                <li>Keep sign-in (OAuth), add the connector, then Connect — log in to Podskrift and click Allow.</li>
+            </ol>
+            <p>
+                Works on Claude Free (one connector), Pro, Max, Team and Enterprise, and in Claude Desktop.
+                On Team/Enterprise an Owner adds it under Organization settings → Connectors first.
+                Source:
+                <a href="https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp" rel="noopener" target="_blank">Claude custom connectors</a>.
+            </p>
+        </div>
+
+        <div class="ai-app-panel" role="tabpanel" id="panel-cursor"
+             aria-labelledby="tab-cursor" hidden>
+            <ol>
+                <li>In Cursor, open Settings → MCP, or edit <code>~/.cursor/mcp.json</code> (project: <code>.cursor/mcp.json</code>). In VS Code, use MCP settings or your workspace MCP config.</li>
+                <li>Add a remote server with URL <code>{{ mcp_connector_url }}</code> — no API key required when OAuth is available.</li>
+                <li>Save, enable the server, and complete Podskrift sign-in in the browser when prompted.</li>
+            </ol>
+            <pre><code>{
+  "mcpServers": {
+    "podskrift": {
+      "url": "{{ mcp_connector_url }}"
+    }
+  }
+}</code></pre>
+            <p>
+                You can still use a Podskrift API key in a Bearer header instead — see
+                <a href="{{ url_for('api_docs') }}">API docs</a>.
+            </p>
+        </div>
+
+        <div class="ai-app-panel" role="tabpanel" id="panel-claude-code"
+             aria-labelledby="tab-claude-code" hidden>
+            <ol>
+                <li>In a terminal (outside a Claude Code session), add the remote HTTP server:</li>
+            </ol>
+            <pre><code>claude mcp add --transport http podskrift {{ mcp_connector_url }}</code></pre>
+            <ol start="2">
+                <li>Start Claude Code and complete Podskrift sign-in when prompted.</li>
+                <li>Ask for a show or episode — tools appear under the podskrift server name.</li>
+            </ol>
+            <p>
+                Use <code>--scope user</code> to register it for all projects. Docs:
+                <a href="https://code.claude.com/docs/en/mcp" rel="noopener" target="_blank">Claude Code MCP</a>.
+            </p>
+        </div>
+    </section>
+
+    <section class="ai-section" aria-labelledby="aiPriceHeading">
+        <h2 id="aiPriceHeading">Pricing</h2>
+        <p class="ai-price">
+            Uses your Podskrift minutes (trial, credit pack, or your own OpenAI key).
+            Episodes you've already transcribed cost nothing to fetch again on your account.
+            <a href="{{ url_for('pricing') }}">Full pricing</a>.
+        </p>
+    </section>
+
+    <section class="ai-section" aria-labelledby="aiFaqHeading">
+        <h2 id="aiFaqHeading">Questions</h2>
+        <div class="ai-faq">
+            {% for question, answer in ai_faq %}
+            <details>
+                <summary>{{ question }}</summary>
+                <p>{{ answer }}</p>
+            </details>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section class="ai-section" style="border-bottom: none; padding-bottom: 0;">
+        <p class="ai-dev">
+            Prefer a longer walkthrough?
+            <a href="{{ url_for('guide_ai_transcripts') }}">Podcast transcripts in ChatGPT and Claude</a>.
+            Building scripts or agents? Use the HTTP API with a key from Settings —
+            <a href="{{ url_for('api_docs') }}">API docs</a>.
+        </p>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    var MCP_URL = {{ mcp_connector_url|tojson }};
+    var tabs = document.getElementById('aiAppTabs');
+    var panels = document.querySelectorAll('.ai-app-panel');
+
+    function showPanel(id) {
+        panels.forEach(function (panel) {
+            var on = panel.id === 'panel-' + id;
+            panel.classList.toggle('active', on);
+            panel.hidden = !on;
+        });
+        if (!tabs) return;
+        tabs.querySelectorAll('.tab').forEach(function (tab) {
+            var on = tab.getAttribute('data-panel') === id;
+            tab.classList.toggle('active', on);
+            tab.setAttribute('aria-selected', on ? 'true' : 'false');
+        });
+    }
+
+    if (tabs) {
+        tabs.addEventListener('click', function (e) {
+            var tab = e.target.closest('.tab');
+            if (!tab || !tabs.contains(tab)) return;
+            showPanel(tab.getAttribute('data-panel'));
+        });
+    }
+
+    function setStatus(msg) {
+        var el = document.getElementById('aiCopyStatus');
+        if (el) el.textContent = msg || '';
+    }
+
+    function trackCopied() {
+        try {
+            if (window.posthog) {
+                posthog.capture('ai_connector_url_copied', {});
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    function copyUrl() {
+        var done = function () {
+            setStatus('Copied');
+            trackCopied();
+            window.setTimeout(function () { setStatus(''); }, 2000);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(MCP_URL).then(done).catch(function () {
+                fallbackCopy(done);
+            });
+        } else {
+            fallbackCopy(done);
+        }
+    }
+
+    function fallbackCopy(done) {
+        var ta = document.createElement('textarea');
+        ta.value = MCP_URL;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+            document.execCommand('copy');
+            done();
+        } catch (e) {
+            setStatus('Select and copy the URL above');
+        }
+        document.body.removeChild(ta);
+    }
+
+    var btn = document.getElementById('aiCopyUrl');
+    if (btn) btn.addEventListener('click', copyUrl);
+
+    try {
+        if (window.posthog) {
+            posthog.capture('ai_page_viewed', {});
+        }
+    } catch (e) { /* ignore */ }
+})();
+</script>
+{% endblock %}

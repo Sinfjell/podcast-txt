@@ -271,6 +271,7 @@
                 For scripts and agents calling the Podskrift API. You don't need this to
                 transcribe on the website — for that, use the OpenAI API key above.
                 <a href="{{ url_for('api_docs') }}">How to use</a>
+                · <a href="{{ url_for('ai_landing') }}">Use in ChatGPT &amp; Claude</a>
             </p>
 
             {% if new_api_key %}
@@ -320,6 +321,7 @@
                 transcribe on the website — for that, use the OpenAI API key above.
                 <a href="{{ url_for('api_docs') }}">How to use</a>
                 · <a href="{{ url_for('api_docs') }}">Docs</a>
+                · <a href="{{ url_for('ai_landing') }}">Use in ChatGPT &amp; Claude</a>
             </p>
             <form method="POST" action="{{ url_for('settings_generate_api_key') }}">
                 <button type="submit" class="btn btn-secondary">Create</button>

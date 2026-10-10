@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "use-in-chatgpt-claude-cursor",
+      "date": "2026-10-10",
+      "title": "Use Podskrift inside ChatGPT, Claude and Cursor",
+      "summary": "Add https://podskrift.com/mcp as a connector, sign in, and ask your AI to summarise or quote any podcast. Same minutes as the website; episodes you've already transcribed cost nothing to fetch again."
+    },
+    {
       "id": "new-signup-120-min-trial",
       "date": "2026-10-09",
       "title": "New accounts get 120 free minutes",

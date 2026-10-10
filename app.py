@@ -8754,6 +8754,8 @@ USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscripti
 - [Home]({public_url('index')}): search, paste Spotify/Apple/RSS, pick an episode, transcribe
 - [Podcasts]({public_url('podcasts_index')}): show landing pages for popular podcasts
 - [Pricing]({public_url('pricing')}): free trial, credit pack, or bring your own key
+- [Use in ChatGPT & Claude]({public_url('ai_landing')}): connect Podskrift MCP (`/mcp`) in ChatGPT, Claude, Cursor or Claude Code
+- [Guide: podcast transcripts in ChatGPT and Claude]({public_url('guide_ai_transcripts')}): step-by-step connector setup and what it costs
 - [What's new]({public_url('whats_new')}): dated feature list, newest first (build in public)
 - [API docs]({public_url('api_docs')}): customer HTTP API (resolve → transcribe → transcript)
 - [How to find an RSS feed]({public_url('rss_help')}): for podcasts outside the search index
@@ -8786,6 +8788,8 @@ def sitemap_xml():
     pages = [public_url('index'),
              public_url('podcasts_index'),
              public_url('pricing'),
+             public_url('ai_landing'),
+             public_url('guide_ai_transcripts'),
              public_url('whats_new'),
              public_url('api_docs'),
              public_url('rss_help'),
@@ -8800,6 +8804,163 @@ def sitemap_xml():
            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
            f'{urls}\n</urlset>\n')
     return Response(xml, mimetype='application/xml')
+
+
+def _mcp_connector_url():
+    base = PUBLIC_BASE_URL or request.url_root.rstrip('/')
+    return base + '/mcp'
+
+
+def ai_faq_entries():
+    """FAQ shown on /ai and mirrored in that page's FAQPage JSON-LD."""
+    return [
+        (
+            'What is MCP?',
+            'MCP (Model Context Protocol) lets an AI app call tools on a remote '
+            'server. Podskrift’s connector at /mcp can look up shows, start a '
+            'transcription, and return the transcript so ChatGPT, Claude or '
+            'Cursor can answer from the episode text.',
+        ),
+        (
+            'What does it cost?',
+            'Same as the website: your free trial minutes, a credit pack, or '
+            'your own OpenAI key. Episodes you\'ve already transcribed cost '
+            'nothing to fetch again on your account.',
+        ),
+        (
+            'Is my data private?',
+            'Transcripts stay on your Podskrift account. The AI app only sees '
+            'what its tools return for your signed-in session. Revoke access '
+            'anytime under Settings → Connected apps.',
+        ),
+        (
+            'Which apps work?',
+            'ChatGPT (web; plan-dependent — full MCP beta for Business/'
+            'Enterprise/Edu, Pro read/fetch; not Free/Go), Claude.ai and '
+            'Desktop (Free one connector, Pro, Max, Team, Enterprise), '
+            'Cursor, VS Code, and Claude Code.',
+        ),
+    ]
+
+
+def guide_ai_faq_entries():
+    """Exactly the five FAQ pairs on the ChatGPT/Claude guide (and its JSON-LD)."""
+    pack = (
+        f'buy a ${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} pack of '
+        f'{CREDIT_PACK_MINUTES} minutes'
+        if stripe_checkout_enabled()
+        else 'buy more minutes'
+    )
+    return [
+        (
+            'Can ChatGPT or Claude summarise a podcast episode?',
+            'Not from the audio alone. They need a transcript. With Podskrift '
+            'connected, they can find the episode, get the transcript and '
+            'summarise it in the same chat.',
+        ),
+        (
+            'Do I need an API key?',
+            'Not for ChatGPT or Claude. You log in to Podskrift when you '
+            'connect. Cursor, VS Code and Claude Code can use either a login '
+            'or an API key from Settings.',
+        ),
+        (
+            'Which ChatGPT plans can add the connector?',
+            'It depends on your plan and workspace. OpenAI lists full MCP '
+            'support as a beta for Business, Enterprise and Edu, and '
+            'read/fetch access for Pro. Free and Go don\'t have plugin '
+            'extensions. If Add custom MCP server doesn\'t appear under '
+            'Plugins, your account can\'t add one yet.',
+        ),
+        (
+            'What happens when my minutes run out?',
+            f'Podskrift won\'t start the job. Your AI gets the cost and a '
+            f'link to {pack}, or you can add your own OpenAI key in Settings.',
+        ),
+        (
+            'Can it transcribe Spotify-exclusive podcasts?',
+            'No. Podskrift needs a public RSS feed, and Spotify exclusives '
+            'don\'t have one. Most shows on Spotify are also published '
+            'publicly, and those work.',
+        ),
+    ]
+
+
+def _faq_page_structured_data(page_url, page_name, page_description, faq_pairs):
+    """WebPage + FAQPage JSON-LD; FAQ answers must match the visible copy."""
+    import json as _json
+    data = {
+        '@context': 'https://schema.org',
+        '@graph': [
+            {
+                '@type': 'WebPage',
+                '@id': page_url + '#page',
+                'name': page_name,
+                'url': page_url,
+                'description': page_description,
+                'isPartOf': {
+                    '@type': 'WebSite',
+                    'name': 'Podskrift',
+                    'url': public_url('index'),
+                },
+            },
+            {
+                '@type': 'FAQPage',
+                '@id': page_url + '#faq',
+                'mainEntity': [
+                    {
+                        '@type': 'Question',
+                        'name': question,
+                        'acceptedAnswer': {'@type': 'Answer', 'text': answer},
+                    }
+                    for question, answer in faq_pairs
+                ],
+            },
+        ],
+    }
+    return (_json.dumps(data, ensure_ascii=False, indent=2)
+            .replace('<', '\\u003c').replace('>', '\\u003e'))
+
+
+@app.route('/ai')
+def ai_landing():
+    """Public landing: connect Podskrift MCP in ChatGPT, Claude, Cursor, etc."""
+    mcp_url = _mcp_connector_url()
+    return render_template(
+        'ai.html',
+        mcp_connector_url=mcp_url,
+        ai_faq=ai_faq_entries(),
+        structured_data=_faq_page_structured_data(
+            public_url('ai_landing'),
+            'Use Podskrift in ChatGPT and Claude',
+            'Connect Podskrift to ChatGPT, Claude, Cursor or Claude Code '
+            'via MCP. Ask your AI to summarise or quote any podcast episode.',
+            ai_faq_entries(),
+        ),
+        trial_minutes=advertised_trial_minutes(),
+    )
+
+
+@app.route('/guides/podcast-transcripts-in-chatgpt-and-claude')
+def guide_ai_transcripts():
+    """Long-form guide: podcast transcripts in ChatGPT and Claude via MCP."""
+    mcp_url = _mcp_connector_url()
+    faq = guide_ai_faq_entries()
+    return render_template(
+        'guide_ai_transcripts.html',
+        mcp_connector_url=mcp_url,
+        guide_faq=faq,
+        structured_data=_faq_page_structured_data(
+            public_url('guide_ai_transcripts'),
+            'Podcast Transcripts in ChatGPT and Claude',
+            'Get podcast transcripts in ChatGPT and Claude: connect Podskrift '
+            'at podskrift.com/mcp, ask for any episode and let the chat '
+            'summarise it.',
+            faq,
+        ),
+        trial_minutes=advertised_trial_minutes(),
+        stripe_configured=stripe_checkout_enabled(),
+    )
 
 
 @app.route('/pricing')
