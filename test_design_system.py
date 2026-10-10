@@ -129,7 +129,7 @@ STYLE_ATTR_RE = re.compile(r'\bstyle\s*=', re.I)
 # drift (100px, 99px, 50rem and 9999px all draw a pill).
 RADIUS_DECL_RE = re.compile(r'border(?:-[a-z]+)*-radius\s*:\s*([^;}"\n]+)', re.I)
 RADIUS_ALLOWED_RE = re.compile(
-    r'^(?:(?:var\(--radius(?:-sm|-md)?(?:,\s*var\(--radius\))?\)|0|2px|50%|inherit)\s*)+$',
+    r'^(?:(?:var\(--radius(?:-sm|-md|-lg)?(?:,\s*var\(--radius\))?\)|0|2px|50%|inherit)\s*)+$',
     re.I,
 )
 BOX_SHADOW_RE = re.compile(
@@ -161,6 +161,33 @@ PRIMARY_VARIANT_RE = re.compile(
     r'''\bbutton\s*\((?:[^()]|\([^()]*\))*?["']primary["']''',
     re.I | re.S,
 )
+
+
+# The only two layered effects in the product (DESIGN.md, Elevation & Depth),
+# each pinned to one rule in components.css. Anything else is still banned.
+SANCTIONED_EFFECTS: dict[str, str] = {
+    'backdrop-filter': '.nav-bar::before',      # glass sticky header
+    'radial-gradient': '.ds-cmd__box::before',  # glow behind the hero search
+}
+
+
+def _blank_css_comments(css: str) -> str:
+    return re.sub(r'/\*.*?\*/', lambda m: ' ' * len(m.group(0)), css, flags=re.S)
+
+
+def _rule_selector(css: str, pos: int) -> str:
+    start = css.rfind('{', 0, pos)
+    return css[css.rfind('}', 0, start) + 1:start].strip()
+
+
+def _without_sanctioned_effects(css: str) -> str:
+    """Blank out declarations that match SANCTIONED_EFFECTS in their own rule."""
+    css = out = _blank_css_comments(css)
+    for m in re.finditer(r'(?:-webkit-)?backdrop-filter\s*:[^;]*;|radial-gradient\s*\(', css, re.I):
+        name = 'radial-gradient' if 'gradient' in m.group(0).lower() else 'backdrop-filter'
+        if _rule_selector(css, m.start()) == SANCTIONED_EFFECTS[name]:
+            out = out[:m.start()] + ' ' * (m.end() - m.start()) + out[m.end():]
+    return out
 
 
 def _rel(path: Path) -> str:
@@ -233,8 +260,9 @@ def test_components_css_exists_and_uses_tokens_only():
     assert COMPONENTS_CSS.is_file()
     text = COMPONENTS_CSS.read_text(encoding='utf-8')
     assert HEX_RE.search(text) is None, 'components.css must use var(--token), not hex'
-    assert BOX_SHADOW_RE.search(text) is None
-    assert GRADIENT_RE.search(text) is None
+    effects = _without_sanctioned_effects(text)
+    assert BOX_SHADOW_RE.search(effects) is None, 'shadow/blur outside the sanctioned header rule'
+    assert GRADIENT_RE.search(effects) is None, 'gradient outside the sanctioned hero glow'
     assert COLOR_FUNC_RE.search(text) is None, 'components.css must not define colours'
     assert LEFT_ACCENT_RE.search(text) is None
     assert ITALIC_RE.search(text) is None
@@ -253,6 +281,20 @@ def test_components_css_exists_and_uses_tokens_only():
     assert SERIF_UI_RE.search(text) is None
 
 
+def test_sanctioned_effects_stay_in_their_one_rule():
+    text = _blank_css_comments(COMPONENTS_CSS.read_text(encoding='utf-8'))
+    for name, selector in SANCTIONED_EFFECTS.items():
+        hits = [m.start() for m in re.finditer(re.escape(name), text, re.I)
+                if text[m.start() - 9:m.start()] != '-webkit-']
+        assert hits, f'{name} expected in {selector}'
+        for pos in hits:
+            assert _rule_selector(text, pos) == selector, (
+                f'{name} used outside {selector}: {_rule_selector(text, pos)[:60]}'
+            )
+    # Effects must read their colours from tokens, never literals.
+    assert 'var(--glow)' in text and 'var(--header-glass)' in text
+
+
 def test_component_macros_exist():
     macros = TEMPLATES / 'components' / 'macros.html'
     assert macros.is_file()
@@ -260,7 +302,8 @@ def test_component_macros_exist():
     for name in (
         'button', 'link_button', 'section', 'page_header', 'tabs', 'tab_panel',
         'checklist_row', 'checklist', 'snippet', 'secret_field', 'notice',
-        'empty_state', 'form_field', 'chip',
+        'empty_state', 'form_field', 'chip', 'proof_list', 'announce',
+        'command_bar', 'works_with', 'signal_wave', 'transcript_window',
     ):
         assert f'macro {name}' in text, f'missing macro {name}'
     assert _count_style_attrs(text) == 0

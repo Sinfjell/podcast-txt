@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "new-home-and-header",
+      "date": "2026-10-10",
+      "title": "A new home page and header",
+      "summary": "One search bar for Spotify links and podcast names, a live preview of what a transcript looks like, and a lighter header that stays out of the way."
+    },
+    {
       "id": "ai-what-you-can-ask",
       "date": "2026-10-10",
       "title": "Copyable prompts for ChatGPT and Claude",

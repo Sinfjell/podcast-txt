@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "components/macros.html" import button, link_button, section, page_header, tabs, tab_panel, checklist, checklist_row, snippet, secret_field, notice, empty_state, form_field, chip, proof_list %}
+{% from "components/macros.html" import button, link_button, section, page_header, tabs, tab_panel, checklist, checklist_row, snippet, secret_field, notice, empty_state, form_field, chip, proof_list, announce, command_bar, works_with, signal_wave, transcript_window %}
 
 {% block title %}Component gallery — Podskrift{% endblock %}
 {% block robots_meta %}<meta name="robots" content="noindex, nofollow">{% endblock %}
@@ -134,6 +134,33 @@
   <section class="ds-gallery-section" aria-labelledby="g-proof">
     <h2 id="g-proof" class="ds-gallery-label">PROOF LIST</h2>
     {{ proof_list([language_count ~ " languages, powered by OpenAI Whisper", "Keeps running if you close the page", "No subscription"]) }}
+    {{ proof_list(["No card, no OpenAI key needed", language_count ~ " languages", "Keeps running if you close the page"], class="ds-proof--inline") }}
+    <p class="ds-gallery-note">Inline variant (<code>class="ds-proof--inline"</code>) sits centred under the hero command bar.</p>
+  </section>
+
+  <section class="ds-gallery-section" aria-labelledby="g-hero">
+    <h2 id="g-hero" class="ds-gallery-label">HERO: ANNOUNCE, COMMAND BAR, WORKS WITH, SIGNAL WAVE, TRANSCRIPT WINDOW</h2>
+    <div class="ds-hero ds-gallery-hero" data-ds-signal-root>
+      {{ signal_wave() }}
+      <div class="ds-hero__inner">
+        {{ announce("Ask Claude or ChatGPT for any transcript", "#g-hero", short="Use it in Claude and ChatGPT") }}
+        <div class="ds-cmd">
+          {% call command_bar("galleryCmd", "Spotify link or podcast name", "Paste a Spotify link or search a podcast",
+                              button_label="Search", button_class="btn-primary",
+                              examples=["Paste a Spotify episode link", "Search “Hard Fork”"]) %}
+          <div class="ds-seg" role="group" aria-label="Search for">
+            <button type="button" class="tab active" aria-pressed="true">Podcasts</button>
+            <button type="button" class="tab" aria-pressed="false">Episodes</button>
+          </div>
+          {% endcall %}
+        </div>
+        {{ works_with([("Spotify", None), ("Apple Podcasts", None), ("RSS", None), ("ChatGPT", "#g-hero")]) }}
+      </div>
+      {{ transcript_window("Why we write things down", "The Long Form · Episode 212 · 1:04:18", [
+          ("00:14", "Welcome back. Today we are talking about why a written version of a conversation is often more useful than the recording."),
+          ("00:31", "You can search it, quote it and skim it. None of that works with audio.")], anchor=true, class="ds-gallery-window") }}
+    </div>
+    <p class="ds-gallery-note">Home only. The glow behind the command bar and the blurred header are the two sanctioned effects; the wave and the playhead stop under reduced motion. The command bar carries the screen's one primary button.</p>
   </section>
 
   <section class="ds-gallery-section" aria-labelledby="g-chip">
