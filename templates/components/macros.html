@@ -299,3 +299,15 @@
 {%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
 <span class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>{{ label }}</span>
 {%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# proof_list — factual reassurance row with check icons, beside a CTA.        #}
+{# Plain claims only: what the product does, never invented numbers.          #}
+{# ------------------------------------------------------------------------- #}
+{% macro proof_list(items, attrs='', class='') -%}
+<ul class="ds-proof{% if class %} {{ class }}{% endif %}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+{%- for item in items %}
+  <li><span class="ds-proof__icon">{{ icon_check() }}</span><span>{{ item }}</span></li>
+{%- endfor %}
+</ul>
+{%- endmacro %}

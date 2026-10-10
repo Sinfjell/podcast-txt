@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "components/macros.html" import snippet, button %}
+{% from "components/macros.html" import snippet, button, proof_list %}
 
 {% block title %}Spotify & podcast transcripts — Podskrift{% endblock %}
 {% block meta_description %}Paste a Spotify episode link or search any podcast, and get the full transcript as text and .srt. {{ language_count }} languages, powered by OpenAI Whisper.{% if trial_minutes %} First {{ trial_minutes }} minutes free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.{% endif %}{% endblock %}
@@ -15,7 +15,8 @@
     .hp-title { font-size: clamp(40px, 6vw, 64px); font-weight: 800; letter-spacing: -0.035em; line-height: 1.02; }
     .hp-sub { font-size: 19px; line-height: 1.5; color: var(--muted); max-width: 520px; }
     .hp-price-line { font-size: 15px; font-weight: 600; line-height: 1.4; color: var(--ink); margin-top: -4px; font-variant-numeric: tabular-nums; }
-    .hp-note { font-size: 14px; line-height: 1.5; color: var(--muted); max-width: 520px; margin-top: -8px; }
+    .hp-note { font-size: 14px; line-height: 1.5; color: var(--ink); max-width: 560px; margin-top: 12px; }
+    .hp-mcp-line { font-size: 15px; color: var(--muted); margin-top: -8px; }
     .hp-search-title { font-size: 17px; font-weight: 700; letter-spacing: 0; line-height: 1.3; margin-bottom: 8px; }
     .hp-search .tabs { margin-bottom: 12px; }
     .hp-row { display: flex; flex-wrap: wrap; gap: 12px; }
@@ -166,25 +167,8 @@
         <p class="hp-price-line" data-testid="hero-price-line">{% if trial_minutes %}{{ trial_minutes }} min free · then {% endif %}${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min</p>
         {% endif %}
         <p class="hp-sub">
-            Paste a Spotify episode link, or search by podcast name. You get the full text and an .srt file in a few minutes.
+            The full text of the episode in a few minutes, ready to read, search and quote.
         </p>
-        <section class="ds-mcp-hero" aria-labelledby="heroMcpHeading">
-            <h2 id="heroMcpHeading">Your podcasts, inside ChatGPT and Claude</h2>
-            <p>Connect Podskrift once. Ask for summaries, quotes and timestamps in your own chat.</p>
-            <div class="ds-mcp-actions">
-                {{ button("Set up in ChatGPT", variant="secondary", href=url_for('guide_chatgpt')) }}
-                {{ button("Set up in Claude", variant="secondary", href=url_for('guide_claude')) }}
-                <a href="#use-in-ai">See how it works ↓</a>
-            </div>
-        </section>
-        {# Signup-trial marketing — anonymous only. Logged-in users have their own
-           grant (often 180 for legacy accounts) and a balance banner above. #}
-        {% if trial_minutes and not current_user.is_authenticated %}
-        <p class="hp-note">
-            First {{ trial_minutes }} minutes of audio free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} — longer episodes get that as a free preview. No card, no OpenAI key needed to start.
-        </p>
-        {% endif %}
-
         {% if first_run and current_user.is_authenticated %}
         <div>
             <h2 style="font-size: 24px; font-weight: 700; letter-spacing: -0.015em; margin-bottom: 4px;">
@@ -209,6 +193,13 @@
                        {% if first_run and current_user.is_authenticated %}autofocus{% endif %}>
                 <button class="btn btn-primary btn-lg" type="button" id="searchBtn">Search</button>
             </div>
+            {# Signup-trial marketing, anonymous only, next to the button it de-risks.
+               Logged-in users have their own grant and a balance banner above. #}
+            {% if trial_minutes and not current_user.is_authenticated %}
+            <p class="hp-note">
+                First {{ trial_minutes }} minutes of audio free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} — longer episodes get that as a free preview. No card, no OpenAI key needed to start.
+            </p>
+            {% endif %}
             <p class="form-hint" id="searchHint">
                 Works with open.spotify.com/episode/… links and any public podcast. Apple Podcasts and RSS feed links work too. Spotify-exclusive shows can't be transcribed.
             </p>
@@ -236,20 +227,35 @@
                 {% endif %}
                 <a href="{{ url_for('pricing') }}">See pricing</a>.
             </p>
-            {% elif trial_minutes and not current_user.is_authenticated %}
-            <p class="form-hint" style="margin-top: 12px;">
-                The free trial covers {{ trial_minutes }} minutes of audio in total{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.
-                Longer episodes still start free — you get the first {{ trial_minutes }} minutes, then buy minutes or add your own key to finish.
-                {% if stripe_buy_enabled %}
-                One-time pack: ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (VAT included).
-                A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
-                {% else %}
-                A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
-                {% endif %}
-                <a href="{{ url_for('pricing') }}">See pricing</a>.
-            </p>
             {% endif %}
         </div>
+
+        {% set proof = [language_count ~ ' languages, powered by OpenAI Whisper',
+                        'Keeps running if you close the page',
+                        'Text and .srt subtitles with timestamps'] %}
+        {% if stripe_buy_enabled %}{% set proof = proof + ['Pay once with Stripe, no subscription'] %}{% endif %}
+        {{ proof_list(proof, attrs='aria-label="Why Podskrift"') }}
+
+        <p class="hp-mcp-line">
+            Also works inside your AI chat: set up in
+            <a href="{{ url_for('guide_chatgpt') }}">ChatGPT</a> or
+            <a href="{{ url_for('guide_claude') }}">Claude</a>.
+            <a href="#use-in-ai">See how it works ↓</a>
+        </p>
+        {# Fine print for anonymous visitors, after the action and the reasons to take it. #}
+        {% if trial_minutes and not current_user.is_authenticated %}
+        <p class="form-hint">
+            The free trial covers {{ trial_minutes }} minutes of audio in total{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.
+            Longer episodes still start free — you get the first {{ trial_minutes }} minutes, then buy minutes or add your own key to finish.
+            {% if stripe_buy_enabled %}
+            One-time pack: ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (VAT included).
+            A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
+            {% else %}
+            A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
+            {% endif %}
+            <a href="{{ url_for('pricing') }}">See pricing</a>.
+        </p>
+        {% endif %}
     </div>
 
     <div class="hp-sample" aria-label="Example transcript">

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "components/macros.html" import button, link_button, section, page_header, tabs, tab_panel, checklist, checklist_row, snippet, secret_field, notice, empty_state, form_field, chip %}
+{% from "components/macros.html" import button, link_button, section, page_header, tabs, tab_panel, checklist, checklist_row, snippet, secret_field, notice, empty_state, form_field, chip, proof_list %}
 
 {% block title %}Component gallery — Podskrift{% endblock %}
 {% block robots_meta %}<meta name="robots" content="noindex, nofollow">{% endblock %}
@@ -129,6 +129,11 @@
       {% endcall %}
       {{ button("Save key", variant="secondary", type="submit") }}
     </form>
+  </section>
+
+  <section class="ds-gallery-section" aria-labelledby="g-proof">
+    <h2 id="g-proof" class="ds-gallery-label">PROOF LIST</h2>
+    {{ proof_list([language_count ~ " languages, powered by OpenAI Whisper", "Keeps running if you close the page", "No subscription"]) }}
   </section>
 
   <section class="ds-gallery-section" aria-labelledby="g-chip">
