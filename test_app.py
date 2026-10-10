@@ -6033,7 +6033,7 @@ def test_customer_settings_generate_and_revoke(trial_on):
     # Growth UI: no multi-key / "Buy more" chrome when Stripe is unset.
     # The #credits trial-balance section is intentional (shows remaining minutes).
     assert b'Buy more' not in page.data
-    assert b'Buy 5 hours for $5' not in page.data
+    assert A.CREDIT_PACK_LABEL.encode() not in page.data
     # A dedicated "Developers" product surface is not part of settings; the
     # developer-only card title is intentional so OpenAI-key users do not
     # confuse the psk_ key with sk-.
@@ -8922,6 +8922,10 @@ def test_transcription_page_has_no_billing_retry_ui(stripe_on):
     assert 'Your OpenAI account has no credit' in src
     assert 'remove the key in' in src
     assert 'Settings to use Podskrift free or paid minutes' in src
+    assert 'Unlock the full episode' in src
+    assert 'result_offer_clicked' in src
+    assert 'resultOfferCard' in src
+    assert 'ds-link-button' in src
 
 
 def test_enqueue_stores_source_audio_url_for_retry(monkeypatch, trial_on):
@@ -9151,6 +9155,26 @@ def test_byok_quota_message_hints_remove_key():
     # Platform-key copy must not tell the user to remove a key they do not have.
     trial_msg = A.describe_openai_error(exc, key_source='trial')
     assert 'Settings' not in trial_msg
+
+
+def test_byok_quota_message_offers_pack_when_stripe_on(stripe_on):
+    exc = _openai_exc(429, 'insufficient_quota')
+    msg = A.describe_openai_error(exc, key_source='user')
+    assert A.OWN_KEY_PACK_OFFER in msg
+    invalid = A.describe_openai_error(
+        _openai_exc(401, 'invalid_api_key', 'AuthenticationError'),
+        key_source='user')
+    assert A.OWN_KEY_PACK_OFFER in invalid
+    # Platform key failures never pitch the pack.
+    assert A.OWN_KEY_PACK_OFFER not in A.describe_openai_error(
+        exc, key_source='trial')
+
+
+def test_pack_covers_episode_line():
+    assert A.pack_covers_episode_line(84) == (
+        'This episode is 84 min — 300 min for $5 covers it and more.')
+    assert A.pack_covers_episode_line(0) == ''
+    assert A.pack_covers_episode_line(None) == ''
 
 
 def test_whisper_does_not_retry_quota_or_auth_errors(tmp_path, monkeypatch):
@@ -9517,7 +9541,7 @@ def _register_and_post(stripe_on, session_dict, etype='checkout.session.complete
 def test_buy_hidden_when_stripe_unconfigured(trial_on):
     uid = _make_user('nostripe@test.com', limit=600, used=600)
     body = _login(uid).get('/settings').data.decode()
-    assert 'Buy 5 hours for $5' not in body
+    assert A.CREDIT_PACK_LABEL not in body
     assert A.stripe_checkout_enabled() is False
 
 
@@ -9528,13 +9552,13 @@ def test_buy_hidden_when_only_secret_key_set(trial_on, monkeypatch):
     assert A.stripe_checkout_enabled() is False
     uid = _make_user('halfstripe@test.com', limit=600, used=600)
     body = _login(uid).get('/settings').data.decode()
-    assert 'Buy 5 hours for $5' not in body
+    assert A.CREDIT_PACK_LABEL not in body
 
 
 def test_buy_shown_when_stripe_configured(stripe_on):
     uid = _make_user('withstripe@test.com', limit=600, used=600)
     body = _login(uid).get('/settings').data.decode()
-    assert 'Buy 5 hours for $5' in body
+    assert A.CREDIT_PACK_LABEL in body
     assert 'billing/checkout' in body
     assert 'csrf_token' in body
     assert 'name="ph_sid"' in body
@@ -9948,7 +9972,7 @@ def test_offer_shown_no_longer_server_fired_on_limit(stripe_on, ph_events, monke
     assert resp.status_code == 402
     body = resp.get_json()
     assert body.get('buy_available') is True
-    assert body.get('buy_label') == 'Buy 5 hours for $5'
+    assert body.get('buy_label') == A.CREDIT_PACK_LABEL
     assert body.get('paywall_reason') in (
         'trial_exhausted', 'low_balance', 'paid_exhausted', 'global_cap',
         'episode_too_long')
@@ -10575,14 +10599,14 @@ def test_pricing_page_renders_without_stripe(trial_on):
     assert 'VAT' in body
     assert 'one-time' in body.lower() or 'One-time' in body
     assert 'Create free account' in body or 'own OpenAI' in body
-    assert 'Buy 5 hours for $5' not in body  # Buy POST only when configured + logged in
+    assert A.CREDIT_PACK_LABEL not in body  # Buy POST only when configured + logged in
     assert '/terms' in body
 
 
 def test_pricing_page_buy_when_logged_in_with_stripe(stripe_on):
     uid = _make_user('pricebuy@test.com', limit=600, used=0)
     body = _login(uid).get('/pricing').data.decode()
-    assert 'Buy 5 hours for $5' in body
+    assert A.CREDIT_PACK_LABEL in body
     assert 'billing/checkout' in body
     assert 'csrf_token' in body
     assert 'One-time · 300 min · VAT incl.' in body
@@ -10601,7 +10625,7 @@ def test_buy_modal_shows_payment_method_hint(stripe_on):
 def test_pricing_hides_buy_for_own_key_user(stripe_on):
     uid = _make_user('pricekey@test.com', key='sk-' + 'p' * 40, limit=600, used=0)
     body = _login(uid).get('/pricing').data.decode()
-    assert 'Buy 5 hours for $5' not in body
+    assert A.CREDIT_PACK_LABEL not in body
     assert 'Add OpenAI key' in body or 'own OpenAI' in body
 
 
@@ -10658,7 +10682,7 @@ def test_low_balance_banner_on_index(stripe_on):
     uid = _make_user('lowbal@test.com', limit=180 * 60, used=160 * 60)
     body = _login(uid).get('/').data.decode()
     assert 'Running low' in body
-    assert 'Buy minutes' in body
+    assert A.CREDIT_PACK_LABEL in body
 
 
 def test_settings_credits_above_openai_and_primary_buy(stripe_on):
@@ -10681,7 +10705,7 @@ def test_transcription_status_flags_minutes_error(stripe_on):
             status='error', phase='error',
             error_message=(
                 'This episode is about 45 minutes — longer than the 0 free '
-                'minutes you have left. Pick a shorter episode, Buy 5 hours '
+                'minutes you have left. Pick a shorter episode, Buy 300 min '
                 'for $5, or add your own OpenAI API key.'
             ),
         ))
@@ -10692,7 +10716,121 @@ def test_transcription_status_flags_minutes_error(stripe_on):
     data = resp.get_json()
     assert data.get('minutes_error') is True
     assert data.get('buy_available') is True
-    assert data.get('buy_label') == 'Buy 5 hours for $5'
+    assert data.get('buy_label') == A.CREDIT_PACK_LABEL
+
+
+def test_paywall_json_prefers_buy_and_episode_cover(stripe_on, monkeypatch, trial_on):
+    uid = _make_user('cover-line@test.com', limit=600, used=600)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/cover.mp3',
+        'episode_title': 'Longish',
+        'duration_min': '84',
+    })
+    assert resp.status_code == 402
+    body = resp.get_json()
+    assert body.get('buy_available') is True
+    assert body.get('buy_label') == A.CREDIT_PACK_LABEL
+    assert body.get('action_label') == A.CREDIT_PACK_LABEL
+    assert body.get('byok_label') == 'Add OpenAI key →'
+    assert 'covers it and more' in (body.get('paywall_cover_line') or '')
+    assert '84 min' in body['paywall_cover_line']
+    assert '84 min' in body['error'] or '84 minutes' in body['error']
+
+
+def test_home_paywall_buy_is_primary_byok_is_text_link(stripe_on):
+    uid = _make_user('home-pw@test.com', limit=600, used=600)
+    body = _login(uid).get('/').data.decode()
+    assert 'Your free trial is used up.' in body
+    assert A.CREDIT_PACK_LABEL in body
+    assert 'data-paywall-buy="home_banner"' in body
+    assert 'data-paywall-byok="home_banner"' in body
+    assert 'ds-link-button' in body
+    # Buy is the filled CTA; BYOK is a text link, not btn-secondary.
+    buy_at = body.index('data-paywall-buy="home_banner"')
+    chunk = body[buy_at:buy_at + 400]
+    assert 'btn-primary' in chunk
+    byok_at = body.index('data-paywall-byok="home_banner"')
+    byok_chunk = body[max(0, byok_at - 80):byok_at + 120]
+    assert 'ds-link-button' in byok_chunk
+    assert 'btn-secondary' not in byok_chunk
+    assert 'btn-primary' not in byok_chunk
+
+
+def test_episode_paywall_buy_is_primary(stripe_on, monkeypatch):
+    uid = _make_user('ep-pw@test.com', limit=600, used=600)
+    client = _login(uid)
+    resp = _render_episode_selection_via_parse_rss(monkeypatch, client)
+    body = resp.data.decode()
+    assert 'id="paywallBuyBtn"' in body
+    btn_at = body.index('id="paywallBuyBtn"')
+    assert 'btn-primary' in body[btn_at - 160:btn_at]
+    assert 'data-paywall-byok="episode_selection"' in body
+    assert 'ds-link-button' in body
+
+
+def test_status_partial_unlock_and_full_result_offer(stripe_on):
+    from models import db, TranscriptionTask
+    uid = _make_user('offer-status@test.com', limit=600, used=120)
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='partial-offer-1', user_id=uid, episode_title='Partial Ep',
+            status='completed', phase='completed',
+            transcript_text='hello',
+            partial_meta=A.encode_partial_task_meta(3600, 84 * 60),
+            source_audio_url='https://example.com/p.mp3',
+        ))
+        db.session.add(TranscriptionTask(
+            id='full-offer-1', user_id=uid, episode_title='Full Ep',
+            status='completed', phase='completed',
+            transcript_text='hello full',
+        ))
+        db.session.commit()
+    client = _login(uid)
+    partial = client.get('/status/partial-offer-1').get_json()
+    assert partial.get('partial') is True
+    assert partial.get('buy_available') is True
+    assert partial.get('buy_label') == A.UNLOCK_EPISODE_LABEL
+    assert partial.get('unlock_label') == A.UNLOCK_EPISODE_LABEL
+    assert partial.get('result_offer') is not True
+
+    full = client.get('/status/full-offer-1').get_json()
+    assert full.get('result_offer') is True
+    assert full.get('result_offer_label') == A.RESULT_OFFER_LABEL
+    assert full.get('buy_available') is True
+
+
+def test_status_own_key_invalid_offers_pack(stripe_on):
+    from models import db, TranscriptionTask
+    uid = _make_user('ownkey-inv@test.com', key='sk-' + 'v' * 40)
+    with A.app.app_context():
+        msg = A.describe_openai_error(
+            _openai_exc(401, 'invalid_api_key', 'AuthenticationError'),
+            key_source='user')
+        db.session.add(TranscriptionTask(
+            id='ownkey-inv-1', user_id=uid, episode_title='Ep',
+            status='error', phase='error',
+            source_audio_url='https://example.com/e.mp3',
+            error_message=msg,
+        ))
+        db.session.commit()
+    data = _login(uid).get('/status/ownkey-inv-1').get_json()
+    assert data.get('own_key_invalid') is True
+    assert data.get('buy_available') is True
+    assert data.get('pack_offer') == A.OWN_KEY_PACK_OFFER
+    assert A.OWN_KEY_PACK_OFFER in (data.get('error') or '')
+
+
+def test_analytics_helpers_for_paywall_ctas_in_base(stripe_on, monkeypatch):
+    monkeypatch.setenv('PODSKRIFT_ENV', 'production')
+    monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
+    body = A.app.test_client().get('/').data.decode()
+    assert 'podskriftPaywallBuyClicked' in body
+    assert 'podskriftPaywallByokClicked' in body
+    assert "posthog.capture('paywall_buy_clicked'" in body
+    assert "posthog.capture('paywall_byok_clicked'" in body
+    assert "posthog.capture('email_offer_clicked'" in body
+    assert "utm_content" in body
+    assert "email_pack" in body
 
 
 def test_transcription_status_no_minutes_flag_on_generic_error(stripe_on):

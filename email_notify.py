@@ -61,12 +61,22 @@ def unsubscribe_url(public_base: str, secret_key: str, user_id: int) -> str:
     return f'{base}{path}' if base else path
 
 
-def with_utm(url: str, campaign: str) -> str:
-    """Append utm_source=email&utm_campaign=<campaign> (preserves existing query)."""
+def with_utm(url: str, campaign: str, content: str | None = None,
+             ref: str | None = None) -> str:
+    """Append utm_source=email&utm_campaign=<campaign> (preserves existing query).
+
+    Optional utm_content / ref mark pack CTAs so the browser can fire
+    email_offer_clicked on landing (cookieless-safe capture in base.html).
+    """
     if not url:
         return url
+    params = {'utm_source': 'email', 'utm_campaign': campaign}
+    if content:
+        params['utm_content'] = content
+    if ref:
+        params['ref'] = ref
     sep = '&' if ('?' in url) else '?'
-    return f'{url}{sep}{urlencode({"utm_source": "email", "utm_campaign": campaign})}'
+    return f'{url}{sep}{urlencode(params)}'
 
 
 def _list_unsubscribe_headers(unsub_url: str) -> dict[str, str]:
@@ -197,15 +207,21 @@ def build_transcript_ready_bodies(
     transcript_url: str,
     unsub_url: str,
     is_partial: bool = False,
+    pack_url: str | None = None,
 ) -> tuple[str, str, str]:
     """Return (subject, text, html).
 
     Partial free-preview jobs use “your free preview is ready” wording so we
-    never imply the full episode was transcribed.
+    never imply the full episode was transcribed. When ``pack_url`` is set,
+    a single plain line offers the 300 min / $5 pack (unsubscribe unchanged).
     """
     show = (podcast_name or '').strip() or 'your podcast'
     ep = (episode_title or '').strip() or 'Episode'
     link = with_utm(transcript_url, TRANSCRIPT_READY)
+    pack_link = ''
+    if pack_url:
+        pack_link = with_utm(
+            pack_url, TRANSCRIPT_READY, content='pack_offer', ref='email_pack')
     if is_partial:
         subject = f'Free preview ready: {ep}'
         lead = (
@@ -220,9 +236,14 @@ def build_transcript_ready_bodies(
         lead = f'Your transcript of “{ep}” from {show} is ready.'
         cta_label = 'Open the transcript'
         tip = 'Search for another episode whenever you are ready.'
+    pack_line = (
+        f'Need more minutes? 300 min for $5: {pack_link}\n\n'
+        if pack_link else ''
+    )
     text = (
         f'{lead}\n\n'
         f'{cta_label}: {link}\n\n'
+        f'{pack_line}'
         f'{tip}\n'
         f'{_footer_text(unsub_url)}'
     )
@@ -241,9 +262,17 @@ def build_transcript_ready_bodies(
             f'<p>Your transcript of <strong>{safe_ep}</strong> from '
             f'{safe_show} is ready.</p>'
         )
+    html_pack = ''
+    if pack_link:
+        safe_pack = html_lib.escape(pack_link, quote=True)
+        html_pack = (
+            f'<p>Need more minutes? '
+            f'<a href="{safe_pack}">300 min for $5</a>.</p>'
+        )
     html = (
         f'{html_lead}'
         f'<p><a href="{safe_link}">{safe_cta}</a></p>'
+        f'{html_pack}'
         f'<p>{html_lib.escape(tip)}</p>'
         f'{_footer_html(unsub_url)}'
     )
@@ -279,6 +308,7 @@ def notify_transcript_ready(
         base = (public_base_url or '').rstrip('/')
         transcript_path = f'/transcription/{task_id}'
         transcript_url = f'{base}{transcript_path}' if base else transcript_path
+        pack_url = f'{base}/pricing' if base else '/pricing'
         unsub = unsubscribe_url(public_base_url, secret_key, user.id)
         is_partial = task_is_partial_preview(task)
         subject, text, html = build_transcript_ready_bodies(
@@ -287,6 +317,7 @@ def notify_transcript_ready(
             transcript_url=transcript_url,
             unsub_url=unsub,
             is_partial=is_partial,
+            pack_url=pack_url,
         )
         outcome = mailer.send_email(
             to=user.email,

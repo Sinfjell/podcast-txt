@@ -1483,6 +1483,49 @@
             } catch (e) { /* ignore */ }
         };
 
+        window.podskriftPaywallBuyClicked = function (location, reason) {
+            try {
+                if (!window.posthog || !location) return;
+                var opts = {};
+                if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+                    opts.transport = 'sendBeacon';
+                }
+                posthog.capture('paywall_buy_clicked', {
+                    location: location,
+                    reason: reason || ''
+                }, opts);
+            } catch (e) { /* ignore */ }
+        };
+
+        window.podskriftPaywallByokClicked = function (location, reason) {
+            try {
+                if (!window.posthog || !location) return;
+                posthog.capture('paywall_byok_clicked', {
+                    location: location,
+                    reason: reason || ''
+                });
+            } catch (e) { /* ignore */ }
+        };
+
+        // Email pack CTA landing: utm_content=pack_offer or ref=email_pack.
+        try {
+            var offerParams = new URLSearchParams(window.location.search);
+            var utmContent = offerParams.get('utm_content') || '';
+            var offerRef = offerParams.get('ref') || '';
+            if (window.posthog && (
+                utmContent === 'pack_offer'
+                || offerRef === 'email_pack'
+            )) {
+                posthog.capture('email_offer_clicked', {
+                    utm_source: offerParams.get('utm_source') || '',
+                    utm_campaign: offerParams.get('utm_campaign') || '',
+                    utm_content: utmContent,
+                    ref: offerRef,
+                    path: window.location.pathname
+                });
+            }
+        } catch (e) { /* ignore */ }
+
         // Buy form: stamp ph_sid only after Accept (cookie session id).
         // buy_clicked itself may fire anonymously in cookieless mode.
         document.addEventListener('submit', function (ev) {
@@ -1511,6 +1554,26 @@
                     opts.transport = 'sendBeacon';
                 }
                 posthog.capture('buy_clicked', {location: loc, transport: 'sendBeacon'}, opts);
+                if (form.getAttribute('data-paywall-buy')) {
+                    posthog.capture('paywall_buy_clicked', {
+                        location: form.getAttribute('data-paywall-buy') || loc,
+                        reason: ''
+                    }, opts);
+                }
+            } catch (e) { /* ignore */ }
+        }, true);
+
+        // BYOK text links on paywall surfaces (delegated; works for static markup).
+        document.addEventListener('click', function (ev) {
+            try {
+                var t = ev.target;
+                if (!t || !t.closest) return;
+                var byok = t.closest('[data-paywall-byok]');
+                if (!byok || !window.posthog) return;
+                posthog.capture('paywall_byok_clicked', {
+                    location: byok.getAttribute('data-paywall-byok') || '',
+                    reason: ''
+                });
             } catch (e) { /* ignore */ }
         }, true);
         // buy_clicked fires only on checkout form submit — opening the Buy
