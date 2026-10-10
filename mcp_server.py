@@ -43,6 +43,33 @@ _MCP_DOC_END = '<!-- /mcp-section -->'
 MCP_MAX_PER_WINDOW = int(os.getenv('MCP_MAX_PER_WINDOW', '60'))
 MCP_WINDOW_SECONDS = int(os.getenv('MCP_WINDOW_SECONDS', '60'))
 MCP_LIST_EPISODE_LIMIT = int(os.getenv('MCP_LIST_EPISODE_LIMIT', '25'))
+# Bounded server-side wait for get_transcript / get_transcript_status when the
+# job is still running. Keeps ChatGPT/Claude from giving up on the first poll
+# without blocking a worker for minutes. Cap hard so a bad env cannot hang
+# gunicorn threads (workers=2, threads=4).
+_MCP_WAIT_SECONDS_DEFAULT = 45.0
+_MCP_WAIT_SECONDS_MAX = 90.0
+_MCP_WAIT_POLL_DEFAULT = 1.0
+_MCP_LIST_DEFAULT_LIMIT = 20
+_MCP_LIST_MAX_LIMIT = 100
+_MCP_TEXT_DEFAULT_CHARS = 24000
+_MCP_TEXT_MAX_CHARS = 100000
+
+
+def _mcp_wait_seconds() -> float:
+    raw = (os.getenv('MCP_WAIT_SECONDS') or str(int(_MCP_WAIT_SECONDS_DEFAULT))).strip()
+    try:
+        return max(0.0, min(float(raw), _MCP_WAIT_SECONDS_MAX))
+    except ValueError:
+        return _MCP_WAIT_SECONDS_DEFAULT
+
+
+def _mcp_wait_poll_seconds() -> float:
+    raw = (os.getenv('MCP_WAIT_POLL_SECONDS') or str(_MCP_WAIT_POLL_DEFAULT)).strip()
+    try:
+        return max(0.05, min(float(raw), 5.0))
+    except ValueError:
+        return _MCP_WAIT_POLL_DEFAULT
 
 _mcp_rate_attempts: dict[str, list[float]] = collections.defaultdict(list)
 _mcp_rate_lock = threading.Lock()
@@ -87,13 +114,122 @@ def _app():
     return app_mod
 
 
+def _public_base() -> str:
+    return (os.getenv('PUBLIC_BASE_URL') or 'https://podskrift.com').rstrip('/')
+
+
 def _pricing_url() -> str:
     A = _app()
     try:
         return A.public_url('pricing')
     except Exception:  # noqa: BLE001 — outside request / no app context
-        base = (os.getenv('PUBLIC_BASE_URL') or 'https://podskrift.com').rstrip('/')
-        return f'{base}/pricing'
+        return f'{_public_base()}/pricing'
+
+
+def _history_url() -> str:
+    A = _app()
+    try:
+        return A.public_url('history')
+    except Exception:  # noqa: BLE001
+        return f'{_public_base()}/history'
+
+
+def _transcript_page_url(task_id: str) -> str:
+    A = _app()
+    try:
+        return A.public_url('transcription_page', task_id=task_id)
+    except Exception:  # noqa: BLE001
+        return f'{_public_base()}/transcription/{task_id}'
+
+
+def _wait_while_pending(user_id, task_id: str, *,
+                        wait_seconds: float | None = None,
+                        sleep_fn=None,
+                        monotonic_fn=None):
+    """Poll the DB until the task leaves pending or ``wait_seconds`` elapses.
+
+    Uses short sleeps (not a busy loop). Returns the latest task row (may still
+    be pending). ``sleep_fn`` / ``monotonic_fn`` are for tests.
+    """
+    from models import db
+
+    wait = _mcp_wait_seconds() if wait_seconds is None else max(0.0, float(wait_seconds))
+    sleep_fn = sleep_fn or time.sleep
+    monotonic_fn = monotonic_fn or time.monotonic
+    poll = _mcp_wait_poll_seconds()
+    deadline = monotonic_fn() + wait
+    task = _user_task(user_id, task_id)
+    if task is None or wait <= 0:
+        return task
+    A = _app()
+    while A.agent_transcript_status(task) == 'pending':
+        remaining = deadline - monotonic_fn()
+        if remaining <= 0:
+            break
+        sleep_fn(min(poll, remaining))
+        db.session.expire_all()
+        task = _user_task(user_id, task_id)
+        if task is None:
+            break
+    return task
+
+
+def _in_progress_fields(task) -> dict:
+    """Shared fields for pending / in_progress MCP responses."""
+    A = _app()
+    percent, eta = A.compute_live_progress(task)
+    eta_sec = int(eta) if eta is not None else None
+    if eta_sec is not None and eta_sec > 0:
+        mins = max(1, int(round(eta_sec / 60.0)))
+        still = f'Still transcribing (~{mins} min left).'
+    else:
+        still = 'Still transcribing.'
+    instruction = (
+        f'{still} Call get_transcript_status again with this task_id '
+        f'(job_id={task.id}) in about 30–60 seconds; do not ask the user '
+        f'to remind you. A “transcript ready” email will be sent when it '
+        f'finishes (if enabled in Settings). Progress is also on History: '
+        f'{_history_url()}'
+    )
+    return {
+        'status': 'in_progress',
+        'transcript_status': 'pending',
+        'task_status': task.status,
+        'progress_pct': int(percent) if percent is not None else 0,
+        'eta_seconds': eta_sec,
+        'message': instruction,
+        'instruction': instruction,
+        'history_url': _history_url(),
+        'email_note': (
+            'A “transcript ready” email will be sent when transcription '
+            'finishes (if enabled in Settings).'
+        ),
+    }
+
+
+def _list_status_bucket(task) -> str | None:
+    """Map a task to completed|in_progress|failed for list_my_transcripts."""
+    A = _app()
+    st = A.agent_transcript_status(task)
+    if st == 'pending':
+        return 'in_progress'
+    if st == 'failed':
+        return 'failed'
+    if st == 'ready' or (task.status or '') == 'completed':
+        return 'completed'
+    return None
+
+
+def _parse_mcp_date(value: str):
+    """YYYY-MM-DD → date, or None."""
+    from datetime import date
+    raw = (value or '').strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw[:10])
+    except ValueError:
+        return None
 
 
 def _jsonrpc_error(req_id, code: int, message: str, data=None):
@@ -287,13 +423,110 @@ def _tool_defs() -> list[dict]:
             },
         },
         {
+            'name': 'list_my_transcripts',
+            'description': (
+                'List the signed-in user’s existing Podskrift transcripts (History). '
+                'Use this when the user asks about “my transcripts”, what they have '
+                'already transcribed, or past episodes — do not invent a new job. '
+                'Filter by query, podcast, dates, or status; newest first. Each item '
+                'includes task_id for get_my_transcript.'
+            ),
+            'inputSchema': {
+                'type': 'object',
+                'properties': {
+                    'query': {
+                        'type': 'string',
+                        'description': (
+                            'Optional search in episode title, podcast name, or '
+                            'transcript text.'
+                        ),
+                    },
+                    'podcast': {
+                        'type': 'string',
+                        'description': 'Optional podcast / publisher name filter.',
+                    },
+                    'since': {
+                        'type': 'string',
+                        'description': 'Optional start date YYYY-MM-DD (inclusive).',
+                    },
+                    'until': {
+                        'type': 'string',
+                        'description': 'Optional end date YYYY-MM-DD (inclusive).',
+                    },
+                    'status': {
+                        'type': 'string',
+                        'description': (
+                            'completed | in_progress | failed | all (default all).'
+                        ),
+                    },
+                    'limit': {
+                        'type': 'integer',
+                        'description': 'Max items (default 20, max 100).',
+                    },
+                    'cursor': {
+                        'type': 'string',
+                        'description': (
+                            'Opaque pagination cursor from a previous response’s '
+                            'next_cursor.'
+                        ),
+                    },
+                },
+            },
+            'annotations': {
+                'readOnlyHint': True,
+                'openWorldHint': False,
+            },
+        },
+        {
+            'name': 'get_my_transcript',
+            'description': (
+                'Fetch an existing transcript by task_id from list_my_transcripts. '
+                'Never starts a new job and never charges minutes. For long text, '
+                'page with offset / max_chars (follow next_offset). Optional format: '
+                'txt (default), srt, or segments (timestamped).'
+            ),
+            'inputSchema': {
+                'type': 'object',
+                'properties': {
+                    'task_id': {
+                        'type': 'string',
+                        'description': 'task_id from list_my_transcripts.',
+                    },
+                    'format': {
+                        'type': 'string',
+                        'description': 'txt | srt | segments (default txt).',
+                    },
+                    'offset': {
+                        'type': 'integer',
+                        'description': 'Character offset into the text (default 0).',
+                    },
+                    'max_chars': {
+                        'type': 'integer',
+                        'description': (
+                            'Max characters to return (default 24000, max 100000). '
+                            'Use next_offset to continue.'
+                        ),
+                    },
+                },
+                'required': ['task_id'],
+            },
+            'annotations': {
+                'readOnlyHint': True,
+                'openWorldHint': False,
+            },
+        },
+        {
             'name': 'get_transcript',
             'description': (
-                'Get a transcript for an episode. If already transcribed for this '
-                'account, returns the text. Otherwise starts transcription (same '
-                'trial / paid / BYOK rules as the website), returning a job_id to '
-                'poll with get_transcript_status. Includes cost_minutes and remaining '
-                'balance. Refuses with pricing_url when the episode exceeds balance.'
+                'Get a transcript for an episode. If this account already has it, '
+                'returns the text for free (cost_minutes 0) — also use '
+                'list_my_transcripts / get_my_transcript for “my past transcripts”. '
+                'Otherwise starts transcription (same trial / paid / BYOK rules as '
+                'the website) and returns a job_id. While in progress the server may '
+                'wait briefly, then return status in_progress with progress/ETA and '
+                'instructions to call get_transcript_status again yourself in 30–60s '
+                '(do not ask the user to remind you; a transcript-ready email is sent '
+                'when done). Refuses with pricing_url when the episode exceeds balance.'
             ),
             'inputSchema': {
                 'type': 'object',
@@ -341,15 +574,19 @@ def _tool_defs() -> list[dict]:
         {
             'name': 'get_transcript_status',
             'description': (
-                'Poll a transcription job started by get_transcript. Returns status '
-                '(pending|ready|failed) and the transcript text when ready.'
+                'Poll a transcription job started by get_transcript. Waits briefly '
+                'server-side if still running, then returns ready (with text), failed, '
+                'or in_progress with progress_pct / eta_seconds and an instruction to '
+                'call this tool again in 30–60 seconds yourself — do not ask the user '
+                'to remind you. Tell the user a transcript-ready email will arrive and '
+                'they can watch History on Podskrift.'
             ),
             'inputSchema': {
                 'type': 'object',
                 'properties': {
                     'job_id': {
                         'type': 'string',
-                        'description': 'Job id returned by get_transcript.',
+                        'description': 'Job id / task_id returned by get_transcript.',
                     },
                 },
                 'required': ['job_id'],
@@ -618,6 +855,92 @@ _EPISODE_META_ARGS = (
 )
 
 
+def _task_ready_payload(task, user, *, reused: bool, cost_minutes: int = 0,
+                        extra: dict | None = None) -> dict:
+    payload = {
+        'job_id': task.id,
+        'task_id': task.id,
+        'transcript_status': 'ready',
+        'status': 'ready',
+        'title': task.episode_title,
+        'publisher': task.podcast_name,
+        'text': task.transcript_text or '',
+        'cost_minutes': cost_minutes,
+        'balance': _balance_snapshot(user),
+        'reused': reused,
+        'url': _transcript_page_url(task.id),
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _task_failed_payload(task, user, *, reused: bool, cost_minutes: int = 0,
+                         extra: dict | None = None) -> dict:
+    payload = {
+        'job_id': task.id,
+        'task_id': task.id,
+        'transcript_status': 'failed',
+        'status': 'failed',
+        'error_message': task.error_message,
+        'title': task.episode_title,
+        'publisher': task.podcast_name,
+        'cost_minutes': cost_minutes,
+        'balance': _balance_snapshot(user),
+        'reused': reused,
+        'history_url': _history_url(),
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _task_pending_payload(task, user, *, reused: bool, cost_minutes: int = 0,
+                          extra: dict | None = None) -> dict:
+    payload = {
+        'job_id': task.id,
+        'task_id': task.id,
+        'title': task.episode_title,
+        'publisher': task.podcast_name,
+        'cost_minutes': cost_minutes,
+        'balance': _balance_snapshot(user),
+        'reused': reused,
+    }
+    payload.update(_in_progress_fields(task))
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _resolve_task_status_payload(task, user, *, reused: bool,
+                                 cost_minutes: int = 0,
+                                 extra: dict | None = None) -> dict:
+    """Wait briefly if pending, then return ready / failed / in_progress."""
+    A = _app()
+    if A.agent_transcript_status(task) == 'pending':
+        task = _wait_while_pending(user.id, task.id) or task
+    status = A.agent_transcript_status(task)
+    if status == 'ready':
+        return _task_ready_payload(
+            task, user, reused=reused, cost_minutes=cost_minutes, extra=extra)
+    if status == 'failed':
+        return _task_failed_payload(
+            task, user, reused=reused, cost_minutes=cost_minutes, extra=extra)
+    if status == 'pending':
+        return _task_pending_payload(
+            task, user, reused=reused, cost_minutes=cost_minutes, extra=extra)
+    return {
+        'job_id': task.id,
+        'task_id': task.id,
+        'transcript_status': status,
+        'status': status,
+        'title': task.episode_title,
+        'cost_minutes': cost_minutes,
+        'balance': _balance_snapshot(user),
+        'reused': reused,
+    }
+
+
 def tool_get_transcript(user, episode: str, language: str = '',
                         meta: dict | None = None) -> dict:
     A = _app()
@@ -638,40 +961,8 @@ def tool_get_transcript(user, episode: str, language: str = '',
         task = _user_task(user.id, task_id)
         if task is not None:
             status = A.agent_transcript_status(task)
-            bal = _balance_snapshot(user)
-            if status == 'ready':
-                return {
-                    'job_id': task.id,
-                    'transcript_status': 'ready',
-                    'title': task.episode_title,
-                    'publisher': task.podcast_name,
-                    'text': task.transcript_text or '',
-                    'cost_minutes': 0,
-                    'balance': bal,
-                    'reused': True,
-                }
-            if status == 'pending':
-                return {
-                    'job_id': task.id,
-                    'transcript_status': 'pending',
-                    'task_status': task.status,
-                    'title': task.episode_title,
-                    'publisher': task.podcast_name,
-                    'message': 'Transcription in progress. Poll get_transcript_status.',
-                    'cost_minutes': 0,
-                    'balance': bal,
-                    'reused': True,
-                }
-            if status == 'failed':
-                return {
-                    'job_id': task.id,
-                    'transcript_status': 'failed',
-                    'error_message': task.error_message,
-                    'title': task.episode_title,
-                    'cost_minutes': 0,
-                    'balance': bal,
-                    'reused': True,
-                }
+            if status in ('ready', 'pending', 'failed'):
+                return _resolve_task_status_payload(task, user, reused=True)
             # Fall through to resolve if id looked like a task but was not usable
 
     catalog, resolve_err = _catalog_from_parsed(parsed)
@@ -684,26 +975,7 @@ def tool_get_transcript(user, episode: str, language: str = '',
     existing = (A._find_existing_web_task(user.id, catalog.get('audio_url'))
                 or A._find_existing_agent_task(user.id, catalog))
     if existing is not None:
-        status = A.agent_transcript_status(existing)
-        bal = _balance_snapshot(user)
-        payload = {
-            'job_id': existing.id,
-            'transcript_status': status,
-            'title': existing.episode_title,
-            'publisher': existing.podcast_name,
-            'balance': bal,
-            # Reuse charges nothing — do not invent the unknown-duration estimate.
-            'cost_minutes': 0,
-            'reused': True,
-        }
-        if status == 'ready':
-            payload['text'] = existing.transcript_text or ''
-        elif status == 'pending':
-            payload['task_status'] = existing.status
-            payload['message'] = 'Transcription in progress. Poll get_transcript_status.'
-        elif status == 'failed':
-            payload['error_message'] = existing.error_message
-        return payload
+        return _resolve_task_status_payload(existing, user, reused=True)
 
     ok, cost_minutes, refusal = _can_afford(user, catalog.get('duration_min'))
     balance_before = _balance_snapshot(user)
@@ -751,50 +1023,289 @@ def tool_get_transcript(user, episode: str, language: str = '',
             payload['message'] = result.get('error')
         return payload
 
-    from models import TranscriptionTask
-    task = A.db.session.get(TranscriptionTask, result['task_id'])
-    return {
-        'job_id': result['task_id'],
-        'transcript_status': A.agent_transcript_status(task) if task else 'pending',
-        'task_status': task.status if task else 'downloading',
-        'title': catalog.get('title'),
-        'publisher': catalog.get('publisher'),
-        'cost_minutes': cost_minutes,
+    task = _user_task(user.id, result['task_id'])
+    if task is None:
+        return {
+            'job_id': result['task_id'],
+            'task_id': result['task_id'],
+            'transcript_status': 'pending',
+            'status': 'in_progress',
+            'title': catalog.get('title'),
+            'publisher': catalog.get('publisher'),
+            'cost_minutes': cost_minutes,
+            'balance_before': balance_before,
+            'balance_after': balance_after,
+            'reused': False,
+            'pricing_url': _pricing_url(),
+            'history_url': _history_url(),
+            'message': (
+                'Transcription started. Call get_transcript_status with this '
+                'job_id shortly.'
+            ),
+        }
+    extra = {
         'balance_before': balance_before,
         'balance_after': balance_after,
-        'reused': False,
-        'message': (
-            'Transcription started. Poll get_transcript_status with this job_id '
-            '(long episodes can take several minutes).'
-        ),
         'pricing_url': _pricing_url(),
     }
+    # Drop the post-wait balance snapshot key clash: pending payload uses balance.
+    return _resolve_task_status_payload(
+        task, user, reused=False, cost_minutes=cost_minutes, extra=extra)
 
 
 def tool_get_transcript_status(user, job_id: str) -> dict:
-    A = _app()
     job_id = (job_id or '').strip()
     if not job_id:
         return {'error': 'job_id is required'}
     task = _user_task(user.id, job_id)
     if task is None:
         return {'error': 'Job not found', 'transcript_status': 'none'}
-    status = A.agent_transcript_status(task)
-    payload = {
-        'job_id': task.id,
-        'transcript_status': status,
-        'task_status': task.status,
+    return _resolve_task_status_payload(task, user, reused=True)
+
+
+def _list_item_from_task(task) -> dict | None:
+    A = _app()
+    bucket = _list_status_bucket(task)
+    if bucket is None:
+        return None
+    published = None
+    if task.episode_published:
+        pub = str(task.episode_published).strip()
+        if pub and not pub.lower().startswith('unknown'):
+            # Prefer ISO date when parseable; otherwise pass through short forms.
+            d = _parse_mcp_date(pub)
+            published = d.isoformat() if d else pub[:32]
+    when = task.completed_at or task.started_at
+    duration_min = None
+    if task.audio_duration:
+        duration_min = round(float(task.audio_duration) / 60.0, 1)
+    return {
+        'task_id': task.id,
         'title': task.episode_title,
         'publisher': task.podcast_name,
-        'balance': _balance_snapshot(user),
+        'published': published,
+        'duration_min': duration_min,
+        'language': task.language,
+        'status': bucket,
+        'source': A.task_source_label(task.source, task.source_client),
+        'created_at': when.isoformat() if when else None,
+        'url': _transcript_page_url(task.id),
     }
-    if status == 'ready':
-        payload['text'] = task.transcript_text or ''
-    elif status == 'failed':
-        payload['error_message'] = task.error_message
-    elif status == 'pending':
-        payload['message'] = 'Still working. Poll again shortly.'
-    return payload
+
+
+def tool_list_my_transcripts(user, *, query: str = '', podcast: str = '',
+                             since: str = '', until: str = '',
+                             status: str = 'all', limit=None,
+                             cursor: str = '') -> dict:
+    """List this user's tasks for MCP — never other accounts."""
+    from datetime import timezone
+    from models import TranscriptionTask
+
+    A = _app()
+    status_key = (status or 'all').strip().lower() or 'all'
+    if status_key not in ('completed', 'in_progress', 'failed', 'all'):
+        return {
+            'error': 'invalid_status',
+            'message': 'status must be completed, in_progress, failed, or all.',
+        }
+    try:
+        lim = int(limit) if limit is not None else _MCP_LIST_DEFAULT_LIMIT
+    except (TypeError, ValueError):
+        lim = _MCP_LIST_DEFAULT_LIMIT
+    lim = max(1, min(lim, _MCP_LIST_MAX_LIMIT))
+
+    offset = 0
+    if cursor not in (None, ''):
+        try:
+            offset = max(0, int(str(cursor).strip()))
+        except ValueError:
+            return {
+                'error': 'invalid_cursor',
+                'message': 'cursor must be an integer offset from next_cursor.',
+            }
+
+    since_d = _parse_mcp_date(since) if since else None
+    until_d = _parse_mcp_date(until) if until else None
+    if since and since_d is None:
+        return {'error': 'invalid_since', 'message': 'since must be YYYY-MM-DD.'}
+    if until and until_d is None:
+        return {'error': 'invalid_until', 'message': 'until must be YYYY-MM-DD.'}
+
+    q = (TranscriptionTask.query
+         .filter(TranscriptionTask.user_id == user.id)
+         .order_by(TranscriptionTask.started_at.desc()))
+
+    podcast_f = (podcast or '').strip()
+    if podcast_f:
+        needle = f'%{A._like_contains(podcast_f.lower())}%'
+        from sqlalchemy import func as sa_func
+        q = q.filter(
+            sa_func.lower(TranscriptionTask.podcast_name).like(needle, escape='\\')
+        )
+
+    # Pull a bounded window, then apply status/date/query in Python so
+    # in_progress matches agent_transcript_status (incl. "transcribing 2/5").
+    scan_cap = min(500, max(100, offset + lim * 5))
+    candidates = q.limit(scan_cap).all()
+
+    query_words = [w for w in re.split(r'\W+', (query or '').strip()) if w]
+    query_re = (
+        re.compile(r'\W+'.join(map(re.escape, query_words)), re.IGNORECASE)
+        if query_words else None
+    )
+
+    matched = []
+    for task in candidates:
+        bucket = _list_status_bucket(task)
+        if bucket is None:
+            continue
+        if status_key != 'all' and bucket != status_key:
+            continue
+        when = task.completed_at or task.started_at
+        if when is not None:
+            # Normalize to date in UTC for since/until.
+            if when.tzinfo is None:
+                when_utc = when.replace(tzinfo=timezone.utc)
+            else:
+                when_utc = when.astimezone(timezone.utc)
+            day = when_utc.date()
+            if since_d and day < since_d:
+                continue
+            if until_d and day > until_d:
+                continue
+        if query_re is not None:
+            hay = ' '.join(filter(None, [
+                task.episode_title or '',
+                task.podcast_name or '',
+                task.transcript_text or '',
+            ]))
+            if not query_re.search(hay):
+                continue
+        item = _list_item_from_task(task)
+        if item:
+            matched.append(item)
+
+    page = matched[offset: offset + lim]
+    next_cursor = None
+    if offset + lim < len(matched):
+        next_cursor = str(offset + lim)
+    elif len(candidates) >= scan_cap and len(matched) >= offset + lim:
+        # More may exist beyond the scan window — offer the next offset anyway.
+        next_cursor = str(offset + lim)
+
+    return {
+        'transcripts': page,
+        'count': len(page),
+        'next_cursor': next_cursor,
+        'history_url': _history_url(),
+    }
+
+
+def tool_get_my_transcript(user, task_id: str, *, format: str = 'txt',
+                           offset=None, max_chars=None) -> dict:
+    """Return an existing transcript; never enqueue / never charge."""
+    A = _app()
+    task_id = (task_id or '').strip()
+    if not task_id:
+        return {'error': 'task_id is required'}
+    task = _user_task(user.id, task_id)
+    if task is None:
+        return {'error': 'Transcript not found', 'transcript_status': 'none'}
+
+    bucket = _list_status_bucket(task)
+    meta = {
+        'task_id': task.id,
+        'title': task.episode_title,
+        'publisher': task.podcast_name,
+        'language': task.language,
+        'status': bucket or A.agent_transcript_status(task),
+        'source': A.task_source_label(task.source, task.source_client),
+        'url': _transcript_page_url(task.id),
+        'cost_minutes': 0,
+        'charged': False,
+    }
+    if task.audio_duration:
+        meta['duration_min'] = round(float(task.audio_duration) / 60.0, 1)
+    if task.episode_published:
+        pub = str(task.episode_published).strip()
+        if pub and not pub.lower().startswith('unknown'):
+            d = _parse_mcp_date(pub)
+            meta['published'] = d.isoformat() if d else pub[:32]
+
+    agent_st = A.agent_transcript_status(task)
+    meta['transcript_status'] = agent_st
+    if agent_st == 'pending':
+        meta.update(_in_progress_fields(task))
+        return meta
+    if agent_st != 'ready':
+        if agent_st == 'failed':
+            meta['error_message'] = task.error_message
+        return meta
+
+    fmt = (format or 'txt').strip().lower()
+    if fmt not in ('txt', 'text', 'plain', 'srt', 'segments'):
+        return {
+            'error': 'invalid_format',
+            'message': 'format must be txt, srt, or segments.',
+            **meta,
+        }
+
+    try:
+        off = int(offset) if offset is not None else 0
+    except (TypeError, ValueError):
+        off = 0
+    off = max(0, off)
+    try:
+        cap = int(max_chars) if max_chars is not None else _MCP_TEXT_DEFAULT_CHARS
+    except (TypeError, ValueError):
+        cap = _MCP_TEXT_DEFAULT_CHARS
+    cap = max(1, min(cap, _MCP_TEXT_MAX_CHARS))
+
+    if fmt == 'segments':
+        segs = []
+        if task.segments_json:
+            try:
+                raw = json.loads(task.segments_json)
+                if isinstance(raw, list):
+                    segs = raw
+            except (TypeError, ValueError, json.JSONDecodeError):
+                segs = []
+        # Page by segment index when offset/max_chars used as segment window.
+        window = segs[off: off + cap]
+        next_off = off + len(window) if off + len(window) < len(segs) else None
+        return {
+            **meta,
+            'format': 'segments',
+            'segments': window,
+            'offset': off,
+            'next_offset': next_off,
+            'total_segments': len(segs),
+        }
+
+    if fmt == 'srt':
+        full = A._segments_to_srt(task.segments_json, task.transcript_text or '')
+        if full is None:
+            return {
+                **meta,
+                'error': 'SRT unavailable (no segment timestamps stored)',
+                'format': 'srt',
+                'text': None,
+            }
+    else:
+        full = task.transcript_text or ''
+        fmt = 'txt'
+
+    chunk = full[off: off + cap]
+    next_off = off + len(chunk) if off + len(chunk) < len(full) else None
+    return {
+        **meta,
+        'format': fmt,
+        'text': chunk,
+        'offset': off,
+        'max_chars': cap,
+        'next_offset': next_off,
+        'total_chars': len(full),
+    }
 
 
 def _capture_tool(tool: str, user_id, success: bool):
@@ -816,6 +1327,31 @@ def _run_tool(name: str, arguments: dict, user) -> dict:
             return _tool_text(out, is_error=not ok and not out.get('results'))
         if name == 'list_episodes':
             out = tool_list_episodes(args.get('podcast') or '', args.get('limit'))
+            ok = 'error' not in out
+            _capture_tool(name, user.id, ok)
+            return _tool_text(out, is_error=not ok)
+        if name == 'list_my_transcripts':
+            out = tool_list_my_transcripts(
+                user,
+                query=args.get('query') or '',
+                podcast=args.get('podcast') or '',
+                since=args.get('since') or '',
+                until=args.get('until') or '',
+                status=args.get('status') or 'all',
+                limit=args.get('limit'),
+                cursor=args.get('cursor') or '',
+            )
+            ok = 'error' not in out
+            _capture_tool(name, user.id, ok)
+            return _tool_text(out, is_error=not ok)
+        if name == 'get_my_transcript':
+            out = tool_get_my_transcript(
+                user,
+                args.get('task_id') or '',
+                format=args.get('format') or 'txt',
+                offset=args.get('offset'),
+                max_chars=args.get('max_chars'),
+            )
             ok = 'error' not in out
             _capture_tool(name, user.id, ok)
             return _tool_text(out, is_error=not ok)
@@ -862,7 +1398,13 @@ def _handle_initialize(params: dict) -> dict:
             'version': '1.0.0',
         },
         'instructions': (
-            'Podskrift MCP: search podcasts, list episodes, and fetch transcripts. '
+            'Podskrift MCP: search podcasts, list episodes, list the user’s past '
+            'transcripts (list_my_transcripts / get_my_transcript), and fetch or '
+            'start transcripts (get_transcript). For “my transcripts / what have I '
+            'transcribed”, call list_my_transcripts — do not start a new job. '
+            'Re-fetching an already-transcribed episode is free. While a new job '
+            'runs, call get_transcript_status yourself every 30–60s; do not ask the '
+            'user to remind you — a transcript-ready email is sent when done. '
             'Authenticate with Authorization: Bearer psk_… (API key from Settings) '
             'or an OAuth access token from the Podskrift authorization server. '
             'Transcription uses the same free trial / paid minutes / BYOK rules as '

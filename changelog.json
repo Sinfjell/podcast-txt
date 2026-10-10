@@ -2,6 +2,18 @@
   "version": 1,
   "entries": [
     {
+      "id": "mcp-list-my-transcripts",
+      "date": "2026-10-10",
+      "title": "Ask ChatGPT or Claude to list and open your past transcripts",
+      "summary": "Your AI connector can now list what you have already transcribed and open any of those episodes — no new minutes charged for past work."
+    },
+    {
+      "id": "history-in-progress",
+      "date": "2026-10-10",
+      "title": "See transcriptions while they run",
+      "summary": "History now shows jobs that are still transcribing at the top, with progress when available, including episodes you started from ChatGPT or Claude."
+    },
+    {
       "id": "mcp-chat-example",
       "date": "2026-10-10",
       "title": "See how a podcast transcript appears in your AI chat",

@@ -55,25 +55,45 @@
     {% endfor %}
 </div>
 {% else %}
-<div class="card">
+<div class="card" id="historyList">
     {% if transcriptions %}
-        {% for t in transcriptions %}
-        <div class="list-item" style="gap: 12px 16px; flex-wrap: wrap;">
+        {% for row in transcriptions %}
+        {% set t = row.task %}
+        <div class="list-item{% if row.kind == 'in_progress' %} history-row-active{% endif %}"
+             style="gap: 12px 16px; flex-wrap: wrap;"
+             {% if row.kind == 'in_progress' %}data-history-task="{{ t.id }}" data-history-active="1"{% endif %}>
             <div class="list-item-text" style="min-width: 0; flex: 1 1 280px; overflow-wrap: anywhere;">
                 <a class="list-item-title" style="color: var(--ink);"
                    href="{{ url_for('transcription_page', task_id=t.id) }}">{{ t.episode_title }}</a>
                 <div class="list-item-sub" style="white-space: normal;">
+                    {% if row.kind == 'in_progress' %}
+                    {{ chip('Transcribing…', variant='warning') }}
+                    <span class="history-live-meta" data-history-meta>
+                        {% if row.progress is not none %} · {{ row.progress }}%{% endif %}
+                        {% if row.eta_seconds is not none and row.eta_seconds > 0 %}
+                        · ~{{ ((row.eta_seconds / 60)|round(0)|int) if row.eta_seconds >= 60 else 1 }} min left
+                        {% endif %}
+                    </span>
+                    {% elif row.kind == 'failed' %}
+                    {{ chip('Failed', variant='warning') }}
+                    {% if row.error_short %} · {{ row.error_short }}{% endif %}
+                    {% else %}
                     {{ (t.completed_at or t.started_at).strftime('%Y-%m-%d %H:%M') }}
                     {% if t.audio_duration %} · {{ (t.audio_duration / 60)|round(1) }} min · ~${{ "%.3f"|format(t.audio_duration / 60 * cost_per_minute) }}{% endif %}
                     {% if t.language %} · {{ display_language(t.language) }}{% endif %}
+                    {% endif %}
                     {% set via = task_source_via_label(t.source, t.source_client) %}
                     {% if via %} · {{ chip(via, variant='muted') }}{% endif %}
                 </div>
             </div>
             <div class="flex-center" style="gap: 8px; flex-wrap: wrap;">
+                {% if row.kind == 'completed' %}
                 <button type="button" class="btn btn-sm btn-secondary" onclick="copyTranscript(this, '{{ t.id }}')">Copy</button>
                 <a href="{{ url_for('download_file', task_id=t.id, file_type='txt') }}" class="btn btn-sm btn-secondary">TXT</a>
                 <a href="{{ url_for('download_file', task_id=t.id, file_type='srt') }}" class="btn btn-sm btn-secondary">SRT</a>
+                {% else %}
+                <a href="{{ url_for('transcription_page', task_id=t.id) }}" class="btn btn-sm btn-secondary">Open</a>
+                {% endif %}
             </div>
         </div>
         {% endfor %}
@@ -98,5 +118,60 @@ function copyTranscript(btn, taskId) {
             });
         });
 }
+
+(function () {
+    // Light poll for in-progress History rows; stop when none remain.
+    if (!{{ 'true' if has_active else 'false' }}) return;
+    var INTERVAL_MS = 3000;
+    var timer = null;
+
+    function humanEta(seconds) {
+        if (seconds === null || seconds === undefined) return '';
+        if (seconds < 60) return '· under a minute left';
+        return '· ~' + Math.round(seconds / 60) + ' min left';
+    }
+
+    function poll() {
+        fetch('/active-jobs')
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                var jobs = (data && data.jobs) || [];
+                var byId = {};
+                jobs.forEach(function (j) { byId[j.id] = j; });
+                var rows = document.querySelectorAll('[data-history-active="1"]');
+                var still = 0;
+                var finished = false;
+                rows.forEach(function (row) {
+                    var id = row.getAttribute('data-history-task');
+                    var job = byId[id];
+                    var meta = row.querySelector('[data-history-meta]');
+                    if (job) {
+                        still += 1;
+                        if (meta) {
+                            var bits = [];
+                            if (typeof job.percent === 'number') bits.push(job.percent + '%');
+                            var eta = humanEta(job.eta_seconds);
+                            meta.textContent = (bits.length ? ' · ' + bits.join(' · ') + ' ' : ' ') + eta;
+                        }
+                    } else {
+                        finished = true;
+                    }
+                });
+                if (finished) {
+                    // A job left the active set — reload so it becomes a completed/failed row.
+                    window.location.reload();
+                    return;
+                }
+                if (!still && timer) {
+                    clearInterval(timer);
+                    timer = null;
+                }
+            })
+            .catch(function () { /* next tick */ });
+    }
+
+    timer = setInterval(poll, INTERVAL_MS);
+    poll();
+})();
 </script>
 {% endblock %}

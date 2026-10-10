@@ -241,12 +241,21 @@ as this HTTP API.
 | --- | --- |
 | `search_podcasts` | Find shows by name (Apple Podcasts directory) |
 | `list_episodes` | Recent episodes for a show name or feed URL |
+| `list_my_transcripts` | List *your* existing transcripts (History); filter/search/paginate |
+| `get_my_transcript` | Fetch one past transcript by `task_id` (never charges; supports paging) |
 | `get_transcript` | Return text if ready, or start Whisper and return a `job_id` |
-| `get_transcript_status` | Poll a `job_id` until `ready` / `failed` |
+| `get_transcript_status` | Poll a `job_id` until `ready` / `failed` (waits briefly server-side) |
+
+When the user asks about past transcripts (“what have I transcribed?”), use
+`list_my_transcripts` / `get_my_transcript`. Re-fetching an episode you already
+transcribed via `get_transcript` is free (`cost_minutes: 0`).
 
 `get_transcript` reports `cost_minutes` and remaining balance before/after. If
 the episode is longer than your remaining minutes, it refuses and includes
-`pricing_url` (`/pricing`) instead of starting a job.
+`pricing_url` (`/pricing`) instead of starting a job. While a job is in
+progress, status responses include `progress_pct` / `eta_seconds` and tell the
+model to call `get_transcript_status` again in 30–60 seconds (a transcript-ready
+email is sent when done; progress also appears on `/history`).
 
 **Cursor example** (`~/.cursor/mcp.json` or project config):
 
@@ -264,7 +273,8 @@ the episode is longer than your remaining minutes, it refuses and includes
 ```
 
 Replace `psk_…` with your key from Settings. Long episodes can take several
-minutes — poll `get_transcript_status` until `transcript_status` is `ready`.
+minutes — call `get_transcript_status` again yourself every 30–60 seconds until
+`transcript_status` is `ready` (do not ask the user to remind you).
 
 <!-- mcp-oauth-section -->
 ### OAuth for ChatGPT and Claude.ai
