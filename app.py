@@ -801,7 +801,7 @@ TRIAL_60_COHORT_CREATED_BEFORE = '2026-10-11 00:00:00'
 #: Shared free-trial budget for one Europe/Oslo calendar day. Resets at Oslo
 #: midnight. Reservations count immediately (trial_budget_days); refunds and
 #: failed-before-Whisper jobs release the day the task was started.
-TRIAL_DAILY_SECONDS = _env_minutes('TRIAL_DAILY_MINUTES', 750) * 60
+TRIAL_DAILY_SECONDS = _env_minutes('TRIAL_DAILY_MINUTES', 2000) * 60
 #: Optional lifetime safety ceiling across ALL accounts. Unset or 0 = off.
 #: Prefer TRIAL_DAILY_MINUTES for day-to-day cost control.
 TRIAL_GLOBAL_SECONDS = _env_minutes_optional('TRIAL_GLOBAL_MINUTES') * 60

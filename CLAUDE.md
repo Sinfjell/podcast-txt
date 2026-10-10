@@ -22,7 +22,7 @@ before merging, regardless of how many files the diff has.
   `threading.Lock` guards nothing. `trial_reserve()` is one conditional UPDATE
   and must stay one statement.
 - **Both caps hold:** per-account (`users.trial_seconds_limit`) and the shared
-  daily budget (`TRIAL_DAILY_MINUTES`, default 750, Europe/Oslo midnight via
+  daily budget (`TRIAL_DAILY_MINUTES`, default 2000, Europe/Oslo midnight via
   `trial_budget_days`). Optional lifetime safety (`TRIAL_GLOBAL_MINUTES`) is
   off when unset. New signups get `NEW_USER_TRIAL_MINUTES` (default 120) stamped
   on `trial_seconds_limit` at registration; NULL limits still mean

@@ -8580,14 +8580,14 @@ def test_anon_homepage_exposes_new_account_trial_badge(trial_on):
 
 
 def test_default_trial_grants_and_daily_budget():
-    """New signups get 120 minutes; NULL-limit legacy rows use 180; daily is 750.
+    """New signups get 120 minutes; NULL-limit legacy rows use 180; daily is 2000.
     Lifetime safety is off when TRIAL_GLOBAL_MINUTES is unset. Per-episode max
     still tracks TRIAL_MINUTES so a 120-min user over remaining balance hits the
     paywall, not the hard episode-length refusal."""
     assert A.NEW_USER_TRIAL_SECONDS == 120 * 60
     assert A.TRIAL_DEFAULT_SECONDS == 180 * 60
     assert A.TRIAL_MAX_EPISODE_SECONDS == A.TRIAL_DEFAULT_SECONDS
-    assert A.TRIAL_DAILY_SECONDS == 750 * 60
+    assert A.TRIAL_DAILY_SECONDS == 2000 * 60
     assert A.TRIAL_GLOBAL_SECONDS == 0
 
 
