@@ -207,6 +207,44 @@ select.field{width:100%}
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation:none !important;transition:none !important;scroll-behavior:auto !important}
 }
+.transcript-pane { font-family: var(--font-serif); }
+/* Static MCP conversation illustration; real text, no simulated controls. */
+.ds-chat-example { margin: var(--space-9) 0; max-width: 47.5rem; }
+.ds-chat-example__window { background: var(--surface); border-radius: var(--radius-md); overflow: hidden; }
+.ds-chat-example__header {
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2);
+  padding: var(--space-4) var(--space-6); border-bottom: 1px solid var(--line);
+}
+.ds-chat-example__header span, .ds-chat-example__label, .ds-chat-example__episode > span,
+.ds-chat-example figcaption { color: var(--muted); font-size: 0.875rem; }
+.ds-chat-example__conversation { display: grid; gap: var(--space-6); padding: var(--space-6); }
+.ds-chat-example__episode { display: grid; gap: var(--space-1); }
+.ds-chat-example__label { display: block; margin-bottom: var(--space-2); }
+.ds-chat-example__user {
+  justify-self: end; max-width: 100%; background: var(--paper);
+  padding: var(--space-4); border-radius: var(--radius-md);
+}
+.ds-chat-example__user p, .ds-chat-example__reply > p { margin: 0; }
+.ds-chat-example__reply .ds-chat-example__tool {
+  color: var(--accent); font-size: 0.875rem; font-weight: 700; margin-bottom: var(--space-3);
+}
+.ds-chat-example__transcript { margin-top: var(--space-4); }
+.ds-chat-example__transcript p {
+  display: grid; grid-template-columns: 3rem minmax(0, 1fr); gap: var(--space-3);
+  margin: 0; padding: var(--space-3) 0; border-top: 1px solid var(--line);
+}
+.ds-chat-example__transcript p > span:last-child {
+  font-family: var(--font-serif); font-size: 1.25rem; line-height: 1.55;
+}
+.ds-chat-example__timestamp {
+  color: var(--accent); font-size: 0.8125rem; font-weight: 700;
+  font-variant-numeric: tabular-nums; padding-top: var(--space-1);
+}
+.ds-chat-example figcaption { margin-top: var(--space-3); }
+@media (max-width: 640px) {
+  .ds-chat-example__header, .ds-chat-example__conversation { padding: var(--space-4); }
+}
+
 </style>
 </head>
 <body>
@@ -448,6 +486,32 @@ select.field{width:100%}
       <p>The text comes back with timestamps, so every line points to a moment in the recording. Download it as plain text for reading, or as an SRT file when you need subtitles. If the language is detected wrongly, name it before you start and run the episode again; unused trial minutes are returned when you cancel a running job.</p>
     </article>
   </div>
+</section>
+<section class="wrap" aria-label="MCP chat illustration"><figure class="ds-chat-example">
+  <div class="ds-chat-example__window">
+    <div class="ds-chat-example__header"><strong>Your AI chat</strong><span>Podskrift connected</span></div>
+    <div class="ds-chat-example__conversation">
+      <div class="ds-chat-example__episode">
+        <span class="ds-chat-example__label">Example episode</span>
+        <strong>The art of listening</strong>
+        <span>A podcast conversation · 32 min</span>
+      </div>
+      <div class="ds-chat-example__user"><span class="ds-chat-example__label">You</span>
+        <p>Give me the transcript of that.</p>
+      </div>
+      <div class="ds-chat-example__reply">
+        <span class="ds-chat-example__label">Assistant</span>
+        <p class="ds-chat-example__tool"><span aria-hidden="true">✓</span> Podskrift · Transcript ready</p>
+        <p>Here’s the transcript, with timestamps.</p>
+        <div class="ds-chat-example__transcript">
+          <p><span class="ds-chat-example__timestamp">00:00</span><span class="transcript-pane">Today we’re talking about listening — and what changes when we really pay attention.</span></p>
+          <p><span class="ds-chat-example__timestamp">00:18</span><span class="transcript-pane">Sometimes the best question is simply, “Tell me more.”</span></p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <figcaption>Illustrated example. Connect Podskrift to request real podcast transcripts in your chat.</figcaption>
+</figure>
 </section>
 </main>
 
