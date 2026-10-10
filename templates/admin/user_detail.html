@@ -95,6 +95,7 @@
                     <tr>
                         <th>Title</th>
                         <th>Status</th>
+                        <th>Via</th>
                         <th>Duration</th>
                         <th>error_kind</th>
                         <th>Created</th>
@@ -105,12 +106,13 @@
                     <tr>
                         <td title="{{ t.podcast_name or '' }}">{{ t.title }}</td>
                         <td><span class="status-pill {{ t.status }}">{{ t.status }}</span></td>
+                        <td>{{ t.via_label or '—' }}</td>
                         <td>{% if t.duration_min is not none %}{{ t.duration_min }} min{% else %}—{% endif %}</td>
                         <td>{{ t.error_kind or '—' }}</td>
                         <td>{{ t.created_oslo }}</td>
                     </tr>
                 {% else %}
-                    <tr><td colspan="5" style="color: var(--muted);">No tasks.</td></tr>
+                    <tr><td colspan="6" style="color: var(--muted);">No tasks.</td></tr>
                 {% endfor %}
                 </tbody>
             </table>

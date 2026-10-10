@@ -78,7 +78,11 @@ jobs:
           key: ffmpeg-${{ runner.os }}-btbn-n8.1-v1
 
       - name: Install Python dependencies
-        run: pip install -r requirements-dev.txt
+        # Same prod file first (requirements.txt), then test extras.
+        # requirements-dev.txt starts with -r requirements.txt.
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
 
       - name: Run test suite
         run: python -m pytest test_app.py -q
@@ -132,6 +136,8 @@ jobs:
                git show origin/main:ops/drain-in-flight.sh \
                  | PODSKRIFT_DRAIN_MAX_WAIT_SEC=1200 bash -s
                git pull --ff-only origin main
+               # Install/upgrade runtime deps (e.g. PyJWT for ChatGPT OAuth).
+               .venv/bin/pip install -r requirements.txt
                systemctl restart podskrift
                systemctl is-active --quiet podskrift
                echo "podskrift is active"

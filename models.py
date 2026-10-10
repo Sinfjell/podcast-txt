@@ -202,6 +202,14 @@ class TranscriptionTask(db.Model):
     # the shared source task (same audio transcribed once).
     summary_source_task_id = db.Column(db.String(36), nullable=True)
 
+    # How the job was started: 'web' | 'mcp' | 'api'. NULL = legacy / unknown.
+    # Analytics also carries this label; the column makes History and admin
+    # able to show "via MCP" without depending on PostHog.
+    source = db.Column(db.String(16), nullable=True)
+    # Optional OAuth / connector display name (e.g. ChatGPT, Claude) when
+    # source='mcp'. Not used for metering.
+    source_client = db.Column(db.String(64), nullable=True)
+
 
 class TranscriptShare(db.Model):
     """Opt-in public share link for a completed transcript.
@@ -358,6 +366,8 @@ TASK_COLUMN_MIGRATIONS = {
     'summary_completion_tokens': 'INTEGER',
     'summary_cost_usd_est': 'FLOAT',
     'summary_source_task_id': 'VARCHAR(36)',
+    'source': 'VARCHAR(16)',
+    'source_client': 'VARCHAR(64)',
 }
 
 #: Same, for the users table.
@@ -435,6 +445,8 @@ class OAuthClient(db.Model):
     response_types_json = db.Column(db.Text, nullable=False)
     token_endpoint_auth_method = db.Column(db.String(64), nullable=False,
                                            default='none', server_default='none')
+    # JSON list of accepted methods (e.g. ["none","private_key_jwt"] for ChatGPT).
+    token_endpoint_auth_methods_json = db.Column(db.Text, nullable=True)
     # CIMD jwks_uri for private_key_jwt (same host as client_id).
     jwks_uri = db.Column(db.String(512), nullable=True)
     # 'dcr' | 'cimd' — how this client was first learned.
@@ -510,6 +522,7 @@ class OAuthJwtJti(db.Model):
 OAUTH_CLIENT_COLUMN_MIGRATIONS = {
     'registration_source': 'VARCHAR(16)',
     'jwks_uri': 'VARCHAR(512)',
+    'token_endpoint_auth_methods_json': 'TEXT',
 }
 OAUTH_AUTHORIZATION_CODE_COLUMN_MIGRATIONS = {}
 OAUTH_ACCESS_TOKEN_COLUMN_MIGRATIONS = {}
