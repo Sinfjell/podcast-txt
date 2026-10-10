@@ -6131,7 +6131,10 @@ def test_public_api_docs_page_renders_customer_markdown(trial_on):
     assert f'{A.NEW_USER_TRIAL_SECONDS // 60} minutes' in body
     # Host CoS secret must never appear on the public page.
     assert 'AGENT_API_KEY' not in body
-    assert 'MCP' not in body
+    # MCP connector docs stay gated; the nav label "MCP" is always present.
+    docs = body[body.index('<main'):body.index('</main>')]
+    assert 'MCP (ChatGPT' not in docs
+    assert '## MCP' not in docs
     assert 'Developers' not in body
 
 
