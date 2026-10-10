@@ -174,13 +174,14 @@ def _client_redirect_uris(client) -> list[str]:
 
 def _is_localhost_host(host: str) -> bool:
     h = (host or '').lower()
-    if h.startswith('['):  # IPv6 literal
+    if h.startswith('['):  # IPv6 literal in netloc form
         return h in ('[::1]',)
-    return h in ('localhost', '127.0.0.1') or h.endswith('.localhost')
+    # urlparse(...).hostname returns ::1 without brackets.
+    return h in ('localhost', '127.0.0.1', '::1') or h.endswith('.localhost')
 
 
 def validate_redirect_uri(uri: str) -> bool:
-    """https required, or http://localhost / 127.0.0.1 for desktop clients."""
+    """https required, or http://localhost / 127.0.0.1 / [::1] for desktop clients."""
     if not uri or not isinstance(uri, str) or len(uri) > 1024:
         return False
     try:
@@ -197,6 +198,43 @@ def validate_redirect_uri(uri: str) -> bool:
     if parsed.scheme == 'http':
         return _is_localhost_host(host)
     return False
+
+
+def redirect_uri_matches(requested: str, registered: str) -> bool:
+    """True when requested matches a registered redirect_uri.
+
+    Exact match always. For http loopback (localhost / 127.0.0.1 / ::1),
+    RFC 8252 §7.3: match scheme+host+path and ignore port (Claude Code).
+    Non-loopback URIs stay exact-match only.
+    """
+    if not requested or not registered:
+        return False
+    req_s = requested.strip()
+    reg_s = registered.strip()
+    if req_s == reg_s:
+        return True
+    try:
+        req = urlparse(req_s)
+        reg = urlparse(reg_s)
+    except ValueError:
+        return False
+    if req.scheme != 'http' or reg.scheme != 'http':
+        return False
+    req_host = (req.hostname or '').lower()
+    reg_host = (reg.hostname or '').lower()
+    if not (_is_localhost_host(req_host) and _is_localhost_host(reg_host)):
+        return False
+    if req_host != reg_host:
+        return False
+    if (req.path or '') != (reg.path or ''):
+        return False
+    # Query must still match (port is the only ignored component).
+    return (req.query or '') == (reg.query or '')
+
+
+def redirect_uri_allowed(requested: str, allowed: list[str]) -> bool:
+    """True when requested matches any registered redirect_uri (loopback-aware)."""
+    return any(redirect_uri_matches(requested, reg) for reg in allowed)
 
 
 def normalize_resource(resource: str | None) -> str | None:
@@ -282,6 +320,15 @@ def _client_id_host(client_id: str | None) -> str:
     return 'dcr'
 
 
+def _is_e2e_test_request() -> bool:
+    """True when the caller is our own E2E/negative harness (not real clients)."""
+    try:
+        ua = request.headers.get('User-Agent') or ''
+    except RuntimeError:
+        return False
+    return ua.startswith('podskrift-e2e/')
+
+
 def _report_oauth_refusal(*, step: str, reason: str, error: str | None = None,
                           client_id: str | None = None,
                           extra_tags: dict | None = None) -> None:
@@ -302,6 +349,9 @@ def _report_oauth_refusal(*, step: str, reason: str, error: str | None = None,
             'client_id_host': _client_id_host(client_id),
             'oauth_error': (error or '')[:64],
         }
+        is_test = _is_e2e_test_request()
+        if is_test:
+            tags['test'] = 'true'
         if extra_tags:
             for key, value in extra_tags.items():
                 if value is None:
@@ -309,7 +359,8 @@ def _report_oauth_refusal(*, step: str, reason: str, error: str | None = None,
                 tags[str(key)[:64]] = str(value)[:120]
         sentry_sdk.capture_message(
             f'OAuth {step} refused: {safe_reason}',
-            level='warning',
+            # Self-tests must not page; real client refusals stay warning.
+            level='info' if is_test else 'warning',
             tags=tags,
             fingerprint=['oauth-refusal', step or 'unknown', safe_reason[:64]],
         )
@@ -1398,11 +1449,12 @@ def register_oauth(app_flask):
                 step='authorize', client_id=client_id or None)
 
         allowed = _client_redirect_uris(client)
-        if redirect_uri not in allowed and looks_like_cimd_client_id(client_id):
+        if (not redirect_uri_allowed(redirect_uri, allowed)
+                and looks_like_cimd_client_id(client_id)):
             # Redirect URIs may have rotated in the client's published CIMD.
             client, _ = resolve_oauth_client(client_id, force_refresh=True)
             allowed = _client_redirect_uris(client) if client else []
-        if client is None or redirect_uri not in allowed:
+        if client is None or not redirect_uri_allowed(redirect_uri, allowed):
             return _oauth_error(
                 'invalid_request',
                 'redirect_uri is not registered for this client.',
@@ -1480,7 +1532,8 @@ def register_oauth(app_flask):
 
         # Re-check redirect_uri from the form against the registered set.
         form_redirect = (request.form.get('redirect_uri') or '').strip()
-        if form_redirect != redirect_uri or form_redirect not in allowed:
+        if (form_redirect != redirect_uri
+                or not redirect_uri_allowed(form_redirect, allowed)):
             return _oauth_error(
                 'invalid_request', 'redirect_uri mismatch.', 400,
                 step='authorize', client_id=client_id)
