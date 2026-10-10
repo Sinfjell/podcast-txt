@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "next-episode-two-dollar-pack",
+      "date": "2026-10-10",
+      "title": "$2 pack for your next episode",
+      "summary": "After your first transcript — and on the paywall — you can buy 90 minutes for $2, or keep the better-value 300 minutes for $5."
+    },
+    {
       "id": "ai-what-you-can-ask",
       "date": "2026-10-10",
       "title": "Copyable prompts for ChatGPT and Claude",

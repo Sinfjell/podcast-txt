@@ -140,26 +140,38 @@
     </div>
 
     {% if needs_api_key %}
-    <div class="alert alert-warning mt-2" style="flex-direction: column; align-items: flex-start;">
+    <div class="alert alert-warning mt-2" style="flex-direction: column; align-items: flex-start;" data-testid="episode-paywall">
         <div>
             <p style="font-weight: 700; font-size: 17px;">Out of free minutes</p>
-            <p style="margin-top: 8px;">
-                {% if stripe_buy_enabled %}
-                {# Buy submits via form= — must not nest a <form> inside episodeForm
-                   or browsers drop the inner form and close episodeForm early,
-                   leaving #transcribeBtn outside any form. JS opens the buy modal. #}
-                <button type="submit" class="btn btn-sm btn-primary"
-                        form="buyFormEpisodeSelection"
-                        id="paywallBuyBtn"
-                        data-paywall-buy="episode_selection"
-                        style="display: inline-flex; margin: 8px 6px 8px 0;">
-                    {{ credit_pack_label }}
-                </button>
-                <span class="form-hint" style="display: block; margin: 4px 0 2px;">{{ credit_pack_payment_hint }}</span>
-                <span style="display: block; margin: 0 0 8px;">{{ credit_pack_subline }}</span>
-                {% endif %}
-                <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="episode_selection">Add your own OpenAI key</a>
-            </p>
+            {% if stripe_buy_enabled %}
+            {# Buy submits via form= — must not nest a <form> inside episodeForm
+               or browsers drop the inner form and close episodeForm early,
+               leaving #transcribeBtn outside any form. #}
+            <div class="ds-pack-offers ds-pack-offers--paywall">
+                <div>
+                    <button type="submit" class="btn btn-sm btn-primary"
+                            form="buyFormEpisodeSelection"
+                            id="paywallBuyBtn"
+                            data-paywall-buy="episode_selection"
+                            data-pack="{{ credit_pack_sku }}">
+                        {{ credit_pack_label }}
+                    </button>
+                    <span class="form-hint">Better value · {{ credit_pack_subline }}</span>
+                    <span class="form-hint">{{ credit_pack_payment_hint }}</span>
+                </div>
+                <div>
+                    <button type="submit" class="btn btn-sm btn-secondary"
+                            form="buyFormNextEpisode"
+                            id="paywallNextEpisodeBtn"
+                            data-paywall-buy="episode_selection"
+                            data-pack="{{ next_episode_pack_sku }}">
+                        {{ next_episode_pack_label }}
+                    </button>
+                    <span class="form-hint">{{ next_episode_offer_label }}</span>
+                </div>
+            </div>
+            {% endif %}
+            <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="episode_selection">Add your own OpenAI key</a>
         </div>
     </div>
     {% endif %}
@@ -205,12 +217,20 @@
 </form>
 
 {% if needs_api_key and stripe_buy_enabled %}
-{# Sibling form kept for PR A compatibility / progressive enhancement; modal is preferred. #}
+{# Sibling forms — must stay outside episodeForm (no nested forms). #}
 <form id="buyFormEpisodeSelection" method="POST" action="{{ url_for('billing_checkout') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="source" value="episode_selection">
+    <input type="hidden" name="pack" value="{{ credit_pack_sku }}">
     <input type="hidden" name="ph_sid" value="">
     <input type="hidden" name="return_to" id="buyFormReturnTo" value="">
+</form>
+<form id="buyFormNextEpisode" method="POST" action="{{ url_for('billing_checkout') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="source" value="episode_selection">
+    <input type="hidden" name="pack" value="{{ next_episode_pack_sku }}">
+    <input type="hidden" name="ph_sid" value="">
+    <input type="hidden" name="return_to" id="buyFormNextReturnTo" value="">
 </form>
 {% endif %}
 
@@ -636,6 +656,21 @@ document.addEventListener('DOMContentLoaded', function() {
             if (typeof window.openBuyModal === 'function') {
                 e.preventDefault();
                 openEpisodeBuyModal(selectedDuration);
+            } else {
+                var rt = document.getElementById('buyFormReturnTo');
+                if (rt) rt.value = returnToForCheckout();
+            }
+        });
+    }
+    var paywallNextBtn = document.getElementById('paywallNextEpisodeBtn');
+    if (paywallNextBtn) {
+        paywallNextBtn.addEventListener('click', function() {
+            var rt = document.getElementById('buyFormNextReturnTo');
+            if (rt) rt.value = returnToForCheckout();
+            if (typeof window.podskriftPaywallBuyClicked === 'function') {
+                window.podskriftPaywallBuyClicked(
+                    'episode_selection', 'trial_exhausted',
+                    {{ next_episode_pack_sku|tojson }});
             }
         });
     }

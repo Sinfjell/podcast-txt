@@ -1496,17 +1496,19 @@
             } catch (e) { /* ignore */ }
         };
 
-        window.podskriftPaywallBuyClicked = function (location, reason) {
+        window.podskriftPaywallBuyClicked = function (location, reason, pack) {
             try {
                 if (!window.posthog || !location) return;
                 var opts = {};
                 if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
                     opts.transport = 'sendBeacon';
                 }
-                posthog.capture('paywall_buy_clicked', {
+                var buyPayload = {
                     location: location,
                     reason: reason || ''
-                }, opts);
+                };
+                if (pack) buyPayload.pack = pack;
+                posthog.capture('paywall_buy_clicked', buyPayload, opts);
             } catch (e) { /* ignore */ }
         };
 
@@ -1568,10 +1570,15 @@
                 }
                 posthog.capture('buy_clicked', {location: loc, transport: 'sendBeacon'}, opts);
                 if (form.getAttribute('data-paywall-buy')) {
-                    posthog.capture('paywall_buy_clicked', {
+                    var formBuy = {
                         location: form.getAttribute('data-paywall-buy') || loc,
                         reason: ''
-                    }, opts);
+                    };
+                    var packEl = form.querySelector('input[name="pack"]');
+                    var packVal = (packEl && packEl.value)
+                        || form.getAttribute('data-pack') || '';
+                    if (packVal) formBuy.pack = packVal;
+                    posthog.capture('paywall_buy_clicked', formBuy, opts);
                 }
             } catch (e) { /* ignore */ }
         }, true);

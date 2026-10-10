@@ -851,29 +851,103 @@ STRIPE_TAX_BEHAVIOR = (os.getenv('STRIPE_TAX_BEHAVIOR') or 'inclusive').strip().
 #: in the Dashboard first, and replaces STRIPE_AUTOMATIC_TAX when both are on.
 STRIPE_MANAGED_PAYMENTS = os.getenv('STRIPE_MANAGED_PAYMENTS', '0').strip().lower() in (
     '1', 'true', 'yes', 'on')
-#: One-time pack: 300 minutes (5 hours) for $5.00 USD.
-CREDIT_PACK_MINUTES = 300
-CREDIT_PACK_SECONDS = CREDIT_PACK_MINUTES * 60
-CREDIT_PACK_AMOUNT_CENTS = 500
-CREDIT_PACK_CURRENCY = 'usd'
-CREDIT_PACK_LABEL = 'Buy 300 min for $5'
-#: Shown under Buy buttons — do not fold into CREDIT_PACK_LABEL (SKU/analytics).
-CREDIT_PACK_SUBLINE = 'One-time · 300 min · VAT incl.'
-#: Secondary result-page offer (not a second green primary when Copy is shown).
-RESULT_OFFER_LABEL = 'Transcribe your next episode: 300 min for $5'
-#: Partial-preview checkout CTA.
-UNLOCK_EPISODE_LABEL = 'Unlock the full episode'
-#: BYOK failure → pack offer (plain sentence; button uses CREDIT_PACK_LABEL).
-OWN_KEY_PACK_OFFER = 'Use Podskrift minutes instead: 300 min for $5'
 #: Trust line near Buy CTAs. Methods match Managed Payments dynamic PMs
 #: (cards + wallets); we never pass payment_method_types on the session.
 CREDIT_PACK_PAYMENT_HINT = (
     'Card · Apple Pay · Google Pay · secure checkout by Stripe')
-CREDIT_PACK_SKU = 'minutes_300_usd500_v1'
 CREDIT_PACK_TAX_BEHAVIOR = STRIPE_TAX_BEHAVIOR if STRIPE_TAX_BEHAVIOR in (
     'inclusive', 'exclusive') else 'inclusive'
 #: Soft nudge on the home banner when free+paid remaining is under this.
 LOW_BALANCE_MINUTES = 30
+
+
+class CreditPack(dict):
+    """Frozen-ish credit pack config accessed as attributes or keys."""
+
+    __slots__ = ()
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
+#: Main offer: 300 minutes for $5 (better value — primary CTA).
+CREDIT_PACK_SKU = 'minutes_300_usd500_v1'
+#: Small pack: $2 for the next episode (up to 90 minutes).
+NEXT_EPISODE_PACK_SKU = 'minutes_90_usd200_v1'
+#: Optional Dashboard Price for the $2 pack; empty → inline price_data.
+STRIPE_PRICE_ID_NEXT_EPISODE = (
+    os.getenv('STRIPE_PRICE_ID_NEXT_EPISODE') or '').strip()
+
+CREDIT_PACKS = {
+    CREDIT_PACK_SKU: CreditPack(
+        sku=CREDIT_PACK_SKU,
+        minutes=300,
+        amount_cents=500,
+        currency='usd',
+        label='Buy 300 min for $5',
+        subline='One-time · 300 min · VAT incl.',
+        better_value=True,
+        product_name='Podskrift — 300 minutes',
+        product_description=(
+            '300 minutes of transcription (5 hours)'),
+    ),
+    NEXT_EPISODE_PACK_SKU: CreditPack(
+        sku=NEXT_EPISODE_PACK_SKU,
+        minutes=90,
+        amount_cents=200,
+        currency='usd',
+        label='$2 — next episode (up to 90 min)',
+        subline='One-time · up to 90 min · VAT incl.',
+        better_value=False,
+        product_name='Podskrift — next episode (90 minutes)',
+        product_description=(
+            '90 minutes of transcription — enough for your next episode'),
+    ),
+}
+DEFAULT_CREDIT_PACK_SKU = CREDIT_PACK_SKU
+
+#: Backward-compatible aliases for the main ($5 / 300 min) pack.
+CREDIT_PACK_MINUTES = CREDIT_PACKS[CREDIT_PACK_SKU].minutes
+CREDIT_PACK_SECONDS = CREDIT_PACK_MINUTES * 60
+CREDIT_PACK_AMOUNT_CENTS = CREDIT_PACKS[CREDIT_PACK_SKU].amount_cents
+CREDIT_PACK_CURRENCY = CREDIT_PACKS[CREDIT_PACK_SKU].currency
+CREDIT_PACK_LABEL = CREDIT_PACKS[CREDIT_PACK_SKU].label
+CREDIT_PACK_SUBLINE = CREDIT_PACKS[CREDIT_PACK_SKU].subline
+#: Secondary result-page offer (not a second green primary when Copy is shown).
+RESULT_OFFER_LABEL = 'Transcribe your next episode: 300 min for $5'
+NEXT_EPISODE_OFFER_LABEL = (
+    '$2 — transcribe your next episode (up to 90 minutes)')
+#: Partial-preview checkout CTA.
+UNLOCK_EPISODE_LABEL = 'Unlock the full episode'
+#: BYOK failure → pack offer (plain sentence; button uses CREDIT_PACK_LABEL).
+OWN_KEY_PACK_OFFER = 'Use Podskrift minutes instead: 300 min for $5'
+
+
+def get_credit_pack(sku=None):
+    """Return a CreditPack by sku, or the default main pack."""
+    if sku and sku in CREDIT_PACKS:
+        return CREDIT_PACKS[sku]
+    return CREDIT_PACKS[DEFAULT_CREDIT_PACK_SKU]
+
+
+def resolve_checkout_pack(raw_sku=None):
+    """Pack for a checkout form value; unknown → default main pack."""
+    sku = (raw_sku or '').strip()
+    if sku in CREDIT_PACKS:
+        return CREDIT_PACKS[sku]
+    return CREDIT_PACKS[DEFAULT_CREDIT_PACK_SKU]
+
+
+def pack_stripe_price_id(pack):
+    """Live Stripe Price id for a pack (env may be monkeypatched in tests)."""
+    if pack.sku == CREDIT_PACK_SKU:
+        return (STRIPE_PRICE_ID or '').strip()
+    if pack.sku == NEXT_EPISODE_PACK_SKU:
+        return (STRIPE_PRICE_ID_NEXT_EPISODE or '').strip()
+    return ''
 
 if stripe is not None and STRIPE_API_VERSION:
     stripe.api_version = STRIPE_API_VERSION
@@ -4113,43 +4187,46 @@ def _session_customer_country(session_dict):
 
 
 def pack_session_matches(d):
-    """Validate a retrieved Checkout Session bought our credit pack.
+    """Validate a retrieved Checkout Session bought a known credit pack.
 
     Checks what was bought (line item / unit amount / pack marker), not only
-    amount_total — so inclusive Stripe Tax (total stays 500) and exclusive
-    tax (subtotal 500, total = subtotal + tax) both credit correctly.
+    amount_total — so inclusive Stripe Tax and exclusive tax both credit.
+    Returns (ok, reason, pack_or_None).
     """
-    if (d.get('currency') or '').lower() != CREDIT_PACK_CURRENCY:
-        return False, 'currency'
-    if (d.get('metadata') or {}).get('pack') != CREDIT_PACK_SKU:
-        return False, 'pack_marker'
+    meta = d.get('metadata') or {}
+    pack = CREDIT_PACKS.get(meta.get('pack') or '')
+    if pack is None:
+        return False, 'pack_marker', None
+    if (d.get('currency') or '').lower() != pack.currency:
+        return False, 'currency', pack
     items = ((d.get('line_items') or {}).get('data') or [])
     if len(items) != 1 or items[0].get('quantity') != 1:
-        return False, 'line_items'
+        return False, 'line_items', pack
     price = items[0].get('price') or {}
     if isinstance(price, str):
-        return False, 'price_unexpanded'
-    if STRIPE_PRICE_ID and price.get('id') != STRIPE_PRICE_ID:
-        return False, 'price_id'
-    if price.get('unit_amount') != CREDIT_PACK_AMOUNT_CENTS:
-        return False, 'unit_amount'
+        return False, 'price_unexpanded', pack
+    expected_price_id = pack_stripe_price_id(pack)
+    if expected_price_id and price.get('id') != expected_price_id:
+        return False, 'price_id', pack
+    if price.get('unit_amount') != pack.amount_cents:
+        return False, 'unit_amount', pack
     td = d.get('total_details') or {}
     if (td.get('amount_discount') or 0) != 0:
-        return False, 'discount'
+        return False, 'discount', pack
     tax = td.get('amount_tax') or 0
     total, subtotal = d.get('amount_total'), d.get('amount_subtotal')
     behavior = (price.get('tax_behavior') or CREDIT_PACK_TAX_BEHAVIOR or '').lower()
     if behavior == 'inclusive':
-        ok = total == CREDIT_PACK_AMOUNT_CENTS
+        ok = total == pack.amount_cents
     else:
         ok = (
-            subtotal == CREDIT_PACK_AMOUNT_CENTS
+            subtotal == pack.amount_cents
             and total is not None
             and total == (subtotal or 0) + tax
         )
     if ok:
-        return True, 'ok'
-    return False, f'amount total={total} subtotal={subtotal} tax={tax}'
+        return True, 'ok', pack
+    return False, f'amount total={total} subtotal={subtotal} tax={tax}', pack
 
 
 def _record_needs_review(session_dict, user_id, event_id, reason):
@@ -4408,10 +4485,10 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
         # Async methods complete unpaid first; wait for async_payment_succeeded.
         return False
 
-    ok, reason = pack_session_matches(d)
+    ok, reason, pack = pack_session_matches(d)
     metadata = d.get('metadata') or {}
     user_id = _int_or_none(d.get('client_reference_id') or metadata.get('user_id'))
-    if not ok or user_id is None:
+    if not ok or user_id is None or pack is None:
         fail_reason = reason if not ok else 'missing_user'
         app.logger.error(
             'Stripe session %s not credited: %s', session_id, fail_reason)
@@ -4433,9 +4510,9 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
         amount_for_legacy = int(
             subtotal if subtotal is not None else total)
     except (TypeError, ValueError):
-        amount_for_legacy = CREDIT_PACK_AMOUNT_CENTS
-    currency = (d.get('currency') or CREDIT_PACK_CURRENCY).lower()
-    minutes = CREDIT_PACK_MINUTES
+        amount_for_legacy = pack.amount_cents
+    currency = (d.get('currency') or pack.currency).lower()
+    minutes = pack.minutes
     customer_country = _session_customer_country(d)
     payment_intent = _session_payment_intent_id(d)
     location = (metadata.get('location') or metadata.get('source') or '')[:64] or None
@@ -4505,6 +4582,8 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
         'payment_intent': payment_intent,
         'fulfilled_via': fulfilled_via,
         'location': location,
+        'pack': pack.sku,
+        'pack_sku': pack.sku,
         'is_first_purchase': prior_credited == 0,
         'revenue': (amount_total_cents or amount_for_legacy or 0) / 100.0,
         '$set': {'has_purchased': True},
@@ -4832,6 +4911,7 @@ def billing_checkout():
             return redirect(url_for('settings'))
 
     source = (request.form.get('source') or 'settings').strip()[:64]
+    pack = resolve_checkout_pack(request.form.get('pack'))
     ph_sid = _consented_posthog_session_id(request.form.get('ph_sid'))
     trial_ctx = _trial_context() or {}
     trial_remaining_min = trial_ctx.get('remaining_minutes')
@@ -4868,25 +4948,25 @@ def billing_checkout():
         cancel_abs = url_for('billing_cancel', next=next_path, _external=True)
 
     line_item = {'quantity': 1}
-    if STRIPE_PRICE_ID:
-        line_item['price'] = STRIPE_PRICE_ID
+    price_id = pack_stripe_price_id(pack)
+    if price_id:
+        line_item['price'] = price_id
     else:
         line_item['price_data'] = {
-            'currency': CREDIT_PACK_CURRENCY,
-            'unit_amount': CREDIT_PACK_AMOUNT_CENTS,
+            'currency': pack.currency,
+            'unit_amount': pack.amount_cents,
             'tax_behavior': CREDIT_PACK_TAX_BEHAVIOR,
             'product_data': {
-                'name': f'Podskrift — {CREDIT_PACK_MINUTES} minutes',
-                'description': f'{CREDIT_PACK_MINUTES} minutes of transcription '
-                               f'({CREDIT_PACK_MINUTES // 60} hours)',
+                'name': pack.product_name,
+                'description': pack.product_description,
                 'tax_code': STRIPE_TAX_CODE,
             },
         }
 
     meta = {
         'user_id': str(current_user.id),
-        'minutes': str(CREDIT_PACK_MINUTES),
-        'pack': CREDIT_PACK_SKU,
+        'minutes': str(pack.minutes),
+        'pack': pack.sku,
         'location': source,
         'source': source,
     }
@@ -4897,7 +4977,7 @@ def billing_checkout():
         meta['return_to'] = return_to[:500]
     pi_meta = {
         'user_id': str(current_user.id),
-        'pack': CREDIT_PACK_SKU,
+        'pack': pack.sku,
         'location': source,
     }
     if ph_sid:
@@ -4952,10 +5032,11 @@ def billing_checkout():
         'location': source,
         'source': source,
         'checkout_session_id': cs_id,
-        'amount_cents': CREDIT_PACK_AMOUNT_CENTS,
-        'currency': CREDIT_PACK_CURRENCY,
-        'minutes': CREDIT_PACK_MINUTES,
-        'pack_sku': CREDIT_PACK_SKU,
+        'amount_cents': pack.amount_cents,
+        'currency': pack.currency,
+        'minutes': pack.minutes,
+        'pack': pack.sku,
+        'pack_sku': pack.sku,
         'managed_payments': bool(STRIPE_MANAGED_PAYMENTS),
         'trial_remaining_min': trial_remaining_min,
         'paid_remaining_min': paid_remaining_min,
@@ -5540,12 +5621,21 @@ def _minutes_limit_actions(user_id, location='enqueue', reason=None,
     (paywall_shown / offer_shown / paywall_buy_clicked / paywall_byok_clicked).
     """
     actions = []
+    next_pack = get_credit_pack(NEXT_EPISODE_PACK_SKU)
     if stripe_checkout_enabled():
         actions.append({
             'label': CREDIT_PACK_LABEL,
             'url': url_for('billing_checkout'),
             'method': 'POST',
             'primary': True,
+            'pack': CREDIT_PACK_SKU,
+        })
+        actions.append({
+            'label': next_pack.label,
+            'url': url_for('billing_checkout'),
+            'method': 'POST',
+            'primary': False,
+            'pack': next_pack.sku,
         })
     actions.append({
         'label': 'Add OpenAI key →',
@@ -5563,6 +5653,14 @@ def _minutes_limit_actions(user_id, location='enqueue', reason=None,
         'buy_available': stripe_checkout_enabled(),
         'buy_label': CREDIT_PACK_LABEL if stripe_checkout_enabled() else None,
         'buy_url': url_for('billing_checkout') if stripe_checkout_enabled() else None,
+        'pack': CREDIT_PACK_SKU if stripe_checkout_enabled() else None,
+        'next_episode_offer': bool(stripe_checkout_enabled()),
+        'next_episode_buy_label': (
+            next_pack.label if stripe_checkout_enabled() else None),
+        'next_episode_pack': (
+            next_pack.sku if stripe_checkout_enabled() else None),
+        'next_episode_offer_label': (
+            NEXT_EPISODE_OFFER_LABEL if stripe_checkout_enabled() else None),
         'paywall_reason': reason,
         'paywall_location': location,
         'paywall_cover_line': cover if stripe_checkout_enabled() else '',
@@ -7013,6 +7111,16 @@ def get_status(task_id):
             result['result_offer_label'] = RESULT_OFFER_LABEL
             result['buy_available'] = True
             result['buy_label'] = CREDIT_PACK_LABEL
+            result['pack'] = CREDIT_PACK_SKU
+            # $2 next-episode pack only right after the user's first completion.
+            completed_n = TranscriptionTask.query.filter_by(
+                user_id=task.user_id, status='completed').count()
+            if completed_n == 1:
+                next_pack = get_credit_pack(NEXT_EPISODE_PACK_SKU)
+                result['next_episode_offer'] = True
+                result['next_episode_offer_label'] = NEXT_EPISODE_OFFER_LABEL
+                result['next_episode_buy_label'] = next_pack.label
+                result['next_episode_pack'] = next_pack.sku
         # One-line balance fact under the completed transcript (metered only).
         fact = balance_fact_for_user(current_user)
         if fact:
@@ -8991,6 +9099,13 @@ def inject_trial_badge():
         'credit_pack_payment_hint': CREDIT_PACK_PAYMENT_HINT,
         'credit_pack_minutes': CREDIT_PACK_MINUTES,
         'credit_pack_price_usd': f'{CREDIT_PACK_AMOUNT_CENTS / 100:.0f}',
+        'credit_pack_sku': CREDIT_PACK_SKU,
+        'next_episode_pack_sku': NEXT_EPISODE_PACK_SKU,
+        'next_episode_pack_label': get_credit_pack(NEXT_EPISODE_PACK_SKU).label,
+        'next_episode_offer_label': NEXT_EPISODE_OFFER_LABEL,
+        'next_episode_pack_minutes': get_credit_pack(NEXT_EPISODE_PACK_SKU).minutes,
+        'next_episode_pack_price_usd': (
+            f'{get_credit_pack(NEXT_EPISODE_PACK_SKU).amount_cents / 100:.0f}'),
         'nav_minutes_left': nav['nav_minutes_left'],
         'nav_daily_exhausted': nav['nav_daily_exhausted'],
         'nav_show_buy': nav['nav_show_buy'],

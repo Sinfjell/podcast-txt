@@ -299,3 +299,46 @@
 {%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
 <span class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>{{ label }}</span>
 {%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# pack_buy_forms — $5 primary + optional $2 next-episode secondary
+   One accent-filled (primary) button. Forms post to billing_checkout.       #}
+{# ------------------------------------------------------------------------- #}
+{% macro pack_buy_forms(source, primary_label=None, show_next_episode=true,
+                        return_to='', size='sm', class='') -%}
+{%- set cls = 'ds-pack-offers' -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+{%- set btn_size = (' btn-' ~ size) if size else '' -%}
+<div class="{{ cls }}">
+  <form method="POST" action="{{ url_for('billing_checkout') }}"
+        data-paywall-buy="{{ source }}" data-pack="{{ credit_pack_sku }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="source" value="{{ source }}">
+    <input type="hidden" name="pack" value="{{ credit_pack_sku }}">
+    <input type="hidden" name="ph_sid" value="">
+    {%- if return_to -%}
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+    {%- endif -%}
+    <button type="submit" class="btn btn-primary{{ btn_size }}">
+      {{ primary_label or credit_pack_label }}
+    </button>
+    <span class="form-hint">Better value · {{ credit_pack_subline }}</span>
+  </form>
+  {%- if show_next_episode and next_episode_pack_sku -%}
+  <form method="POST" action="{{ url_for('billing_checkout') }}"
+        data-paywall-buy="{{ source }}" data-pack="{{ next_episode_pack_sku }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="source" value="{{ source }}">
+    <input type="hidden" name="pack" value="{{ next_episode_pack_sku }}">
+    <input type="hidden" name="ph_sid" value="">
+    {%- if return_to -%}
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+    {%- endif -%}
+    <button type="submit" class="btn btn-secondary{{ btn_size }}">
+      {{ next_episode_pack_label }}
+    </button>
+    <span class="form-hint">{{ next_episode_offer_label }}</span>
+  </form>
+  {%- endif -%}
+</div>
+{%- endmacro %}

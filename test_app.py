@@ -4091,16 +4091,22 @@ def test_llms_txt_is_served_as_plain_utf8_text(trial_on):
 def test_no_page_quotes_a_trial_length_the_code_does_not_grant(trial_on):
     """The regex in the llms.txt test was anchored to one phrasing and stepped
     straight over a hardcoded "60 trial minutes" in the same file and a
-    hardcoded "First 60 minutes free" in the hero."""
+    hardcoded "First 60 minutes free" in the hero.
+
+    Paid credit-pack sizes (e.g. 90 / 300) are allowed — they are not trial
+    grants.
+    """
     import re as _re
     client = A.app.test_client()
     granted = A.NEW_USER_TRIAL_SECONDS // 60
+    pack_minutes = {p.minutes for p in A.CREDIT_PACKS.values()}
+    allowed = {granted} | pack_minutes
     for path in ('/', '/llms.txt', '/docs/api'):
         text = client.get(path).data.decode()
         figures = {int(n) for n in _re.findall(r'(\d+)\s+(?:trial\s+)?minutes', text)}
-        assert figures <= {granted}, (
-            f'{path} quotes {sorted(figures - {granted})} minutes; the configured '
-            f'grant is {granted}'
+        assert figures <= allowed, (
+            f'{path} quotes {sorted(figures - allowed)} minutes; allowed are '
+            f'trial grant {granted} and pack sizes {sorted(pack_minutes)}'
         )
 
 
@@ -8961,30 +8967,31 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'ai-what-you-can-ask'
-    assert entries[1]['id'] == 'mcp-list-my-transcripts'
-    assert entries[2]['id'] == 'history-in-progress'
-    assert entries[3]['id'] == 'mcp-chat-example'
-    assert entries[4]['id'] == 'mcp-visual-setup-guides'
-    assert entries[5]['id'] == 'history-via-mcp'
-    assert entries[6]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[7]['id'] == 'new-signup-120-min-trial'
-    assert entries[8]['id'] == 'new-look'
-    assert entries[9]['id'] == 'forgot-password'
-    assert entries[10]['id'] == 'share-listen-links'
-    assert entries[11]['id'] == 'keyboard-and-faster-loading'
+    assert entries[0]['id'] == 'next-episode-two-dollar-pack'
+    assert entries[1]['id'] == 'ai-what-you-can-ask'
+    assert entries[2]['id'] == 'mcp-list-my-transcripts'
+    assert entries[3]['id'] == 'history-in-progress'
+    assert entries[4]['id'] == 'mcp-chat-example'
+    assert entries[5]['id'] == 'mcp-visual-setup-guides'
+    assert entries[6]['id'] == 'history-via-mcp'
+    assert entries[7]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[8]['id'] == 'new-signup-120-min-trial'
+    assert entries[9]['id'] == 'new-look'
+    assert entries[10]['id'] == 'forgot-password'
+    assert entries[11]['id'] == 'share-listen-links'
+    assert entries[12]['id'] == 'keyboard-and-faster-loading'
     # Internal / auth fixes never ship as user-facing changelog entries.
     assert all(e['id'] != 'chatgpt-oauth-private-key-jwt' for e in entries)
-    assert entries[12]['id'] == 'show-landing-pages'
-    assert entries[13]['id'] == 'public-share-links'
-    assert entries[14]['id'] == 'unsubscribe-confirm-click'
-    assert entries[15]['id'] == 'partial-preview-minutes-wording'
-    assert entries[16]['id'] == 'partial-trial-preview'
-    assert entries[17]['id'] == 'own-key-billing-clarity'
-    assert entries[18]['id'] == 'clearer-missing-episode-audio'
-    assert entries[19]['id'] == 'new-signup-60-min-trial'
-    assert entries[20]['id'] == 'spotify-paste-robustness'
-    assert entries[21]['id'] == 'no-double-charge-restart'
+    assert entries[13]['id'] == 'show-landing-pages'
+    assert entries[14]['id'] == 'public-share-links'
+    assert entries[15]['id'] == 'unsubscribe-confirm-click'
+    assert entries[16]['id'] == 'partial-preview-minutes-wording'
+    assert entries[17]['id'] == 'partial-trial-preview'
+    assert entries[18]['id'] == 'own-key-billing-clarity'
+    assert entries[19]['id'] == 'clearer-missing-episode-audio'
+    assert entries[20]['id'] == 'new-signup-60-min-trial'
+    assert entries[21]['id'] == 'spotify-paste-robustness'
+    assert entries[22]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -11547,13 +11554,17 @@ def test_home_paywall_buy_is_primary_byok_is_text_link(stripe_on):
     body = _login(uid).get('/').data.decode()
     assert 'Your free trial is used up.' in body
     assert A.CREDIT_PACK_LABEL in body
+    assert A.get_credit_pack(A.NEXT_EPISODE_PACK_SKU).label in body
     assert 'data-paywall-buy="home_banner"' in body
     assert 'data-paywall-byok="home_banner"' in body
     assert 'ds-link-button' in body
-    # Buy is the filled CTA; BYOK is a text link, not btn-secondary.
-    buy_at = body.index('data-paywall-buy="home_banner"')
-    chunk = body[buy_at:buy_at + 400]
+    # $5 Buy is the filled CTA; $2 is secondary; BYOK is a text link.
+    buy_at = body.index(f'data-pack="{A.CREDIT_PACK_SKU}"')
+    chunk = body[buy_at:buy_at + 500]
     assert 'btn-primary' in chunk
+    next_at = body.index(f'data-pack="{A.NEXT_EPISODE_PACK_SKU}"')
+    next_chunk = body[next_at:next_at + 500]
+    assert 'btn-secondary' in next_chunk
     byok_at = body.index('data-paywall-byok="home_banner"')
     byok_chunk = body[max(0, byok_at - 80):byok_at + 120]
     assert 'ds-link-button' in byok_chunk
@@ -11602,6 +11613,99 @@ def test_status_partial_unlock_and_full_result_offer(stripe_on):
     assert full.get('result_offer') is True
     assert full.get('result_offer_label') == A.RESULT_OFFER_LABEL
     assert full.get('buy_available') is True
+    # Second completed transcript — $2 next-episode offer is first-only.
+    assert full.get('next_episode_offer') is not True
+
+
+def test_first_completed_transcript_offers_next_episode_pack(stripe_on):
+    from models import db, TranscriptionTask
+    uid = _make_user('first-offer@test.com', limit=600, used=0)
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='first-full-1', user_id=uid, episode_title='First Ep',
+            status='completed', phase='completed',
+            transcript_text='hello',
+        ))
+        db.session.commit()
+    data = _login(uid).get('/status/first-full-1').get_json()
+    assert data.get('result_offer') is True
+    assert data.get('next_episode_offer') is True
+    assert data.get('next_episode_pack') == A.NEXT_EPISODE_PACK_SKU
+    assert data.get('pack') == A.CREDIT_PACK_SKU
+    assert '$2' in (data.get('next_episode_offer_label') or '')
+    assert data.get('next_episode_buy_label') == A.get_credit_pack(
+        A.NEXT_EPISODE_PACK_SKU).label
+
+
+def test_checkout_next_episode_pack_and_webhook_credit(stripe_on, ph_events):
+    uid = _make_user('nextpack@test.com', limit=600, used=600)
+    client = _login(uid)
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token,
+        'source': 'result_offer',
+        'pack': A.NEXT_EPISODE_PACK_SKU,
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    kw = stripe_on['last_create_params']
+    assert kw['metadata']['pack'] == A.NEXT_EPISODE_PACK_SKU
+    assert kw['metadata']['minutes'] == '90'
+    assert kw['line_items'][0]['price_data']['unit_amount'] == 200
+    started = [e for e in ph_events.events if e['event'] == 'checkout_started']
+    assert started[-1]['properties']['pack'] == A.NEXT_EPISODE_PACK_SKU
+    assert started[-1]['properties']['minutes'] == 90
+
+    session = _pack_session(uid, 'cs_next_ep_1', **{
+        'amount_subtotal': 200,
+        'amount_total': 200,
+        'metadata': {
+            'user_id': str(uid),
+            'minutes': '90',
+            'pack': A.NEXT_EPISODE_PACK_SKU,
+        },
+        'line_items': {
+            'data': [{
+                'quantity': 1,
+                'price': {
+                    'id': 'price_inline_90',
+                    'unit_amount': 200,
+                    'tax_behavior': 'inclusive',
+                },
+            }],
+        },
+    })
+    assert _register_and_post(stripe_on, session).status_code == 200
+    assert _paid(uid) == 90 * 60
+    purchased = [e for e in ph_events.events if e['event'] == 'purchase_completed']
+    assert purchased[-1]['properties']['minutes'] == 90
+    assert purchased[-1]['properties']['pack'] == A.NEXT_EPISODE_PACK_SKU
+
+
+def test_episode_paywall_shows_next_episode_pack(stripe_on, monkeypatch):
+    uid = _make_user('ep-next@test.com', limit=600, used=600)
+    episodes = [{
+        'index': 0, 'title': 'Ep', 'published': '2024-01-01',
+        'audio_url': 'https://example.com/ep.mp3', 'description': '',
+        'duration_min': 30.0, 'estimated_cost': 0.18, 'artwork': '',
+        'podcast_name': 'Feed',
+    }]
+    monkeypatch.setattr(A, 'get_episodes_from_rss', lambda url: (episodes, None))
+    body = _login(uid).post('/parse_rss', data={
+        'rss_url': 'https://example.com/feed.xml',
+    }, follow_redirects=True).data.decode()
+    assert 'Out of free minutes' in body
+    assert A.CREDIT_PACK_LABEL in body
+    assert A.get_credit_pack(A.NEXT_EPISODE_PACK_SKU).label in body
+    assert f'name="pack" value="{A.NEXT_EPISODE_PACK_SKU}"' in body
+    assert 'id="paywallNextEpisodeBtn"' in body
+    # One primary (green) buy — the $5 pack; $2 is secondary.
+    assert 'id="paywallBuyBtn"' in body
+    buy_at = body.index('id="paywallBuyBtn"')
+    assert 'btn-primary' in body[buy_at - 160:buy_at]
+    next_at = body.index('id="paywallNextEpisodeBtn"')
+    assert 'btn-secondary' in body[next_at - 160:next_at]
 
 
 def test_status_own_key_invalid_offers_pack(stripe_on):
@@ -13537,15 +13641,16 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'ai-what-you-can-ask'
-    assert entries[1]['id'] == 'mcp-list-my-transcripts'
-    assert entries[2]['id'] == 'history-in-progress'
-    assert entries[3]['id'] == 'mcp-chat-example'
-    assert entries[4]['id'] == 'mcp-visual-setup-guides'
-    assert entries[5]['id'] == 'history-via-mcp'
-    assert entries[6]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[7]['id'] == 'new-signup-120-min-trial'
-    assert entries[8]['id'] == 'new-look'
+    assert entries[0]['id'] == 'next-episode-two-dollar-pack'
+    assert entries[1]['id'] == 'ai-what-you-can-ask'
+    assert entries[2]['id'] == 'mcp-list-my-transcripts'
+    assert entries[3]['id'] == 'history-in-progress'
+    assert entries[4]['id'] == 'mcp-chat-example'
+    assert entries[5]['id'] == 'mcp-visual-setup-guides'
+    assert entries[6]['id'] == 'history-via-mcp'
+    assert entries[7]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[8]['id'] == 'new-signup-120-min-trial'
+    assert entries[9]['id'] == 'new-look'
 
 
 # --------------------------------------------------------------------------

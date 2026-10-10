@@ -108,10 +108,21 @@
         <p class="text-sm text-muted result-offer-note" id="resultOfferNote">
             Transcribe your next episode: 300 min for $5
         </p>
-        <div class="result-offer-actions">
-            <button type="button" class="btn btn-sm btn-secondary" id="resultOfferBuyBtn">
-                Buy 300 min for $5
-            </button>
+        <div class="result-offer-actions ds-pack-offers" id="resultOfferActions">
+            <div>
+                <button type="button" class="btn btn-sm btn-secondary" id="resultOfferBuyBtn"
+                        data-pack="{{ credit_pack_sku }}">
+                    Buy 300 min for $5
+                </button>
+                <span class="form-hint" id="resultOfferMainHint">Better value · {{ credit_pack_subline }}</span>
+            </div>
+            <div id="resultOfferNextWrap" class="hidden">
+                <button type="button" class="btn btn-sm btn-secondary" id="resultOfferNextBtn"
+                        data-pack="{{ next_episode_pack_sku }}">
+                    {{ next_episode_pack_label }}
+                </button>
+                <span class="form-hint" id="resultOfferNextHint">{{ next_episode_offer_label }}</span>
+            </div>
             <a href="{{ url_for('settings') }}#openai" class="ds-link-button" id="resultOfferByokLink"
                data-paywall-byok="result_offer">Add your own OpenAI key</a>
         </div>
@@ -311,6 +322,10 @@
     var BUY_LABEL = {{ credit_pack_label|tojson }};
     var UNLOCK_LABEL = {{ ('Unlock the full episode')|tojson }};
     var RESULT_OFFER_LABEL = {{ ('Transcribe your next episode: 300 min for $5')|tojson }};
+    var MAIN_PACK = {{ credit_pack_sku|tojson }};
+    var NEXT_PACK = {{ next_episode_pack_sku|tojson }};
+    var NEXT_PACK_LABEL = {{ next_episode_pack_label|tojson }};
+    var NEXT_OFFER_LABEL = {{ next_episode_offer_label|tojson }};
     var BUY_URL = {{ url_for('billing_checkout')|tojson }};
     var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
     var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
@@ -356,7 +371,7 @@
         node.style.display = visible ? '' : 'none';
     }
 
-    function postBuyForm(source, returnTo) {
+    function postBuyForm(source, returnTo, pack) {
         var form = document.createElement('form');
         form.method = 'POST';
         form.action = BUY_URL;
@@ -369,6 +384,7 @@
         }
         hidden('csrf_token', CSRF_TOKEN);
         hidden('source', source || 'transcription_error');
+        hidden('pack', pack || MAIN_PACK || '');
         var sid = '';
         try { if (window.posthog) sid = posthog.get_session_id() || ''; } catch (e) { sid = ''; }
         hidden('ph_sid', sid);
@@ -457,25 +473,60 @@
             return;
         }
         var note = el('resultOfferNote');
-        if (note) note.textContent = d.result_offer_label || RESULT_OFFER_LABEL;
+        if (note) {
+            note.textContent = d.next_episode_offer
+                ? (d.next_episode_offer_label || NEXT_OFFER_LABEL)
+                : (d.result_offer_label || RESULT_OFFER_LABEL);
+        }
         var buyBtn = el('resultOfferBuyBtn');
         if (buyBtn && !buyBtn._bound) {
             buyBtn._bound = true;
             buyBtn.addEventListener('click', function() {
+                var pack = d.pack || MAIN_PACK;
                 phCapture('result_offer_clicked', {
                     task_id: taskId,
                     location: 'result',
+                    pack: pack,
                 });
                 if (typeof window.podskriftPaywallBuyClicked === 'function') {
-                    window.podskriftPaywallBuyClicked('result_offer', 'result');
+                    window.podskriftPaywallBuyClicked('result_offer', 'result', pack);
                 }
-                postBuyForm('result_offer', window.location.pathname);
+                postBuyForm('result_offer', window.location.pathname, pack);
             });
+        }
+        var nextWrap = el('resultOfferNextWrap');
+        var nextBtn = el('resultOfferNextBtn');
+        if (d.next_episode_offer && nextWrap && nextBtn) {
+            if (nextBtn && d.next_episode_buy_label) {
+                nextBtn.textContent = d.next_episode_buy_label;
+            }
+            if (!nextBtn._bound) {
+                nextBtn._bound = true;
+                nextBtn.addEventListener('click', function() {
+                    var pack = d.next_episode_pack || NEXT_PACK;
+                    phCapture('result_offer_clicked', {
+                        task_id: taskId,
+                        location: 'result',
+                        pack: pack,
+                    });
+                    if (typeof window.podskriftPaywallBuyClicked === 'function') {
+                        window.podskriftPaywallBuyClicked('result_offer', 'result', pack);
+                    }
+                    postBuyForm('result_offer', window.location.pathname, pack);
+                });
+            }
+            show(nextWrap, true);
+        } else if (nextWrap) {
+            show(nextWrap, false);
         }
         show(card, true);
         if (!resultOfferShown) {
             resultOfferShown = true;
-            phCapture('result_offer_shown', { task_id: taskId, location: 'result' });
+            phCapture('result_offer_shown', {
+                task_id: taskId,
+                location: 'result',
+                next_episode_offer: !!d.next_episode_offer,
+            });
         }
     }
 

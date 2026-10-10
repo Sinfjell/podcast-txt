@@ -114,13 +114,23 @@
         {% elif trial.exhausted %}
         Your free trial is used up.
         {% if trial.stripe_buy %}
-        <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;" data-paywall-buy="home_banner">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="source" value="home_banner">
-            <input type="hidden" name="ph_sid" value="">
-            <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
-        </form>
-        <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
+        <span class="ds-pack-offers ds-pack-offers--inline">
+            <form method="POST" action="{{ url_for('billing_checkout') }}" data-paywall-buy="home_banner" data-pack="{{ credit_pack_sku }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="source" value="home_banner">
+                <input type="hidden" name="pack" value="{{ credit_pack_sku }}">
+                <input type="hidden" name="ph_sid" value="">
+                <button type="submit" class="btn btn-sm btn-primary">{{ trial.buy_label }}</button>
+            </form>
+            <form method="POST" action="{{ url_for('billing_checkout') }}" data-paywall-buy="home_banner" data-pack="{{ next_episode_pack_sku }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="source" value="home_banner">
+                <input type="hidden" name="pack" value="{{ next_episode_pack_sku }}">
+                <input type="hidden" name="ph_sid" value="">
+                <button type="submit" class="btn btn-sm btn-secondary">{{ next_episode_pack_label }}</button>
+            </form>
+        </span>
+        <span class="form-hint ds-pack-offers__value-hint">Better value · {{ credit_pack_subline }}</span>
         {% endif %}
         <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_banner">Add your own OpenAI key</a>
         {% elif trial.low_balance %}

@@ -891,3 +891,33 @@
 @media (max-width: 640px) {
   .ds-chat-example__header, .ds-chat-example__conversation { padding: var(--space-4); }
 }
+
+/* Dual credit-pack offer ($5 primary + $2 next-episode secondary). */
+.ds-pack-offers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+.ds-pack-offers form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin: 0;
+}
+.ds-pack-offers .form-hint { margin: 0; display: block; }
+.ds-pack-offers--inline {
+  display: inline-flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 var(--space-2);
+}
+.ds-pack-offers--inline form { display: inline; }
+.ds-pack-offers--paywall { margin-top: var(--space-2); }
+.ds-pack-offers__value-hint {
+  display: inline;
+  margin: 0 var(--space-2) 0 0;
+}
