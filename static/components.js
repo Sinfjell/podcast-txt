@@ -100,6 +100,23 @@
     });
   });
 
+  /* Reveal: [data-ds-reveal] holds its parts back until it first scrolls into
+     view (CSS keys off data-ds-reveal="waiting"). Without JS, or under reduced
+     motion, it is simply shown. */
+  if (!reduceMotion && 'IntersectionObserver' in window) {
+    document.querySelectorAll('[data-ds-reveal]').forEach(function (el) {
+      el.setAttribute('data-ds-reveal', 'waiting');
+      var io = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+          if (!entry.isIntersecting) return;
+          el.setAttribute('data-ds-reveal', 'shown');
+          io.disconnect();
+        });
+      }, { threshold: 0.25 });
+      io.observe(el);
+    });
+  }
+
   /* Typed placeholder: [data-ds-type-placeholder] holds a JSON list of
      examples. It types them in turn until the visitor touches the field (or
      anything in the same command bar), then leaves the real placeholder. */

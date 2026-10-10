@@ -11,7 +11,11 @@
 <style>
     /* Home page. Sound bars turn into lines of text (DESIGN.md, Motion / Texture). */
     .hp-price-line { font-size: 15px; font-weight: 600; line-height: 1.4; color: var(--ink); margin-top: -8px; font-variant-numeric: tabular-nums; }
-    .hp-trial { margin-top: 16px; text-align: center; }
+    .hp-balance { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px 16px; margin-top: 16px;
+                  font-size: 15px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .hp-balance a { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; font-weight: 700; color: var(--accent); }
+    .hp-balance a:hover .ds-arrow { transform: translateX(3px); }
+    .hp-trial { margin-top: 4px; text-align: center; }
     .hp-trial summary { cursor: pointer; display: inline-flex; align-items: center; min-height: 44px; font-size: 14px; color: var(--muted); }
     .hp-trial summary:hover { color: var(--ink); }
     .hp-trial .hp-fine { margin-top: 8px; }
@@ -160,6 +164,16 @@
                 <button type="button" class="tab" data-type="episode" aria-pressed="false">Episodes</button>
             </div>
             {% endcall %}
+            {# Signed in on our key: the balance and the way to top it up sit right
+               under the box, so nobody has to hunt for where to buy minutes. #}
+            {% if app_hero and nav_minutes_left is not none %}
+            <p class="hp-balance">
+                <span>{{ nav_minutes_left }} min left</span>
+                {% if nav_show_buy %}
+                <a href="{{ url_for('pricing') }}?from=home_balance" data-open-buy-modal data-buy-source="buy_modal_home_balance">Buy more minutes<span class="ds-arrow" aria-hidden="true">→</span></a>
+                {% endif %}
+            </p>
+            {% endif %}
             {# Signup-trial marketing, anonymous only, next to the button it de-risks.
                Logged-in users have their own grant and a balance banner above. #}
             {% if not app_hero %}
@@ -264,36 +278,29 @@
 {% endif %}
 
 <section class="hp-section ds-mcp-promotion" aria-labelledby="aiHeading" id="use-in-ai">
-    <h2 id="aiHeading">Ask your AI about a podcast</h2>
-    <p class="ds-mcp-lead">MCP is the connection that lets ChatGPT or Claude use Podskrift.
-        Your AI finds the episode, gets its transcript and answers your questions — without copying text between apps.</p>
-    {% include "components/mcp_chat_example.html" %}
-    <ol class="ds-mcp-flow">
-        <li><strong>Connect once</strong><span>Add Podskrift’s URL in your AI app and sign in to Podskrift.</span></li>
-        <li><strong>Ask for an episode</strong><span>Name a show or paste an episode link. Podskrift fetches or transcribes it.</span></li>
-        <li><strong>Keep the conversation going</strong><span>Ask for a summary, key ideas or quotes with timestamps.</span></li>
-    </ol>
-    <div class="ds-mcp-guides">
-        <a class="ds-mcp-guide" href="{{ url_for('guide_chatgpt') }}">
-            <img src="{{ url_for('static', filename='guides/chatgpt/02-add-custom-mcp-server.webp') }}"
-                 width="1100" height="319" loading="lazy" alt="ChatGPT Add menu showing Add custom MCP server.">
-            <h3>Connect to ChatGPT →</h3><p>Follow the illustrated setup guide on the web.</p>
-        </a>
-        <a class="ds-mcp-guide" href="{{ url_for('guide_claude') }}">
-            <img src="{{ url_for('static', filename='guides/claude/02-add-custom-connector.webp') }}"
-                 width="690" height="196" loading="lazy" alt="Claude Add menu showing Add custom connector.">
-            <h3>Connect to Claude →</h3><p>See where to add the URL, sign in and enable Podskrift.</p>
-        </a>
+    <div class="ds-mcp-split">
+        <div class="ds-mcp-copy">
+            <h2 id="aiHeading">Ask your AI about a podcast</h2>
+            <p class="ds-mcp-lead">MCP is the connection that lets ChatGPT or Claude use Podskrift.
+                Your AI finds the episode, gets its transcript and answers your questions.</p>
+            <ol class="ds-mcp-steps">
+                <li><div><strong>Connect once</strong><span>Add Podskrift’s URL in your AI app and sign in.</span></div></li>
+                <li><div><strong>Ask for an episode</strong><span>Name a show or paste a link. Podskrift fetches or transcribes it.</span></div></li>
+                <li><div><strong>Keep talking</strong><span>Ask for a summary, key ideas or quotes with timestamps.</span></div></li>
+            </ol>
+            <div class="ds-mcp-actions">
+                {{ button("Connect ChatGPT", variant="secondary", href=url_for('guide_chatgpt')) }}
+                {{ button("Connect Claude", variant="secondary", href=url_for('guide_claude')) }}
+            </div>
+            <div class="ds-mcp-try">
+                <p>Then try</p>
+                {{ snippet("Summarise the latest episode of Hard Fork", copy_label='Copy prompt', what='prompt') }}
+            </div>
+            <p class="ds-mcp-fine">Uses the same minutes as the website, and episodes you’ve already transcribed are free to fetch again.
+                <a href="{{ url_for('ai_landing') }}">Cursor, VS Code and Claude Code →</a></p>
+        </div>
+        {% include "components/mcp_chat_example.html" %}
     </div>
-    <div class="ds-mcp-example">
-        <h3>Try this after connecting</h3>
-        {{ snippet("Summarise the latest episode of Hard Fork", copy_label='Copy prompt', what='prompt') }}
-        <p>Then ask: “Find three key quotes and include their timestamps.”</p>
-    </div>
-    <p class="ds-mcp-lead">Uses the same Podskrift minutes as the website.
-        Episodes you've already transcribed cost nothing to fetch again on your account.
-        <a href="{{ url_for('pricing') }}">See pricing</a>.</p>
-    <p><a href="{{ url_for('ai_landing') }}">More apps: Cursor, VS Code and Claude Code →</a></p>
 </section>
 
 {# Three ways to use it. The trial card follows the conditions the page already

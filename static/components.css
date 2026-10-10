@@ -858,41 +858,85 @@
 
 .pricing-pack-subline { margin: 0; }
 
-/* Static MCP conversation illustration; real text, no simulated controls. */
-.ds-chat-example { margin: var(--space-9) 0; max-width: 47.5rem; }
-.ds-chat-example__window { background: var(--surface); border-radius: var(--radius-md); overflow: hidden; }
-.ds-chat-example__header {
-  display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2);
-  padding: var(--space-4) var(--space-6); border-bottom: 1px solid var(--line);
+/* Static MCP conversation illustration; real text, no simulated controls.
+   Same window language as the hero's transcript window. Its parts rise in
+   turn the first time it scrolls into view ([data-ds-reveal], components.js). */
+.ds-chat-example { margin: 0; width: 100%; max-width: 47.5rem; }
+.ds-chat-example__window {
+  background: var(--paper); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg); overflow: hidden;
 }
-.ds-chat-example__header span, .ds-chat-example__label, .ds-chat-example__episode > span,
+.ds-chat-example__header {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2);
+  padding: var(--space-3) var(--space-6); background: var(--surface); border-bottom: 1px solid var(--line);
+}
+.ds-chat-example__header span, .ds-chat-example__label, .ds-chat-example__episode-text > span,
 .ds-chat-example figcaption { color: var(--muted); font-size: 0.875rem; }
+.ds-chat-example__status { display: inline-flex; align-items: center; gap: var(--space-2); }
+.ds-chat-example__status i { width: 8px; height: 8px; border-radius: 2px; background: var(--accent); animation: ds-pulse 2.4s ease-in-out infinite; }
 .ds-chat-example__conversation { display: grid; gap: var(--space-6); padding: var(--space-6); }
-.ds-chat-example__episode { display: grid; gap: var(--space-1); }
+.ds-chat-example__episode {
+  display: flex; align-items: center; gap: var(--space-4);
+  padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-md);
+}
+.ds-chat-example__cover { flex: 0 0 auto; width: 3rem; height: 3rem; border-radius: var(--radius); background: var(--accent-tint); }
+.ds-chat-example__episode-text { display: grid; gap: 2px; min-width: 0; }
+.ds-chat-example__episode-text .ds-chat-example__label { margin: 0; font-size: 0.75rem; }
 .ds-chat-example__label { display: block; margin-bottom: var(--space-2); }
 .ds-chat-example__user {
-  justify-self: end; max-width: 100%; background: var(--paper);
-  padding: var(--space-4); border-radius: var(--radius-md);
+  justify-self: end; max-width: min(100%, 26rem); background: var(--surface);
+  padding: var(--space-3) var(--space-4); border-radius: var(--radius-lg);
 }
 .ds-chat-example__user p, .ds-chat-example__reply > p { margin: 0; }
 .ds-chat-example__reply .ds-chat-example__tool {
-  color: var(--accent); font-size: 0.875rem; font-weight: 700; margin-bottom: var(--space-3);
+  display: inline-flex; gap: var(--space-2); align-items: center;
+  padding: var(--space-1) var(--space-3); margin-bottom: var(--space-3);
+  border-radius: var(--radius); background: var(--accent-tint); color: var(--on-accent-tint);
+  font-size: 0.875rem; font-weight: 700;
 }
-.ds-chat-example__transcript { margin-top: var(--space-4); }
+.ds-chat-example__transcript { margin-top: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-md); overflow: hidden; }
 .ds-chat-example__transcript p {
   display: grid; grid-template-columns: 3rem minmax(0, 1fr); gap: var(--space-3);
-  margin: 0; padding: var(--space-3) 0; border-top: 1px solid var(--line);
+  margin: 0; padding: var(--space-3) var(--space-4);
 }
+.ds-chat-example__transcript p + p { border-top: 1px solid var(--line); }
+.ds-chat-example__transcript p:first-child { background: var(--accent-tint); }
 .ds-chat-example__transcript p > span:last-child {
-  font-size: 1.25rem; line-height: 1.55;
+  font-size: 1.1875rem; line-height: 1.5;
 }
 .ds-chat-example__timestamp {
   color: var(--accent); font-size: 0.8125rem; font-weight: 700;
   font-variant-numeric: tabular-nums; padding-top: var(--space-1);
 }
 .ds-chat-example figcaption { margin-top: var(--space-3); }
+.ds-chat-example[data-ds-reveal="waiting"] .ds-chat-example__conversation > * { opacity: 0.001; transform: translateY(12px); }
+.ds-chat-example__conversation > * { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out); }
+.ds-chat-example__conversation > :nth-child(2) { transition-delay: 0.35s; }
+.ds-chat-example__conversation > :nth-child(3) { transition-delay: 0.9s; }
 @media (max-width: 640px) {
   .ds-chat-example__header, .ds-chat-example__conversation { padding: var(--space-4); }
+  .ds-chat-example__transcript p { padding: var(--space-3); }
+  .ds-chat-example__transcript p > span:last-child { font-size: 1.0625rem; }
+}
+
+/* MCP promotion on home: copy and steps beside the chat window. */
+.ds-mcp-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: var(--space-12); align-items: start; }
+.ds-mcp-copy { display: flex; flex-direction: column; gap: var(--space-6); }
+.ds-mcp-copy h2 { font-size: clamp(1.75rem, 3vw, 2.5rem); letter-spacing: -0.03em; line-height: 1.1; }
+.ds-mcp-steps { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--space-4); counter-reset: ds-step; }
+.ds-mcp-steps li { display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: var(--space-3); counter-increment: ds-step; }
+.ds-mcp-steps li::before {
+  content: counter(ds-step); display: grid; place-items: center; width: 2rem; height: 2rem;
+  border: 1px solid var(--line-strong); border-radius: var(--radius); font-weight: 700; font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+}
+.ds-mcp-steps strong { display: block; }
+.ds-mcp-steps span { display: block; color: var(--muted); font-size: 0.9375rem; margin-top: 2px; }
+.ds-mcp-try { display: grid; gap: var(--space-2); }
+.ds-mcp-try > p { color: var(--muted); font-size: 0.875rem; }
+.ds-mcp-fine { color: var(--muted); font-size: 0.875rem; }
+@media (max-width: 900px) {
+  .ds-mcp-split { grid-template-columns: minmax(0, 1fr); gap: var(--space-9); }
 }
 
 /* proof_list: factual reassurance beside a call to action (home hero). */
@@ -1179,6 +1223,6 @@ body:has(.ds-signal) { overflow-x: clip; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .nav-brand:hover svg g:first-child rect, .ds-window, .ds-window__status i { animation: none; }
-  .ds-arrow, .ds-window__line, .ds-window__line p, .ds-window__playhead, .nav-cta svg { transition: none; }
+  .nav-brand:hover svg g:first-child rect, .ds-window, .ds-window__status i, .ds-chat-example__status i { animation: none; }
+  .ds-arrow, .ds-window__line, .ds-window__line p, .ds-window__playhead, .nav-cta svg, .ds-chat-example__conversation > * { transition: none; }
 }

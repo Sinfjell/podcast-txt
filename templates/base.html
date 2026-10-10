@@ -252,9 +252,9 @@
             background: var(--accent-tint);
         }
         .nav-links a.nav-balance:hover { background: var(--accent-tint); color: var(--on-accent-tint); }
-        .nav-links a.nav-buy { font-weight: 700; }
-        /* The one non-accent filled button (DESIGN.md: button-nav-cta). */
-        .nav-links a.nav-cta {
+        /* The one non-accent filled button (DESIGN.md: button-nav-cta): Start free
+           when logged out, the buy link when signed in. */
+        .nav-links a.nav-cta, .nav-links a.nav-buy {
             background: var(--ink);
             color: var(--paper);
             border: 1px solid var(--ink);
@@ -263,9 +263,9 @@
             gap: 6px;
             margin-left: 4px;
         }
-        .nav-links a.nav-cta:hover { background: var(--ink); color: var(--paper); }
-        .nav-cta svg { transition: transform var(--dur-1) var(--ease-out); }
-        .nav-cta:hover svg { transform: translateX(2px); }
+        .nav-links a.nav-cta:hover, .nav-links a.nav-buy:hover { background: var(--ink); color: var(--paper); }
+        .nav-cta svg, .nav-buy svg:not(.nav-icon) { transition: transform var(--dur-1) var(--ease-out); }
+        .nav-cta:hover svg, .nav-buy:hover svg:not(.nav-icon) { transform: translateX(2px); }
         /* Signed in: product links after the brand, balance and account menu at
            the far end. The account menu is a small panel under the avatar. */
         .nav-links a.nav-mobile-only { display: none; }
@@ -906,7 +906,9 @@
             .nav-links a.nav-login:hover { background: var(--surface-hover); color: var(--ink); }
             .nav-links a.nav-login .nav-icon { display: none; }
             .nav-links a.nav-cta,
-            .nav-links a.nav-cta:hover {
+            .nav-links a.nav-cta:hover,
+            .nav-links a.nav-buy,
+            .nav-links a.nav-buy:hover {
                 margin-left: 0;
                 margin-top: 10px;
                 justify-content: center;
@@ -920,7 +922,8 @@
                 border-radius: var(--radius);
                 opacity: 1;
             }
-            .nav-links a.nav-cta:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+            .nav-links a.nav-cta:hover, .nav-links a.nav-buy:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+            .nav-links a.nav-buy .nav-icon { display: none; }
             .nav-links .nav-sep {
                 display: block;
                 height: 0;
@@ -1253,7 +1256,7 @@
                        data-open-buy-modal data-buy-source="buy_modal_header"
                        id="navBuyPill">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
-                        Buy minutes
+                        Buy minutes<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
                     </a>
                     {% endif %}
                     <div class="nav-account" data-nav-account>
