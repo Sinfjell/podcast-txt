@@ -13215,6 +13215,46 @@ def test_signup_from_share_attributes_utm_source(ph_events, trial_on):
     assert props['next_type'] == 'none'
     assert props['has_pending_transcript'] is False
     assert props['trial_granted_min'] == A.NEW_USER_TRIAL_SECONDS // 60
+    # Landing on /register itself counts as first touch; no external Referer → direct.
+    assert props['first_landing'] == '/register'
+    assert props['first_referrer_source'] == 'share'  # utm wins over empty Referer
+
+
+def test_signup_captures_country_and_first_touch(ph_events, trial_on):
+    A._register_attempts.clear()
+    client = A.app.test_client()
+    client.get(
+        '/pricing',
+        headers={
+            'Referer': 'https://www.google.com/search?q=podcast+transcript',
+            'CF-IPCountry': 'NO',
+        },
+    )
+    resp = client.post(
+        '/register',
+        data={'email': 'geo@example.com', 'password': 'password123'},
+        headers={'CF-IPCountry': 'NO', 'Accept-Language': 'en-US,en;q=0.9'},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (302, 303)
+    events = [e for e in ph_events.events if e['event'] == 'user_signed_up']
+    assert len(events) == 1
+    props = events[0]['properties']
+    assert props['country'] == 'NO'
+    assert props['first_landing'] == '/pricing'
+    assert props['first_referrer_source'] == 'google'
+    assert 'email' not in props
+
+
+def test_signup_country_skips_unknown_cf_uses_accept_language():
+    with A.app.test_request_context(
+            '/register',
+            headers={'CF-IPCountry': 'XX', 'Accept-Language': 'nb-NO,nb;q=0.9'}):
+        assert A._signup_country() == 'NO'
+    with A.app.test_request_context('/register', headers={'CF-IPCountry': 'T1'}):
+        assert A._signup_country() is None
+    with A.app.test_request_context('/register'):
+        assert A._signup_country() is None
 
 
 def test_auth_next_type_oauth_bucket():
