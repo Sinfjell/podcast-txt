@@ -250,12 +250,17 @@ When the user asks about past transcripts (“what have I transcribed?”), use
 `list_my_transcripts` / `get_my_transcript`. Re-fetching an episode you already
 transcribed via `get_transcript` is free (`cost_minutes: 0`).
 
-`get_transcript` reports `cost_minutes` and remaining balance before/after. If
-the episode is longer than your remaining minutes, it refuses and includes
-`pricing_url` (`/pricing`) instead of starting a job. While a job is in
-progress, status responses include `progress_pct` / `eta_seconds` and tell the
-model to call `get_transcript_status` again in 30–60 seconds (a transcript-ready
-email is sent when done; progress also appears on `/history`).
+`get_transcript` reports `cost_minutes` and remaining balance before/after, plus
+a short `balance_fact` line for metered accounts (skipped for BYOK). If the
+episode is longer than your remaining minutes, it returns a structured
+`insufficient_balance` payload (`episode_minutes`, `minutes_left`,
+`shortfall_minutes`, optional partial-preview note, and a pricing information
+link — not a checkout deep link). Starting a job returns `task_id` /
+`job_id` with a rough ETA window (`eta_seconds_low` / `eta_seconds_high` /
+`eta_text`) and a `next_step` telling the model to call
+`get_transcript_status` after ~N seconds. While in progress, status responses
+include the same ETA fields; when ready they include transcript text by default
+(page with `offset` / `max_chars` / `next_offset`, or set `include_text` false).
 
 **Cursor example** (`~/.cursor/mcp.json` or project config):
 

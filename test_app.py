@@ -6513,7 +6513,9 @@ def test_mcp_initialize_and_tools_list(mcp_on):
     assert 'free' in gt_desc or 'cost_minutes 0' in gt_desc
     assert 'list_my_transcripts' in gt_desc
     status_desc = by_name['get_transcript_status']['description'].lower()
-    assert '30' in status_desc and 'remind' in status_desc
+    assert 'remind' in status_desc
+    assert 'include_text' in status_desc or 'offset' in status_desc
+    assert 'eta' in by_name['get_transcript']['description'].lower()
 
 
 def test_mcp_search_podcasts_tool(mcp_on, monkeypatch):
@@ -6609,18 +6611,30 @@ def test_mcp_get_transcript_starts_job(mcp_on, ph_events):
     assert payload.get('error') is None
     assert payload['transcript_status'] == 'pending'
     assert payload['job_id']
+    assert payload['task_id'] == payload['job_id']
     assert payload['cost_minutes'] == 42
     assert 'balance_before' in payload
     assert 'balance_after' in payload
     # Minutes reserved → free balance dropped
     assert (payload['balance_after']['remaining_minutes']
             < payload['balance_before']['remaining_minutes'])
+    assert 'eta_seconds_low' in payload and 'eta_seconds_high' in payload
+    assert payload['eta_seconds_low'] <= payload['eta_seconds_high']
+    assert 'usually ready' in (payload.get('eta_text') or '').lower()
+    assert 'get_transcript_status' in (payload.get('next_step') or '')
+    assert payload['task_id'] in (payload.get('next_step') or '')
+    assert 'balance_fact' in payload
+    assert payload['balance_fact']['minutes_left'] is not None
+    assert 'pricing' in payload['balance_fact']['line'].lower()
+    assert 'checkout' not in payload['balance_fact']['line'].lower()
 
     status_payload, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript_status', {
         'job_id': payload['job_id'],
     })
     assert status_payload['job_id'] == payload['job_id']
     assert status_payload['transcript_status'] == 'pending'
+    assert 'eta_seconds_low' in status_payload
+    assert 'balance_fact' in status_payload
 
     called = [e for e in ph_events.events if e['event'] == 'mcp_tool_called']
     assert called
@@ -6631,7 +6645,7 @@ def test_mcp_get_transcript_starts_job(mcp_on, ph_events):
     assert all(isinstance(e['properties'].get('success'), bool) for e in called)
 
 
-def test_mcp_get_transcript_insufficient_balance(mcp_on):
+def test_mcp_get_transcript_insufficient_balance(mcp_on, ph_events):
     from models import db, User
     with A.app.app_context():
         u = db.session.get(User, mcp_on['a'])
@@ -6644,9 +6658,18 @@ def test_mcp_get_transcript_insufficient_balance(mcp_on):
     })
     assert result.get('isError') is True
     assert payload['error'] == 'insufficient_balance'
-    assert payload['pricing_url'].endswith('/pricing')
+    assert 'ref=mcp_shortfall' in payload['pricing_url']
     assert 'cost_minutes' in payload
     assert 'balance' in payload or 'balance_before' in payload
+    assert payload['episode_minutes'] >= payload['minutes_left']
+    assert payload['shortfall_minutes'] >= 0
+    assert 'eta_if_topped_up' in payload
+    assert 'eta_text' in payload['eta_if_topped_up']
+    assert 'buy now' not in payload['message'].lower()
+    assert 'checkout' not in payload['message'].lower()
+    hits = [e for e in ph_events.events if e['event'] == 'mcp_insufficient_balance']
+    assert len(hits) == 1
+    assert hits[0]['properties']['shortfall_minutes'] == payload['shortfall_minutes']
 
 
 def test_mcp_cannot_read_other_users_job(mcp_on):
@@ -6835,6 +6858,216 @@ def test_mcp_get_transcript_status_waits_with_mocked_time(mcp_on, monkeypatch):
     assert 'do not ask the user to remind you' in payload['instruction'].lower()
     assert sleeps, 'expected wait loop to sleep'
     assert sum(sleeps) <= 45 + 1
+    assert 'eta_seconds_low' in payload
+    assert payload['eta_seconds_low'] <= payload['eta_seconds_high']
+    assert 'usually ready' in (payload.get('eta_text') or '').lower()
+    assert 'next_step' in payload
+
+
+def test_estimate_transcription_eta_historical_and_fallback(trial_on):
+    """p25–p75 window from rates; fallback when too few samples."""
+    hist = A.estimate_transcription_eta(
+        audio_duration_sec=60 * 60,
+        progress_pct=0,
+        queue_ahead=0,
+        rates=[10, 12, 15, 20, 25, 30],
+        min_samples=5,
+    )
+    assert hist['eta_basis'] == 'historical'
+    assert hist['sample_count'] == 6
+    assert hist['eta_seconds_low'] < hist['eta_seconds_high']
+    assert hist['eta_seconds_low'] <= hist['eta_seconds'] <= hist['eta_seconds_high']
+    assert 'usually ready' in hist['eta_text']
+    assert '–' in hist['eta_text'] or '-' in hist['eta_text']
+
+    fb = A.estimate_transcription_eta(
+        audio_duration_sec=30 * 60,
+        progress_pct=0,
+        queue_ahead=0,
+        rates=[10, 12],  # below min_samples
+        min_samples=5,
+    )
+    assert fb['eta_basis'] == 'fallback'
+    assert fb['eta_seconds_low'] >= 30
+    assert fb['eta_seconds_high'] >= fb['eta_seconds_low']
+
+    # Progress shrinks remaining window.
+    mid = A.estimate_transcription_eta(
+        audio_duration_sec=60 * 60,
+        progress_pct=50,
+        queue_ahead=0,
+        rates=[10, 12, 15, 20, 25, 30],
+        min_samples=5,
+    )
+    assert mid['eta_seconds_high'] < hist['eta_seconds_high']
+
+    # Queue ahead stretches the window.
+    queued = A.estimate_transcription_eta(
+        audio_duration_sec=60 * 60,
+        progress_pct=0,
+        queue_ahead=2,
+        rates=[10, 12, 15, 20, 25, 30],
+        min_samples=5,
+    )
+    assert queued['eta_seconds_high'] > hist['eta_seconds_high']
+    assert queued['queue_ahead'] == 2
+
+
+def test_recent_transcription_rates_from_fixtures(trial_on):
+    from models import TranscriptionTask, db
+
+    now = datetime.now(timezone.utc)
+    with A.app.app_context():
+        uid = _make_user('eta-rates@test.com')
+        for i, (audio_min, wall_min) in enumerate([
+            (60, 15), (60, 20), (30, 8), (45, 12), (90, 30),
+            (60, 18),
+        ]):
+            db.session.add(TranscriptionTask(
+                id=f'eta-rate-{i}', user_id=uid, status='completed',
+                episode_title=f'Ep {i}', podcast_name='ETA Show',
+                audio_duration=float(audio_min * 60),
+                started_at=now - timedelta(hours=i + 2),
+                completed_at=now - timedelta(hours=i + 2) + timedelta(minutes=wall_min),
+                transcript_text='done',
+            ))
+        db.session.commit()
+        rates = A.recent_transcription_rates(limit=50, lookback_days=7)
+    assert len(rates) >= 6
+    assert rates == sorted(rates)
+    # 15 wall min / 60 audio min = 15 sec per audio minute
+    assert min(rates) >= 10
+    assert max(rates) <= 40
+
+
+def test_balance_fact_byok_large_and_typical(trial_on):
+    from models import User, TranscriptionTask, db
+
+    with A.app.app_context():
+        byok = _make_user('bf-byok@test.com')
+        u = db.session.get(User, byok)
+        u.openai_api_key = 'sk-test-not-real'
+        db.session.commit()
+        assert A.balance_fact_for_user(u) is None
+
+        rich = _make_user('bf-rich@test.com', limit=400 * 60, used=0)
+        u2 = db.session.get(User, rich)
+        u2.paid_seconds_balance = 0
+        db.session.commit()
+        fact_rich = A.balance_fact_for_user(u2)
+        assert fact_rich['minutes_left'] >= 300
+        assert fact_rich['approx_episodes_left'] is None
+        assert 'episode' not in fact_rich['line'].lower()
+        assert 'pricing' in fact_rich['line'].lower()
+
+        modest = _make_user('bf-modest@test.com', limit=90 * 60, used=0)
+        u3 = db.session.get(User, modest)
+        now = datetime.now(timezone.utc)
+        for i, mins in enumerate([40, 50, 45]):
+            db.session.add(TranscriptionTask(
+                id=f'bf-ep-{i}', user_id=modest, status='completed',
+                episode_title=f'Ep {i}', podcast_name='Show',
+                audio_duration=float(mins * 60),
+                started_at=now - timedelta(days=i + 1),
+                completed_at=now - timedelta(days=i + 1) + timedelta(minutes=5),
+                transcript_text='x',
+            ))
+        db.session.commit()
+        fact = A.balance_fact_for_user(u3)
+        assert fact['minutes_left'] == 90
+        assert fact['approx_episodes_left'] == 2  # ~45 min median
+        assert 'about 2 more episodes' in fact['line']
+        assert fact['pricing_url'].endswith('/pricing')
+
+
+def test_mcp_get_transcript_status_returns_text_when_ready(mcp_on):
+    """Ready status includes paged text by default; include_text=false skips it."""
+    from models import TranscriptionTask, db
+
+    long_text = ('Ready word. ' * 300)
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='cust-a-ready-status', user_id=mcp_on['a'], status='completed',
+            episode_title='Ready ep', podcast_name='Show',
+            transcript_text=long_text,
+            audio_duration=600.0,
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+            completed_at=datetime.now(timezone.utc),
+            source='mcp', source_client='ChatGPT',
+        ))
+        db.session.commit()
+
+    full, res = _mcp_tool(mcp_on['key_a'], 'get_transcript_status', {
+        'job_id': 'cust-a-ready-status', 'max_chars': 40,
+    })
+    assert res.get('isError') is False, full
+    assert full['status'] == 'ready'
+    assert full['text'].startswith('Ready word.')
+    assert full['offset'] == 0
+    assert full['next_offset'] == 40
+    assert full['total_chars'] > 40
+    assert 'balance_fact' in full
+
+    # task_id alias works the same as job_id.
+    via_alias, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript_status', {
+        'task_id': 'cust-a-ready-status', 'max_chars': 40,
+    })
+    assert via_alias['task_id'] == 'cust-a-ready-status'
+    assert via_alias['text'] == full['text']
+
+    page2, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript_status', {
+        'job_id': 'cust-a-ready-status',
+        'offset': full['next_offset'], 'max_chars': 40,
+    })
+    assert page2['offset'] == 40
+    assert page2['text']
+
+    status_only, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript_status', {
+        'job_id': 'cust-a-ready-status', 'include_text': False,
+    })
+    assert status_only['status'] == 'ready'
+    assert 'text' not in status_only
+
+    stolen, stolen_res = _mcp_tool(mcp_on['key_b'], 'get_transcript_status', {
+        'job_id': 'cust-a-ready-status',
+    })
+    assert stolen_res.get('isError') is True
+    assert stolen['error'] == 'Job not found'
+
+
+def test_mcp_get_my_transcript_includes_balance_fact(mcp_on):
+    got, res = _mcp_tool(mcp_on['key_a'], 'get_my_transcript', {
+        'task_id': 'cust-a-ep', 'max_chars': 20,
+    })
+    assert res.get('isError') is False, got
+    assert got['charged'] is False
+    assert 'balance_fact' in got
+    assert isinstance(got['balance_fact']['minutes_left'], int)
+
+
+def test_status_endpoint_balance_fact_on_completed(trial_on):
+    """Web /status includes balance_fact for metered users on completed jobs."""
+    from models import TranscriptionTask, db
+
+    uid = _make_user('web-bf@test.com', limit=120 * 60, used=0)
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='web-bf-task', user_id=uid, status='completed',
+            episode_title='Done', podcast_name='Show',
+            transcript_text='Hello transcript',
+            audio_duration=1800.0,
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+            completed_at=datetime.now(timezone.utc),
+        ))
+        db.session.commit()
+    client = _login(uid)
+    r = client.get('/status/web-bf-task')
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body['status'] == 'completed'
+    assert 'balance_fact' in body
+    assert 'min left' in body['balance_fact']['line']
+    assert body['balance_fact']['pricing_url'].endswith('/pricing')
 
 
 def test_mcp_list_episodes_spotify_show(mcp_on, monkeypatch):

@@ -174,37 +174,88 @@ def _wait_while_pending(user_id, task_id: str, *,
     return task
 
 
-def _in_progress_fields(task) -> dict:
-    """Shared fields for pending / in_progress MCP responses."""
+def _eta_fields_for_task(task) -> dict:
+    """Historical p25–p75 ETA window for an in-flight (or just-started) task."""
     A = _app()
-    percent, eta = A.compute_live_progress(task)
-    eta_sec = int(eta) if eta is not None else None
-    if eta_sec is not None and eta_sec > 0:
-        mins = max(1, int(round(eta_sec / 60.0)))
-        still = f'Still transcribing (~{mins} min left).'
-    else:
-        still = 'Still transcribing.'
-    instruction = (
-        f'{still} Call get_transcript_status again with this task_id '
-        f'(job_id={task.id}) in about 30–60 seconds; do not ask the user '
-        f'to remind you. A “transcript ready” email will be sent when it '
-        f'finishes (if enabled in Settings). Progress is also on History: '
+    percent, live_eta = A.compute_live_progress(task)
+    pct = int(percent) if percent is not None else 0
+    ahead = A.count_transcriptions_ahead(task)
+    est = A.estimate_transcription_eta(
+        audio_duration_sec=task.audio_duration,
+        progress_pct=pct,
+        queue_ahead=ahead,
+    )
+    # Prefer the historical window; if live phase ETA is longer, stretch high.
+    if live_eta is not None and live_eta > est['eta_seconds_high']:
+        est['eta_seconds_high'] = int(round(live_eta))
+        if est['eta_seconds'] > est['eta_seconds_high']:
+            est['eta_seconds'] = est['eta_seconds_high']
+        est['eta_text'] = A.format_eta_window_text(
+            est['eta_seconds_low'], est['eta_seconds_high'])
+    return {
+        'progress_pct': pct,
+        'eta_seconds': est['eta_seconds'],
+        'eta_seconds_low': est['eta_seconds_low'],
+        'eta_seconds_high': est['eta_seconds_high'],
+        'eta_text': est['eta_text'],
+        'eta_basis': est['eta_basis'],
+        'eta_sample_count': est['sample_count'],
+        'queue_ahead': est['queue_ahead'],
+    }
+
+
+def _next_step_instruction(task_id: str, eta: dict, *, still_prefix: str) -> str:
+    """Explicit next-step copy: poll get_transcript_status after ~N seconds."""
+    low = int(eta.get('eta_seconds_low') or 60)
+    poll_after = max(30, min(low, 120))
+    eta_text = eta.get('eta_text') or 'usually ready in a few minutes'
+    return (
+        f'{still_prefix} Rough ETA: {eta_text} '
+        f'(not a promise). Call get_transcript_status with task_id '
+        f'{task_id} after ~{poll_after} s; do not ask the user to remind '
+        f'you. A “transcript ready” email will be sent when it finishes '
+        f'(if enabled in Settings). Progress is also on History: '
         f'{_history_url()}'
     )
+
+
+def _in_progress_fields(task) -> dict:
+    """Shared fields for pending / in_progress MCP responses."""
+    eta = _eta_fields_for_task(task)
+    still = f'Still transcribing ({eta["eta_text"]}).'
+    instruction = _next_step_instruction(task.id, eta, still_prefix=still)
     return {
         'status': 'in_progress',
         'transcript_status': 'pending',
         'task_status': task.status,
-        'progress_pct': int(percent) if percent is not None else 0,
-        'eta_seconds': eta_sec,
+        'progress_pct': eta['progress_pct'],
+        'eta_seconds': eta['eta_seconds'],
+        'eta_seconds_low': eta['eta_seconds_low'],
+        'eta_seconds_high': eta['eta_seconds_high'],
+        'eta_text': eta['eta_text'],
+        'eta_basis': eta['eta_basis'],
+        'queue_ahead': eta['queue_ahead'],
         'message': instruction,
         'instruction': instruction,
+        'next_step': (
+            f'call get_transcript_status with task_id {task.id} '
+            f'after ~{max(30, min(int(eta["eta_seconds_low"]), 120))} s'
+        ),
         'history_url': _history_url(),
         'email_note': (
             'A “transcript ready” email will be sent when transcription '
             'finishes (if enabled in Settings).'
         ),
     }
+
+
+def _attach_balance_fact(payload: dict, user) -> dict:
+    """Add ``balance_fact`` for metered users (skip BYOK)."""
+    A = _app()
+    fact = A.balance_fact_for_user(user, pricing_url=_pricing_url())
+    if fact:
+        payload['balance_fact'] = fact
+    return payload
 
 
 def _list_status_bucket(task) -> str | None:
@@ -302,21 +353,94 @@ def _estimate_cost_minutes(duration_min) -> int:
     return A.trial_estimate_seconds(duration_min) // 60
 
 
-def _insufficient_balance_payload(user, *, cost_minutes: int, message: str | None = None):
+def _pricing_info_url(*, ref: str | None = None) -> str:
+    """Information-page pricing link (no checkout deep link)."""
+    base = _pricing_url()
+    if not ref:
+        return base
+    sep = '&' if '?' in base else '?'
+    return f'{base}{sep}ref={ref}'
+
+
+def _insufficient_balance_payload(user, *, cost_minutes: int,
+                                  duration_min=None,
+                                  message: str | None = None,
+                                  reason: str = 'low_balance'):
+    """Structured shortfall for MCP — facts + pricing info link, no upsell."""
+    A = _app()
     bal = _balance_snapshot(user)
-    pricing = _pricing_url()
-    msg = message or (
-        f'This episode costs about {cost_minutes} minutes, but you have '
-        f'{bal.get("remaining_minutes", 0)} minutes left. '
-        f'Buy more minutes or add your own OpenAI key: {pricing}'
+    minutes_left = int(bal.get('remaining_minutes') or 0)
+    episode_minutes = int(cost_minutes)
+    try:
+        if duration_min is not None:
+            episode_minutes = max(1, int(round(float(duration_min))))
+    except (TypeError, ValueError):
+        pass
+    shortfall = max(0, episode_minutes - minutes_left)
+    pricing = _pricing_info_url(ref='mcp_shortfall')
+
+    # ETA if the user topped up enough to cover this episode (informational).
+    eta = A.estimate_transcription_eta(
+        audio_duration_sec=float(episode_minutes) * 60.0,
+        progress_pct=0,
+        queue_ahead=max(0, A.count_in_flight_transcriptions()),
     )
-    return {
+
+    trial_rem, paid_rem = A._platform_remaining_seconds(user.id)
+    estimate = A.trial_estimate_seconds(duration_min if duration_min is not None
+                                        else episode_minutes)
+    partial_ok = (
+        paid_rem <= 0
+        and trial_rem >= A.TRIAL_PARTIAL_MIN_SECONDS
+        and estimate > trial_rem
+    )
+    partial_note = None
+    if partial_ok:
+        partial_min = max(1, trial_rem // 60)
+        partial_note = (
+            f'On the website you can start a free partial preview of the first '
+            f'{partial_min} minutes (MCP starts full episodes only).'
+        )
+
+    msg = message or (
+        f'This episode is about {episode_minutes} minutes; you have '
+        f'{minutes_left} minutes left (shortfall {shortfall}). '
+        f'See {pricing} for how Podskrift minutes work.'
+    )
+    if partial_note and 'partial' not in msg.lower():
+        msg = f'{msg} {partial_note}'
+
+    product_analytics.capture(
+        'mcp_insufficient_balance',
+        getattr(user, 'id', None),
+        {
+            'episode_minutes': episode_minutes,
+            'minutes_left': minutes_left,
+            'shortfall_minutes': shortfall,
+            'reason': reason,
+            'partial_preview_available': bool(partial_ok),
+        },
+    )
+
+    payload = {
         'error': 'insufficient_balance',
         'message': msg,
         'cost_minutes': cost_minutes,
+        'episode_minutes': episode_minutes,
+        'minutes_left': minutes_left,
+        'shortfall_minutes': shortfall,
         'balance': bal,
         'pricing_url': pricing,
+        'eta_if_topped_up': {
+            'eta_seconds_low': eta['eta_seconds_low'],
+            'eta_seconds_high': eta['eta_seconds_high'],
+            'eta_text': eta['eta_text'],
+        },
+        'partial_preview_available': bool(partial_ok),
     }
+    if partial_note:
+        payload['partial_preview_note'] = partial_note
+    return payload
 
 
 def _can_afford(user, duration_min) -> tuple[bool, int, dict | None]:
@@ -333,8 +457,8 @@ def _can_afford(user, duration_min) -> tuple[bool, int, dict | None]:
         return False, cost_minutes, {
             'error': 'no_openai_key',
             'message': (
-                'No OpenAI API key available. Add your key in Settings, or buy '
-                f'minutes: {_pricing_url()}'
+                'No OpenAI API key available. Add your key in Settings, or see '
+                f'{_pricing_url()} for how minutes work.'
             ),
             'pricing_url': _pricing_url(),
             'cost_minutes': cost_minutes,
@@ -352,7 +476,8 @@ def _can_afford(user, duration_min) -> tuple[bool, int, dict | None]:
         can = (trial_rem + paid_rem) >= estimate
     if not can:
         return False, cost_minutes, _insufficient_balance_payload(
-            user, cost_minutes=cost_minutes)
+            user, cost_minutes=cost_minutes, duration_min=duration_min,
+            reason='episode_too_long' if over_free_cap else 'low_balance')
     # Shared daily budget can still refuse inside enqueue; surface a clearer
     # pre-check when today's free pool is empty and paid cannot cover.
     if (not over_free_cap and paid_rem < estimate
@@ -361,10 +486,12 @@ def _can_afford(user, duration_min) -> tuple[bool, int, dict | None]:
         return False, cost_minutes, _insufficient_balance_payload(
             user,
             cost_minutes=cost_minutes,
+            duration_min=duration_min,
+            reason='daily_cap',
             message=(
                 f'This episode costs about {cost_minutes} minutes, but the shared '
-                f'daily free budget is exhausted (or too low). Buy minutes or add '
-                f'your own OpenAI key: {_pricing_url()}'
+                f'daily free budget is exhausted (or too low). '
+                f'See {_pricing_info_url(ref="mcp_shortfall")} for how minutes work.'
             ),
         )
     return True, cost_minutes, None
@@ -522,11 +649,14 @@ def _tool_defs() -> list[dict]:
                 'returns the text for free (cost_minutes 0) — also use '
                 'list_my_transcripts / get_my_transcript for “my past transcripts”. '
                 'Otherwise starts transcription (same trial / paid / BYOK rules as '
-                'the website) and returns a job_id. While in progress the server may '
-                'wait briefly, then return status in_progress with progress/ETA and '
-                'instructions to call get_transcript_status again yourself in 30–60s '
-                '(do not ask the user to remind you; a transcript-ready email is sent '
-                'when done). Refuses with pricing_url when the episode exceeds balance.'
+                'the website) and returns task_id / job_id plus a rough ETA window '
+                '(eta_seconds_low/high + eta_text; not a promise) and next_step: '
+                'call get_transcript_status with that task_id after ~N seconds. '
+                'While in progress the server may wait briefly, then return '
+                'in_progress with progress and the same ETA fields (do not ask the '
+                'user to remind you; a transcript-ready email is sent when done). '
+                'When balance is too low, returns a structured insufficient_balance '
+                'payload with shortfall and a pricing information link.'
             ),
             'inputSchema': {
                 'type': 'object',
@@ -574,19 +704,49 @@ def _tool_defs() -> list[dict]:
         {
             'name': 'get_transcript_status',
             'description': (
-                'Poll a transcription job started by get_transcript. Waits briefly '
-                'server-side if still running, then returns ready (with text), failed, '
-                'or in_progress with progress_pct / eta_seconds and an instruction to '
-                'call this tool again in 30–60 seconds yourself — do not ask the user '
-                'to remind you. Tell the user a transcript-ready email will arrive and '
-                'they can watch History on Podskrift.'
+                'Poll a transcription job by task_id / job_id from get_transcript. '
+                'Waits briefly server-side if still running, then returns ready, '
+                'failed, or in_progress. When ready, includes transcript text by '
+                'default (same offset / max_chars / next_offset paging as '
+                'get_my_transcript; set include_text false for status only). '
+                'In progress includes eta_seconds_low/high + eta_text and next_step '
+                'to call this tool again after ~N seconds — do not ask the user to '
+                'remind you. A transcript-ready email is sent when done.'
             ),
             'inputSchema': {
                 'type': 'object',
                 'properties': {
                     'job_id': {
                         'type': 'string',
-                        'description': 'Job id / task_id returned by get_transcript.',
+                        'description': (
+                            'Job id / task_id returned by get_transcript '
+                            '(alias: task_id).'
+                        ),
+                    },
+                    'task_id': {
+                        'type': 'string',
+                        'description': 'Alias for job_id.',
+                    },
+                    'include_text': {
+                        'type': 'boolean',
+                        'description': (
+                            'When ready, include transcript text (default true). '
+                            'Set false for status-only.'
+                        ),
+                    },
+                    'offset': {
+                        'type': 'integer',
+                        'description': (
+                            'Character offset into the text when include_text is '
+                            'true (default 0).'
+                        ),
+                    },
+                    'max_chars': {
+                        'type': 'integer',
+                        'description': (
+                            'Max characters when include_text is true '
+                            '(default 24000, max 100000). Follow next_offset.'
+                        ),
                     },
                 },
                 'required': ['job_id'],
@@ -855,8 +1015,35 @@ _EPISODE_META_ARGS = (
 )
 
 
+def _page_transcript_text(task, *, offset=None, max_chars=None) -> dict:
+    """Character window over transcript_text (same rules as get_my_transcript)."""
+    try:
+        off = int(offset) if offset is not None else 0
+    except (TypeError, ValueError):
+        off = 0
+    off = max(0, off)
+    try:
+        cap = int(max_chars) if max_chars is not None else _MCP_TEXT_DEFAULT_CHARS
+    except (TypeError, ValueError):
+        cap = _MCP_TEXT_DEFAULT_CHARS
+    cap = max(1, min(cap, _MCP_TEXT_MAX_CHARS))
+    full = task.transcript_text or ''
+    chunk = full[off: off + cap]
+    next_off = off + len(chunk) if off + len(chunk) < len(full) else None
+    return {
+        'format': 'txt',
+        'text': chunk,
+        'offset': off,
+        'max_chars': cap,
+        'next_offset': next_off,
+        'total_chars': len(full),
+    }
+
+
 def _task_ready_payload(task, user, *, reused: bool, cost_minutes: int = 0,
-                        extra: dict | None = None) -> dict:
+                        extra: dict | None = None,
+                        include_text: bool = True,
+                        offset=None, max_chars=None) -> dict:
     payload = {
         'job_id': task.id,
         'task_id': task.id,
@@ -864,15 +1051,17 @@ def _task_ready_payload(task, user, *, reused: bool, cost_minutes: int = 0,
         'status': 'ready',
         'title': task.episode_title,
         'publisher': task.podcast_name,
-        'text': task.transcript_text or '',
         'cost_minutes': cost_minutes,
         'balance': _balance_snapshot(user),
         'reused': reused,
         'url': _transcript_page_url(task.id),
     }
+    if include_text:
+        payload.update(_page_transcript_text(
+            task, offset=offset, max_chars=max_chars))
     if extra:
         payload.update(extra)
-    return payload
+    return _attach_balance_fact(payload, user)
 
 
 def _task_failed_payload(task, user, *, reused: bool, cost_minutes: int = 0,
@@ -892,7 +1081,7 @@ def _task_failed_payload(task, user, *, reused: bool, cost_minutes: int = 0,
     }
     if extra:
         payload.update(extra)
-    return payload
+    return _attach_balance_fact(payload, user)
 
 
 def _task_pending_payload(task, user, *, reused: bool, cost_minutes: int = 0,
@@ -909,12 +1098,14 @@ def _task_pending_payload(task, user, *, reused: bool, cost_minutes: int = 0,
     payload.update(_in_progress_fields(task))
     if extra:
         payload.update(extra)
-    return payload
+    return _attach_balance_fact(payload, user)
 
 
 def _resolve_task_status_payload(task, user, *, reused: bool,
                                  cost_minutes: int = 0,
-                                 extra: dict | None = None) -> dict:
+                                 extra: dict | None = None,
+                                 include_text: bool = True,
+                                 offset=None, max_chars=None) -> dict:
     """Wait briefly if pending, then return ready / failed / in_progress."""
     A = _app()
     if A.agent_transcript_status(task) == 'pending':
@@ -922,14 +1113,15 @@ def _resolve_task_status_payload(task, user, *, reused: bool,
     status = A.agent_transcript_status(task)
     if status == 'ready':
         return _task_ready_payload(
-            task, user, reused=reused, cost_minutes=cost_minutes, extra=extra)
+            task, user, reused=reused, cost_minutes=cost_minutes, extra=extra,
+            include_text=include_text, offset=offset, max_chars=max_chars)
     if status == 'failed':
         return _task_failed_payload(
             task, user, reused=reused, cost_minutes=cost_minutes, extra=extra)
     if status == 'pending':
         return _task_pending_payload(
             task, user, reused=reused, cost_minutes=cost_minutes, extra=extra)
-    return {
+    payload = {
         'job_id': task.id,
         'task_id': task.id,
         'transcript_status': status,
@@ -939,6 +1131,7 @@ def _resolve_task_status_payload(task, user, *, reused: bool,
         'balance': _balance_snapshot(user),
         'reused': reused,
     }
+    return _attach_balance_fact(payload, user)
 
 
 def tool_get_transcript(user, episode: str, language: str = '',
@@ -1025,9 +1218,23 @@ def tool_get_transcript(user, episode: str, language: str = '',
 
     task = _user_task(user.id, result['task_id'])
     if task is None:
-        return {
-            'job_id': result['task_id'],
-            'task_id': result['task_id'],
+        # Task row not readable yet — still return ID + fallback ETA + next step.
+        A = _app()
+        dur = catalog.get('duration_min')
+        try:
+            audio_sec = float(dur) * 60.0 if dur is not None else None
+        except (TypeError, ValueError):
+            audio_sec = None
+        eta = A.estimate_transcription_eta(
+            audio_duration_sec=audio_sec,
+            progress_pct=0,
+            queue_ahead=max(0, A.count_in_flight_transcriptions() - 1),
+        )
+        poll_after = max(30, min(int(eta['eta_seconds_low']), 120))
+        tid = result['task_id']
+        payload = {
+            'job_id': tid,
+            'task_id': tid,
             'transcript_status': 'pending',
             'status': 'in_progress',
             'title': catalog.get('title'),
@@ -1038,11 +1245,27 @@ def tool_get_transcript(user, episode: str, language: str = '',
             'reused': False,
             'pricing_url': _pricing_url(),
             'history_url': _history_url(),
+            'eta_seconds': eta['eta_seconds'],
+            'eta_seconds_low': eta['eta_seconds_low'],
+            'eta_seconds_high': eta['eta_seconds_high'],
+            'eta_text': eta['eta_text'],
+            'eta_basis': eta['eta_basis'],
+            'next_step': (
+                f'call get_transcript_status with task_id {tid} '
+                f'after ~{poll_after} s'
+            ),
             'message': (
-                'Transcription started. Call get_transcript_status with this '
-                'job_id shortly.'
+                f'Transcription started ({eta["eta_text"]}). '
+                f'Call get_transcript_status with task_id {tid} '
+                f'after ~{poll_after} s.'
+            ),
+            'instruction': (
+                f'Transcription started ({eta["eta_text"]}). '
+                f'Call get_transcript_status with task_id {tid} '
+                f'after ~{poll_after} s; do not ask the user to remind you.'
             ),
         }
+        return _attach_balance_fact(payload, user)
     extra = {
         'balance_before': balance_before,
         'balance_after': balance_after,
@@ -1053,14 +1276,26 @@ def tool_get_transcript(user, episode: str, language: str = '',
         task, user, reused=False, cost_minutes=cost_minutes, extra=extra)
 
 
-def tool_get_transcript_status(user, job_id: str) -> dict:
-    job_id = (job_id or '').strip()
+def tool_get_transcript_status(user, job_id: str = '', *,
+                               task_id: str = '',
+                               include_text=True,
+                               offset=None, max_chars=None) -> dict:
+    job_id = (job_id or task_id or '').strip()
     if not job_id:
         return {'error': 'job_id is required'}
     task = _user_task(user.id, job_id)
     if task is None:
         return {'error': 'Job not found', 'transcript_status': 'none'}
-    return _resolve_task_status_payload(task, user, reused=True)
+    if isinstance(include_text, str):
+        include_text = include_text.strip().lower() not in (
+            '0', 'false', 'no', 'off')
+    elif include_text is None:
+        include_text = True
+    else:
+        include_text = bool(include_text)
+    return _resolve_task_status_payload(
+        task, user, reused=True, include_text=include_text,
+        offset=offset, max_chars=max_chars)
 
 
 def _list_item_from_task(task) -> dict | None:
@@ -1236,11 +1471,11 @@ def tool_get_my_transcript(user, task_id: str, *, format: str = 'txt',
     meta['transcript_status'] = agent_st
     if agent_st == 'pending':
         meta.update(_in_progress_fields(task))
-        return meta
+        return _attach_balance_fact(meta, user)
     if agent_st != 'ready':
         if agent_st == 'failed':
             meta['error_message'] = task.error_message
-        return meta
+        return _attach_balance_fact(meta, user)
 
     fmt = (format or 'txt').strip().lower()
     if fmt not in ('txt', 'text', 'plain', 'srt', 'segments'):
@@ -1273,14 +1508,14 @@ def tool_get_my_transcript(user, task_id: str, *, format: str = 'txt',
         # Page by segment index when offset/max_chars used as segment window.
         window = segs[off: off + cap]
         next_off = off + len(window) if off + len(window) < len(segs) else None
-        return {
+        return _attach_balance_fact({
             **meta,
             'format': 'segments',
             'segments': window,
             'offset': off,
             'next_offset': next_off,
             'total_segments': len(segs),
-        }
+        }, user)
 
     if fmt == 'srt':
         full = A._segments_to_srt(task.segments_json, task.transcript_text or '')
@@ -1297,7 +1532,7 @@ def tool_get_my_transcript(user, task_id: str, *, format: str = 'txt',
 
     chunk = full[off: off + cap]
     next_off = off + len(chunk) if off + len(chunk) < len(full) else None
-    return {
+    return _attach_balance_fact({
         **meta,
         'format': fmt,
         'text': chunk,
@@ -1305,7 +1540,7 @@ def tool_get_my_transcript(user, task_id: str, *, format: str = 'txt',
         'max_chars': cap,
         'next_offset': next_off,
         'total_chars': len(full),
-    }
+    }, user)
 
 
 def _capture_tool(tool: str, user_id, success: bool):
@@ -1366,7 +1601,14 @@ def _run_tool(name: str, arguments: dict, user) -> dict:
             _capture_tool(name, user.id, ok and 'error' not in out)
             return _tool_text(out, is_error='error' in out)
         if name == 'get_transcript_status':
-            out = tool_get_transcript_status(user, args.get('job_id') or '')
+            out = tool_get_transcript_status(
+                user,
+                args.get('job_id') or '',
+                task_id=args.get('task_id') or '',
+                include_text=args.get('include_text', True),
+                offset=args.get('offset'),
+                max_chars=args.get('max_chars'),
+            )
             ok = 'error' not in out
             _capture_tool(name, user.id, ok)
             return _tool_text(out, is_error=not ok)

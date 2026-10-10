@@ -20,6 +20,7 @@ import secrets
 import signal
 import sqlite3
 import shutil
+import statistics
 import subprocess
 import ssl
 import time
@@ -583,6 +584,16 @@ MIN_FREE_DISK_BYTES = max(0, _env_int('MIN_FREE_DISK_MB', 4096)) * 1024 * 1024
 # Only used to interpolate progress between chunk checkpoints -- the API gives us
 # no streaming progress, so without an estimate the bar would sit still for minutes.
 WHISPER_REALTIME_FACTOR = 12.0
+
+# Historical ETA for MCP (and other agents): wall seconds per audio minute from
+# recent completed jobs. Fallback when too few samples — full pipeline (download
+# + split + Whisper), not Whisper-only realtime.
+ETA_SAMPLE_LIMIT = max(10, _env_int('ETA_SAMPLE_LIMIT', 50))
+ETA_LOOKBACK_DAYS = max(1, _env_int('ETA_LOOKBACK_DAYS', 7))
+ETA_MIN_SAMPLES = max(1, _env_int('ETA_MIN_SAMPLES', 5))
+# Optimistic / pessimistic full-pipeline seconds of wall clock per audio minute.
+ETA_FALLBACK_SEC_PER_AUDIO_MIN_LOW = 10.0
+ETA_FALLBACK_SEC_PER_AUDIO_MIN_HIGH = 40.0
 
 # Share of the overall progress bar owned by each phase.
 PHASE_SPANS = {
@@ -2978,6 +2989,265 @@ def compute_live_progress(task):
         return max(stored, int(lo + _asymptotic_fraction(phase_elapsed, 30) * (hi - lo))), None
 
     return stored, None
+
+
+def _aware_utc(dt):
+    """Return ``dt`` as timezone-aware UTC, or None."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _percentile_sorted(sorted_vals, p):
+    """Linear percentile on a non-empty sorted list (p in 0..100)."""
+    if not sorted_vals:
+        return None
+    if len(sorted_vals) == 1:
+        return float(sorted_vals[0])
+    rank = (p / 100.0) * (len(sorted_vals) - 1)
+    lo = int(math.floor(rank))
+    hi = int(math.ceil(rank))
+    if lo == hi:
+        return float(sorted_vals[lo])
+    frac = rank - lo
+    return float(sorted_vals[lo]) * (1.0 - frac) + float(sorted_vals[hi]) * frac
+
+
+def recent_transcription_rates(*, limit=None, lookback_days=None):
+    """Wall-clock seconds per audio minute from recent completed jobs.
+
+    Returns a sorted list of rates. Jobs without duration or timestamps, or
+    with non-positive wall time, are skipped.
+    """
+    lim = int(limit if limit is not None else ETA_SAMPLE_LIMIT)
+    days = int(lookback_days if lookback_days is not None else ETA_LOOKBACK_DAYS)
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+    rows = (
+        TranscriptionTask.query
+        .filter(
+            TranscriptionTask.status == 'completed',
+            TranscriptionTask.completed_at.isnot(None),
+            TranscriptionTask.started_at.isnot(None),
+            TranscriptionTask.audio_duration.isnot(None),
+            TranscriptionTask.audio_duration > 0,
+            TranscriptionTask.completed_at >= since,
+        )
+        .order_by(TranscriptionTask.completed_at.desc())
+        .limit(max(1, lim))
+        .all()
+    )
+    rates = []
+    for task in rows:
+        start = _aware_utc(task.started_at)
+        end = _aware_utc(task.completed_at)
+        if start is None or end is None:
+            continue
+        wall = (end - start).total_seconds()
+        audio_min = float(task.audio_duration) / 60.0
+        if wall <= 0 or audio_min <= 0:
+            continue
+        # Ignore absurd outliers (clock skew / stuck jobs).
+        rate = wall / audio_min
+        if rate < 0.5 or rate > 600:
+            continue
+        rates.append(rate)
+    rates.sort()
+    return rates
+
+
+def count_transcriptions_ahead(task):
+    """How many in-flight jobs are ahead of ``task`` (global admission queue)."""
+    if task is None or not getattr(task, 'id', None):
+        return max(0, count_in_flight_transcriptions())
+    start = _aware_utc(task.started_at) or datetime.now(timezone.utc)
+    q = (
+        TranscriptionTask.query
+        .filter(
+            ~TranscriptionTask.status.in_(['completed', *TERMINAL_STATUSES]),
+            TranscriptionTask.id != task.id,
+        )
+    )
+    ahead = 0
+    for other in q.limit(200).all():
+        other_start = _aware_utc(other.started_at) or start
+        if other_start < start or (
+                other_start == start and str(other.id) < str(task.id)):
+            ahead += 1
+    return ahead
+
+
+def format_eta_window_text(low_sec, high_sec) -> str:
+    """Human rough window — never a promise."""
+    def _mins(sec):
+        return max(1, int(round(max(0.0, float(sec)) / 60.0)))
+
+    lo_m = _mins(low_sec)
+    hi_m = _mins(high_sec)
+    if hi_m < lo_m:
+        hi_m = lo_m
+    if lo_m == hi_m:
+        unit = 'minute' if lo_m == 1 else 'minutes'
+        return f'usually ready in about {lo_m} {unit}'
+    return f'usually ready in about {lo_m}–{hi_m} minutes'
+
+
+def estimate_transcription_eta(
+        *,
+        audio_duration_sec=None,
+        progress_pct=None,
+        queue_ahead=0,
+        rates=None,
+        min_samples=None):
+    """Rough ETA window from recent run rates (p25–p75) × duration + queue.
+
+    Returns a dict with ``eta_seconds_low`` / ``eta_seconds_high`` /
+    ``eta_seconds`` (midpoint), ``eta_text``, ``eta_basis``
+    (``historical``|``fallback``), and ``sample_count``. Not a SLA.
+    """
+    min_n = int(min_samples if min_samples is not None else ETA_MIN_SAMPLES)
+    sample_rates = list(rates) if rates is not None else recent_transcription_rates()
+    sample_count = len(sample_rates)
+    if sample_count >= min_n:
+        low_rate = _percentile_sorted(sample_rates, 25)
+        mid_rate = _percentile_sorted(sample_rates, 50)
+        high_rate = _percentile_sorted(sample_rates, 75)
+        basis = 'historical'
+    else:
+        low_rate = ETA_FALLBACK_SEC_PER_AUDIO_MIN_LOW
+        mid_rate = (
+            ETA_FALLBACK_SEC_PER_AUDIO_MIN_LOW
+            + ETA_FALLBACK_SEC_PER_AUDIO_MIN_HIGH) / 2.0
+        high_rate = ETA_FALLBACK_SEC_PER_AUDIO_MIN_HIGH
+        basis = 'fallback'
+
+    try:
+        audio_sec = float(audio_duration_sec) if audio_duration_sec else 0.0
+    except (TypeError, ValueError):
+        audio_sec = 0.0
+    audio_min = max(audio_sec / 60.0, 1.0)  # at least one minute of work
+
+    low = low_rate * audio_min
+    mid = mid_rate * audio_min
+    high = high_rate * audio_min
+
+    # Queue: each job ahead adds a median-length episode at the mid rate.
+    ahead = max(0, int(queue_ahead or 0))
+    if ahead:
+        typical_min = 45.0
+        if sample_rates:
+            # Prefer median wall seconds of a sample job if we have rates —
+            # approximate via mid_rate * median audio minutes when available.
+            typical_min = 45.0
+        queue_add = ahead * mid_rate * typical_min
+        low += queue_add * 0.7
+        mid += queue_add
+        high += queue_add * 1.2
+
+    # Remaining work from progress (never claim "done" before completion).
+    try:
+        pct = float(progress_pct) if progress_pct is not None else 0.0
+    except (TypeError, ValueError):
+        pct = 0.0
+    pct = max(0.0, min(99.0, pct))
+    remaining_frac = max(0.05, 1.0 - (pct / 100.0))
+    low *= remaining_frac
+    mid *= remaining_frac
+    high *= remaining_frac
+
+    # Floor: never advertise sub-30s windows (polling noise).
+    low = max(30.0, low)
+    mid = max(low, mid)
+    high = max(mid, high)
+
+    low_i = int(round(low))
+    mid_i = int(round(mid))
+    high_i = int(round(high))
+    return {
+        'eta_seconds_low': low_i,
+        'eta_seconds_high': high_i,
+        'eta_seconds': mid_i,
+        'eta_text': format_eta_window_text(low_i, high_i),
+        'eta_basis': basis,
+        'sample_count': sample_count,
+        'queue_ahead': ahead,
+        'seconds_per_audio_minute_p25': round(low_rate, 2),
+        'seconds_per_audio_minute_p75': round(high_rate, 2),
+    }
+
+
+# Balance-fact: large paid/trial leftover — minutes only, no episode estimate.
+BALANCE_FACT_LARGE_MINUTES = 300
+BALANCE_FACT_DEFAULT_EPISODE_MIN = 45
+
+
+def user_median_episode_minutes(user_id, *, limit=50, default=None):
+    """Median completed episode length (minutes) for this user, or default."""
+    if default is None:
+        default = BALANCE_FACT_DEFAULT_EPISODE_MIN
+    rows = (
+        TranscriptionTask.query
+        .filter(
+            TranscriptionTask.user_id == user_id,
+            TranscriptionTask.status == 'completed',
+            TranscriptionTask.audio_duration.isnot(None),
+            TranscriptionTask.audio_duration > 0,
+        )
+        .order_by(TranscriptionTask.completed_at.desc())
+        .limit(max(1, int(limit)))
+        .all()
+    )
+    mins = []
+    for task in rows:
+        try:
+            mins.append(float(task.audio_duration) / 60.0)
+        except (TypeError, ValueError):
+            continue
+    if not mins:
+        return float(default)
+    mins.sort()
+    return float(_percentile_sorted(mins, 50) or default)
+
+
+def balance_fact_for_user(user, *, pricing_url=None):
+    """Short metered-balance fact for MCP / result page. None for BYOK.
+
+    ChatGPT app-directory rules: facts + information link only — no checkout
+    deep links or pushy upsell copy.
+    """
+    if user is None:
+        return None
+    _, key_source = resolve_openai_key(user)
+    if key_source == 'user':
+        return None
+    trial_rem, paid_rem = _platform_remaining_seconds(user.id)
+    minutes_left = max(0, (int(trial_rem) + int(paid_rem)) // 60)
+    pricing = pricing_url or (
+        public_url('pricing') if has_request_context()
+        else f"{(os.getenv('PUBLIC_BASE_URL') or 'https://podskrift.com').rstrip('/')}/pricing"
+    )
+    fact = {
+        'minutes_left': minutes_left,
+        'pricing_url': pricing,
+    }
+    if minutes_left > BALANCE_FACT_LARGE_MINUTES:
+        fact['approx_episodes_left'] = None
+        fact['line'] = f'{minutes_left} min left. Pricing: {pricing}'
+        return fact
+    ep_min = user_median_episode_minutes(user.id)
+    ep_min = max(5.0, float(ep_min))
+    approx = int(minutes_left // ep_min) if ep_min else 0
+    fact['approx_episodes_left'] = approx
+    fact['typical_episode_min'] = round(ep_min, 1)
+    if approx <= 0:
+        ep_bit = 'less than 1 more episode at your usual length'
+    elif approx == 1:
+        ep_bit = 'about 1 more episode'
+    else:
+        ep_bit = f'about {approx} more episodes'
+    fact['line'] = f'{minutes_left} min left ({ep_bit}). Pricing: {pricing}'
+    return fact
 
 
 def format_timestamp(seconds):
@@ -6606,6 +6876,10 @@ def get_status(task_id):
             result['result_offer_label'] = RESULT_OFFER_LABEL
             result['buy_available'] = True
             result['buy_label'] = CREDIT_PACK_LABEL
+        # One-line balance fact under the completed transcript (metered only).
+        fact = balance_fact_for_user(current_user)
+        if fact:
+            result['balance_fact'] = fact
 
     return jsonify(result)
 
