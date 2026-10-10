@@ -10491,6 +10491,12 @@ def test_checkout_session_creation(stripe_on, ph_events):
     assert 'automatic_tax' not in kw
     assert '/billing/cancel' in kw['cancel_url']
     assert 'next=' in kw['cancel_url']
+    # Abandoned-checkout recovery: short TTL + recovery email after expiry.
+    assert kw['expires_at'] > int(A.time.time())
+    assert kw['expires_at'] <= int(A.time.time()) + A.CHECKOUT_EXPIRES_HOURS * 3600 + 5
+    assert kw['after_expiration']['recovery']['enabled'] is True
+    assert kw['after_expiration']['recovery']['allow_promotion_codes'] is True
+    assert kw['consent_collection']['promotions'] == 'auto'
     started = [e for e in ph_events.events if e['event'] == 'checkout_started']
     assert started and started[-1]['distinct_id'] == str(uid)
     props = started[-1]['properties']
@@ -10500,6 +10506,8 @@ def test_checkout_session_creation(stripe_on, ph_events):
     assert props['amount_cents'] == A.CREDIT_PACK_AMOUNT_CENTS
     assert props['pack_sku'] == A.CREDIT_PACK_SKU
     assert props['$session_id'] == 'ph_sess_test_1'
+    assert props['recovery_enabled'] is True
+    assert props['expires_hours'] == A.CHECKOUT_EXPIRES_HOURS
     assert props.get('app') == 'podskrift'
     assert 'email' not in props
     assert '@' not in str(props)
@@ -10697,7 +10705,8 @@ def test_checkout_session_expired_captures_checkout_expired(stripe_on, ph_events
         'amount_total': 500,
         'currency': 'usd',
         'created': 1_700_000_000,
-        'expires_at': 1_700_000_000 + 24 * 3600,
+        'expires_at': 1_700_000_000 + 2 * 3600,
+        'after_expiration': {'recovery': {'enabled': True}},
         'metadata': {'user_id': str(uid), 'minutes': '300',
                      'pack': A.CREDIT_PACK_SKU, 'location': 'paywall'},
     }
@@ -10717,9 +10726,27 @@ def test_checkout_session_expired_captures_checkout_expired(stripe_on, ph_events
     assert props['location'] == 'paywall'
     assert props['amount_cents'] == 500
     assert props['minutes'] == 300
-    assert props['open_minutes'] == 24 * 60
+    assert props['open_minutes'] == 2 * 60
+    assert props['recovery_enabled'] is True
     assert props['trial_remaining_min'] == 90
     assert 'email' not in props
+
+
+def test_checkout_recovery_can_be_disabled(stripe_on, monkeypatch):
+    monkeypatch.setattr(A, 'CHECKOUT_RECOVERY_ENABLED', False)
+    uid = _make_user('norecovery@test.com', limit=600, used=0)
+    client = _login(uid)
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'settings',
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    kw = stripe_on['last_create_params']
+    assert 'after_expiration' not in kw
+    assert 'consent_collection' not in kw
+    assert 'expires_at' in kw  # short TTL still applies
 
 
 def test_checkout_session_expired_without_user_is_anonymous(stripe_on, ph_events):

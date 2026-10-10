@@ -906,6 +906,26 @@ CREDIT_PACK_TAX_BEHAVIOR = STRIPE_TAX_BEHAVIOR if STRIPE_TAX_BEHAVIOR in (
 #: Soft nudge on the home banner when free+paid remaining is under this.
 LOW_BALANCE_MINUTES = 30
 
+
+def _env_hours(name, default):
+    """Positive hours clamped to Stripe Checkout Session bounds (1–24)."""
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        return max(1, min(24, int(raw)))
+    except (TypeError, ValueError):
+        app.logger.warning('%s=%r is not an int; using %s', name, raw, default)
+        return default
+
+
+#: Checkout Session lifetime before expiry (and recovery email). Default 2h so
+#: abandoned-checkout recovery can fire the same day. Stripe allows 30 min–24 h;
+#: we keep a 1 h floor for simplicity.
+CHECKOUT_EXPIRES_HOURS = _env_hours('CHECKOUT_EXPIRES_HOURS', 2)
+#: Abandoned Checkout recovery (Stripe emails a resume link after expiry).
+CHECKOUT_RECOVERY_ENABLED = os.getenv(
+    'CHECKOUT_RECOVERY_ENABLED', '1').strip().lower() not in (
+        '0', 'false', 'no', 'off')
+
 if stripe is not None and STRIPE_API_VERSION:
     stripe.api_version = STRIPE_API_VERSION
 
@@ -4989,6 +5009,9 @@ def billing_checkout():
     if ph_sid:
         pi_meta['ph_sid'] = ph_sid
 
+    # Shorter than Stripe's 24h default so abandoned-checkout recovery emails
+    # can fire the same day. expires_at is a Unix timestamp (seconds).
+    expires_at = int(time.time()) + CHECKOUT_EXPIRES_HOURS * 3600
     params = {
         'mode': 'payment',
         'line_items': [line_item],
@@ -5002,11 +5025,26 @@ def billing_checkout():
         # street address on every buyer. Do not pass payment_method_types —
         # Managed Payments uses dynamic payment methods (card + wallets).
         'billing_address_collection': 'auto',
+        'expires_at': expires_at,
         'metadata': meta,
         'payment_intent_data': {
             'metadata': pi_meta,
         },
     }
+    if CHECKOUT_RECOVERY_ENABLED:
+        # Stripe emails a one-time recovery URL after the session expires.
+        # promotions=auto is required for recovery emails in jurisdictions that
+        # need promotional consent; allow_promotion_codes on the recovery link
+        # matches our one-time pack (no subscription coupons).
+        params['after_expiration'] = {
+            'recovery': {
+                'enabled': True,
+                'allow_promotion_codes': True,
+            },
+        }
+        params['consent_collection'] = {
+            'promotions': 'auto',
+        }
     if STRIPE_MANAGED_PAYMENTS:
         # Managed Payments rejects automatic_tax: Stripe owns the tax.
         params['managed_payments'] = {'enabled': True}
@@ -5045,6 +5083,8 @@ def billing_checkout():
         'managed_payments': bool(STRIPE_MANAGED_PAYMENTS),
         'trial_remaining_min': trial_remaining_min,
         'paid_remaining_min': paid_remaining_min,
+        'expires_hours': CHECKOUT_EXPIRES_HOURS,
+        'recovery_enabled': bool(CHECKOUT_RECOVERY_ENABLED),
     }
     started_props.update(trial_variant_props(current_user))
     if ph_sid:
