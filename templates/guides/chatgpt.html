@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import button, link_button, page_header, snippet, notice %}
+
+{% block title %}Connect Podskrift to ChatGPT — Podskrift{% endblock %}
+{% block meta_description %}Add Podskrift as a custom MCP server in ChatGPT Plugins. Name it Podskrift, URL https://podskrift.com/mcp, Authentication OAuth — then ask ChatGPT to summarise any podcast episode.{% endblock %}
+{% block og_title %}Connect Podskrift to ChatGPT{% endblock %}
+{% block og_description %}Step-by-step: add the Podskrift MCP connector in ChatGPT Plugins, sign in, and ask about any episode.{% endblock %}
+
+{% block content %}
+<article class="ds-guide">
+  {{ page_header(
+    "Connect Podskrift to ChatGPT",
+    "Add Podskrift as a custom MCP server, sign in once, then ask ChatGPT to summarise or quote any podcast episode."
+  ) }}
+
+  <div class="ds-guide__intro">
+    <p>
+      Works on ChatGPT on the web. Full MCP is a beta for Business, Enterprise and Edu;
+      Pro can connect with read/fetch tools. Free and Go do not get plugin extensions.
+    </p>
+  </div>
+
+  {% call notice(variant="info") %}
+    Plan notes from OpenAI:
+    <a href="https://help.openai.com/en/articles/12584461" rel="noopener" target="_blank">Developer mode and MCP apps</a>
+    ·
+    <a href="https://developers.openai.com/plugins/deploy/connect-chatgpt" rel="noopener" target="_blank">Connect an MCP server</a>.
+    Business/Enterprise may need an admin to allow custom MCP servers.
+  {% endcall %}
+
+  <section class="ds-guide__section" aria-labelledby="chatgpt-setup">
+    <h2 id="chatgpt-setup">Set it up</h2>
+    <ol class="ds-guide__steps">
+      <li class="ds-guide__step">
+        <h3>Open Customize, then Plugins</h3>
+        <p>
+          In ChatGPT on the web, open
+          <a href="https://chatgpt.com/plugins" rel="noopener" target="_blank">chatgpt.com/plugins</a>
+          — or click the Customize icon in the sidebar, then choose Plugins.
+        </p>
+        {% if shots.get('01-customize-plugins') %}
+        <figure class="ds-guide__figure">
+          <picture>
+            <source type="image/webp" srcset="{{ url_for('static', filename='guides/chatgpt/01-customize-plugins.webp') }}">
+            <img src="{{ url_for('static', filename='guides/chatgpt/01-customize-plugins.png') }}"
+                 width="1100" height="439" loading="lazy"
+                 alt="ChatGPT Customize sidebar with Plugins selected, and the Add button highlighted in the top right.">
+          </picture>
+          <figcaption>Customize → Plugins, then Add (markers 1–3).</figcaption>
+        </figure>
+        {% endif %}
+      </li>
+
+      <li class="ds-guide__step">
+        <h3>Add a custom MCP server</h3>
+        <p>Click <strong>Add</strong>, then choose <strong>Add custom MCP server</strong>.</p>
+        {% if shots.get('02-add-custom-mcp-server') %}
+        <figure class="ds-guide__figure">
+          <picture>
+            <source type="image/webp" srcset="{{ url_for('static', filename='guides/chatgpt/02-add-custom-mcp-server.webp') }}">
+            <img src="{{ url_for('static', filename='guides/chatgpt/02-add-custom-mcp-server.png') }}"
+                 width="1100" height="335" loading="lazy"
+                 alt="ChatGPT Add menu open, with Add custom MCP server highlighted.">
+          </picture>
+          <figcaption>Choose Add custom MCP server from the Add menu.</figcaption>
+        </figure>
+        {% endif %}
+      </li>
+
+      <li class="ds-guide__step">
+        <h3>Fill in Podskrift and create the plugin</h3>
+        <p>
+          Name: <strong>Podskrift</strong>.
+          Server URL: <code>{{ mcp_connector_url }}</code>.
+          Authentication: <strong>OAuth</strong>.
+          Tick <strong>I understand and want to continue</strong>, then click <strong>Create as a plugin</strong>.
+        </p>
+        {{ snippet(mcp_connector_url, copy_label='Copy', what='connector URL') }}
+        {% if shots.get('03-create-as-plugin') %}
+        <figure class="ds-guide__figure">
+          <picture>
+            <source type="image/webp" srcset="{{ url_for('static', filename='guides/chatgpt/03-create-as-plugin.webp') }}">
+            <img src="{{ url_for('static', filename='guides/chatgpt/03-create-as-plugin.png') }}"
+                 width="596" height="792" loading="lazy"
+                 alt="Add custom MCP server dialog with Name Podskrift, URL https://podskrift.com/mcp, Authentication OAuth, consent ticked, and Create as a plugin highlighted.">
+          </picture>
+          <figcaption>Name, URL, OAuth, consent — then Create as a plugin.</figcaption>
+        </figure>
+        {% endif %}
+      </li>
+
+      <li class="ds-guide__step">
+        <h3>Sign in to Podskrift and Allow</h3>
+        <p>
+          ChatGPT opens Podskrift’s sign-in. Log in (or create an account), then click <strong>Allow</strong>.
+          Transcription uses the same minutes as the website.
+        </p>
+      </li>
+
+      <li class="ds-guide__step">
+        <h3>Try it in a new chat</h3>
+        <p>Ask for an episode in plain language — for example:</p>
+        {{ snippet("Summarise the latest episode of Hard Fork", copy_label='Copy', what='prompt') }}
+      </li>
+    </ol>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="chatgpt-ask">
+    <h2 id="chatgpt-ask">What you can ask</h2>
+    <p class="ds-guide__muted">Copy a prompt and paste it into ChatGPT after Podskrift is connected.</p>
+    <ul class="ds-guide__prompts">
+      {% for prompt in example_prompts %}
+      <li>{{ snippet(prompt, copy_label='Copy', what='prompt') }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="chatgpt-cost">
+    <h2 id="chatgpt-cost">What it costs</h2>
+    <p class="ds-guide__cost">
+      Uses your Podskrift minutes (trial, credit pack, or your own OpenAI key).
+      Episodes you've already transcribed are free to fetch again on your account.
+      <a href="{{ url_for('pricing') }}">Full pricing</a>.
+    </p>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="chatgpt-trouble">
+    <h2 id="chatgpt-trouble">Troubleshooting</h2>
+    <ul class="ds-guide__list">
+      <li>
+        <strong>Sign-in loop</strong> —
+        Finish Allow in the Podskrift window; if it keeps bouncing, open
+        <a href="{{ url_for('settings') }}">Settings → Connected apps</a> after logging in on the website, then try Connect again in ChatGPT.
+      </li>
+      <li>
+        <strong>Not available on your plan</strong> —
+        Free and Go cannot add custom MCP servers. Pro has read/fetch; full MCP is a Business/Enterprise/Edu beta.
+        If <strong>Add custom MCP server</strong> is missing, your account cannot add one yet.
+      </li>
+      <li>
+        <strong>Revoke access</strong> —
+        On Podskrift, go to Settings → Connected apps and revoke ChatGPT. You can reconnect later.
+      </li>
+    </ul>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="chatgpt-faq">
+    <h2 id="chatgpt-faq">FAQ</h2>
+    <div class="ds-guide__faq">
+      {% for question, answer in guide_faq %}
+      <details>
+        <summary>{{ question }}</summary>
+        <p>{{ answer }}</p>
+      </details>
+      {% endfor %}
+    </div>
+  </section>
+
+  <div class="ds-guide__cta">
+    {{ button("Open ChatGPT Plugins", variant="primary", href="https://chatgpt.com/plugins", attrs='rel="noopener" target="_blank"') }}
+    {{ link_button("Back to Use in AI", href=url_for('ai_landing')) }}
+  </div>
+</article>
+{% endblock %}

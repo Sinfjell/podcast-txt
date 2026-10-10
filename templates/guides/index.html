@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import button, link_button, page_header, section %}
+
+{% block title %}Guides — Podskrift{% endblock %}
+{% block meta_description %}Setup guides for using Podskrift in ChatGPT and Claude — custom MCP connectors, sign-in, and example prompts.{% endblock %}
+{% block og_title %}Guides — Podskrift{% endblock %}
+{% block og_description %}Connect Podskrift to ChatGPT or Claude with step-by-step setup guides.{% endblock %}
+
+{% block content %}
+<div class="ds-guide">
+  {{ page_header(
+    "Guides",
+    "Step-by-step setup for connecting Podskrift to your AI apps. Same minutes as the website; episodes you've already transcribed are free to fetch again."
+  ) }}
+
+  <div class="ds-stack ds-stack-4">
+    {% call section(title="Connect Podskrift to ChatGPT", variant="bordered") %}
+      <p class="ds-guide__muted">
+        Customize → Plugins → Add custom MCP server. Web only; plan-dependent (not Free/Go).
+      </p>
+      {{ button("Open ChatGPT guide", variant="primary", href=url_for('guide_chatgpt')) }}
+    {% endcall %}
+
+    {% call section(title="Connect Podskrift to Claude", variant="bordered") %}
+      <p class="ds-guide__muted">
+        Customize → Connectors → Add custom connector. Works on Free, Pro, Max, Team and Desktop.
+      </p>
+      {{ link_button("Open Claude guide", href=url_for('guide_claude')) }}
+    {% endcall %}
+
+    {% call section(title="Podcast transcripts in ChatGPT and Claude", variant="bordered") %}
+      <p class="ds-guide__muted">
+        Longer overview: how the tools work, pricing, Cursor / VS Code / Claude Code, and FAQ.
+      </p>
+      {{ link_button("Open overview guide", href=url_for('guide_ai_transcripts')) }}
+    {% endcall %}
+  </div>
+
+  <div class="ds-guide__cta">
+    {{ link_button("Use in ChatGPT & Claude", href=url_for('ai_landing')) }}
+  </div>
+</div>
+{% endblock %}

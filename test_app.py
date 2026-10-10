@@ -3686,6 +3686,9 @@ def test_the_sitemap_lists_the_public_pages(trial_on):
     assert any(u.endswith('/docs/api') for u in locs)
     assert any(u.endswith('/whats-new') for u in locs)
     assert any(u.endswith('/ai') for u in locs)
+    assert any(u.endswith('/guides') for u in locs)
+    assert any(u.endswith('/guides/chatgpt') for u in locs)
+    assert any(u.endswith('/guides/claude') for u in locs)
     assert any(u.endswith('/guides/podcast-transcripts-in-chatgpt-and-claude') for u in locs)
     assert any(u.endswith('/register') for u in locs)
     assert not any('/settings' in u or '/history' in u for u in locs), (
@@ -3712,6 +3715,8 @@ def test_ai_landing_page_renders_and_has_faq_json_ld(trial_on):
     assert body.count('class="btn btn-primary"') == 1, 'one accent-filled button on /ai'
     assert '/docs/api' in body
     assert '/guides/podcast-transcripts-in-chatgpt-and-claude' in body
+    assert '/guides/chatgpt' in body
+    assert '/guides/claude' in body
     assert "you've already transcribed cost nothing" in body
     for question, _ in A.ai_faq_entries():
         assert question in body
@@ -3722,6 +3727,83 @@ def test_ai_landing_page_renders_and_has_faq_json_ld(trial_on):
     assert 'FAQPage' in types
     faq = next(n for n in data['@graph'] if n['@type'] == 'FAQPage')
     assert len(faq['mainEntity']) == len(A.ai_faq_entries())
+
+
+def test_guides_chatgpt_and_claude_pages(trial_on):
+    """Dedicated setup guides: HowTo + FAQPage JSON-LD, sitemap, llms.txt."""
+    import json as _json
+    import re as _re
+
+    client = A.app.test_client()
+    for path, title, faq_fn, must_contain in (
+        (
+            '/guides/chatgpt',
+            'Connect Podskrift to ChatGPT',
+            A.guide_chatgpt_faq_entries,
+            (
+                'Add custom MCP server',
+                'Create as a plugin',
+                'chatgpt.com/plugins',
+                'help.openai.com/en/articles/12584461',
+                'developers.openai.com/plugins/deploy/connect-chatgpt',
+                'Summarise the latest episode of Hard Fork',
+                "you've already transcribed are free",
+                'Settings → Connected apps',
+                'guides/chatgpt/01-customize-plugins',
+            ),
+        ),
+        (
+            '/guides/claude',
+            'Connect Podskrift to Claude',
+            A.guide_claude_faq_entries,
+            (
+                'Add custom connector',
+                'Customize',
+                'Connectors',
+                'support.claude.com/en/articles/11175166',
+                'Summarise the latest episode of Hard Fork',
+                "you've already transcribed are free",
+                'Settings → Connected apps',
+            ),
+        ),
+    ):
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        body = resp.data.decode()
+        assert title in body
+        assert body.count('class="btn btn-primary"') == 1, path
+        assert 'ds-guide' in body
+        for needle in must_contain:
+            assert needle in body, f'{path} missing {needle!r}'
+        faq_pairs = faq_fn()
+        for question, answer in faq_pairs:
+            assert question in body
+            assert answer in body
+        m = _re.search(r'<script type="application/ld\+json">(.*?)</script>', body, _re.S)
+        assert m, f'no JSON-LD on {path}'
+        data = _json.loads(m.group(1))
+        types = {n['@type'] for n in data['@graph']}
+        assert types >= {'WebPage', 'HowTo', 'FAQPage'}, types
+        howto = next(n for n in data['@graph'] if n['@type'] == 'HowTo')
+        assert len(howto['step']) >= 4
+        faq = next(n for n in data['@graph'] if n['@type'] == 'FAQPage')
+        assert len(faq['mainEntity']) == len(faq_pairs)
+        for entry, (question, answer) in zip(faq['mainEntity'], faq_pairs):
+            assert entry['name'] == question
+            assert entry['acceptedAnswer']['text'] == answer
+
+    hub = client.get('/guides')
+    assert hub.status_code == 200
+    hub_body = hub.data.decode()
+    assert '/guides/chatgpt' in hub_body and '/guides/claude' in hub_body
+    assert hub_body.count('class="btn btn-primary"') == 1
+
+    sitemap = client.get('/sitemap.xml').data.decode()
+    assert '/guides/chatgpt' in sitemap
+    assert '/guides/claude' in sitemap
+    assert '/guides<' in sitemap or '/guides</loc>' in sitemap or sitemap.count('/guides') >= 3
+    llms = client.get('/llms.txt').data.decode()
+    assert '/guides/chatgpt' in llms and '/guides/claude' in llms
 
 
 def test_guide_ai_transcripts_page_renders(trial_on):
@@ -3763,6 +3845,8 @@ def test_ai_in_llms_txt(trial_on):
     body = A.app.test_client().get('/llms.txt').data.decode()
     assert '/ai' in body
     assert '/guides/podcast-transcripts-in-chatgpt-and-claude' in body
+    assert '/guides/chatgpt' in body
+    assert '/guides/claude' in body
     assert 'ChatGPT' in body and 'Claude' in body
 
 

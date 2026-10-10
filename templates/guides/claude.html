@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import button, link_button, page_header, snippet, notice %}
+
+{% block title %}Connect Podskrift to Claude — Podskrift{% endblock %}
+{% block meta_description %}Add Podskrift as a custom connector in Claude. Name it Podskrift, URL https://podskrift.com/mcp — then ask Claude to summarise any podcast episode. Works on Free, Pro, Max, Team and Desktop.{% endblock %}
+{% block og_title %}Connect Podskrift to Claude{% endblock %}
+{% block og_description %}Step-by-step: add the Podskrift connector in Claude Customize → Connectors, sign in, and ask about any episode.{% endblock %}
+
+{% block content %}
+<article class="ds-guide">
+  {{ page_header(
+    "Connect Podskrift to Claude",
+    "Add Podskrift as a custom connector, sign in once, then ask Claude to summarise or quote any podcast episode."
+  ) }}
+
+  <div class="ds-guide__intro">
+    <p>
+      Works on Claude Free (one custom connector), Pro, Max, Team and Enterprise,
+      and in Claude Desktop on the same account. On Team/Enterprise an Owner adds
+      the connector under Organization settings → Connectors first.
+    </p>
+  </div>
+
+  {% call notice(variant="info") %}
+    Source:
+    <a href="https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp" rel="noopener" target="_blank">Claude custom connectors</a>.
+  {% endcall %}
+
+  <section class="ds-guide__section" aria-labelledby="claude-setup">
+    <h2 id="claude-setup">Set it up</h2>
+    <ol class="ds-guide__steps">
+      <li class="ds-guide__step">
+        <h3>Open Customize → Connectors</h3>
+        <p>In Claude on the web or Desktop, open <strong>Customize</strong>, then <strong>Connectors</strong>.</p>
+        {% if shots.get('01-customize-connectors') %}
+        <figure class="ds-guide__figure">
+          <picture>
+            <source type="image/webp" srcset="{{ url_for('static', filename='guides/claude/01-customize-connectors.webp') }}">
+            <img src="{{ url_for('static', filename='guides/claude/01-customize-connectors.png') }}"
+                 width="1100" height="600" loading="lazy"
+                 alt="Claude Customize menu with Connectors selected.">
+          </picture>
+          <figcaption>Customize → Connectors.</figcaption>
+        </figure>
+        {% endif %}
+      </li>
+
+      <li class="ds-guide__step">
+        <h3>Add a custom connector</h3>
+        <p>Click <strong>+ Add</strong>, then <strong>Add custom connector</strong>.</p>
+        {% if shots.get('02-add-custom-connector') %}
+        <figure class="ds-guide__figure">
+          <picture>
+            <source type="image/webp" srcset="{{ url_for('static', filename='guides/claude/02-add-custom-connector.webp') }}">
+            <img src="{{ url_for('static', filename='guides/claude/02-add-custom-connector.png') }}"
+                 width="1100" height="600" loading="lazy"
+                 alt="Claude Add menu with Add custom connector highlighted.">
+          </picture>
+          <figcaption>Choose Add custom connector.</figcaption>
+        </figure>
+        {% endif %}
+      </li>
+
+      <li class="ds-guide__step">
+        <h3>Name it Podskrift and paste the URL</h3>
+        <p>
+          Name: <strong>Podskrift</strong>.
+          URL: <code>{{ mcp_connector_url }}</code>.
+          Keep sign-in (OAuth), then click <strong>Add</strong>.
+        </p>
+        {{ snippet(mcp_connector_url, copy_label='Copy', what='connector URL') }}
+        {% if shots.get('03-connector-form') %}
+        <figure class="ds-guide__figure">
+          <picture>
+            <source type="image/webp" srcset="{{ url_for('static', filename='guides/claude/03-connector-form.webp') }}">
+            <img src="{{ url_for('static', filename='guides/claude/03-connector-form.png') }}"
+                 width="800" height="600" loading="lazy"
+                 alt="Claude custom connector form with Name Podskrift and URL https://podskrift.com/mcp.">
+          </picture>
+          <figcaption>Name and remote MCP URL.</figcaption>
+        </figure>
+        {% endif %}
+      </li>
+
+      <li class="ds-guide__step">
+        <h3>Connect, sign in, and Allow</h3>
+        <p>
+          Click <strong>Connect</strong>. Claude opens Podskrift’s sign-in.
+          Log in (or create an account), then click <strong>Allow</strong>.
+        </p>
+        {% if shots.get('04-connect-allow') %}
+        <figure class="ds-guide__figure">
+          <picture>
+            <source type="image/webp" srcset="{{ url_for('static', filename='guides/claude/04-connect-allow.webp') }}">
+            <img src="{{ url_for('static', filename='guides/claude/04-connect-allow.png') }}"
+                 width="800" height="600" loading="lazy"
+                 alt="Podskrift Allow screen for Claude connector access.">
+          </picture>
+          <figcaption>Sign in to Podskrift and click Allow.</figcaption>
+        </figure>
+        {% endif %}
+      </li>
+
+      <li class="ds-guide__step">
+        <h3>Enable it in a chat</h3>
+        <p>
+          In a new chat, open the tools menu and turn on <strong>Podskrift</strong>,
+          then ask for an episode — for example:
+        </p>
+        {{ snippet("Summarise the latest episode of Hard Fork", copy_label='Copy', what='prompt') }}
+        {% if shots.get('05-enable-in-chat') %}
+        <figure class="ds-guide__figure">
+          <picture>
+            <source type="image/webp" srcset="{{ url_for('static', filename='guides/claude/05-enable-in-chat.webp') }}">
+            <img src="{{ url_for('static', filename='guides/claude/05-enable-in-chat.png') }}"
+                 width="800" height="600" loading="lazy"
+                 alt="Claude chat tools menu with Podskrift enabled.">
+          </picture>
+          <figcaption>Enable Podskrift from the tools menu in a chat.</figcaption>
+        </figure>
+        {% endif %}
+      </li>
+    </ol>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="claude-ask">
+    <h2 id="claude-ask">What you can ask</h2>
+    <p class="ds-guide__muted">Copy a prompt and paste it into Claude after Podskrift is connected.</p>
+    <ul class="ds-guide__prompts">
+      {% for prompt in example_prompts %}
+      <li>{{ snippet(prompt, copy_label='Copy', what='prompt') }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="claude-cost">
+    <h2 id="claude-cost">What it costs</h2>
+    <p class="ds-guide__cost">
+      Uses your Podskrift minutes (trial, credit pack, or your own OpenAI key).
+      Episodes you've already transcribed are free to fetch again on your account.
+      <a href="{{ url_for('pricing') }}">Full pricing</a>.
+    </p>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="claude-trouble">
+    <h2 id="claude-trouble">Troubleshooting</h2>
+    <ul class="ds-guide__list">
+      <li>
+        <strong>Sign-in loop</strong> —
+        Finish Allow in the Podskrift window; if it keeps bouncing, open
+        <a href="{{ url_for('settings') }}">Settings → Connected apps</a> on the website, then click Connect again in Claude.
+      </li>
+      <li>
+        <strong>Not available on your plan</strong> —
+        Free accounts get one custom connector. On Team/Enterprise an Owner must add Podskrift under Organization settings → Connectors before members can connect.
+      </li>
+      <li>
+        <strong>Revoke access</strong> —
+        On Podskrift, go to Settings → Connected apps and revoke Claude. You can reconnect later.
+      </li>
+    </ul>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="claude-faq">
+    <h2 id="claude-faq">FAQ</h2>
+    <div class="ds-guide__faq">
+      {% for question, answer in guide_faq %}
+      <details>
+        <summary>{{ question }}</summary>
+        <p>{{ answer }}</p>
+      </details>
+      {% endfor %}
+    </div>
+  </section>
+
+  <div class="ds-guide__cta">
+    {{ button("Open Claude", variant="primary", href="https://claude.ai", attrs='rel="noopener" target="_blank"') }}
+    {{ link_button("Back to Use in AI", href=url_for('ai_landing')) }}
+  </div>
+</article>
+{% endblock %}

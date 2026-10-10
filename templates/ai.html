@@ -67,7 +67,7 @@
     }
     .ai-app-panel code {
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px;
-        background: var(--surface); border-radius: var(--radius-sm, 4px); padding: 2px 6px;
+        background: var(--surface); border-radius: var(--radius-sm, var(--radius)); padding: 2px 6px;
     }
 
     .ai-price {
@@ -163,6 +163,8 @@
                 <a href="https://developers.openai.com/plugins/deploy/connect-chatgpt" rel="noopener" target="_blank">Connect an MCP server</a>
                 ·
                 <a href="https://help.openai.com/en/articles/12584461" rel="noopener" target="_blank">Developer mode and MCP apps</a>.
+                <a href="{{ url_for('guide_chatgpt') }}">Full ChatGPT guide</a>
+                with screenshots.
             </p>
         </div>
 
@@ -178,6 +180,7 @@
                 On Team/Enterprise an Owner adds it under Organization settings → Connectors first.
                 Source:
                 <a href="https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp" rel="noopener" target="_blank">Claude custom connectors</a>.
+                <a href="{{ url_for('guide_claude') }}">Full Claude guide</a>.
             </p>
         </div>
 
@@ -242,7 +245,13 @@
     <section class="ai-section" style="border-bottom: none; padding-bottom: 0;">
         <p class="ai-dev">
             Prefer a longer walkthrough?
-            <a href="{{ url_for('guide_ai_transcripts') }}">Podcast transcripts in ChatGPT and Claude</a>.
+            <a href="{{ url_for('guides_index') }}">All guides</a>
+            ·
+            <a href="{{ url_for('guide_chatgpt') }}">ChatGPT</a>
+            ·
+            <a href="{{ url_for('guide_claude') }}">Claude</a>
+            ·
+            <a href="{{ url_for('guide_ai_transcripts') }}">Overview</a>.
             Building scripts or agents? Use the HTTP API with a key from Settings —
             <a href="{{ url_for('api_docs') }}">API docs</a>.
         </p>

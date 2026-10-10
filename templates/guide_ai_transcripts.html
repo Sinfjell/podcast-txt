@@ -21,7 +21,7 @@
     .guide .connector strong { font-size: 14px; font-weight: 700; color: var(--muted); }
     .guide .connector code {
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px;
-        background: var(--surface); border-radius: var(--radius-sm, 4px); padding: 6px 10px;
+        background: var(--surface); border-radius: var(--radius-sm, var(--radius)); padding: 6px 10px;
         overflow-wrap: anywhere;
     }
     .guide h2 {
@@ -36,7 +36,7 @@
     .guide li:last-child { margin-bottom: 0; }
     .guide code {
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px;
-        background: var(--surface); border-radius: var(--radius-sm, 4px); padding: 2px 6px;
+        background: var(--surface); border-radius: var(--radius-sm, var(--radius)); padding: 2px 6px;
         overflow-wrap: anywhere;
     }
     .guide pre {
@@ -102,6 +102,8 @@
         <strong>Connector URL</strong>
         <code>{{ mcp_connector_url }}</code>
         <a href="{{ url_for('ai_landing') }}">Quick start on /ai</a>
+        ·
+        <a href="{{ url_for('guides_index') }}">All guides</a>
     </div>
 
     <h2>How it works</h2>
@@ -136,6 +138,8 @@
         <li>In a new chat, type <code>@Podskrift</code> or just ask for an episode.</li>
     </ol>
     <p class="note">
+        Screenshots and a tighter walkthrough:
+        <a href="{{ url_for('guide_chatgpt') }}">Connect Podskrift to ChatGPT</a>.
         <strong>Availability:</strong> custom MCP servers depend on your ChatGPT plan and workspace.
         OpenAI currently lists full MCP support as a beta for Business, Enterprise and Edu.
         Pro can connect MCP servers with read/fetch permissions, and Free and Go don't have plugin extensions.
@@ -157,6 +161,8 @@
         <li>Keep sign-in (OAuth), click <strong>Add</strong>, then <strong>Connect</strong>. Log in to Podskrift and click <strong>Allow</strong>.</li>
     </ol>
     <p class="note">
+        Fuller walkthrough:
+        <a href="{{ url_for('guide_claude') }}">Connect Podskrift to Claude</a>.
         Custom connectors work on Claude Free (one connector), Pro, Max, Team and Enterprise,
         and in Claude Desktop on the same account.
         On Team and Enterprise, an Owner adds the connector under <strong>Organization settings → Connectors</strong> first.
