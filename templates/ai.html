@@ -7,92 +7,7 @@
 {% block container_class %}container-wide{% endblock %}
 
 {% block head_links %}
-<style>
-    .ai-wrap { max-width: 760px; margin: 0 auto; padding: 24px 0 72px; }
-    .ai-title {
-        font-size: clamp(30px, 5vw, 44px); font-weight: 800; letter-spacing: -0.03em;
-        line-height: 1.05; margin: 0 0 12px;
-    }
-    .ai-lead { font-size: 17px; line-height: 1.55; color: var(--muted); margin: 0 0 24px; max-width: 36em; }
-    .ai-example {
-        background: var(--surface); border-radius: var(--radius); padding: 20px 24px; margin: 0 0 36px;
-    }
-    .ai-example-label {
-        font-size: 12px; font-weight: 700; letter-spacing: 0.08em; color: var(--muted);
-        margin: 0 0 8px; text-transform: none;
-    }
-    .ai-example p {
-        margin: 0; font-size: 17px; line-height: 1.55; color: var(--ink); font-weight: 500;
-    }
-    .ai-cta { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 0 0 48px; }
-    .ai-cta .form-hint { margin: 0; }
-
-    .ai-section { border-top: 1px solid var(--line); padding: 48px 0; }
-    .ai-section h2 {
-        font-size: 24px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.2;
-        margin: 0 0 24px;
-    }
-    .ai-section > p { font-size: 17px; line-height: 1.55; color: var(--muted); margin: 0 0 24px; max-width: 36em; }
-
-    .ai-steps { display: flex; flex-direction: column; gap: 0; }
-    .ai-step {
-        display: grid; grid-template-columns: 1fr; gap: 8px;
-        padding: 20px 0; border-top: 1px solid var(--line);
-    }
-    .ai-step:first-child { border-top: none; padding-top: 0; }
-    .ai-step h3 { font-size: 17px; font-weight: 700; margin: 0; line-height: 1.4; }
-    .ai-step p { margin: 0; font-size: 15px; line-height: 1.5; color: var(--muted); }
-    .ai-url-row {
-        display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; margin-top: 4px;
-    }
-    .ai-url-row code {
-        flex: 1 1 220px; display: flex; align-items: center; min-height: 48px;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px;
-        background: var(--paper); border: 1px solid var(--line-strong); border-radius: var(--radius);
-        padding: 0 16px; color: var(--ink); overflow-wrap: anywhere;
-    }
-
-    .ai-app-panel { display: none; }
-    .ai-app-panel.active { display: block; }
-    .ai-app-panel ol { margin: 0; padding-left: 24px; color: var(--ink); font-size: 17px; line-height: 1.55; }
-    .ai-app-panel li { margin-bottom: 12px; }
-    .ai-app-panel li:last-child { margin-bottom: 0; }
-    .ai-app-panel p { margin: 16px 0 0; font-size: 15px; line-height: 1.5; color: var(--muted); }
-    .ai-app-panel pre {
-        background: var(--surface); border-radius: var(--radius); padding: 16px;
-        overflow-x: auto; margin: 16px 0 0; font-size: 14px; line-height: 1.55;
-    }
-    .ai-app-panel pre code {
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        background: none; padding: 0; font-size: inherit;
-    }
-    .ai-app-panel code {
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px;
-        background: var(--surface); border-radius: var(--radius-sm, var(--radius)); padding: 2px 6px;
-    }
-
-    .ai-price {
-        font-size: 17px; line-height: 1.55; color: var(--ink); margin: 0;
-        max-width: 36em;
-    }
-
-    .ai-faq details { border-top: 1px solid var(--line); }
-    .ai-faq details:last-child { border-bottom: 1px solid var(--line); }
-    .ai-faq summary {
-        cursor: pointer; display: flex; align-items: center; min-height: 52px;
-        padding: 4px 0; font-size: 17px; font-weight: 700;
-    }
-    .ai-faq details p { margin: 0 0 16px; color: var(--muted); font-size: 17px; line-height: 1.55; }
-
-    .ai-dev { font-size: 15px; color: var(--muted); margin: 0; }
-
-    @media (max-width: 640px) {
-        .ai-wrap { padding-bottom: 48px; }
-        .ai-section { padding: 36px 0; }
-        .tabs { gap: 16px; overflow-x: auto; }
-        .tab { white-space: nowrap; flex-shrink: 0; }
-    }
-</style>
+<link rel="stylesheet" href="{{ url_for('static', filename='ai.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -249,7 +164,7 @@
         </div>
     </section>
 
-    <section class="ai-section" style="border-bottom: none; padding-bottom: 0;">
+    <section class="ai-section ai-section-last">
         <p class="ai-dev">
             Prefer a longer walkthrough?
             <a href="{{ url_for('guides_index') }}">All guides</a>

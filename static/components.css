@@ -690,3 +690,5 @@
   .ds-mcp-flow, .ds-mcp-guides { grid-template-columns: minmax(0, 1fr); }
 }
 .ds-guide__figure--detail { max-width: 22rem; }
+
+.pricing-pack-subline { margin: 0; }
