@@ -1,0 +1,482 @@
+/* Shared Podskrift components (DESIGN.md).
+   Tokens come from templates/base.html (:root). No new colours or fonts.
+   Macros live in templates/components/. Prefer these over hand-rolled CSS. */
+
+/* ---------------------------------------------------------------------------
+   Layout helpers used by macros (spacing scale from DESIGN.md)
+   --------------------------------------------------------------------------- */
+.ds-stack { display: flex; flex-direction: column; }
+.ds-stack-1 { gap: var(--space-1); }
+.ds-stack-2 { gap: var(--space-2); }
+.ds-stack-3 { gap: var(--space-3); }
+.ds-stack-4 { gap: var(--space-4); }
+.ds-stack-6 { gap: var(--space-6); }
+.ds-stack-9 { gap: var(--space-9); }
+.ds-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
+}
+.ds-mt-1 { margin-top: var(--space-1); }
+.ds-mt-2 { margin-top: var(--space-2); }
+.ds-mt-3 { margin-top: var(--space-3); }
+.ds-mt-4 { margin-top: var(--space-4); }
+.ds-mt-6 { margin-top: var(--space-6); }
+.ds-mt-9 { margin-top: var(--space-9); }
+.ds-mb-0 { margin-bottom: 0; }
+.ds-w-full { width: 100%; }
+.ds-max-ch-28 { max-width: 28rem; }
+.ds-max-ch-40 { max-width: 40rem; }
+
+/* ---------------------------------------------------------------------------
+   Page header — title + lede
+   --------------------------------------------------------------------------- */
+.ds-page-header {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    margin-bottom: var(--space-9);
+}
+.ds-page-header__title {
+    font-size: var(--title-fluid, clamp(1.875rem, 5vw, 2.75rem));
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    line-height: 1.05;
+    color: var(--ink);
+    margin: 0;
+}
+.ds-page-header__lede {
+    margin: 0;
+    max-width: 40rem;
+    font-size: 1.0625rem;
+    line-height: 1.55;
+    color: var(--muted);
+}
+
+/* ---------------------------------------------------------------------------
+   Buttons — variants map onto existing .btn rules; ghost = tertiary text
+   --------------------------------------------------------------------------- */
+.btn-ghost {
+    background: transparent;
+    color: var(--accent);
+    border-color: transparent;
+    padding: 0 1rem;
+}
+.btn-ghost:hover {
+    background: var(--surface);
+    color: var(--accent-hover);
+    border-color: transparent;
+}
+a.ds-link-button {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font-family: inherit;
+}
+a.ds-link-button:hover,
+button.ds-link-button:hover {
+    color: var(--accent-hover);
+}
+button.ds-link-button {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+/* ---------------------------------------------------------------------------
+   Card / section
+   --------------------------------------------------------------------------- */
+.ds-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding: var(--space-6);
+    background: var(--surface);
+    border-radius: var(--radius-md, var(--radius));
+}
+.ds-section--bordered {
+    background: var(--paper);
+    border: 1px solid var(--line);
+}
+.ds-section--strong {
+    background: var(--paper);
+    border: 1px solid var(--line-strong);
+}
+.ds-section__title {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    line-height: 1.2;
+    color: var(--ink);
+}
+
+/* ---------------------------------------------------------------------------
+   Tabs (segmented underline control) — builds on .tabs / .tab in base.html
+   --------------------------------------------------------------------------- */
+.ds-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-6);
+    border-bottom: 1px solid var(--line);
+    margin: 0 0 var(--space-6);
+}
+.ds-tab {
+    background: none;
+    border: none;
+    border-bottom: 3px solid transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 1rem;
+    font-weight: 500;
+    min-height: 44px;
+    padding: 0;
+    margin-bottom: -1px;
+    cursor: pointer;
+    transition: color var(--transition), border-color var(--transition);
+}
+.ds-tab:hover { color: var(--ink); }
+.ds-tab[aria-selected="true"],
+.ds-tab[aria-pressed="true"],
+.ds-tab.is-active {
+    color: var(--ink);
+    font-weight: 700;
+    border-bottom-color: var(--accent);
+}
+.ds-tabpanel { margin: 0; }
+.ds-tabpanel[hidden] { display: none; }
+
+/* ---------------------------------------------------------------------------
+   Checklist row — pending / active / done / error
+   --------------------------------------------------------------------------- */
+.ds-checklist {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border-top: 1px solid var(--line);
+}
+.ds-checklist__row {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-4) 0;
+    border-bottom: 1px solid var(--line);
+}
+.ds-checklist__marker {
+    flex: none;
+    width: 24px;
+    height: 24px;
+    margin-top: 2px;
+    border-radius: 50%;
+    border: 2px solid var(--line-strong);
+    background: var(--paper);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--on-accent);
+}
+.ds-checklist__row.is-done .ds-checklist__marker {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--on-accent);
+}
+.ds-checklist__row.is-active .ds-checklist__marker {
+    border-color: var(--accent);
+    background: var(--paper);
+}
+.ds-checklist__row.is-error .ds-checklist__marker {
+    border-color: var(--danger);
+    background: var(--danger-tint);
+    color: var(--danger);
+}
+.ds-checklist__body {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+}
+.ds-checklist__title {
+    margin: 0;
+    font-size: 1.0625rem;
+    font-weight: 700;
+    line-height: 1.35;
+    color: var(--ink);
+}
+.ds-checklist__row.is-pending .ds-checklist__title { font-weight: 700; }
+.ds-checklist__detail {
+    margin: 0;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    color: var(--muted);
+}
+.ds-checklist__row.is-error .ds-checklist__detail { color: var(--danger); }
+.ds-checklist__marker svg {
+    width: 14px;
+    height: 14px;
+    display: block;
+}
+
+/* ---------------------------------------------------------------------------
+   Code / snippet block with copy
+   --------------------------------------------------------------------------- */
+.ds-snippet {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    background: var(--surface);
+    border-radius: var(--radius-md, var(--radius));
+}
+.ds-snippet__code {
+    flex: 1 1 12rem;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    border: none;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    color: var(--ink);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.ds-snippet__actions {
+    flex: none;
+    display: flex;
+    gap: var(--space-2);
+}
+
+/* ---------------------------------------------------------------------------
+   Secret / key field (shown once) with copy
+   --------------------------------------------------------------------------- */
+.ds-secret {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+.ds-secret__field {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    align-items: stretch;
+}
+.ds-secret__value {
+    flex: 1 1 12rem;
+    min-width: 0;
+    min-height: 48px;
+    padding: 0 1rem;
+    display: flex;
+    align-items: center;
+    background: var(--paper);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-md, var(--radius));
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.875rem;
+    color: var(--ink);
+    word-break: break-all;
+}
+.ds-secret__hint {
+    margin: 0;
+    font-size: 0.875rem;
+    color: var(--muted);
+}
+
+/* ---------------------------------------------------------------------------
+   Notice / callout — info / success / warning / error (pairs with .alert)
+   --------------------------------------------------------------------------- */
+.ds-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md, var(--radius));
+    font-size: 1.0625rem;
+    line-height: 1.45;
+}
+.ds-notice svg {
+    flex: none;
+    width: 22px;
+    height: 22px;
+    margin-top: 1px;
+}
+.ds-notice a {
+    color: inherit;
+    font-weight: 700;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+.ds-notice--info,
+.ds-notice--success {
+    background: var(--accent-tint);
+    color: var(--on-accent-tint);
+}
+.ds-notice--warning {
+    background: var(--warning-tint);
+    color: var(--on-warning-tint);
+}
+.ds-notice--error {
+    background: var(--danger-tint);
+    color: var(--on-danger-tint);
+}
+.ds-notice__body { flex: 1 1 auto; min-width: 0; }
+
+/* ---------------------------------------------------------------------------
+   Empty state
+   --------------------------------------------------------------------------- */
+.ds-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-9) var(--space-6);
+    background: var(--surface);
+    border-radius: var(--radius-md, var(--radius));
+}
+.ds-empty__title {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    line-height: 1.2;
+    color: var(--ink);
+}
+.ds-empty__lede {
+    margin: 0;
+    max-width: 32rem;
+    font-size: 1.0625rem;
+    line-height: 1.55;
+    color: var(--muted);
+}
+.ds-empty__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    margin-top: var(--space-2);
+}
+
+/* ---------------------------------------------------------------------------
+   Form field — label, help, error (extends .form-* from base)
+   --------------------------------------------------------------------------- */
+.ds-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin-bottom: var(--space-6);
+}
+.ds-field__label {
+    font-size: 0.875rem;
+    font-weight: 700;
+    color: var(--ink);
+}
+.ds-field__opt {
+    font-weight: 400;
+    color: var(--muted);
+}
+.ds-field__help {
+    font-size: 0.875rem;
+    color: var(--muted);
+    margin: 0;
+}
+.ds-field__error {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    margin: 0;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--danger);
+}
+.ds-field__error svg {
+    flex: none;
+    width: 18px;
+    height: 18px;
+    margin-top: 2px;
+}
+.ds-field .form-input[aria-invalid="true"] {
+    border: 2px solid var(--danger);
+}
+
+/* ---------------------------------------------------------------------------
+   Status chip — radius-md only (no pills). Allowed by DESIGN.md as accent-tint.
+   --------------------------------------------------------------------------- */
+.ds-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 0 0.75rem;
+    border-radius: var(--radius-md, var(--radius));
+    font-size: 0.875rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    background: var(--accent-tint);
+    color: var(--on-accent-tint);
+    white-space: nowrap;
+}
+.ds-chip--warning {
+    background: var(--warning-tint);
+    color: var(--on-warning-tint);
+}
+.ds-chip--muted {
+    background: var(--surface);
+    color: var(--muted);
+    border: 1px solid var(--line);
+}
+
+/* ---------------------------------------------------------------------------
+   Gallery page chrome (dev-only)
+   --------------------------------------------------------------------------- */
+.ds-gallery-section {
+    padding: var(--space-9) 0;
+    border-top: 1px solid var(--line);
+}
+.ds-gallery-section:first-of-type { border-top: none; }
+.ds-gallery-label {
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 0 0 var(--space-4);
+}
+.ds-gallery-note {
+    font-size: 0.875rem;
+    color: var(--muted);
+    margin: var(--space-3) 0 0;
+    max-width: 40rem;
+}
+
+@media (forced-colors: active) {
+    .ds-section,
+    .ds-snippet,
+    .ds-empty,
+    .ds-checklist__marker,
+    .ds-tab {
+        border: 1px solid CanvasText;
+    }
+    .ds-tab[aria-selected="true"],
+    .ds-tab[aria-pressed="true"] {
+        outline: 3px solid Highlight;
+    }
+}

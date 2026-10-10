@@ -75,7 +75,7 @@ import mail as mailer
 import summary as summary_mod
 import mcp_server as mcp_server_mod
 import oauth_server as oauth_server_mod
-from admin_dashboard import admin_bp, ensure_admin_indexes
+from admin_dashboard import admin_bp, ensure_admin_indexes, is_admin_user
 
 try:
     import stripe
@@ -9009,6 +9009,16 @@ def api_docs():
         body_html=body_html,
         trial_minutes=advertised_trial_minutes(),
     )
+
+
+@app.route('/design/components')
+def design_components_gallery():
+    """Dev-only component gallery. Visible when DEBUG or the viewer is admin."""
+    if not (app.debug or is_admin_user()):
+        abort(404)
+    response = make_response(render_template('design_components.html'))
+    response.headers['X-Robots-Tag'] = 'noindex, nofollow'
+    return response
 
 
 # Remote MCP (Streamable HTTP). Route always exists; returns 404 when the flag

@@ -1,0 +1,303 @@
+{# Shared Podskrift UI macros. Import with:
+   {% from "components/macros.html" import button, page_header, notice %}
+   Compose pages from these; do not hand-roll component CSS. See DESIGN.md
+   "How to build a page" and /design/components. #}
+
+{# ------------------------------------------------------------------------- #}
+{# Icons (inline SVG, 2px stroke)                                             #}
+{# ------------------------------------------------------------------------- #}
+{% macro icon_info() -%}
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/></svg>
+{%- endmacro %}
+
+{% macro icon_warning() -%}
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l10 18H2L12 3z"/><path d="M12 10v5M12 18h.01"/></svg>
+{%- endmacro %}
+
+{% macro icon_error() -%}
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 16.5h.01"/></svg>
+{%- endmacro %}
+
+{% macro icon_check() -%}
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5L19 7"/></svg>
+{%- endmacro %}
+
+{% macro icon_success() -%}
+{{ icon_check() }}
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# button — primary | secondary | ghost | danger
+   Convention: one primary (accent-filled) per screen. Nav CTA is separate. #}
+{# ------------------------------------------------------------------------- #}
+{% macro button(label, variant='secondary', type='button', href=None, size='',
+                disabled=false, attrs='', class='') -%}
+{%- set v = variant|lower -%}
+{%- if v == 'primary' -%}
+  {%- set cls = 'btn btn-primary' -%}
+{%- elif v == 'ghost' or v == 'tertiary' or v == 'text' -%}
+  {%- set cls = 'btn btn-ghost' -%}
+{%- elif v == 'danger' -%}
+  {%- set cls = 'btn btn-danger' -%}
+{%- else -%}
+  {%- set cls = 'btn btn-secondary' -%}
+{%- endif -%}
+{%- if size %}{% set cls = cls ~ ' btn-' ~ size %}{% endif -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+{%- if href -%}
+<a href="{{ href }}" class="{{ cls }}"{% if disabled %} aria-disabled="true" tabindex="-1"{% endif %}{% if attrs %} {{ attrs|safe }}{% endif %}>{{ label }}</a>
+{%- else -%}
+<button type="{{ type }}" class="{{ cls }}"{% if disabled %} disabled{% endif %}{% if attrs %} {{ attrs|safe }}{% endif %}>{{ label }}</button>
+{%- endif -%}
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# link_button — underlined text action (not a filled control)                #}
+{# ------------------------------------------------------------------------- #}
+{% macro link_button(label, href=None, type='button', attrs='', class='') -%}
+{%- set cls = 'ds-link-button' -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+{%- if href -%}
+<a href="{{ href }}" class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>{{ label }}</a>
+{%- else -%}
+<button type="{{ type }}" class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>{{ label }}</button>
+{%- endif -%}
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# card / section                                                             #}
+{# ------------------------------------------------------------------------- #}
+{% macro section(title=None, variant='surface', attrs='', class='') -%}
+{%- set cls = 'ds-section' -%}
+{%- if variant == 'bordered' %}{% set cls = cls ~ ' ds-section--bordered' %}
+{%- elif variant == 'strong' %}{% set cls = cls ~ ' ds-section--strong' %}
+{%- endif -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+<section class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+  {%- if title -%}
+  <h2 class="ds-section__title">{{ title }}</h2>
+  {%- endif -%}
+  {{ caller() }}
+</section>
+{%- endmacro %}
+
+{# Alias: use {% call section(...) %} … {% endcall %} (same markup). #}
+{% macro card(title=None, variant='surface', attrs='', class='') -%}
+{%- set cls = 'ds-section' -%}
+{%- if variant == 'bordered' %}{% set cls = cls ~ ' ds-section--bordered' %}
+{%- elif variant == 'strong' %}{% set cls = cls ~ ' ds-section--strong' %}
+{%- endif -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+<section class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+  {%- if title -%}
+  <h2 class="ds-section__title">{{ title }}</h2>
+  {%- endif -%}
+  {{ caller() }}
+</section>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# page_header — h1 + lede                                                    #}
+{# ------------------------------------------------------------------------- #}
+{% macro page_header(title, lede=None, attrs='', class='') -%}
+{%- set cls = 'ds-page-header' -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+<header class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+  <h1 class="ds-page-header__title">{{ title }}</h1>
+  {%- if lede -%}
+  <p class="ds-page-header__lede">{{ lede }}</p>
+  {%- endif -%}
+</header>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# tabs — underline segmented control with aria                               #}
+{# tabs: list of {id, label, selected?}                                       #}
+{# ------------------------------------------------------------------------- #}
+{% macro tabs(name, items, attrs='', class='') -%}
+{%- set cls = 'ds-tabs' -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+<div class="{{ cls }}" role="tablist" aria-label="{{ name }}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+  {%- for item in items -%}
+  {%- set selected = item.selected if item.selected is defined else loop.first -%}
+  <button type="button"
+          class="ds-tab{% if selected %} is-active{% endif %}"
+          role="tab"
+          id="{{ item.id }}-tab"
+          aria-controls="{{ item.id }}-panel"
+          aria-selected="{{ 'true' if selected else 'false' }}"
+          {% if not selected %}tabindex="-1"{% endif %}
+          data-ds-tab="{{ item.id }}">{{ item.label }}</button>
+  {%- endfor -%}
+</div>
+{%- endmacro %}
+
+{% macro tab_panel(id, selected=false, attrs='', class='') -%}
+{%- set cls = 'ds-tabpanel' -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+<div class="{{ cls }}"
+     role="tabpanel"
+     id="{{ id }}-panel"
+     aria-labelledby="{{ id }}-tab"
+     {% if not selected %}hidden{% endif %}
+     {% if attrs %} {{ attrs|safe }}{% endif %}>
+  {{ caller() }}
+</div>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# checklist_row — pending | active | done | error                            #}
+{# ------------------------------------------------------------------------- #}
+{% macro checklist_row(title, detail=None, state='pending', attrs='', class='') -%}
+{%- set st = state|lower -%}
+{%- set cls = 'ds-checklist__row is-' ~ st -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+<li class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+  <span class="ds-checklist__marker" aria-hidden="true">
+    {%- if st == 'done' -%}{{ icon_check() }}
+    {%- elif st == 'error' -%}{{ icon_error() }}
+    {%- endif -%}
+  </span>
+  <div class="ds-checklist__body">
+    <p class="ds-checklist__title">{{ title }}</p>
+    {%- if detail -%}
+    <p class="ds-checklist__detail">{{ detail }}</p>
+    {%- endif -%}
+  </div>
+</li>
+{%- endmacro %}
+
+{% macro checklist(items=None, attrs='', class='', live=false) -%}
+{%- set cls = 'ds-checklist' -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+<ul class="{{ cls }}"{% if live %} aria-live="polite"{% endif %}{% if attrs %} {{ attrs|safe }}{% endif %}>
+  {%- if items -%}
+    {%- for item in items -%}
+      {{ checklist_row(item.title, item.detail if item.detail is defined else none, item.state if item.state is defined else 'pending') }}
+    {%- endfor -%}
+  {%- endif -%}
+</ul>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# snippet — code/pre block with copy button                                  #}
+{# ------------------------------------------------------------------------- #}
+{% macro snippet(code, copy_label='Copy', attrs='', class='', copy_id='ds-snippet') -%}
+{%- set cls = 'ds-snippet' -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+<div class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+  <pre class="ds-snippet__code" id="{{ copy_id }}"><code>{{ code }}</code></pre>
+  <div class="ds-snippet__actions">
+    <button type="button"
+            class="btn btn-secondary btn-sm"
+            data-ds-copy="#{{ copy_id }}"
+            data-ds-copy-label="{{ copy_label }}"
+            data-ds-copied-label="Copied">{{ copy_label }}</button>
+  </div>
+</div>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# secret_field — shown-once key with copy                                    #}
+{# ------------------------------------------------------------------------- #}
+{% macro secret_field(value, label='API key', hint='Copy it now. It will not be shown again.',
+                      copy_label='Copy', attrs='', class='', field_id=None) -%}
+{%- set cls = 'ds-secret' -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+{%- set fid = field_id or 'ds-secret-value' -%}
+<div class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+  <span class="ds-field__label" id="{{ fid }}-label">{{ label }}</span>
+  {%- if hint -%}
+  <p class="ds-secret__hint" id="{{ fid }}-hint">{{ hint }}</p>
+  {%- endif -%}
+  <div class="ds-secret__field">
+    <code class="ds-secret__value" id="{{ fid }}" aria-labelledby="{{ fid }}-label"{% if hint %} aria-describedby="{{ fid }}-hint"{% endif %}>{{ value }}</code>
+    <button type="button"
+            class="btn btn-secondary btn-sm"
+            data-ds-copy="#{{ fid }}"
+            data-ds-copy-label="{{ copy_label }}"
+            data-ds-copied-label="Copied">{{ copy_label }}</button>
+  </div>
+</div>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# notice — info | success | warning | error                                  #}
+{# ------------------------------------------------------------------------- #}
+{% macro notice(message, variant='info', attrs='', class='', role=None) -%}
+{%- set v = variant|lower -%}
+{%- if v == 'success' -%}{%- set v = 'success' -%}
+{%- elif v == 'warning' -%}{%- set v = 'warning' -%}
+{%- elif v == 'error' or v == 'danger' -%}{%- set v = 'error' -%}
+{%- else -%}{%- set v = 'info' -%}
+{%- endif -%}
+{%- set cls = 'ds-notice ds-notice--' ~ v -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+{%- set r = role if role is not none else ('alert' if v == 'error' else 'status') -%}
+<div class="{{ cls }}" role="{{ r }}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+  {%- if v == 'warning' -%}{{ icon_warning() }}
+  {%- elif v == 'error' -%}{{ icon_error() }}
+  {%- elif v == 'success' -%}{{ icon_success() }}
+  {%- else -%}{{ icon_info() }}
+  {%- endif -%}
+  <div class="ds-notice__body">{{ message|safe }}</div>
+</div>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# empty_state                                                                #}
+{# ------------------------------------------------------------------------- #}
+{% macro empty_state(title, lede=None, attrs='', class='') -%}
+{%- set cls = 'ds-empty' -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+<div class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+  <h2 class="ds-empty__title">{{ title }}</h2>
+  {%- if lede -%}
+  <p class="ds-empty__lede">{{ lede }}</p>
+  {%- endif -%}
+  {%- if caller is defined -%}
+  <div class="ds-empty__actions">{{ caller() }}</div>
+  {%- endif -%}
+</div>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# form_field — label, help, input slot, error
+   Use with {% call %}: pass the <input> as the call body.                    #}
+{# ------------------------------------------------------------------------- #}
+{% macro form_field(label, field_id, help=None, error=None, required=false,
+                    optional=false, attrs='', class='') -%}
+{%- set cls = 'ds-field' -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+<div class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+  <label class="ds-field__label" for="{{ field_id }}">
+    {{ label }}
+    {%- if optional %} <span class="ds-field__opt">(optional)</span>
+    {%- elif required %} <span class="ds-field__opt">(required)</span>
+    {%- endif -%}
+  </label>
+  {%- if help -%}
+  <p class="ds-field__help" id="{{ field_id }}-help">{{ help }}</p>
+  {%- endif -%}
+  {%- if error -%}
+  <p class="ds-field__error" id="{{ field_id }}-error" role="alert">
+    {{ icon_error() }}
+    <span>{{ error }}</span>
+  </p>
+  {%- endif -%}
+  {{ caller() }}
+</div>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# chip — status chip (radius-md, never a pill)                               #}
+{# ------------------------------------------------------------------------- #}
+{% macro chip(label, variant='accent', attrs='', class='') -%}
+{%- set v = variant|lower -%}
+{%- set cls = 'ds-chip' -%}
+{%- if v == 'warning' %}{% set cls = cls ~ ' ds-chip--warning' %}
+{%- elif v == 'muted' %}{% set cls = cls ~ ' ds-chip--muted' %}
+{%- endif -%}
+{%- if class %}{% set cls = cls ~ ' ' ~ class %}{% endif -%}
+<span class="{{ cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>{{ label }}</span>
+{%- endmacro %}
