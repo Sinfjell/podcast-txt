@@ -717,6 +717,12 @@
         body.nav-menu-open .whats-new-toast[data-open="1"] {
             display: none;
         }
+        /* The panel lives inside .nav-bar's stacking context (z-index 100).
+           Lift the whole bar (and the scrim just under it) above the toast
+           while open — do not raise .nav-links alone, or the scrim paints
+           over the opaque panel. */
+        body.nav-menu-open .nav-bar { z-index: 140; }
+        body.nav-menu-open .nav-scrim { z-index: 135; }
         .footer-text-btn {
             background: none;
             border: none;
@@ -801,11 +807,7 @@
             .nav-links.open {
                 transform: translateY(0);
                 opacity: 1;
-                /* Above .whats-new-toast (120) so menu items stay on top even if
-                   the toast is briefly visible during open/close. */
-                z-index: 130;
             }
-            .nav-scrim.open { z-index: 125; }
             .nav-links a {
                 display: flex;
                 align-items: center;

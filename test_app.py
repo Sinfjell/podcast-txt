@@ -3119,8 +3119,8 @@ def test_the_menu_degrades_without_javascript(trial_on):
 def test_whats_new_toast_defers_while_mobile_menu_is_open(trial_on):
     """On iPhone Safari the What's new sheet sat on top of the open mobile menu
     and covered Admin (and anything below). The toast must hide for the life of
-    the menu, the open panel must stack above it, and Escape must not dismiss
-    a toast that is only deferred.
+    the menu, the open nav stacking context must sit above it, and Escape must
+    not dismiss a toast that is only deferred.
     """
     import re as _re
     body = A.app.test_client().get('/').data.decode()
@@ -3140,18 +3140,24 @@ def test_whats_new_toast_defers_while_mobile_menu_is_open(trial_on):
     toast_block = body[body.index('.whats-new-toast {'):
                        body.index('.whats-new-toast[data-open="1"]')]
     toast_z = int(_re.search(r'z-index:\s*(\d+)', toast_block).group(1))
+    # Panel is inside .nav-bar's stacking context — lift the bar (and scrim
+    # just under it), never .nav-links alone (that put the scrim over the panel).
+    assert 'body.nav-menu-open .nav-bar { z-index: 140; }' in body
+    assert 'body.nav-menu-open .nav-scrim { z-index: 135; }' in body
+    nav_bar_z = 140
+    scrim_open_z = 135
+    assert nav_bar_z > toast_z and scrim_open_z > toast_z
+    assert nav_bar_z > scrim_open_z
+    # Closed-panel baseline must stay below the toast so the toast stays
+    # tappable when the menu is shut (panel remains in the DOM at opacity 0).
     mobile = body[body.index('@media (max-width: 640px)'):]
     panel_rules = mobile[:mobile.index('@media (prefers-reduced-motion')]
-    open_block = panel_rules[panel_rules.index('.nav-links.open {'):]
-    # Second .nav-links.open block carries transform/opacity/z-index.
-    open_block = open_block[open_block.index('.nav-links.open {', 1):]
-    open_block = open_block[:open_block.index('}')]
-    panel_z = int(_re.search(r'z-index:\s*(\d+)', open_block).group(1))
-    assert panel_z > toast_z, (
-        f'open menu panel z-index ({panel_z}) must beat the What\'s new toast '
-        f'({toast_z})'
+    base_panel = panel_rules[panel_rules.index('.nav-links {'):
+                             panel_rules.index('.nav-links.open')]
+    base_z = int(_re.search(r'z-index:\s*(\d+)', base_panel).group(1))
+    assert base_z < toast_z, (
+        f'closed panel z-index ({base_z}) must stay under the toast ({toast_z})'
     )
-    assert 'z-index: 125' in panel_rules or '.nav-scrim.open { z-index: 125; }' in body
 
 
 def test_the_stop_button_handler_is_reachable_from_its_onclick(trial_on):
