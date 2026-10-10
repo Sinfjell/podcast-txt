@@ -1269,6 +1269,10 @@
         <a href="{{ url_for('ai_landing') }}">Use in ChatGPT &amp; Claude</a> &middot;
         <a href="{{ url_for('guide_ai_transcripts') }}">AI transcript guide</a> &middot;
         <a href="{{ url_for('whats_new') }}">What's new</a> &middot;
+        {% if mcp_enabled %}
+        <a href="{{ url_for('connect_page') }}">Connect</a> &middot;
+        {% endif %}
+        <a href="{{ url_for('api_docs') }}">API</a> &middot;
         <a href="{{ url_for('privacy') }}">Privacy</a> &middot;
         <a href="{{ url_for('terms') }}">Terms</a> &middot;
         {% if posthog_key and not is_admin_page %}

@@ -891,3 +891,34 @@
 @media (max-width: 640px) {
   .ds-chat-example__header, .ds-chat-example__conversation { padding: var(--space-4); }
 }
+
+/* /connect — composed from the macros above; only page layout lives here. */
+.connect { display: flex; flex-direction: column; gap: var(--space-9); padding-bottom: var(--space-12); }
+.connect [hidden] { display: none !important; }
+.connect .ds-page-header { margin-bottom: 0; }
+.connect__h2 {
+  margin: 0; font-size: 1.5rem; font-weight: 700; letter-spacing: -0.015em; line-height: 1.2; color: var(--ink);
+}
+.connect__lede { margin: 0; color: var(--muted); max-width: 40rem; }
+.connect__hint { margin: 0; font-size: 0.875rem; line-height: 1.5; color: var(--muted); }
+.connect__manual { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-3); }
+.connect__manual > .ds-stack { align-self: stretch; }
+/* Snippets sit on the surface card, so they step back to paper. */
+.connect .ds-section .ds-snippet { background: var(--paper); border: 1px solid var(--line); }
+.connect__setup { border-top: 1px solid var(--line); padding-top: var(--space-6); }
+.connect__prompt { border-bottom: 1px solid var(--line); }
+/* Key / connection rows: shared by /connect and Settings. */
+.ds-key-list { list-style: none; margin: 0; padding: 0; }
+.ds-key-row {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: var(--space-3); padding: var(--space-4) 0; border-top: 1px solid var(--line);
+}
+.ds-key-row:last-child { border-bottom: 1px solid var(--line); }
+.ds-key-row__body { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.ds-key-row__meta { font-size: 0.875rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.connect .ds-tabs { margin-bottom: 0; }
+/* Five apps do not fit one row on a phone; scroll the tab row, never wrap it. */
+@media (max-width: 640px) {
+  .connect .ds-tabs { flex-wrap: nowrap; overflow-x: auto; gap: var(--space-4); scrollbar-width: none; }
+  .connect .ds-tab { flex: none; margin-bottom: 0; }
+}

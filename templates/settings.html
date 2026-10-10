@@ -261,18 +261,28 @@
     </section>
     {% endif %}
 
-    {% if new_api_key or current_user.has_api_key %}
+    {% set creds = api_credentials or [] %}
+    {% if new_api_key or creds or current_user.has_api_key %}
     <section class="settings-section">
         <div class="settings-head">
-            <h2>Podskrift API key (developers only)</h2>
-            <a href="{{ url_for('api_docs') }}" class="btn btn-sm btn-secondary">Docs</a>
+            <h2>Podskrift API keys (developers only)</h2>
+            <div class="settings-row">
+                {% if mcp_enabled %}
+                <a href="{{ url_for('connect_page') }}" class="btn btn-sm btn-secondary">Connect AI apps</a>
+                {% endif %}
+                <a href="{{ url_for('api_docs') }}" class="btn btn-sm btn-secondary">Docs</a>
+            </div>
         </div>
         <div>
             <p class="settings-note" style="margin-bottom: 16px;">
-                For scripts and agents calling the Podskrift API. You don't need this to
-                transcribe on the website — for that, use the OpenAI API key above.
+                For scripts, agents, and AI apps calling the Podskrift API or MCP.
+                You don't need this to transcribe on the website — for that, use the
+                OpenAI API key above.
                 <a href="{{ url_for('api_docs') }}">How to use</a>
                 · <a href="{{ url_for('ai_landing') }}">Use in ChatGPT &amp; Claude</a>
+                {% if mcp_enabled %}
+                · <a href="{{ url_for('connect_page') }}">Connect to Cursor / VS Code</a>
+                {% endif %}
             </p>
 
             {% if new_api_key %}
@@ -288,7 +298,34 @@
                     This is the only time the full key is shown.
                 </div>
             </div>
-            {% else %}
+            {% endif %}
+
+            {% if creds %}
+            <ul class="ds-key-list">
+                {% for c in creds %}
+                <li class="ds-key-row">
+                    <div class="ds-key-row__body">
+                        <strong>{{ c.label }}</strong>
+                        <span class="ds-key-row__meta">
+                            <code>{{ c.key_prefix }}…</code>
+                            {% if c.created_at %}
+                            · created {{ c.created_at.strftime('%Y-%m-%d') }}
+                            {% endif %}
+                            {% if c.last_seen_at %}
+                            · last used {{ c.last_seen_at.strftime('%Y-%m-%d') }}
+                            {% endif %}
+                        </span>
+                    </div>
+                    <form method="POST" action="{{ url_for('settings_revoke_api_key') }}"
+                          onsubmit="return confirm('Revoke this key? Apps using it will get 401.');">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="credential_id" value="{{ c.id }}">
+                        <button type="submit" class="btn btn-danger btn-sm">Revoke</button>
+                    </form>
+                </li>
+                {% endfor %}
+            </ul>
+            {% elif current_user.has_api_key %}
             <p style="margin-bottom: 16px;">
                 Active key:
                 <code>{{ current_user.api_key_prefix }}…</code>
@@ -299,32 +336,39 @@
                 {% endif %}
             </p>
             <div class="settings-row">
-                <form method="POST" action="{{ url_for('settings_generate_api_key') }}"
-                      onsubmit="return confirm('Old keys stop working immediately.');">
-                    <button type="submit" class="btn btn-secondary">Regenerate</button>
-                </form>
                 <form method="POST" action="{{ url_for('settings_revoke_api_key') }}"
                       onsubmit="return confirm('Revoke this key? Scripts using it will get 401.');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-danger">Revoke</button>
                 </form>
             </div>
             {% endif %}
+
+            <form method="POST" action="{{ url_for('settings_generate_api_key') }}" class="ds-mt-4">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn btn-secondary">Create key</button>
+            </form>
         </div>
     </section>
     {% else %}
     <details class="settings-section">
         <summary>
-            <h2>Podskrift API key (developers only)</h2>
+            <h2>Podskrift API keys (developers only)</h2>
         </summary>
         <div style="padding-top: 16px;">
             <p class="settings-note" style="margin-bottom: 16px;">
-                For scripts and agents calling the Podskrift API. You don't need this to
-                transcribe on the website — for that, use the OpenAI API key above.
+                For scripts, agents, and AI apps calling the Podskrift API or MCP.
+                You don't need this to transcribe on the website — for that, use the
+                OpenAI API key above.
                 <a href="{{ url_for('api_docs') }}">How to use</a>
                 · <a href="{{ url_for('api_docs') }}">Docs</a>
                 · <a href="{{ url_for('ai_landing') }}">Use in ChatGPT &amp; Claude</a>
+                {% if mcp_enabled %}
+                · <a href="{{ url_for('connect_page') }}">Connect AI apps</a>
+                {% endif %}
             </p>
             <form method="POST" action="{{ url_for('settings_generate_api_key') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="btn btn-secondary">Create</button>
             </form>
         </div>
