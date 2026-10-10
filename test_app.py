@@ -10497,12 +10497,13 @@ def test_checkout_session_creation(stripe_on, ph_events):
     assert 'automatic_tax' not in kw
     assert '/billing/cancel' in kw['cancel_url']
     assert 'next=' in kw['cancel_url']
-    # Abandoned-checkout recovery: short TTL + recovery email after expiry.
+    # Short session TTL for same-day abandon analytics; recovery off by default
+    # (Norway cannot set consent_collection.promotions).
     assert kw['expires_at'] > int(A.time.time())
     assert kw['expires_at'] <= int(A.time.time()) + A.CHECKOUT_EXPIRES_HOURS * 3600 + 5
-    assert kw['after_expiration']['recovery']['enabled'] is True
-    assert kw['after_expiration']['recovery']['allow_promotion_codes'] is True
-    assert kw['consent_collection']['promotions'] == 'auto'
+    assert 'after_expiration' not in kw
+    assert 'consent_collection' not in kw
+    assert kw.get('allow_promotion_codes') is not True
     started = [e for e in ph_events.events if e['event'] == 'checkout_started']
     assert started and started[-1]['distinct_id'] == str(uid)
     props = started[-1]['properties']
@@ -10512,7 +10513,7 @@ def test_checkout_session_creation(stripe_on, ph_events):
     assert props['amount_cents'] == A.CREDIT_PACK_AMOUNT_CENTS
     assert props['pack_sku'] == A.CREDIT_PACK_SKU
     assert props['$session_id'] == 'ph_sess_test_1'
-    assert props['recovery_enabled'] is True
+    assert props['recovery_enabled'] is False
     assert props['expires_hours'] == A.CHECKOUT_EXPIRES_HOURS
     assert props.get('app') == 'podskrift'
     assert 'email' not in props
@@ -10738,8 +10739,9 @@ def test_checkout_session_expired_captures_checkout_expired(stripe_on, ph_events
     assert 'email' not in props
 
 
-def test_checkout_recovery_can_be_disabled(stripe_on, monkeypatch):
-    monkeypatch.setattr(A, 'CHECKOUT_RECOVERY_ENABLED', False)
+def test_checkout_recovery_off_by_default(stripe_on):
+    """Regression: CHECKOUT_RECOVERY_ENABLED defaults off; never promotions."""
+    assert A.CHECKOUT_RECOVERY_ENABLED is False
     uid = _make_user('norecovery@test.com', limit=600, used=0)
     client = _login(uid)
     client.get('/settings')
@@ -10753,6 +10755,34 @@ def test_checkout_recovery_can_be_disabled(stripe_on, monkeypatch):
     assert 'after_expiration' not in kw
     assert 'consent_collection' not in kw
     assert 'expires_at' in kw  # short TTL still applies
+    assert kw.get('allow_promotion_codes') is not True
+
+
+def test_checkout_recovery_flag_never_sets_promotions_or_promo_codes(
+        stripe_on, monkeypatch):
+    """Even with recovery on: no consent_collection.promotions, no promo codes.
+
+    Stripe rejects promotions consent for Norway accounts (PODSKRIFT-W).
+    Promo codes must stay off: we only credit the full undiscounted pack.
+    """
+    monkeypatch.setattr(A, 'CHECKOUT_RECOVERY_ENABLED', True)
+    uid = _make_user('recoveryon@test.com', limit=600, used=0)
+    client = _login(uid)
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'settings',
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    kw = stripe_on['last_create_params']
+    assert kw['after_expiration']['recovery']['enabled'] is True
+    recovery = kw['after_expiration']['recovery']
+    assert recovery.get('allow_promotion_codes') is not True
+    assert 'allow_promotion_codes' not in recovery
+    assert 'consent_collection' not in kw
+    assert kw.get('allow_promotion_codes') is not True
+    assert 'expires_at' in kw
 
 
 def test_checkout_session_expired_without_user_is_anonymous(stripe_on, ph_events):
