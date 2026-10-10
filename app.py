@@ -1213,6 +1213,23 @@ def paid_balance_seconds(user):
     return max(0, int(getattr(user, 'paid_seconds_balance', 0) or 0))
 
 
+def _balance_analytics_props(user_id):
+    """trial/paid minutes left for analytics (who is close to the paywall).
+
+    Never raises: analytics must not affect a finished job.
+    """
+    try:
+        user = db.session.get(User, int(user_id))
+        if user is None:
+            return {}
+        props = {'paid_remaining_min': paid_balance_seconds(user) // 60}
+        if not getattr(user, 'openai_api_key', None):
+            props['trial_remaining_min'] = trial_status(user)[2] // 60
+        return props
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def trial_reserve(user_id, seconds, *, budget_day=None):
     """Atomically reserve `seconds` of allowance. True only if granted.
 
@@ -1778,6 +1795,10 @@ SHARE_CREATE_WINDOW_SECONDS = 3600
 #: 22 bytes → 176 bits of entropy (url-safe); requirement is >= 128-bit.
 SHARE_TOKEN_BYTES = 22
 UTM_SESSION_KEY = '_utm_source'
+#: First human pageview in this browser session (path + Referer), for signup
+#: attribution. Written once; coarse referrer bucket only reaches PostHog.
+FIRST_LANDING_SESSION_KEY = '_first_landing'
+FIRST_REFERRER_SESSION_KEY = '_first_referrer'
 
 _share_create_attempts = collections.defaultdict(list)
 _share_create_lock = threading.Lock()
@@ -3440,6 +3461,8 @@ def _auth_next_type(candidate=None):
         return 'settings'
     if path.startswith('/history'):
         return 'history'
+    if path.startswith('/oauth/'):
+        return 'oauth'
     return 'other'
 
 
@@ -3460,6 +3483,61 @@ def _stash_utm_from_request():
     session[UTM_SESSION_KEY] = src[:64]
 
 
+def _stash_first_touch_from_request():
+    """Remember first landing path + Referer once per browser session.
+
+    Skips probes, webhooks, static assets, and non-GET so bots/health checks
+    do not overwrite a real first page. Path only — never query string.
+    """
+    if FIRST_LANDING_SESSION_KEY in session:
+        return
+    if request.method not in ('GET', 'HEAD'):
+        return
+    path = request.path or '/'
+    if path.startswith('/static/') or _canonical_host_exempt(path):
+        return
+    # Admin/debug surfaces are not acquisition landings.
+    if path.startswith('/admin') or path.startswith('/design'):
+        return
+    session[FIRST_LANDING_SESSION_KEY] = path[:128]
+    session[FIRST_REFERRER_SESSION_KEY] = (request.referrer or '')[:512]
+
+
+def _signup_country():
+    """ISO country for signup analytics when a header provides it; else None.
+
+    Prefers Cloudflare CF-IPCountry (skip XX/T1 unknowns). Falls back to a
+    region subtag on Accept-Language (e.g. nb-NO → NO). Never guesses.
+    """
+    try:
+        cf = (request.headers.get('CF-IPCountry') or '').strip().upper()
+        if len(cf) == 2 and cf.isalpha() and cf not in ('XX', 'T1'):
+            return cf
+        raw = (request.headers.get('Accept-Language') or '').split(',')[0]
+        tag = raw.split(';')[0].strip().replace('_', '-')
+        parts = tag.split('-')
+        if len(parts) >= 2 and len(parts[1]) == 2 and parts[1].isalpha():
+            return parts[1].upper()
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _first_touch_analytics_props(*, utm=None):
+    """Consume stashed first landing/referrer into coarse signup props."""
+    if (FIRST_LANDING_SESSION_KEY not in session
+            and FIRST_REFERRER_SESSION_KEY not in session):
+        return {}
+    props = {}
+    landing = session.pop(FIRST_LANDING_SESSION_KEY, None)
+    ref = session.pop(FIRST_REFERRER_SESSION_KEY, None) or ''
+    if landing:
+        props['first_landing'] = str(landing)[:128]
+    props['first_referrer_source'] = show_pages_mod.referrer_source(
+        ref, utm or '')
+    return props
+
+
 def _utm_source_for_signup():
     """utm_source from session (stashed) or the signup form/query, if any."""
     src = session.pop(UTM_SESSION_KEY, None)
@@ -3468,6 +3546,12 @@ def _utm_source_for_signup():
     if not src:
         return None
     return str(src)[:64]
+
+
+@app.before_request
+def _stash_first_touch():
+    """Remember the first navigable page + Referer for signup analytics."""
+    _stash_first_touch_from_request()
 
 
 def _capture_register_failed(reason):
@@ -3589,12 +3673,21 @@ def register():
         created = True
 
         _persist_login(user)
-        signup_props = {}
+        signup_props = {
+            # Coarse intent buckets only (never the raw next path / episode).
+            'next_type': _auth_next_type(),
+            'has_pending_transcript': bool(
+                session.get(PENDING_TRANSCRIPTION_KEY)),
+            'trial_granted_min': NEW_USER_TRIAL_SECONDS // 60,
+        }
         utm = _utm_source_for_signup()
         if utm:
             signup_props['utm_source'] = utm
-        product_analytics.capture(
-            'user_signed_up', user.id, signup_props or None)
+        country = _signup_country()
+        if country:
+            signup_props['country'] = country
+        signup_props.update(_first_touch_analytics_props(utm=utm))
+        product_analytics.capture('user_signed_up', user.id, signup_props)
         if session.get(PENDING_TRANSCRIPTION_KEY):
             flash('Account created — starting your transcript.', 'success')
         else:
@@ -4153,6 +4246,46 @@ def _capture_checkout_returned(status, *, user_id, session_id=None, location=Non
     if extra:
         props.update(extra)
     product_analytics.capture('checkout_returned', user_id, props)
+
+
+def _capture_checkout_expired(obj):
+    """checkout_expired from the Stripe checkout.session.expired webhook.
+
+    Abandoned checkouts are otherwise invisible: closing the Stripe tab never
+    hits /billing/cancel. Server-side, no email/card; uuid5 dedupes retries.
+    """
+    d = obj.to_dict() if hasattr(obj, 'to_dict') else (
+        obj if isinstance(obj, dict) else {})
+    cs_id = d.get('id')
+    meta = d.get('metadata') or {}
+    ref = str(d.get('client_reference_id') or meta.get('user_id') or '').strip()
+    props = {
+        'checkout_session_id': cs_id,
+        'location': meta.get('location') or meta.get('source') or None,
+        'pack_sku': meta.get('pack') or None,
+        'amount_cents': d.get('amount_total'),
+        'currency': d.get('currency'),
+        'recovery_enabled': bool(
+            ((d.get('after_expiration') or {}).get('recovery') or {})
+            .get('enabled')),
+    }
+    created, expires = d.get('created'), d.get('expires_at')
+    if isinstance(created, int) and isinstance(expires, int) and expires >= created:
+        props['open_minutes'] = (expires - created) // 60
+    try:
+        minutes = int(meta.get('minutes'))
+        props['minutes'] = minutes
+    except (TypeError, ValueError):
+        pass
+    if ref.isdigit():
+        distinct_id = int(ref)
+        props.update(_balance_analytics_props(distinct_id))
+    else:
+        distinct_id = f'stripe:{cs_id or "unknown"}'
+        props['$process_person_profile'] = False
+    product_analytics.capture(
+        'checkout_expired', distinct_id, props,
+        uuid=_ph_uuid5(f'expired:{cs_id}') if cs_id else None)
 
 
 def _capture_stripe_webhook_error(reason, *, event_type=None, extra=None):
@@ -4968,6 +5101,8 @@ def stripe_webhook():
             'checkout.session.async_payment_succeeded',
         ):
             fulfill_checkout(obj_id, event_id=event.id)
+        elif etype == 'checkout.session.expired':
+            _capture_checkout_expired(obj)
         elif etype == 'checkout.session.async_payment_failed':
             app.logger.warning('Async payment failed for %s', obj_id)
             _capture_purchase_failed(
@@ -6067,6 +6202,7 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
                                 # Incl. this completion (status is already completed).
                                 done_props['nth_transcript'] = (
                                     _completed_transcript_count(user_id))
+                                done_props.update(_balance_analytics_props(user_id))
                                 meta = task_partial_meta(finished)
                                 if meta:
                                     n_min, m_min = partial_minutes_pair(meta)
@@ -6596,6 +6732,7 @@ def _spawn_worker_for_existing_task(task):
                                     finished.language) or None
                             done_props['nth_transcript'] = (
                                 _completed_transcript_count(user_id))
+                            done_props.update(_balance_analytics_props(user_id))
                         product_analytics.capture(
                             'transcript_completed', user_id, done_props)
                         if finished is not None:

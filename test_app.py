@@ -8770,6 +8770,18 @@ def test_transcript_completed_includes_key_source(ph_events, monkeypatch, trial_
     assert props['app'] == 'podskrift'
     assert props['input_origin'] == 'audio'
     assert 'nth_transcript' in props
+    # Balance after completion: own-key user has no trial figure.
+    assert props['paid_remaining_min'] == 0
+    assert 'trial_remaining_min' not in props
+
+
+def test_balance_analytics_props_trial_user(trial_on):
+    uid = _make_user('balprops@test.com', limit=120 * 60, used=45 * 60)
+    with A.app.app_context():
+        props = A._balance_analytics_props(uid)
+    assert props == {'paid_remaining_min': 0, 'trial_remaining_min': 75}
+    with A.app.app_context():
+        assert A._balance_analytics_props(999999) == {}
 
 
 def test_transcript_completed_outside_request_context(ph_events, monkeypatch, trial_on):
@@ -10552,6 +10564,54 @@ def test_async_payment_failed_captures_purchase_failed(stripe_on, ph_events):
     assert failed[-1]['properties']['stage'] == 'async_payment'
     assert failed[-1]['distinct_id'] == 'stripe:cs_async_fail_1'
     assert failed[-1]['properties'].get('$process_person_profile') is False
+
+
+def test_checkout_session_expired_captures_checkout_expired(stripe_on, ph_events):
+    uid = _make_user('expired@test.com', limit=120 * 60, used=30 * 60)
+    obj = {
+        'id': 'cs_expired_1',
+        'object': 'checkout.session',
+        'client_reference_id': str(uid),
+        'amount_total': 500,
+        'currency': 'usd',
+        'created': 1_700_000_000,
+        'expires_at': 1_700_000_000 + 24 * 3600,
+        'metadata': {'user_id': str(uid), 'minutes': '300',
+                     'pack': A.CREDIT_PACK_SKU, 'location': 'paywall'},
+    }
+    event = _ns_event('checkout.session.expired', 'cs_expired_1', obj=obj)
+    A.stripe.Webhook.construct_event = staticmethod(
+        lambda payload, sig, secret: event)
+    resp = A.app.test_client().post(
+        '/stripe/webhook', data=b'{}',
+        headers={'Stripe-Signature': 't=1,v1=ok'})
+    assert resp.status_code == 200
+    assert _paid(uid) == 0
+    exp = [e for e in ph_events.events if e['event'] == 'checkout_expired']
+    assert len(exp) == 1
+    assert exp[0]['distinct_id'] == str(uid)
+    props = exp[0]['properties']
+    assert props['checkout_session_id'] == 'cs_expired_1'
+    assert props['location'] == 'paywall'
+    assert props['amount_cents'] == 500
+    assert props['minutes'] == 300
+    assert props['open_minutes'] == 24 * 60
+    assert props['trial_remaining_min'] == 90
+    assert 'email' not in props
+
+
+def test_checkout_session_expired_without_user_is_anonymous(stripe_on, ph_events):
+    obj = {'id': 'cs_expired_anon', 'metadata': {}}
+    event = _ns_event('checkout.session.expired', 'cs_expired_anon', obj=obj)
+    A.stripe.Webhook.construct_event = staticmethod(
+        lambda payload, sig, secret: event)
+    resp = A.app.test_client().post(
+        '/stripe/webhook', data=b'{}',
+        headers={'Stripe-Signature': 't=1,v1=ok'})
+    assert resp.status_code == 200
+    exp = [e for e in ph_events.events if e['event'] == 'checkout_expired']
+    assert exp and exp[0]['distinct_id'] == 'stripe:cs_expired_anon'
+    assert exp[0]['properties']['$process_person_profile'] is False
 
 
 def test_completed_unpaid_does_not_credit(stripe_on):
@@ -13151,6 +13211,55 @@ def test_signup_from_share_attributes_utm_source(ph_events, trial_on):
     events = [e for e in ph_events.events if e['event'] == 'user_signed_up']
     assert len(events) == 1
     assert events[0]['properties'].get('utm_source') == 'share'
+    props = events[0]['properties']
+    assert props['next_type'] == 'none'
+    assert props['has_pending_transcript'] is False
+    assert props['trial_granted_min'] == A.NEW_USER_TRIAL_SECONDS // 60
+    # Landing on /register itself counts as first touch; no external Referer → direct.
+    assert props['first_landing'] == '/register'
+    assert props['first_referrer_source'] == 'share'  # utm wins over empty Referer
+
+
+def test_signup_captures_country_and_first_touch(ph_events, trial_on):
+    A._register_attempts.clear()
+    client = A.app.test_client()
+    client.get(
+        '/pricing',
+        headers={
+            'Referer': 'https://www.google.com/search?q=podcast+transcript',
+            'CF-IPCountry': 'NO',
+        },
+    )
+    resp = client.post(
+        '/register',
+        data={'email': 'geo@example.com', 'password': 'password123'},
+        headers={'CF-IPCountry': 'NO', 'Accept-Language': 'en-US,en;q=0.9'},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (302, 303)
+    events = [e for e in ph_events.events if e['event'] == 'user_signed_up']
+    assert len(events) == 1
+    props = events[0]['properties']
+    assert props['country'] == 'NO'
+    assert props['first_landing'] == '/pricing'
+    assert props['first_referrer_source'] == 'google'
+    assert 'email' not in props
+
+
+def test_signup_country_skips_unknown_cf_uses_accept_language():
+    with A.app.test_request_context(
+            '/register',
+            headers={'CF-IPCountry': 'XX', 'Accept-Language': 'nb-NO,nb;q=0.9'}):
+        assert A._signup_country() == 'NO'
+    with A.app.test_request_context('/register', headers={'CF-IPCountry': 'T1'}):
+        assert A._signup_country() is None
+    with A.app.test_request_context('/register'):
+        assert A._signup_country() is None
+
+
+def test_auth_next_type_oauth_bucket():
+    with A.app.test_request_context('/login?next=/oauth/authorize?client_id=x'):
+        assert A._auth_next_type() == 'oauth'
 
 
 def test_mint_share_token_is_unguessable():
