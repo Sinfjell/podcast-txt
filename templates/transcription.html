@@ -101,18 +101,17 @@
     </div>
 </div>
 
-<!-- Calm secondary offer after a full transcript (Copy stays the primary). -->
+<!-- Calm secondary offer after a full transcript (Copy stays the primary).
+     Dual-offer layout: short heading → $5 + caption → $2 + short caption → BYOK.
+     No duplicate marketing line under the heading. -->
 <div id="resultOfferCard" class="hidden card mb-2 result-offer-card" data-testid="result-offer">
     <div class="card-body">
         <p class="result-offer-title">Keep going</p>
-        <p class="text-sm text-muted result-offer-note" id="resultOfferNote">
-            Transcribe your next episode: 300 min for $5
-        </p>
-        <div class="result-offer-actions ds-pack-offers" id="resultOfferActions">
+        <div class="ds-pack-offers" id="resultOfferActions">
             <div>
                 <button type="button" class="btn btn-sm btn-secondary" id="resultOfferBuyBtn"
                         data-pack="{{ credit_pack_sku }}">
-                    Buy 300 min for $5
+                    {{ credit_pack_label }}
                 </button>
                 <span class="form-hint" id="resultOfferMainHint">Better value · {{ credit_pack_subline }}</span>
             </div>
@@ -121,7 +120,7 @@
                         data-pack="{{ next_episode_pack_sku }}">
                     {{ next_episode_pack_label }}
                 </button>
-                <span class="form-hint" id="resultOfferNextHint">{{ next_episode_offer_label }}</span>
+                <span class="form-hint" id="resultOfferNextHint">{{ next_episode_pack_subline }}</span>
             </div>
             <a href="{{ url_for('settings') }}#openai" class="ds-link-button" id="resultOfferByokLink"
                data-paywall-byok="result_offer">Add your own OpenAI key</a>
@@ -174,10 +173,10 @@
         .next-ep .btn { width: 100%; justify-content: center; }
     }
     .result-offer-card { margin-top: 16px; }
-    .result-offer-title { font-weight: 700; font-size: 15px; margin: 0 0 6px; }
-    .result-offer-note { margin: 0 0 12px; line-height: 1.55; }
+    .result-offer-title { font-weight: 700; font-size: 15px; margin: 0 0 var(--space-3, 12px); }
     .result-offer-actions {
-        display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+        display: flex; flex-direction: column; flex-wrap: nowrap;
+        align-items: flex-start; gap: var(--space-3, 12px);
     }
 </style>
 
@@ -321,11 +320,10 @@
     var STRIPE_BUY = {{ stripe_buy_enabled|tojson }};
     var BUY_LABEL = {{ credit_pack_label|tojson }};
     var UNLOCK_LABEL = {{ ('Unlock the full episode')|tojson }};
-    var RESULT_OFFER_LABEL = {{ ('Transcribe your next episode: 300 min for $5')|tojson }};
     var MAIN_PACK = {{ credit_pack_sku|tojson }};
     var NEXT_PACK = {{ next_episode_pack_sku|tojson }};
     var NEXT_PACK_LABEL = {{ next_episode_pack_label|tojson }};
-    var NEXT_OFFER_LABEL = {{ next_episode_offer_label|tojson }};
+    var NEXT_PACK_SUBLINE = {{ next_episode_pack_subline|tojson }};
     var BUY_URL = {{ url_for('billing_checkout')|tojson }};
     var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
     var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
@@ -472,12 +470,7 @@
             show(card, false);
             return;
         }
-        var note = el('resultOfferNote');
-        if (note) {
-            note.textContent = d.next_episode_offer
-                ? (d.next_episode_offer_label || NEXT_OFFER_LABEL)
-                : (d.result_offer_label || RESULT_OFFER_LABEL);
-        }
+        // Heading + button/caption stack only — no duplicate offer line under the title.
         var buyBtn = el('resultOfferBuyBtn');
         if (buyBtn) {
             // First-transcript dual offer: $5 is the one green button; Copy demotes.
@@ -505,9 +498,13 @@
         }
         var nextWrap = el('resultOfferNextWrap');
         var nextBtn = el('resultOfferNextBtn');
+        var nextHint = el('resultOfferNextHint');
         if (d.next_episode_offer && nextWrap && nextBtn) {
-            if (nextBtn && d.next_episode_buy_label) {
+            if (d.next_episode_buy_label) {
                 nextBtn.textContent = d.next_episode_buy_label;
+            }
+            if (nextHint) {
+                nextHint.textContent = d.next_episode_pack_subline || NEXT_PACK_SUBLINE;
             }
             if (!nextBtn._bound) {
                 nextBtn._bound = true;
@@ -856,7 +853,24 @@
             var balLine = el('balanceFactLine');
             if (balLine) {
                 if (d.balance_fact && d.balance_fact.line) {
-                    balLine.textContent = d.balance_fact.line;
+                    // MCP fact lines embed a raw pricing URL; on the web render
+                    // "Pricing" as a real link so no bare URL shows in the UI.
+                    balLine.textContent = '';
+                    var factLine = d.balance_fact.line;
+                    var pricingUrl = d.balance_fact.pricing_url || '';
+                    var pricingIdx = pricingUrl ? factLine.indexOf(pricingUrl) : -1;
+                    if (pricingIdx !== -1) {
+                        var before = factLine.slice(0, pricingIdx).replace(/\s*Pricing:\s*$/i, '').trim();
+                        if (before) {
+                            balLine.appendChild(document.createTextNode(before + ' · '));
+                        }
+                        var pricingLink = document.createElement('a');
+                        pricingLink.href = pricingUrl;
+                        pricingLink.textContent = 'Pricing';
+                        balLine.appendChild(pricingLink);
+                    } else {
+                        balLine.textContent = factLine;
+                    }
                     show(balLine, true);
                 } else {
                     balLine.textContent = '';

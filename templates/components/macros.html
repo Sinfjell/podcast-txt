@@ -337,7 +337,8 @@
     <button type="submit" class="btn btn-secondary{{ btn_size }}">
       {{ next_episode_pack_label }}
     </button>
-    <span class="form-hint">{{ next_episode_offer_label }}</span>
+    {# Short caption under the $2 button — not the long offer line (shown once elsewhere if needed). #}
+    <span class="form-hint">{{ next_episode_pack_subline }}</span>
   </form>
   {%- endif -%}
 </div>

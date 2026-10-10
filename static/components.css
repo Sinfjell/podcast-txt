@@ -892,32 +892,71 @@
   .ds-chat-example__header, .ds-chat-example__conversation { padding: var(--space-4); }
 }
 
-/* Dual credit-pack offer ($5 primary + $2 next-episode secondary). */
+/* Dual credit-pack offer ($5 primary + $2 next-episode secondary).
+   Column stack, left-aligned with the surrounding text (no extra indent).
+   Each form/option owns its caption directly under the button.
+   Higher specificity on the alert variant so base .alert { align-items:center;
+   justify-content:space-between } cannot re-center the stack. */
+.alert.ds-pack-offers-alert {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: var(--space-3);
+}
+.ds-pack-offers__lede {
+  margin: 0;
+  font-weight: 700;
+  width: 100%;
+  text-align: left;
+}
 .ds-pack-offers {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
   align-items: flex-start;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  text-align: left;
 }
-.ds-pack-offers form {
+.ds-pack-offers > form,
+.ds-pack-offers > div {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
+  justify-content: flex-start;
   gap: var(--space-1);
   margin: 0;
+  padding: 0;
+  width: auto;
+  max-width: 100%;
 }
-.ds-pack-offers .form-hint { margin: 0; display: block; }
-.ds-pack-offers--inline {
-  display: inline-flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  margin: 0 var(--space-2);
+.ds-pack-offers .btn {
+  margin: 0;
+  margin-inline: 0;
+  align-self: flex-start;
 }
-.ds-pack-offers--inline form { display: inline; }
-.ds-pack-offers--paywall { margin-top: var(--space-2); }
-.ds-pack-offers__value-hint {
-  display: inline;
-  margin: 0 var(--space-2) 0 0;
+.ds-pack-offers .form-hint {
+  margin: 0;
+  display: block;
+  text-align: left;
+}
+.ds-pack-offers--paywall { margin-top: var(--space-3); }
+.ds-pack-offers > .ds-link-button,
+.alert.ds-pack-offers-alert > .ds-link-button {
+  align-self: flex-start;
+  margin: 0;
+}
+/* Result-page Keep going card: same left edge for title, buttons, captions, BYOK. */
+.result-offer-card .card-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+}
+.result-offer-card .result-offer-title,
+.result-offer-card .ds-pack-offers {
+  width: 100%;
 }

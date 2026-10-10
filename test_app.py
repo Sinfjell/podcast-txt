@@ -11562,9 +11562,15 @@ def test_home_paywall_buy_is_primary_byok_is_text_link(stripe_on):
     buy_at = body.index(f'data-pack="{A.CREDIT_PACK_SKU}"')
     chunk = body[buy_at:buy_at + 500]
     assert 'btn-primary' in chunk
+    # Caption for $5 sits under its own button (not after the $2 button).
+    assert 'Better value ·' in chunk
+    assert A.CREDIT_PACK_SUBLINE in chunk
     next_at = body.index(f'data-pack="{A.NEXT_EPISODE_PACK_SKU}"')
-    next_chunk = body[next_at:next_at + 500]
+    next_chunk = body[next_at:next_at + 800]
     assert 'btn-secondary' in next_chunk
+    assert A.get_credit_pack(A.NEXT_EPISODE_PACK_SKU).subline in body
+    # Long $2 marketing line must not appear as the $2 caption (or under the lede).
+    assert A.NEXT_EPISODE_OFFER_LABEL not in body
     byok_at = body.index('data-paywall-byok="home_banner"')
     byok_chunk = body[max(0, byok_at - 80):byok_at + 120]
     assert 'ds-link-button' in byok_chunk
@@ -11633,8 +11639,18 @@ def test_first_completed_transcript_offers_next_episode_pack(stripe_on):
     assert data.get('next_episode_pack') == A.NEXT_EPISODE_PACK_SKU
     assert data.get('pack') == A.CREDIT_PACK_SKU
     assert '$2' in (data.get('next_episode_offer_label') or '')
+    assert data.get('next_episode_pack_subline') == A.get_credit_pack(
+        A.NEXT_EPISODE_PACK_SKU).subline
     assert data.get('next_episode_buy_label') == A.get_credit_pack(
         A.NEXT_EPISODE_PACK_SKU).label
+    # Result markup: short heading, captions under each button, no duplicate
+    # "$2 — transcribe…" marketing line under Keep going.
+    page = _login(uid).get('/transcription/first-full-1').data.decode()
+    assert 'Keep going' in page
+    assert 'id="resultOfferNote"' not in page
+    assert A.NEXT_EPISODE_OFFER_LABEL not in page
+    assert A.get_credit_pack(A.NEXT_EPISODE_PACK_SKU).subline in page
+    assert 'Better value ·' in page
 
 
 def test_checkout_next_episode_pack_and_webhook_credit(stripe_on, ph_events):

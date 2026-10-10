@@ -7119,6 +7119,7 @@ def get_status(task_id):
                 next_pack = get_credit_pack(NEXT_EPISODE_PACK_SKU)
                 result['next_episode_offer'] = True
                 result['next_episode_offer_label'] = NEXT_EPISODE_OFFER_LABEL
+                result['next_episode_pack_subline'] = next_pack.subline
                 result['next_episode_buy_label'] = next_pack.label
                 result['next_episode_pack'] = next_pack.sku
         # One-line balance fact under the completed transcript (metered only).
@@ -9103,6 +9104,7 @@ def inject_trial_badge():
         'next_episode_pack_sku': NEXT_EPISODE_PACK_SKU,
         'next_episode_pack_label': get_credit_pack(NEXT_EPISODE_PACK_SKU).label,
         'next_episode_offer_label': NEXT_EPISODE_OFFER_LABEL,
+        'next_episode_pack_subline': get_credit_pack(NEXT_EPISODE_PACK_SKU).subline,
         'next_episode_pack_minutes': get_credit_pack(NEXT_EPISODE_PACK_SKU).minutes,
         'next_episode_pack_price_usd': (
             f'{get_credit_pack(NEXT_EPISODE_PACK_SKU).amount_cents / 100:.0f}'),

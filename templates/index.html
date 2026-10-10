@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "components/macros.html" import snippet, button %}
+{% from "components/macros.html" import pack_buy_forms with context %}
 
 {% block title %}Spotify & podcast transcripts — Podskrift{% endblock %}
 {% block meta_description %}Paste a Spotify episode link or search any podcast, and get the full transcript as text and .srt. {{ language_count }} languages, powered by OpenAI Whisper.{% if trial_minutes %} First {{ trial_minutes }} minutes free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.{% endif %}{% endblock %}
@@ -92,8 +93,17 @@
         Start your first transcript below — no card needed.
     </span>
 </div>
+{% elif trial.exhausted %}
+{# Column layout so each pack button + its caption share a left edge with the lede. #}
+<div class="alert alert-warning ds-pack-offers-alert" data-testid="home-paywall">
+    <p class="ds-pack-offers__lede">Your free trial is used up.</p>
+    {% if trial.stripe_buy %}
+    {{ pack_buy_forms('home_banner', primary_label=trial.buy_label) }}
+    {% endif %}
+    <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_banner">Add your own OpenAI key</a>
+</div>
 {% else %}
-<div class="alert alert-{% if trial.exhausted %}warning{% elif trial.low_balance %}warning{% else %}info{% endif %}">
+<div class="alert alert-{% if trial.low_balance %}warning{% else %}info{% endif %}">
     {# One span, not loose inline nodes: .alert is display:flex, so each text
        node and link became its own unwrappable flex item and the sentence
        rendered as broken columns on a narrow screen. #}
@@ -109,28 +119,6 @@
             <input type="hidden" name="ph_sid" value="">
             <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
         </form>
-        {% endif %}
-        <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_banner">Add your own OpenAI key</a>
-        {% elif trial.exhausted %}
-        Your free trial is used up.
-        {% if trial.stripe_buy %}
-        <span class="ds-pack-offers ds-pack-offers--inline">
-            <form method="POST" action="{{ url_for('billing_checkout') }}" data-paywall-buy="home_banner" data-pack="{{ credit_pack_sku }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <input type="hidden" name="source" value="home_banner">
-                <input type="hidden" name="pack" value="{{ credit_pack_sku }}">
-                <input type="hidden" name="ph_sid" value="">
-                <button type="submit" class="btn btn-sm btn-primary">{{ trial.buy_label }}</button>
-            </form>
-            <form method="POST" action="{{ url_for('billing_checkout') }}" data-paywall-buy="home_banner" data-pack="{{ next_episode_pack_sku }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <input type="hidden" name="source" value="home_banner">
-                <input type="hidden" name="pack" value="{{ next_episode_pack_sku }}">
-                <input type="hidden" name="ph_sid" value="">
-                <button type="submit" class="btn btn-sm btn-secondary">{{ next_episode_pack_label }}</button>
-            </form>
-        </span>
-        <span class="form-hint ds-pack-offers__value-hint">Better value · {{ credit_pack_subline }}</span>
         {% endif %}
         <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_banner">Add your own OpenAI key</a>
         {% elif trial.low_balance %}
