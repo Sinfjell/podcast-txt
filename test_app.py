@@ -10010,7 +10010,7 @@ def test_null_limit_accounts_pick_up_the_raised_default(monkeypatch, trial_on):
 
 
 def test_register_stamps_new_user_trial_limit(trial_on):
-    """Registration sets trial_seconds_limit to NEW_USER_TRIAL_MINUTES (120)."""
+    """Registration stamps the split-assigned grant (or NEW_USER when split off)."""
     email = 'newgrant@example.com'
     _purge([email])
     A._register_attempts.clear()
@@ -10023,13 +10023,135 @@ def test_register_stamps_new_user_trial_limit(trial_on):
     with A.app.app_context():
         u = A.User.query.filter_by(email=email).first()
         assert u is not None
-        assert u.trial_seconds_limit == A.NEW_USER_TRIAL_SECONDS
-        assert u.trial_seconds_limit == 120 * 60
+        expected_variant, expected_seconds = A.assign_trial_variant(u.id)
+        assert u.trial_variant == expected_variant
+        assert u.trial_seconds_limit == expected_seconds
+        assert expected_seconds in (60 * 60, 120 * 60)
         limit, used, remaining = A.trial_status(u)
-        assert limit == 120 * 60
+        assert limit == expected_seconds
         assert used == 0
-        assert remaining == 120 * 60
+        assert remaining == expected_seconds
     _purge([email])
+
+
+def test_register_split_off_stamps_new_user_trial_minutes(monkeypatch, trial_on):
+    """TRIAL_SPLIT_ENABLED=0 keeps the NEW_USER_TRIAL_MINUTES stamp and NULL variant."""
+    monkeypatch.setattr(A, 'TRIAL_SPLIT_ENABLED', False)
+    email = 'nosplit@example.com'
+    _purge([email])
+    A._register_attempts.clear()
+    client = A.app.test_client()
+    resp = client.post('/register', data={
+        'email': email,
+        'password': 'password123',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    with A.app.app_context():
+        u = A.User.query.filter_by(email=email).first()
+        assert u is not None
+        assert u.trial_variant is None
+        assert u.trial_seconds_limit == A.NEW_USER_TRIAL_SECONDS == 120 * 60
+    _purge([email])
+
+
+def test_assign_trial_variant_is_deterministic_and_balanced():
+    """Same user id always maps to the same bucket; both variants appear."""
+    assert A.TRIAL_SPLIT_ENABLED is True
+    assert A.TRIAL_SPLIT_VARIANTS == ['60', '120']
+    a1, s1 = A.assign_trial_variant(1)
+    a2, s2 = A.assign_trial_variant(1)
+    assert (a1, s1) == (a2, s2)
+    assert s1 == int(a1) * 60
+    seen = {A.assign_trial_variant(i)[0] for i in range(1, 200)}
+    assert seen == {'60', '120'}
+
+
+def test_signup_emits_trial_variant_person_property(ph_events, trial_on):
+    email = 'variant-ph@example.com'
+    _purge([email])
+    A._register_attempts.clear()
+    client = A.app.test_client()
+    resp = client.post('/register', data={
+        'email': email,
+        'password': 'password123',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    events = [e for e in ph_events.events if e['event'] == 'user_signed_up']
+    assert len(events) == 1
+    props = events[0]['properties']
+    with A.app.app_context():
+        u = A.User.query.filter_by(email=email).first()
+        assert u.trial_variant in ('60', '120')
+        assert props['trial_variant'] == u.trial_variant
+        assert props['trial_granted_min'] == u.trial_seconds_limit // 60
+        assert props.get('$set') == {'trial_variant': u.trial_variant}
+    # Flash quotes the user's actual allowance, not the marketing default.
+    follow = client.get(resp.headers['Location'])
+    body = follow.data.decode()
+    assert f"you have {props['trial_granted_min']} free minutes" in body
+    _purge([email])
+
+
+def test_trial_limit_hit_and_checkout_carry_trial_variant(
+        ph_events, monkeypatch, trial_on, stripe_on):
+    """Buying-signal and checkout events include the stored trial_variant."""
+    uid = _make_user('variant-hit@test.com', limit=60 * 60, used=60 * 60)
+    with A.app.app_context():
+        u = A.db.session.get(A.User, uid)
+        u.trial_variant = '60'
+        A.db.session.commit()
+    monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', 10 ** 7)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Blocked',
+        'duration_min': '30',
+    })
+    assert resp.status_code == 402
+    hits = [e for e in ph_events.events if e['event'] == 'trial_limit_hit']
+    assert hits and hits[-1]['properties'].get('trial_variant') == '60'
+
+    client = _login(uid)
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    client.set_cookie(A.COOKIE_CONSENT_NAME, 'accepted')
+    client.post('/billing/checkout', data={
+        'csrf_token': token,
+        'source': 'settings',
+    }, follow_redirects=False)
+    started = [e for e in ph_events.events if e['event'] == 'checkout_started']
+    assert started and started[-1]['properties'].get('trial_variant') == '60'
+
+    session = _pack_session(uid, 'cs_variant_buy_1')
+    _register_and_post(stripe_on, session)
+    purchased = [e for e in ph_events.events if e['event'] == 'purchase_completed']
+    assert purchased and purchased[-1]['properties'].get('trial_variant') == '60'
+    assert purchased[-1]['properties']['$set']['trial_variant'] == '60'
+    assert purchased[-1]['properties']['$set']['has_purchased'] is True
+
+
+def test_legacy_users_keep_null_trial_variant(trial_on):
+    """Existing accounts are not backfilled — NULL variant, current allowance."""
+    uid = _make_user('legacy-variant@test.com', limit=180 * 60, used=10)
+    with A.app.app_context():
+        u = A.db.session.get(A.User, uid)
+        assert u.trial_variant is None
+        assert A.trial_variant_props(u) == {}
+        assert A.trial_status(u)[0] == 180 * 60
+
+
+def test_base_exposes_trial_variant_for_client_analytics(stripe_on, monkeypatch):
+    monkeypatch.setenv('PODSKRIFT_ENV', 'production')
+    monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
+    uid = _make_user('variant-js@test.com', limit=60 * 60, used=0)
+    with A.app.app_context():
+        u = A.db.session.get(A.User, uid)
+        u.trial_variant = '60'
+        A.db.session.commit()
+    body = _login(uid).get('/').data.decode()
+    assert 'var TRIAL_VARIANT = "60";' in body
+    assert "payload.trial_variant = TRIAL_VARIANT" in body
+    assert 'trial_variant: TRIAL_VARIANT' in body
 
 
 def _set_created(uid, created_at):
@@ -13214,7 +13336,9 @@ def test_signup_from_share_attributes_utm_source(ph_events, trial_on):
     props = events[0]['properties']
     assert props['next_type'] == 'none'
     assert props['has_pending_transcript'] is False
-    assert props['trial_granted_min'] == A.NEW_USER_TRIAL_SECONDS // 60
+    assert props['trial_granted_min'] in (60, 120)
+    assert props.get('trial_variant') in ('60', '120')
+    assert props['trial_granted_min'] == int(props['trial_variant'])
     # Landing on /register itself counts as first touch; no external Referer → direct.
     assert props['first_landing'] == '/register'
     assert props['first_referrer_source'] == 'share'  # utm wins over empty Referer

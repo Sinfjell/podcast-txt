@@ -313,7 +313,7 @@ Named events:
 | Event | Where | Properties |
 |---|---|---|
 | `podcast_searched` | browser, before signup | `search_type`, `result_count` (never the query) |
-| `user_signed_up`, `settings_viewed` | server | — |
+| `user_signed_up`, `settings_viewed` | server | `user_signed_up`: `trial_granted_min`, optional `trial_variant` + `$set.trial_variant` when the split assigned one |
 | `openai_key_saved` / `openai_key_validation_failed` | server | `status` / `reason` |
 | `transcript_started` / `transcript_completed` | server | `key_source` (trial/user), `source` (web/api) |
 | `transcript_failed` | server | the above + `reason` (`invalid_key`, `no_billing`, `own_key_invalid`, `own_key_no_credit`, `rate_limit`, `network`, `trial_exhausted`, `abandoned`, `stale`, `source_audio_missing`, `source_audio_forbidden`, `other`) |
@@ -331,7 +331,9 @@ the day when the shared daily budget is empty.
 | `TRIAL_DAILY_MINUTES` | `2000` | Shared free-trial budget for one Europe/Oslo calendar day. Resets at Oslo midnight. Reservations count immediately (`trial_budget_days`); refunds / failed-before-Whisper jobs release that day's row. |
 | `TRIAL_GLOBAL_MINUTES` | unset (= off) | Optional lifetime safety ceiling across all accounts. Leave unset in normal operation; set only if you want a hard multi-day stop beyond the daily budget. |
 | `TRIAL_MINUTES` | `180` | Per-account fallback when `users.trial_seconds_limit` is NULL (legacy rows). |
-| `NEW_USER_TRIAL_MINUTES` | `120` | Stamped on `trial_seconds_limit` at registration. |
+| `NEW_USER_TRIAL_MINUTES` | `120` | Stamped on `trial_seconds_limit` at registration when the split is off. |
+| `TRIAL_SPLIT_ENABLED` | on | When on, new signups get a deterministic hash-of-id variant from `TRIAL_SPLIT_VARIANTS` (stored on `users.trial_variant`). Existing rows keep NULL variant and their current limit. |
+| `TRIAL_SPLIT_VARIANTS` | `60,120` | Comma-separated minute labels for the split (equal buckets). |
 | `TRIAL_ENABLED` | on | Kill switch for handing out the platform key. |
 
 `/health` exposes `trial_available` (today's budget still has room) plus

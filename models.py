@@ -23,10 +23,14 @@ class User(UserMixin, db.Model):
     # Trial metering. Only ever touched for users transcribing on OUR key --
     # a user with their own key spends their own quota and is never metered.
     # A NULL limit means "use TRIAL_MINUTES" (legacy accounts). New signups
-    # get NEW_USER_TRIAL_MINUTES stamped here at registration.
+    # get NEW_USER_TRIAL_MINUTES stamped here at registration (or a split
+    # variant when TRIAL_SPLIT_ENABLED).
     trial_seconds_limit = db.Column(db.Integer, nullable=True)
     trial_seconds_used = db.Column(db.Integer, nullable=False, default=0,
                                    server_default='0')
+    # A/B trial grant label, e.g. '60' or '120'. NULL for legacy users and
+    # when the split is off — they keep whatever trial_seconds_limit says.
+    trial_variant = db.Column(db.String(16), nullable=True)
     # Paid credit-pack balance (seconds). Credited only from a verified Stripe
     # webhook; spent after free trial minutes, never counted against the
     # global free-trial ceiling.
@@ -374,6 +378,7 @@ TASK_COLUMN_MIGRATIONS = {
 USER_COLUMN_MIGRATIONS = {
     'trial_seconds_limit': 'INTEGER',
     'trial_seconds_used': 'INTEGER NOT NULL DEFAULT 0',
+    'trial_variant': 'VARCHAR(16)',
     'paid_seconds_balance': 'INTEGER NOT NULL DEFAULT 0',
     'api_key_hash': 'VARCHAR(64)',
     'api_key_prefix': 'VARCHAR(16)',
