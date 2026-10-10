@@ -482,3 +482,94 @@ MCP_CREDENTIAL_COLUMN_MIGRATIONS = {
     'kind': "VARCHAR(16) NOT NULL DEFAULT 'key'",
     'created_at': 'DATETIME',
 }
+
+
+class OAuthClient(db.Model):
+    """OAuth 2.1 client from Dynamic Client Registration (RFC 7591).
+
+    ChatGPT / Claude.ai connectors register themselves here. Public clients
+    (token_endpoint_auth_method=none) store no secret.
+    """
+    __tablename__ = 'oauth_clients'
+
+    id = db.Column(db.Integer, primary_key=True)
+    # DCR mint is short (poc_…); CIMD client_ids are HTTPS metadata URLs.
+    client_id = db.Column(db.String(512), unique=True, nullable=False)
+    # NULL for public clients; SHA-256 hex when a secret was issued.
+    client_secret_hash = db.Column(db.String(64), nullable=True)
+    client_name = db.Column(db.String(255), nullable=True)
+    # JSON arrays stored as text (same pattern as partial_meta elsewhere).
+    redirect_uris_json = db.Column(db.Text, nullable=False)
+    grant_types_json = db.Column(db.Text, nullable=False)
+    response_types_json = db.Column(db.Text, nullable=False)
+    token_endpoint_auth_method = db.Column(db.String(64), nullable=False,
+                                           default='none', server_default='none')
+    # 'dcr' | 'cimd' — how this client was first learned.
+    registration_source = db.Column(db.String(16), nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class OAuthAuthorizationCode(db.Model):
+    """Single-use authorization code (PKCE S256). Store only the hash."""
+    __tablename__ = 'oauth_authorization_codes'
+
+    id = db.Column(db.Integer, primary_key=True)
+    code_hash = db.Column(db.String(64), unique=True, nullable=False)
+    client_id = db.Column(db.String(512), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False,
+                        index=True)
+    redirect_uri = db.Column(db.String(1024), nullable=False)
+    code_challenge = db.Column(db.String(128), nullable=False)
+    code_challenge_method = db.Column(db.String(16), nullable=False)
+    scope = db.Column(db.String(255), nullable=True)
+    # RFC 8707 resource indicator (audience), e.g. https://podskrift.com/mcp
+    resource = db.Column(db.String(512), nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    used_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class OAuthAccessToken(db.Model):
+    """Short-lived access token. Plaintext shown once to the client; DB has hash."""
+    __tablename__ = 'oauth_access_tokens'
+
+    id = db.Column(db.Integer, primary_key=True)
+    token_hash = db.Column(db.String(64), unique=True, nullable=False)
+    client_id = db.Column(db.String(512), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False,
+                        index=True)
+    scope = db.Column(db.String(255), nullable=True)
+    resource = db.Column(db.String(512), nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    revoked_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class OAuthRefreshToken(db.Model):
+    """Refresh token with rotation. Revoking one client connection clears these."""
+    __tablename__ = 'oauth_refresh_tokens'
+
+    id = db.Column(db.Integer, primary_key=True)
+    token_hash = db.Column(db.String(64), unique=True, nullable=False)
+    client_id = db.Column(db.String(512), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False,
+                        index=True)
+    scope = db.Column(db.String(255), nullable=True)
+    resource = db.Column(db.String(512), nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    revoked_at = db.Column(db.DateTime, nullable=True)
+    # Set when this token is rotated; the replacement's hash (audit trail).
+    replaced_by_hash = db.Column(db.String(64), nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+#: Additive columns for oauth_* tables (future ALTERs). Applied by
+#: ensure_oauth_tables AFTER CREATE TABLE IF NOT EXISTS.
+OAUTH_CLIENT_COLUMN_MIGRATIONS = {
+    'registration_source': 'VARCHAR(16)',
+}
+OAUTH_AUTHORIZATION_CODE_COLUMN_MIGRATIONS = {}
+OAUTH_ACCESS_TOKEN_COLUMN_MIGRATIONS = {}
+OAUTH_REFRESH_TOKEN_COLUMN_MIGRATIONS = {
+    'replaced_by_hash': 'VARCHAR(64)',
+}

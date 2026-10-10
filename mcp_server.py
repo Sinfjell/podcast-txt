@@ -912,7 +912,8 @@ def _handle_initialize(params: dict) -> dict:
         'instructions': (
             'Podskrift MCP: search podcasts, list episodes, and fetch transcripts. '
             'Authenticate with Authorization: Bearer psk_… '
-            '(API key from /connect or Settings). '
+            '(API key from /connect or Settings) '
+            'or an OAuth access token from the Podskrift authorization server. '
             'Transcription uses the same free trial / paid minutes / BYOK rules as '
             f'the website. Pricing: {_pricing_url()}'
         ),
@@ -967,7 +968,12 @@ def _dispatch_rpc(message: dict, user) -> dict | None:
 
 
 def _authenticate_mcp():
-    """Set g.api_* via the same rules as /api/v1, return (user, error_response)."""
+    """Set g.api_* via the same rules as /api/v1, return (user, error_response).
+
+    Accepts the CoS agent key, a customer ``psk_…`` API key, or (when
+    ``MCP_OAUTH_ENABLED``) a short-lived OAuth access token mapped to the user.
+    Billing / trial metering is unchanged — tools still run as that user.
+    """
     A = _app()
     provided = A._extract_agent_api_key()
     if not provided:
@@ -998,10 +1004,27 @@ def _authenticate_mcp():
         if cred is not None:
             mcp_credentials_mod.touch_credential_seen(cred)
         return customer, None
+    # OAuth access token (poa_…) — only when the OAuth flag is on.
+    import oauth_server as oauth_mod
+    if oauth_mod.mcp_oauth_enabled():
+        oauth_user = oauth_mod.lookup_access_token_user(provided)
+        if oauth_user is not None:
+            g.api_auth_kind = 'oauth'
+            g.api_user_id = oauth_user.id
+            return oauth_user, None
+
     revoked = getattr(g, 'mcp_revoked_credential', None)
     if revoked is not None and isinstance(provided, str) and provided.startswith('psk_'):
         mcp_credentials_mod.note_revoked_key_hit(revoked)
     return None, (jsonify({'error': 'Unauthorized'}), 401)
+
+
+def _mcp_www_authenticate() -> str:
+    """401 challenge; includes resource_metadata when OAuth is enabled."""
+    import oauth_server as oauth_mod
+    if oauth_mod.mcp_oauth_enabled():
+        return oauth_mod._www_authenticate_header()
+    return 'Bearer realm="podskrift"'
 
 
 def _cors_headers(resp: Response) -> Response:
@@ -1048,7 +1071,7 @@ def create_mcp_view(app_flask):
             resp, code = auth_err
             resp.status_code = code
             if code == 401:
-                resp.headers['WWW-Authenticate'] = 'Bearer realm="podskrift"'
+                resp.headers['WWW-Authenticate'] = _mcp_www_authenticate()
             return _cors_headers(resp)
 
         bucket = f'mcp:{getattr(g, "api_auth_kind", "?")}:{getattr(g, "api_user_id", "?")}'

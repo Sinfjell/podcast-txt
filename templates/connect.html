@@ -823,7 +823,7 @@
                 ' is using an old key. Click ' + cfg.primary + ' again to replace it.');
         } else if (data.problem === 'no_minutes') {
             showAlert('warning',
-                'Your free minutes are used up. <a href="{{ url_for("pricing") }}">300 minutes for $5</a>.');
+                'Your free minutes are used up. <a href="{{ url_for("pricing") }}">{{ credit_pack_minutes }} minutes for ${{ credit_pack_price_usd }}</a>.');
         } else if (data.problem === 'tool_errors') {
             showAlert('danger',
                 'Podskrift got requests from ' + cfg.label +
@@ -835,38 +835,48 @@
         var list = document.getElementById('connectionsList');
         var section = document.getElementById('connectionsSection');
         var conns = data.connections || [];
+        list.textContent = '';
         if (!conns.length) {
             section.hidden = true;
-            list.innerHTML = '';
         } else {
             section.hidden = false;
-            list.innerHTML = conns.map(function (c) {
-                var label = c.label || c.client;
-                var meta = [];
-                if (c.connected) meta.push('connected');
-                if (c.last_seen_at) meta.push('last used recently');
-                return '<li class="connect-conn" data-id="' + c.id + '">' +
-                    '<div><strong>' + label + '</strong> ' +
-                    '<span class="connect-conn-meta">' + meta.join(' · ') +
-                    (c.prefix ? ' · ' + c.prefix + '…' : '') +
-                    '</span></div>' +
-                    '<button type="button" class="btn btn-danger btn-sm" data-revoke="' +
-                    c.id + '">Disconnect</button></li>';
-            }).join('');
-            list.querySelectorAll('[data-revoke]').forEach(function (btn) {
+            conns.forEach(function (c) {
+                var li = document.createElement('li');
+                li.className = 'connect-conn';
+                li.setAttribute('data-id', String(c.id));
+                var info = document.createElement('div');
+                var strong = document.createElement('strong');
+                strong.textContent = c.label || c.client || '';
+                info.appendChild(strong);
+                info.appendChild(document.createTextNode(' '));
+                var metaBits = [];
+                if (c.connected) metaBits.push('connected');
+                if (c.last_seen_at) metaBits.push('last used recently');
+                if (c.prefix) metaBits.push(String(c.prefix) + '…');
+                var meta = document.createElement('span');
+                meta.className = 'connect-conn-meta';
+                meta.textContent = metaBits.join(' · ');
+                info.appendChild(meta);
+                li.appendChild(info);
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'btn btn-danger btn-sm';
+                btn.textContent = 'Disconnect';
+                btn.setAttribute('data-revoke', String(c.id));
                 btn.onclick = function () {
-                    var id = btn.getAttribute('data-revoke');
                     var name = (CLIENTS[state.client] || {}).label || 'this app';
                     if (!confirm('Disconnect ' + name +
                         '? It stops working with Podskrift until you connect again.')) {
                         return;
                     }
-                    fetch('/connect/credentials/' + id + '/revoke', {
+                    fetch('/connect/credentials/' + c.id + '/revoke', {
                         method: 'POST',
                         credentials: 'same-origin',
                         headers: { 'X-CSRF-Token': state.csrf, 'Accept': 'application/json' }
                     }).then(function () { pollStatus(true); });
                 };
+                li.appendChild(btn);
+                list.appendChild(li);
             });
         }
         return allDone;
@@ -891,8 +901,12 @@
             }
             var url = state.statusUrl + '?client=' + encodeURIComponent(state.client);
             fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
-                .then(function (r) { return r.json(); })
+                .then(function (r) {
+                    if (r.status === 401) return null;  // logged out — stop polling
+                    return r.json();
+                })
                 .then(function (data) {
+                    if (!data) return;
                     var done = renderStatus(data);
                     if (!done) schedule();
                 })

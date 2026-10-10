@@ -222,6 +222,44 @@
         </div>
     </section>
 
+    {% if mcp_oauth_enabled %}
+    <section class="settings-section" id="connected-apps">
+        <div>
+            <h2>Connected apps</h2>
+            <p class="settings-note" style="margin-bottom: 16px;">
+                Apps that signed in with OAuth to use Podskrift MCP (for example ChatGPT or Claude).
+                Revoking stops that app from calling Podskrift as you.
+            </p>
+            {% if connected_apps %}
+            <ul style="list-style: none; padding: 0; margin: 0 0 8px;">
+                {% for app in connected_apps %}
+                <li style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line);">
+                    <div>
+                        <strong>{{ app.client_name }}</strong>
+                        {% if app.connected_at %}
+                        <span class="text-muted" style="font-size: 14px;">
+                            · connected {{ app.connected_at.strftime('%Y-%m-%d') }}
+                        </span>
+                        {% endif %}
+                    </div>
+                    {# client_name is registrant-controlled: tojson (htmlsafe) inside a
+                       single-quoted attribute, never raw inside a JS string. #}
+                    <form method="POST" action="{{ url_for('settings_oauth_revoke') }}"
+                          onsubmit='return confirm({{ ("Revoke access for " ~ app.client_name ~ "?")|tojson }});'>
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="client_id" value="{{ app.client_id }}">
+                        <button type="submit" class="btn btn-danger">Revoke</button>
+                    </form>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="settings-note">No connected apps yet.</p>
+            {% endif %}
+        </div>
+    </section>
+    {% endif %}
+
     {% set creds = api_credentials or [] %}
     {% if new_api_key or creds or current_user.has_api_key %}
     <section class="settings-section">

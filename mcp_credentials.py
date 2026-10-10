@@ -28,8 +28,6 @@ CLIENT_LABELS = {
     'other': 'API key',
 }
 
-# Double-click reuse window for an unused key of the same client.
-RECENT_UNUSED_MINUTES = 10
 # Throttle last_seen_at writes.
 LAST_SEEN_THROTTLE_SECONDS = 60
 # "Old key in use" window for status.problem.
@@ -309,36 +307,17 @@ def list_active_credentials(user_id):
 
 
 def mint_credential(user_id, client, *, mint_fn, hash_fn, prefix_fn, label=None):
-    """Create or rotate a key credential for client. Returns (row, plaintext).
+    """Insert a new key credential for client. Returns (row, plaintext).
 
-    If an unused key for the same client was minted in the last 10 minutes,
-    rotate that row instead of inserting another.
+    Always creates a new row — never rotates or reuses an existing key.
     """
     if client not in CONNECT_CLIENTS:
         client = 'other'
     label = label or CLIENT_LABELS.get(client, 'API key')
-    cutoff = _utcnow() - timedelta(minutes=RECENT_UNUSED_MINUTES)
-    recent = (
-        McpCredential.query
-        .filter_by(user_id=user_id, client=client, kind='key')
-        .filter(McpCredential.revoked_at.is_(None))
-        .filter(McpCredential.first_initialize_at.is_(None))
-        .filter(McpCredential.created_at >= cutoff)
-        .order_by(McpCredential.created_at.desc())
-        .first()
-    )
     plaintext = mint_fn()
     digest = hash_fn(plaintext)
     prefix = prefix_fn(plaintext)
     now = _utcnow()
-    if recent is not None:
-        recent.key_hash = digest
-        recent.key_prefix = prefix
-        recent.label = label
-        recent.created_at = now
-        db.session.commit()
-        return recent, plaintext
-
     row = McpCredential(
         user_id=user_id,
         kind='key',

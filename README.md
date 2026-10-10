@@ -204,6 +204,9 @@ The app includes a comprehensive help guide for finding RSS feeds from:
 - `MCP_ENABLED` — remote MCP at `/mcp` for ChatGPT / Claude / Cursor (default
   off). Same `psk_…` Bearer key as the HTTP API; see the gated MCP section in
   [docs/customer-api.md](docs/customer-api.md) when the flag is on.
+- `MCP_OAUTH_ENABLED` — OAuth 2.1 authorization server for ChatGPT / Claude.ai
+  connectors (default off). Keeps `psk_…` auth; adds consent, DCR, and tokens
+  audience-bound to `/mcp`.
 
 ### Free trial
 
