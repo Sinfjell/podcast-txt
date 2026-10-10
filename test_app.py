@@ -6225,6 +6225,46 @@ def test_mcp_list_episodes_tool(mcp_on):
     assert ep['id']
 
 
+def test_mcp_list_episodes_falls_back_to_search_top_match(mcp_on, monkeypatch):
+    """Show-name typos vs apostrophes: use search_podcasts ranking, top hit."""
+    monkeypatch.setattr(A, '_itunes_shows_matching', lambda q: [])
+    monkeypatch.setattr(A, '_itunes_search', lambda term, entity: [
+        {
+            'collectionName': "Merriam-Webster's Word of the Day",
+            'feedUrl': 'https://feeds.example.com/mw.xml',
+            'artistName': 'Merriam-Webster',
+        },
+        {
+            'collectionName': 'Unrelated Dictionary Show',
+            'feedUrl': 'https://feeds.example.com/other.xml',
+        },
+    ])
+    mw_feed = [{
+        'title': 'Word: ephemeral',
+        'published': '2026-09-10',
+        'audio_url': 'https://cdn.example.com/mw-2026-09-10.mp3',
+        'podcast_name': "Merriam-Webster's Word of the Day",
+        'artwork': '',
+        'duration_min': 5.0,
+        'estimated_cost': 0.03,
+    }]
+
+    def _feed(url):
+        if url == 'https://feeds.example.com/mw.xml':
+            return list(mw_feed), None
+        return None, 'wrong feed'
+
+    monkeypatch.setattr(A, 'get_episodes_from_rss', _feed)
+    payload, result = _mcp_tool(mcp_on['key_a'], 'list_episodes', {
+        'podcast': 'Merriam-Webster Word of the Day',
+    })
+    assert result.get('isError') is False, payload
+    assert payload['feed_url'] == 'https://feeds.example.com/mw.xml'
+    assert payload['podcast'] == "Merriam-Webster's Word of the Day"
+    assert payload['count'] >= 1
+    assert payload['episodes'][0]['title'] == 'Word: ephemeral'
+
+
 def test_mcp_get_transcript_ready_existing(mcp_on):
     payload, result = _mcp_tool(mcp_on['key_a'], 'get_transcript', {
         'episode': 'cust-a-ep',
@@ -6233,6 +6273,8 @@ def test_mcp_get_transcript_ready_existing(mcp_on):
     assert payload['transcript_status'] == 'ready'
     assert payload['text'] == 'Transcript belonging to A.'
     assert payload['job_id'] == 'cust-a-ep'
+    assert payload['reused'] is True
+    assert payload['cost_minutes'] == 0
     assert 'balance' in payload
 
 
@@ -6307,9 +6349,12 @@ def test_mcp_get_transcript_by_list_id_does_not_charge_twice(mcp_on):
     assert first['reused'] is False
     assert first['title'] == ep['title']
     assert first['cost_minutes'] == 42
+    # Repeat with only the audio-URL id (no duration_min) — must not invent the
+    # 30-minute unknown-duration estimate as a new charge.
     second, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript', {'episode': ep['id']})
     assert second['job_id'] == first['job_id']
     assert second['reused'] is True
+    assert second['cost_minutes'] == 0
     assert (second['balance']['remaining_minutes']
             == first['balance_after']['remaining_minutes'])
 

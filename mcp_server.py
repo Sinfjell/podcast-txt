@@ -405,11 +405,20 @@ def _resolve_podcast_feed(podcast: str) -> tuple[str | None, str | None, str | N
             return podcast, None, None
         return None, None, 'URL is not a supported feed, Apple, or Spotify show link.'
 
-    # Show name via iTunes
+    # Show name via iTunes: prefer exact/substring matches, then the same
+    # directory ranking search_podcasts uses. Apostrophe/hyphen differences
+    # (e.g. "Merriam-Webster Word of the Day" vs "Merriam-Webster's …") often
+    # miss the strict filter but rank first in Apple's search.
     try:
         shows = A._itunes_shows_matching(podcast)
     except RuntimeError as e:
         return None, None, str(e)
+    if not shows:
+        try:
+            raw = A._itunes_search(podcast, 'podcast')
+        except Exception as e:  # noqa: BLE001 — surface directory errors cleanly
+            return None, None, f'Podcast directory unreachable: {e}'
+        shows = [item for item in raw if item.get('feedUrl')]
     if not shows:
         return None, None, (
             f'No public podcast feed found for "{podcast}". '
@@ -617,7 +626,7 @@ def tool_get_transcript(user, episode: str, language: str = '',
                     'title': task.episode_title,
                     'publisher': task.podcast_name,
                     'text': task.transcript_text or '',
-                    'cost_minutes': None,
+                    'cost_minutes': 0,
                     'balance': bal,
                     'reused': True,
                 }
@@ -629,6 +638,7 @@ def tool_get_transcript(user, episode: str, language: str = '',
                     'title': task.episode_title,
                     'publisher': task.podcast_name,
                     'message': 'Transcription in progress. Poll get_transcript_status.',
+                    'cost_minutes': 0,
                     'balance': bal,
                     'reused': True,
                 }
@@ -638,6 +648,7 @@ def tool_get_transcript(user, episode: str, language: str = '',
                     'transcript_status': 'failed',
                     'error_message': task.error_message,
                     'title': task.episode_title,
+                    'cost_minutes': 0,
                     'balance': bal,
                     'reused': True,
                 }
@@ -661,7 +672,8 @@ def tool_get_transcript(user, episode: str, language: str = '',
             'title': existing.episode_title,
             'publisher': existing.podcast_name,
             'balance': bal,
-            'cost_minutes': _estimate_cost_minutes(catalog.get('duration_min')),
+            # Reuse charges nothing — do not invent the unknown-duration estimate.
+            'cost_minutes': 0,
             'reused': True,
         }
         if status == 'ready':
