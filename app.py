@@ -8937,11 +8937,11 @@ USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscripti
 - [Home]({public_url('index')}): search, paste Spotify/Apple/RSS, pick an episode, transcribe
 - [Podcasts]({public_url('podcasts_index')}): show landing pages for popular podcasts
 - [Pricing]({public_url('pricing')}): free trial, credit pack, or bring your own key
-- [Use in ChatGPT & Claude]({public_url('ai_landing')}): connect Podskrift MCP (`/mcp`) in ChatGPT, Claude, Cursor or Claude Code
+- [Use in ChatGPT & Claude]({public_url('ai_landing')}): connect Podskrift MCP (`/mcp`) in ChatGPT, Claude, Cursor or Claude Code; copyable prompts for your library, marketing, research and routines
 - [Guides]({public_url('guides_index')}): setup walkthroughs for ChatGPT, Claude, and the long-form overview
 - [Connect Podskrift to ChatGPT]({public_url('guide_chatgpt')}): Plugins → custom MCP server → OAuth
 - [Connect Podskrift to Claude]({public_url('guide_claude')}): Customize → Connectors → custom connector
-- [Guide: podcast transcripts in ChatGPT and Claude]({public_url('guide_ai_transcripts')}): overview of connector setup and what it costs
+- [Guide: podcast transcripts in ChatGPT and Claude]({public_url('guide_ai_transcripts')}): step-by-step connector setup, example asks, and what it costs
 - [What's new]({public_url('whats_new')}): dated feature list, newest first (build in public)
 - [API docs]({public_url('api_docs')}): customer HTTP API (resolve → transcribe → transcript)
 - [How to find an RSS feed]({public_url('rss_help')}): for podcasts outside the search index
@@ -8998,6 +8998,57 @@ def sitemap_xml():
 def _mcp_connector_url():
     base = PUBLIC_BASE_URL or request.url_root.rstrip('/')
     return base + '/mcp'
+
+
+def ai_ask_prompt_groups():
+    """Copyable example prompts for /ai and the ChatGPT/Claude guide.
+
+    Honest framing: Podskrift returns transcripts (and lists your library);
+    the chat app writes the summary, post, or document. Keep prompts short.
+    """
+    return [
+        {
+            'id': 'library',
+            'title': 'Your library',
+            'blurb': 'Browse what you’ve already transcribed — free to fetch again.',
+            'prompts': [
+                'Find my latest transcript of Hard Fork and turn it into a polished document with key points and quotes',
+                'List everything I transcribed this week',
+                'Search my transcripts for what was said about pricing',
+            ],
+        },
+        {
+            'id': 'marketing',
+            'title': 'Content & marketing',
+            'blurb': 'Podskrift supplies the transcript; your AI writes the piece.',
+            'prompts': [
+                'Turn this episode into a blog post',
+                '5 LinkedIn posts from my latest Lex Fridman transcript',
+                'Pull the 10 best quotes with timestamps',
+                'Extract the sales arguments and objections for our product from this sales podcast',
+            ],
+        },
+        {
+            'id': 'research',
+            'title': 'Research & learning',
+            'blurb': 'Compare episodes or build notes from the transcript text.',
+            'prompts': [
+                'Compare what three episodes said about AI regulation',
+                'Make study notes and flashcards from this episode',
+            ],
+        },
+        {
+            'id': 'routines',
+            'title': 'Routines',
+            'blurb': (
+                'Use ChatGPT scheduled tasks or Claude schedules. '
+                'New episodes use your Podskrift minutes; repeats of the same episode do not.'
+            ),
+            'prompts': [
+                'Every Monday, get the newest episode of [show] and email me a summary',
+            ],
+        },
+    ]
 
 
 def ai_faq_entries():
@@ -9076,8 +9127,13 @@ def guide_ai_faq_entries():
 
 
 def _faq_page_structured_data(page_url, page_name, page_description, faq_pairs,
-                              howto=None):
-    """WebPage + FAQPage JSON-LD (optional HowTo). FAQ text must match the page."""
+                              howto=None, prompt_groups=None):
+    """WebPage + FAQPage JSON-LD (optional HowTo / prompt ItemList).
+
+    FAQ answers must match the visible copy. Optional ``prompt_groups``
+    (from ``ai_ask_prompt_groups``) add an ItemList of example asks so
+    assistants can surface concrete prompts.
+    """
     import json as _json
     graph = [
         {
@@ -9123,7 +9179,34 @@ def _faq_page_structured_data(page_url, page_name, page_description, faq_pairs,
             ],
         }
         graph.insert(1, howto_node)
-    data = {'@context': 'https://schema.org', '@graph': graph}
+    if prompt_groups:
+        items = []
+        pos = 1
+        for group in prompt_groups:
+            for prompt in group.get('prompts') or ():
+                items.append({
+                    '@type': 'ListItem',
+                    'position': pos,
+                    'name': prompt,
+                })
+                pos += 1
+        if items:
+            graph.append({
+                '@type': 'ItemList',
+                '@id': page_url + '#ask-prompts',
+                'name': 'What you can ask',
+                'description': (
+                    'Example prompts for ChatGPT or Claude with Podskrift. '
+                    'Podskrift returns transcripts; the AI writes summaries '
+                    'and documents.'
+                ),
+                'numberOfItems': len(items),
+                'itemListElement': items,
+            })
+    data = {
+        '@context': 'https://schema.org',
+        '@graph': graph,
+    }
     return (_json.dumps(data, ensure_ascii=False, indent=2)
             .replace('<', '\\u003c').replace('>', '\\u003e'))
 
@@ -9221,16 +9304,20 @@ def guide_claude_faq_entries():
 def ai_landing():
     """Public landing: connect Podskrift MCP in ChatGPT, Claude, Cursor, etc."""
     mcp_url = _mcp_connector_url()
+    prompts = ai_ask_prompt_groups()
     return render_template(
         'ai.html',
         mcp_connector_url=mcp_url,
         ai_faq=ai_faq_entries(),
+        ask_prompt_groups=prompts,
         structured_data=_faq_page_structured_data(
             public_url('ai_landing'),
             'Use Podskrift in ChatGPT and Claude',
             'Connect Podskrift to ChatGPT, Claude, Cursor or Claude Code '
-            'via MCP. Ask your AI to summarise or quote any podcast episode.',
+            'via MCP. Ask your AI to summarise episodes, search your '
+            'transcript library, or draft posts from the transcript text.',
             ai_faq_entries(),
+            prompt_groups=prompts,
         ),
         trial_minutes=advertised_trial_minutes(),
     )
@@ -9384,17 +9471,20 @@ def guide_ai_transcripts():
     """Long-form guide: podcast transcripts in ChatGPT and Claude via MCP."""
     mcp_url = _mcp_connector_url()
     faq = guide_ai_faq_entries()
+    prompts = ai_ask_prompt_groups()
     return render_template(
         'guide_ai_transcripts.html',
         mcp_connector_url=mcp_url,
         guide_faq=faq,
+        ask_prompt_groups=prompts,
         structured_data=_faq_page_structured_data(
             public_url('guide_ai_transcripts'),
             'Podcast Transcripts in ChatGPT and Claude',
             'Get podcast transcripts in ChatGPT and Claude: connect Podskrift '
-            'at podskrift.com/mcp, ask for an episode and let the chat '
-            'summarise it.',
+            'at podskrift.com/mcp, ask for any episode, search your library, '
+            'and let the chat summarise or draft from the transcript.',
             faq,
+            prompt_groups=prompts,
         ),
         trial_minutes=advertised_trial_minutes(),
         stripe_configured=stripe_checkout_enabled(),

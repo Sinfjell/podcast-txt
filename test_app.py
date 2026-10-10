@@ -3718,6 +3718,18 @@ def test_ai_landing_page_renders_and_has_faq_json_ld(trial_on):
     assert '/guides/chatgpt' in body
     assert '/guides/claude' in body
     assert "you've already transcribed cost nothing" in body
+    # What you can ask — copyable prompts, secondary Copy only.
+    assert 'What you can ask' in body
+    assert 'Your library' in body
+    assert 'Content &amp; marketing' in body or 'Content & marketing' in body
+    assert 'Research &amp; learning' in body or 'Research & learning' in body
+    assert 'Routines' in body
+    assert 'List everything I transcribed this week' in body
+    assert 'data-ds-copy' in body
+    assert 'Podskrift returns the transcript' in body
+    groups = A.ai_ask_prompt_groups()
+    n_prompts = sum(len(g['prompts']) for g in groups)
+    assert 6 <= n_prompts <= 10
     for question, _ in A.ai_faq_entries():
         assert question in body
     m = _re.search(r'<script type="application/ld\+json">(.*?)</script>', body, _re.S)
@@ -3725,8 +3737,12 @@ def test_ai_landing_page_renders_and_has_faq_json_ld(trial_on):
     data = _json.loads(m.group(1))
     types = {n['@type'] for n in data['@graph']}
     assert 'FAQPage' in types
+    assert 'ItemList' in types
     faq = next(n for n in data['@graph'] if n['@type'] == 'FAQPage')
     assert len(faq['mainEntity']) == len(A.ai_faq_entries())
+    asks = next(n for n in data['@graph'] if n['@type'] == 'ItemList')
+    assert asks['numberOfItems'] == n_prompts
+    assert any('Hard Fork' in (it.get('name') or '') for it in asks['itemListElement'])
 
 
 def test_guides_chatgpt_and_claude_pages(trial_on):
@@ -3822,6 +3838,11 @@ def test_guide_ai_transcripts_page_renders(trial_on):
     assert 'Free (one connector)' in body or 'one connector' in body
     assert "you've already transcribed cost nothing" in body
     assert body.count('class="btn btn-primary"') == 1
+    assert 'What you can ask' in body
+    assert 'list_my_transcripts' in body
+    assert 'get_my_transcript' in body
+    assert 'List everything I transcribed this week' in body
+    assert 'Every Monday' in body
     faq_pairs = A.guide_ai_faq_entries()
     assert len(faq_pairs) == 5
     for question, answer in faq_pairs:
@@ -3835,6 +3856,7 @@ def test_guide_ai_transcripts_page_renders(trial_on):
     for entry, (question, answer) in zip(faq['mainEntity'], faq_pairs):
         assert entry['name'] == question
         assert entry['acceptedAnswer']['text'] == answer
+    assert any(n['@type'] == 'ItemList' for n in data['@graph'])
     sitemap = A.app.test_client().get('/sitemap.xml').data.decode()
     assert path in sitemap
     llms = A.app.test_client().get('/llms.txt').data.decode()
@@ -3848,6 +3870,7 @@ def test_ai_in_llms_txt(trial_on):
     assert '/guides/chatgpt' in body
     assert '/guides/claude' in body
     assert 'ChatGPT' in body and 'Claude' in body
+    assert 'copyable prompts' in body.lower() or 'library' in body.lower()
 
 
 def test_nav_and_footer_link_to_ai(trial_on):
@@ -8595,29 +8618,30 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'mcp-list-my-transcripts'
-    assert entries[1]['id'] == 'history-in-progress'
-    assert entries[2]['id'] == 'mcp-chat-example'
-    assert entries[3]['id'] == 'mcp-visual-setup-guides'
-    assert entries[4]['id'] == 'history-via-mcp'
-    assert entries[5]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[6]['id'] == 'new-signup-120-min-trial'
-    assert entries[7]['id'] == 'new-look'
-    assert entries[8]['id'] == 'forgot-password'
-    assert entries[9]['id'] == 'share-listen-links'
-    assert entries[10]['id'] == 'keyboard-and-faster-loading'
+    assert entries[0]['id'] == 'ai-what-you-can-ask'
+    assert entries[1]['id'] == 'mcp-list-my-transcripts'
+    assert entries[2]['id'] == 'history-in-progress'
+    assert entries[3]['id'] == 'mcp-chat-example'
+    assert entries[4]['id'] == 'mcp-visual-setup-guides'
+    assert entries[5]['id'] == 'history-via-mcp'
+    assert entries[6]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[7]['id'] == 'new-signup-120-min-trial'
+    assert entries[8]['id'] == 'new-look'
+    assert entries[9]['id'] == 'forgot-password'
+    assert entries[10]['id'] == 'share-listen-links'
+    assert entries[11]['id'] == 'keyboard-and-faster-loading'
     # Internal / auth fixes never ship as user-facing changelog entries.
     assert all(e['id'] != 'chatgpt-oauth-private-key-jwt' for e in entries)
-    assert entries[11]['id'] == 'show-landing-pages'
-    assert entries[12]['id'] == 'public-share-links'
-    assert entries[13]['id'] == 'unsubscribe-confirm-click'
-    assert entries[14]['id'] == 'partial-preview-minutes-wording'
-    assert entries[15]['id'] == 'partial-trial-preview'
-    assert entries[16]['id'] == 'own-key-billing-clarity'
-    assert entries[17]['id'] == 'clearer-missing-episode-audio'
-    assert entries[18]['id'] == 'new-signup-60-min-trial'
-    assert entries[19]['id'] == 'spotify-paste-robustness'
-    assert entries[20]['id'] == 'no-double-charge-restart'
+    assert entries[12]['id'] == 'show-landing-pages'
+    assert entries[13]['id'] == 'public-share-links'
+    assert entries[14]['id'] == 'unsubscribe-confirm-click'
+    assert entries[15]['id'] == 'partial-preview-minutes-wording'
+    assert entries[16]['id'] == 'partial-trial-preview'
+    assert entries[17]['id'] == 'own-key-billing-clarity'
+    assert entries[18]['id'] == 'clearer-missing-episode-audio'
+    assert entries[19]['id'] == 'new-signup-60-min-trial'
+    assert entries[20]['id'] == 'spotify-paste-robustness'
+    assert entries[21]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -13072,14 +13096,15 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'mcp-list-my-transcripts'
-    assert entries[1]['id'] == 'history-in-progress'
-    assert entries[2]['id'] == 'mcp-chat-example'
-    assert entries[3]['id'] == 'mcp-visual-setup-guides'
-    assert entries[4]['id'] == 'history-via-mcp'
-    assert entries[5]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[6]['id'] == 'new-signup-120-min-trial'
-    assert entries[7]['id'] == 'new-look'
+    assert entries[0]['id'] == 'ai-what-you-can-ask'
+    assert entries[1]['id'] == 'mcp-list-my-transcripts'
+    assert entries[2]['id'] == 'history-in-progress'
+    assert entries[3]['id'] == 'mcp-chat-example'
+    assert entries[4]['id'] == 'mcp-visual-setup-guides'
+    assert entries[5]['id'] == 'history-via-mcp'
+    assert entries[6]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[7]['id'] == 'new-signup-120-min-trial'
+    assert entries[8]['id'] == 'new-look'
 
 
 # --------------------------------------------------------------------------

@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "ai-what-you-can-ask",
+      "date": "2026-10-10",
+      "title": "Copyable prompts for ChatGPT and Claude",
+      "summary": "On Use in ChatGPT & Claude, you’ll find short prompts for your library, marketing, research and weekly routines — copy one and paste it into your AI."
+    },
+    {
       "id": "mcp-list-my-transcripts",
       "date": "2026-10-10",
       "title": "Ask ChatGPT or Claude to list and open your past transcripts",

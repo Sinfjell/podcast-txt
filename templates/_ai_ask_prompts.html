@@ -1,0 +1,34 @@
+{# Shared "What you can ask" prompt groups for /ai and the ChatGPT/Claude guide.
+   Copy uses components.js [data-ds-copy] (secondary buttons only).
+   Expects ask_prompt_groups from ai_ask_prompt_groups().
+   Outer is a div so the host page owns the section landmark. #}
+<div class="ai-ask">
+    <h2 id="{{ heading_id|default('aiAskHeading') }}">What you can ask</h2>
+    <p class="ai-ask-lead">
+        Copy a prompt into ChatGPT or Claude after you connect Podskrift.
+        Podskrift returns the transcript (or lists your library); your AI writes
+        the summary, post, or document.
+    </p>
+    {% for group in ask_prompt_groups %}
+    <div class="ai-ask-group" id="ask-{{ group.id }}">
+        <h3 class="ai-ask-group-title">{{ group.title }}</h3>
+        {% if group.blurb %}
+        <p class="ai-ask-group-blurb">{{ group.blurb }}</p>
+        {% endif %}
+        <ul class="ai-ask-list">
+            {% for prompt in group.prompts %}
+            <li class="ai-ask-row" data-ds-copy-root>
+                <p class="ai-ask-prompt" data-ds-copy-source>{{ prompt }}</p>
+                <button type="button"
+                        class="btn btn-secondary btn-sm"
+                        data-ds-copy
+                        data-ds-copy-label="Copy"
+                        data-ds-copied-label="Copied"
+                        aria-label="Copy prompt">Copy</button>
+                <span class="sr-only" role="status" data-ds-copy-status></span>
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endfor %}
+</div>

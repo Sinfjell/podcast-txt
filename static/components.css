@@ -449,6 +449,69 @@
 }
 
 /* ---------------------------------------------------------------------------
+   AI ask prompts — copyable example asks on /ai and the ChatGPT/Claude guide
+   --------------------------------------------------------------------------- */
+.ai-ask {
+    margin: 0;
+}
+.ai-ask .ai-ask-lead {
+    font-size: 1.0625rem;
+    line-height: 1.55;
+    color: var(--muted);
+    margin: 0 0 var(--space-6);
+    max-width: 36em;
+}
+.ai-ask-group {
+    margin: 0 0 var(--space-7);
+}
+.ai-ask-group:last-child {
+    margin-bottom: 0;
+}
+.ai-ask-group-title {
+    font-size: 1.0625rem;
+    font-weight: 700;
+    line-height: 1.35;
+    margin: 0 0 var(--space-2);
+    color: var(--ink);
+}
+.ai-ask-group-blurb {
+    font-size: 0.875rem;
+    line-height: 1.5;
+    color: var(--muted);
+    margin: 0 0 var(--space-3);
+    max-width: 36em;
+}
+.ai-ask-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+.ai-ask-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-4) 0;
+    border-top: 1px solid var(--line);
+}
+.ai-ask-list .ai-ask-row:last-child {
+    border-bottom: 1px solid var(--line);
+}
+.ai-ask-prompt {
+    flex: 1 1 16rem;
+    min-width: 0;
+    margin: 0;
+    font-size: 1.0625rem;
+    font-weight: 500;
+    line-height: 1.55;
+    color: var(--ink);
+}
+.ai-ask-row .btn {
+    flex: none;
+    margin-top: 2px;
+}
+
+/* ---------------------------------------------------------------------------
    Gallery page chrome (dev-only)
    --------------------------------------------------------------------------- */
 .ds-gallery-section {
