@@ -3040,7 +3040,7 @@ def test_the_scrim_is_not_inside_the_blurred_nav_bar(trial_on):
     """
     body = A.app.test_client().get('/').data.decode()
     assert 'id="navScrim"' in body, 'no backdrop at all'
-    nav_open = body.index('<nav class="nav-bar">')
+    nav_open = body.index('<nav class="nav-bar"')
     nav_close = body.index('</nav>', nav_open)
     assert 'navScrim' not in body[nav_open:nav_close], (
         'the scrim is inside <nav>, whose backdrop-filter collapses it to 0 height'
@@ -8961,30 +8961,31 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'ai-what-you-can-ask'
-    assert entries[1]['id'] == 'mcp-list-my-transcripts'
-    assert entries[2]['id'] == 'history-in-progress'
-    assert entries[3]['id'] == 'mcp-chat-example'
-    assert entries[4]['id'] == 'mcp-visual-setup-guides'
-    assert entries[5]['id'] == 'history-via-mcp'
-    assert entries[6]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[7]['id'] == 'new-signup-120-min-trial'
-    assert entries[8]['id'] == 'new-look'
-    assert entries[9]['id'] == 'forgot-password'
-    assert entries[10]['id'] == 'share-listen-links'
-    assert entries[11]['id'] == 'keyboard-and-faster-loading'
+    assert entries[0]['id'] == 'new-home-and-header'
+    assert entries[1]['id'] == 'ai-what-you-can-ask'
+    assert entries[2]['id'] == 'mcp-list-my-transcripts'
+    assert entries[3]['id'] == 'history-in-progress'
+    assert entries[4]['id'] == 'mcp-chat-example'
+    assert entries[5]['id'] == 'mcp-visual-setup-guides'
+    assert entries[6]['id'] == 'history-via-mcp'
+    assert entries[7]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[8]['id'] == 'new-signup-120-min-trial'
+    assert entries[9]['id'] == 'new-look'
+    assert entries[10]['id'] == 'forgot-password'
+    assert entries[11]['id'] == 'share-listen-links'
+    assert entries[12]['id'] == 'keyboard-and-faster-loading'
     # Internal / auth fixes never ship as user-facing changelog entries.
     assert all(e['id'] != 'chatgpt-oauth-private-key-jwt' for e in entries)
-    assert entries[12]['id'] == 'show-landing-pages'
-    assert entries[13]['id'] == 'public-share-links'
-    assert entries[14]['id'] == 'unsubscribe-confirm-click'
-    assert entries[15]['id'] == 'partial-preview-minutes-wording'
-    assert entries[16]['id'] == 'partial-trial-preview'
-    assert entries[17]['id'] == 'own-key-billing-clarity'
-    assert entries[18]['id'] == 'clearer-missing-episode-audio'
-    assert entries[19]['id'] == 'new-signup-60-min-trial'
-    assert entries[20]['id'] == 'spotify-paste-robustness'
-    assert entries[21]['id'] == 'no-double-charge-restart'
+    assert entries[13]['id'] == 'show-landing-pages'
+    assert entries[14]['id'] == 'public-share-links'
+    assert entries[15]['id'] == 'unsubscribe-confirm-click'
+    assert entries[16]['id'] == 'partial-preview-minutes-wording'
+    assert entries[17]['id'] == 'partial-trial-preview'
+    assert entries[18]['id'] == 'own-key-billing-clarity'
+    assert entries[19]['id'] == 'clearer-missing-episode-audio'
+    assert entries[20]['id'] == 'new-signup-60-min-trial'
+    assert entries[21]['id'] == 'spotify-paste-robustness'
+    assert entries[22]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -13688,15 +13689,16 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'ai-what-you-can-ask'
-    assert entries[1]['id'] == 'mcp-list-my-transcripts'
-    assert entries[2]['id'] == 'history-in-progress'
-    assert entries[3]['id'] == 'mcp-chat-example'
-    assert entries[4]['id'] == 'mcp-visual-setup-guides'
-    assert entries[5]['id'] == 'history-via-mcp'
-    assert entries[6]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[7]['id'] == 'new-signup-120-min-trial'
-    assert entries[8]['id'] == 'new-look'
+    assert entries[0]['id'] == 'new-home-and-header'
+    assert entries[1]['id'] == 'ai-what-you-can-ask'
+    assert entries[2]['id'] == 'mcp-list-my-transcripts'
+    assert entries[3]['id'] == 'history-in-progress'
+    assert entries[4]['id'] == 'mcp-chat-example'
+    assert entries[5]['id'] == 'mcp-visual-setup-guides'
+    assert entries[6]['id'] == 'history-via-mcp'
+    assert entries[7]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[8]['id'] == 'new-signup-120-min-trial'
+    assert entries[9]['id'] == 'new-look'
 
 
 # --------------------------------------------------------------------------
