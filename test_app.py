@@ -7813,23 +7813,24 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'chatgpt-oauth-private-key-jwt'
-    assert entries[1]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[2]['id'] == 'new-signup-120-min-trial'
-    assert entries[3]['id'] == 'new-look'
-    assert entries[4]['id'] == 'forgot-password'
-    assert entries[5]['id'] == 'share-listen-links'
-    assert entries[6]['id'] == 'keyboard-and-faster-loading'
-    assert entries[7]['id'] == 'show-landing-pages'
-    assert entries[8]['id'] == 'public-share-links'
-    assert entries[9]['id'] == 'unsubscribe-confirm-click'
-    assert entries[10]['id'] == 'partial-preview-minutes-wording'
-    assert entries[11]['id'] == 'partial-trial-preview'
-    assert entries[12]['id'] == 'own-key-billing-clarity'
-    assert entries[13]['id'] == 'clearer-missing-episode-audio'
-    assert entries[14]['id'] == 'new-signup-60-min-trial'
-    assert entries[15]['id'] == 'spotify-paste-robustness'
-    assert entries[16]['id'] == 'no-double-charge-restart'
+    assert entries[0]['id'] == 'history-via-mcp'
+    assert entries[1]['id'] == 'chatgpt-oauth-private-key-jwt'
+    assert entries[2]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[3]['id'] == 'new-signup-120-min-trial'
+    assert entries[4]['id'] == 'new-look'
+    assert entries[5]['id'] == 'forgot-password'
+    assert entries[6]['id'] == 'share-listen-links'
+    assert entries[7]['id'] == 'keyboard-and-faster-loading'
+    assert entries[8]['id'] == 'show-landing-pages'
+    assert entries[9]['id'] == 'public-share-links'
+    assert entries[10]['id'] == 'unsubscribe-confirm-click'
+    assert entries[11]['id'] == 'partial-preview-minutes-wording'
+    assert entries[12]['id'] == 'partial-trial-preview'
+    assert entries[13]['id'] == 'own-key-billing-clarity'
+    assert entries[14]['id'] == 'clearer-missing-episode-audio'
+    assert entries[15]['id'] == 'new-signup-60-min-trial'
+    assert entries[16]['id'] == 'spotify-paste-robustness'
+    assert entries[17]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -12146,10 +12147,11 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'chatgpt-oauth-private-key-jwt'
-    assert entries[1]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[2]['id'] == 'new-signup-120-min-trial'
-    assert entries[3]['id'] == 'new-look'
+    assert entries[0]['id'] == 'history-via-mcp'
+    assert entries[1]['id'] == 'chatgpt-oauth-private-key-jwt'
+    assert entries[2]['id'] == 'use-in-chatgpt-claude-cursor'
+    assert entries[3]['id'] == 'new-signup-120-min-trial'
+    assert entries[4]['id'] == 'new-look'
 
 
 # --------------------------------------------------------------------------
