@@ -57,6 +57,10 @@ class User(UserMixin, db.Model):
     session_version = db.Column(db.Integer, nullable=False, default=0,
                                 server_default='0')
 
+    # Last Europe/Oslo calendar day we emitted user_active_day (YYYY-MM-DD).
+    # Dedupes the once-per-day PostHog event across workers and sessions.
+    last_active_day = db.Column(db.String(10), nullable=True)
+
     feeds = db.relationship('SavedFeed', backref='user', lazy=True, cascade='all, delete-orphan')
     tasks = db.relationship('TranscriptionTask', backref='user', lazy=True, cascade='all, delete-orphan')
     credit_purchases = db.relationship('CreditPurchase', backref='user', lazy=True,
@@ -386,6 +390,7 @@ USER_COLUMN_MIGRATIONS = {
     'email_transcript_ready': 'BOOLEAN NOT NULL DEFAULT 1',
     'email_unsubscribed_at': 'DATETIME',
     'session_version': 'INTEGER NOT NULL DEFAULT 0',
+    'last_active_day': 'VARCHAR(10)',
 }
 
 #: Additive columns for password_reset_tokens. Applied by

@@ -1889,10 +1889,19 @@ SHARE_CREATE_WINDOW_SECONDS = 3600
 #: 22 bytes → 176 bits of entropy (url-safe); requirement is >= 128-bit.
 SHARE_TOKEN_BYTES = 22
 UTM_SESSION_KEY = '_utm_source'
-#: First human pageview in this browser session (path + Referer), for signup
-#: attribution. Written once; coarse referrer bucket only reaches PostHog.
+#: First human pageview in this browser session (path + Referer + utm_*),
+#: for signup attribution. Written once on the first navigable GET; never
+#: overwritten later — so a ChatGPT land on /?utm_source=chatgpt.com still
+#: attributes after the visitor navigates to /register.
 FIRST_LANDING_SESSION_KEY = '_first_landing'
 FIRST_REFERRER_SESSION_KEY = '_first_referrer'
+FIRST_UTM_SESSION_KEY = '_first_utm'
+#: utm_* query keys we keep for first-touch (never invent values).
+FIRST_TOUCH_UTM_KEYS = (
+    'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+)
+#: Session short-circuit for user_active_day (Oslo YYYY-MM-DD).
+ACTIVE_DAY_SESSION_KEY = '_active_day'
 
 _share_create_attempts = collections.defaultdict(list)
 _share_create_lock = threading.Lock()
@@ -3569,8 +3578,20 @@ def _analytics_anon_id():
     return f'anon:{aid}'
 
 
+def _first_touch_utm_from_args():
+    """utm_* present on this request, truncated; empty dict if none."""
+    out = {}
+    for key in FIRST_TOUCH_UTM_KEYS:
+        val = (request.args.get(key) or '').strip()
+        if val:
+            out[key] = val[:64]
+    return out
+
+
 def _stash_utm_from_request():
-    """Remember utm_source from the query string for the eventual signup event."""
+    """Legacy helper — first-touch stash owns utm. Write-once only."""
+    if FIRST_LANDING_SESSION_KEY in session or UTM_SESSION_KEY in session:
+        return
     src = (request.args.get('utm_source') or '').strip()
     if not src:
         return
@@ -3578,10 +3599,13 @@ def _stash_utm_from_request():
 
 
 def _stash_first_touch_from_request():
-    """Remember first landing path + Referer once per browser session.
+    """Remember first landing path + Referer + utm_* once per browser session.
 
-    Skips probes, webhooks, static assets, and non-GET so bots/health checks
-    do not overwrite a real first page. Path only — never query string.
+    Runs on the first navigable GET of any page (not only /register), so a
+    visitor who lands on /?utm_source=chatgpt.com then signs up keeps that
+    attribution. Skips probes, webhooks, static assets, and non-GET so
+    bots/health checks do not lock an empty first touch. Path only — never
+    the query string — for first_landing; utm_* are stored separately.
     """
     if FIRST_LANDING_SESSION_KEY in session:
         return
@@ -3595,6 +3619,12 @@ def _stash_first_touch_from_request():
         return
     session[FIRST_LANDING_SESSION_KEY] = path[:128]
     session[FIRST_REFERRER_SESSION_KEY] = (request.referrer or '')[:512]
+    utm = _first_touch_utm_from_args()
+    if utm:
+        session[FIRST_UTM_SESSION_KEY] = utm
+        src = utm.get('utm_source')
+        if src:
+            session[UTM_SESSION_KEY] = src
 
 
 def _signup_country():
@@ -3618,23 +3648,43 @@ def _signup_country():
 
 
 def _first_touch_analytics_props(*, utm=None):
-    """Consume stashed first landing/referrer into coarse signup props."""
+    """Consume stashed first landing/referrer/utm into signup + person props."""
     if (FIRST_LANDING_SESSION_KEY not in session
-            and FIRST_REFERRER_SESSION_KEY not in session):
+            and FIRST_REFERRER_SESSION_KEY not in session
+            and FIRST_UTM_SESSION_KEY not in session
+            and UTM_SESSION_KEY not in session):
         return {}
     props = {}
     landing = session.pop(FIRST_LANDING_SESSION_KEY, None)
     ref = session.pop(FIRST_REFERRER_SESSION_KEY, None) or ''
+    first_utm = dict(session.pop(FIRST_UTM_SESSION_KEY, None) or {})
+    session.pop(UTM_SESSION_KEY, None)
+    if utm and 'utm_source' not in first_utm:
+        first_utm['utm_source'] = str(utm)[:64]
+    for key, val in first_utm.items():
+        if val:
+            props[key] = str(val)[:64]
     if landing:
         props['first_landing'] = str(landing)[:128]
+    effective_utm = first_utm.get('utm_source') or utm or ''
     props['first_referrer_source'] = show_pages_mod.referrer_source(
-        ref, utm or '')
+        ref, effective_utm)
+    set_once = {}
+    if landing:
+        set_once['first_landing'] = props['first_landing']
+    set_once['first_referrer_source'] = props['first_referrer_source']
+    for key in FIRST_TOUCH_UTM_KEYS:
+        if key in props:
+            set_once[key] = props[key]
+    if set_once:
+        props['$set_once'] = set_once
     return props
 
 
 def _utm_source_for_signup():
-    """utm_source from session (stashed) or the signup form/query, if any."""
-    src = session.pop(UTM_SESSION_KEY, None)
+    """utm_source from first-touch stash or the signup form/query, if any."""
+    first_utm = session.get(FIRST_UTM_SESSION_KEY) or {}
+    src = session.pop(UTM_SESSION_KEY, None) or first_utm.get('utm_source')
     if not src:
         src = (request.values.get('utm_source') or '').strip() or None
     if not src:
@@ -3642,10 +3692,85 @@ def _utm_source_for_signup():
     return str(src)[:64]
 
 
+def _should_count_active_day_web():
+    """True for browser navigations that should count toward DAU."""
+    path = request.path or '/'
+    if path.startswith('/static/'):
+        return False
+    if path in ('/health', '/healthz', '/ready', '/ping') or path.startswith('/health'):
+        return False
+    if path.startswith('/stripe/webhook'):
+        return False
+    # MCP and customer API have their own source=mcp / are not "web".
+    if path == '/mcp' or path.startswith('/mcp/') or path.startswith('/api/'):
+        return False
+    return True
+
+
+def maybe_capture_user_active_day(user_id, *, source):
+    """Emit at most one user_active_day per user per Europe/Oslo day.
+
+    Dedupes with an atomic UPDATE on ``users.last_active_day`` (safe across
+    gunicorn workers) and a session short-circuit for the same browser.
+    ``source`` is ``web`` or ``mcp``. Never raises.
+    """
+    if not user_id or source not in ('web', 'mcp'):
+        return False
+    try:
+        day = trial_oslo_day_str()
+        if has_request_context():
+            try:
+                if session.get(ACTIVE_DAY_SESSION_KEY) == day:
+                    return False
+            except RuntimeError:
+                pass
+        result = db.session.execute(text("""
+            UPDATE users
+               SET last_active_day = :day
+             WHERE id = :uid
+               AND (last_active_day IS NULL OR last_active_day != :day)
+        """), {'day': day, 'uid': int(user_id)})
+        db.session.commit()
+        claimed = result.rowcount == 1
+        if has_request_context():
+            try:
+                session[ACTIVE_DAY_SESSION_KEY] = day
+            except RuntimeError:
+                pass
+        if not claimed:
+            return False
+        product_analytics.capture(
+            'user_active_day',
+            user_id,
+            {'source': source, 'day': day},
+        )
+        return True
+    except Exception:  # noqa: BLE001 - analytics must never break a request
+        app.logger.exception('user_active_day capture failed for %s', user_id)
+        try:
+            db.session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
 @app.before_request
 def _stash_first_touch():
-    """Remember the first navigable page + Referer for signup analytics."""
+    """Remember the first navigable page + Referer + utm_* for signup analytics."""
     _stash_first_touch_from_request()
+
+
+@app.before_request
+def _capture_user_active_day():
+    """One user_active_day per logged-in browser user per Oslo day."""
+    try:
+        if not getattr(current_user, 'is_authenticated', False):
+            return
+        if not _should_count_active_day_web():
+            return
+        maybe_capture_user_active_day(current_user.id, source='web')
+    except Exception:  # noqa: BLE001
+        app.logger.exception('user_active_day before_request failed')
 
 
 def _capture_register_failed(reason):
@@ -7335,6 +7460,13 @@ def transcription_page(task_id):
             current_user.id,
             {'type': campaign},
         )
+    # Owner opened their transcript page (server-side; not the public /t/ share).
+    status = (task.status or '').split()[0][:32] or 'unknown'
+    product_analytics.capture(
+        'transcript_viewed',
+        current_user.id,
+        {'status': status},
+    )
     return render_template(
         'transcription.html',
         task_id=task_id,

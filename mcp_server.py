@@ -1803,6 +1803,11 @@ def create_mcp_view(app_flask):
                 resp.headers['WWW-Authenticate'] = _mcp_www_authenticate()
             return _cors_headers(resp)
 
+        # One user_active_day per Oslo day for MCP-authenticated traffic.
+        if user is not None:
+            A = _app()
+            A.maybe_capture_user_active_day(user.id, source='mcp')
+
         bucket = f'mcp:{getattr(g, "api_auth_kind", "?")}:{getattr(g, "api_user_id", "?")}'
         if not _rate_limit_ok(bucket):
             resp = jsonify({'error': 'Too many requests', 'retry_after_seconds': MCP_WINDOW_SECONDS})
