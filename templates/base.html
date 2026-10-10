@@ -171,7 +171,7 @@
         }
         .skip-link:focus { top: 8px; color: var(--on-accent); }
         /* Links inside running text must not rely on colour alone. */
-        main p a, .form-hint a, .footer a { text-decoration: underline; text-underline-offset: 2px; }
+        main p a, .form-hint a { text-decoration: underline; text-underline-offset: 2px; }
         [data-kbd-click]:focus-visible { outline-offset: -3px; }
         main:focus { outline: none; }
 
@@ -597,13 +597,56 @@
         /* Footer */
         .footer {
             border-top: 1px solid var(--line);
-            padding: 24px;
-            text-align: center;
+            padding: 48px 24px 24px;
             font-size: 14px;
             color: var(--muted);
         }
-        .footer a { color: var(--muted); }
-        .footer a:hover { color: var(--ink); }
+        .footer-inner { max-width: 1120px; margin: 0 auto; }
+        .footer-top {
+            display: flex;
+            justify-content: space-between;
+            gap: 48px;
+            padding-bottom: 40px;
+        }
+        .footer-brand-block { max-width: 300px; }
+        .footer-tagline { margin: 8px 0 0; line-height: 1.5; }
+        .footer-cols { display: flex; gap: 64px; }
+        .footer-heading {
+            margin: 0 0 12px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--ink);
+            letter-spacing: 0;
+            line-height: 1.4;
+        }
+        .footer-list { list-style: none; margin: 0; padding: 0; }
+        .footer-list li { margin: 0; }
+        .footer a, .footer-text-btn { color: var(--muted); text-decoration: none; }
+        .footer-list a, .footer-list .footer-text-btn {
+            display: inline-block;
+            padding: 5px 0;
+            line-height: 1.4;
+        }
+        .footer a:hover, .footer a:focus-visible { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+        .footer .footer-brand { color: var(--ink); }
+        .footer .footer-brand:hover { text-decoration: none; }
+        .footer-bottom {
+            display: flex;
+            justify-content: space-between;
+            gap: 8px 24px;
+            flex-wrap: wrap;
+            padding-top: 20px;
+            border-top: 1px solid var(--line);
+            font-size: 13px;
+        }
+        .footer-bottom a { text-decoration: underline; text-underline-offset: 2px; }
+        @media (max-width: 640px) {
+            .footer { padding: 40px 24px 24px; }
+            .footer-top { flex-direction: column; gap: 32px; padding-bottom: 32px; }
+            .footer-brand-block { max-width: none; }
+            .footer-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 32px 24px; }
+            .footer-bottom { flex-direction: column; }
+        }
 
         /* What's new popup — returning visitors only; localStorage-gated.
            z-index stays above the closed mobile panel (95) so the toast stays
@@ -787,12 +830,9 @@
             padding: 0;
             margin: 0;
             font: inherit;
-            color: var(--muted);
-            text-decoration: underline;
-            text-underline-offset: 2px;
             cursor: pointer;
         }
-        .footer-text-btn:hover { color: var(--ink); }
+        .footer-text-btn:hover, .footer-text-btn:focus-visible { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
 
         /* Utility */
         .text-center { text-align: center; }
@@ -1342,19 +1382,53 @@
     </div>
 
     <footer class="footer">
-        A <a href="https://productivitytech.io" target="_blank">ProductivityTech</a> product &middot;
-        Developed by <a href="https://nettsmed.no" target="_blank">Nettsmed</a> &middot;
-        <a href="{{ url_for('podcasts_index') }}">Podcasts</a> &middot;
-        <a href="{{ url_for('ai_landing') }}">Use in ChatGPT &amp; Claude</a> &middot;
-        <a href="{{ url_for('guide_ai_transcripts') }}">AI transcript guide</a> &middot;
-        <a href="{{ url_for('whats_new') }}">What's new</a> &middot;
-        <a href="{{ url_for('privacy') }}">Privacy</a> &middot;
-        <a href="{{ url_for('terms') }}">Terms</a> &middot;
-        {% if posthog_key and not is_admin_page %}
-        <button type="button" class="footer-text-btn" id="cookieSettingsLink">Cookie settings</button> &middot;
-        {% endif %}
-        <a href="{{ url_for('contact') }}">Contact</a> &middot;
-        <a href="{{ url_for('contact') }}">Feedback / feature ideas</a>
+        <div class="footer-inner">
+            <div class="footer-top">
+                <div class="footer-brand-block">
+                    <a href="{{ url_for('index') }}" class="nav-brand footer-brand" translate="no">
+                        <svg width="30" height="28" viewBox="0 0 30 28" aria-hidden="true">
+                            <g fill="var(--ink)"><rect x="2" y="9" width="3" height="10" rx="1.5"/><rect x="8" y="4" width="3" height="20" rx="1.5"/><rect x="14" y="8" width="3" height="12" rx="1.5"/></g>
+                            <g fill="var(--accent)"><rect x="20" y="7" width="8" height="3" rx="1.5"/><rect x="20" y="12.5" width="8" height="3" rx="1.5"/><rect x="20" y="18" width="5" height="3" rx="1.5"/></g>
+                        </svg>
+                        podskrift
+                    </a>
+                    <p class="footer-tagline">Podcast transcripts you can read, search and use in AI.</p>
+                </div>
+                <nav class="footer-cols" aria-label="Footer">
+                    <div class="footer-col">
+                        <h2 class="footer-heading">Product</h2>
+                        <ul class="footer-list">
+                            <li><a href="{{ url_for('podcasts_index') }}">Podcasts</a></li>
+                            <li><a href="{{ url_for('ai_landing') }}">Use in ChatGPT &amp; Claude</a></li>
+                            <li><a href="{{ url_for('guide_ai_transcripts') }}">AI transcript guide</a></li>
+                            <li><a href="{{ url_for('pricing') }}">Pricing</a></li>
+                            <li><a href="{{ url_for('whats_new') }}">What's new</a></li>
+                        </ul>
+                    </div>
+                    <div class="footer-col">
+                        <h2 class="footer-heading">Support</h2>
+                        <ul class="footer-list">
+                            <li><a href="{{ url_for('contact') }}">Contact</a></li>
+                            <li><a href="{{ url_for('contact') }}">Feedback / feature ideas</a></li>
+                        </ul>
+                    </div>
+                    <div class="footer-col">
+                        <h2 class="footer-heading">Legal</h2>
+                        <ul class="footer-list">
+                            <li><a href="{{ url_for('privacy') }}">Privacy</a></li>
+                            <li><a href="{{ url_for('terms') }}">Terms</a></li>
+                            {% if posthog_key and not is_admin_page %}
+                            <li><button type="button" class="footer-text-btn" id="cookieSettingsLink">Cookie settings</button></li>
+                            {% endif %}
+                        </ul>
+                    </div>
+                </nav>
+            </div>
+            <div class="footer-bottom">
+                <span>&copy; Podskrift</span>
+                <span>A <a href="https://productivitytech.io" target="_blank" rel="noopener">ProductivityTech</a> product &middot; Developed by <a href="https://nettsmed.no" target="_blank" rel="noopener">Nettsmed</a></span>
+            </div>
+        </div>
     </footer>
 
     {% if posthog_key and not is_admin_page %}
