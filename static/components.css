@@ -968,6 +968,10 @@ body.nav-menu-open .nav-bar::before { background: var(--paper); }
   max-width: 34rem;
   text-wrap: balance;
 }
+/* Signed-in start screen: a question and the command bar, no pitch. */
+.ds-hero--app { padding-top: var(--space-9); }
+.ds-hero--app h1 { font-size: clamp(2rem, 4.4vw, 3rem); letter-spacing: -0.035em; max-width: 20ch; }
+
 /* Hero content that is not centred text: search results, hints. */
 .ds-hero__left { text-align: left; }
 

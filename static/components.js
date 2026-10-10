@@ -81,6 +81,25 @@
     onScroll();
   }
 
+  /* Account menu in the signed-in header. On phones the toggle is hidden and
+     the menu's links sit in the slide-down panel, so this only runs on desktop. */
+  document.querySelectorAll('[data-nav-account]').forEach(function (root) {
+    var toggle = root.querySelector('.nav-account__toggle');
+    if (!toggle) return;
+    function setOpen(open) {
+      root.toggleAttribute('data-open', open);
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    toggle.addEventListener('click', function () { setOpen(!root.hasAttribute('data-open')); });
+    document.addEventListener('click', function (e) { if (!root.contains(e.target)) setOpen(false); });
+    root.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && root.hasAttribute('data-open')) { setOpen(false); toggle.focus(); }
+    });
+    root.addEventListener('focusout', function (e) {
+      if (e.relatedTarget && !root.contains(e.relatedTarget)) setOpen(false);
+    });
+  });
+
   /* Typed placeholder: [data-ds-type-placeholder] holds a JSON list of
      examples. It types them in turn until the visitor touches the field (or
      anything in the same command bar), then leaves the real placeholder. */

@@ -11,7 +11,10 @@
 <style>
     /* Home page. Sound bars turn into lines of text (DESIGN.md, Motion / Texture). */
     .hp-price-line { font-size: 15px; font-weight: 600; line-height: 1.4; color: var(--ink); margin-top: -8px; font-variant-numeric: tabular-nums; }
-    .hp-first-run { font-size: 24px; font-weight: 700; letter-spacing: -0.015em; }
+    .hp-trial { margin-top: 16px; text-align: center; }
+    .hp-trial summary { cursor: pointer; display: inline-flex; align-items: center; min-height: 44px; font-size: 14px; color: var(--muted); }
+    .hp-trial summary:hover { color: var(--ink); }
+    .hp-trial .hp-fine { margin-top: 8px; }
     .hp-lang-row { margin-top: 12px; }
     .hp-lang-select { max-width: 220px; }
     .hp-window { margin-top: 160px; }
@@ -128,18 +131,20 @@
 {% endif %}
 {% endif %}
 
-<!-- Hero: centred over the signal wave (DESIGN.md, Hero). -->
-<section class="hp-hero ds-hero" data-ds-signal-root>
-    {{ signal_wave() }}
+{# Hero (DESIGN.md, Hero). Visitors get the pitch over the signal wave;
+   signed-in users already bought it, so they get a start screen: a short
+   question and the command bar, nothing to read. #}
+{% set app_hero = current_user.is_authenticated %}
+<section class="hp-hero ds-hero{% if app_hero %} ds-hero--app{% endif %}"{% if not app_hero %} data-ds-signal-root{% endif %}>
+    {% if not app_hero %}{{ signal_wave() }}{% endif %}
     <div class="ds-hero__inner">
+        {% if app_hero %}
+        <h1 class="hp-title">{% if first_run %}Start your first transcript{% else %}What do you want to transcribe?{% endif %}</h1>
+        {% else %}
         {{ announce('Ask Claude or ChatGPT for any transcript', '#use-in-ai', short='Use it in Claude and ChatGPT') }}
         <h1 class="hp-title">Any podcast episode as text, <span class="ds-hero__soft">even on Spotify</span></h1>
-        {% if not current_user.is_authenticated %}
         <p class="hp-price-line" data-testid="hero-price-line">{% if trial_minutes %}{{ trial_minutes }} min free · then {% endif %}${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min</p>
-        {% endif %}
         <p class="ds-hero__lede">Paste a Spotify link or search a podcast. The full transcript with timestamps, ready to read, search and quote in a few minutes.</p>
-        {% if first_run and current_user.is_authenticated %}
-        <h2 class="hp-first-run">Start your first transcript</h2>
         {% endif %}
 
         <div class="hp-search ds-cmd">
@@ -149,7 +154,7 @@
                                 examples=['Paste a Spotify episode link', 'open.spotify.com/episode/…',
                                           'Search “Hard Fork”', 'Search “Huberman Lab”',
                                           'Paste an Apple Podcasts link'],
-                                attrs='enterkeyhint="search"' ~ (' autofocus' if first_run and current_user.is_authenticated else '')) %}
+                                attrs='enterkeyhint="search"' ~ (' autofocus' if app_hero else '')) %}
             <div class="ds-seg" id="searchTabs" role="group" aria-label="Search for">
                 <button type="button" class="tab active" data-type="show" aria-pressed="true">Podcasts</button>
                 <button type="button" class="tab" data-type="episode" aria-pressed="false">Episodes</button>
@@ -157,10 +162,12 @@
             {% endcall %}
             {# Signup-trial marketing, anonymous only, next to the button it de-risks.
                Logged-in users have their own grant and a balance banner above. #}
-            {% set assure = ['No card, no OpenAI key needed' if trial_minutes and not current_user.is_authenticated else 'Text and .srt subtitles',
+            {% if not app_hero %}
+            {% set assure = ['No card, no OpenAI key needed' if trial_minutes else 'Text and .srt subtitles',
                              language_count ~ ' languages, powered by OpenAI Whisper',
                              'Keeps running if you close the page'] %}
             {{ proof_list(assure, class='ds-proof--inline', attrs='aria-label="Why Podskrift"') }}
+            {% endif %}
             <div class="ds-hero__left">
                 <div id="episodeLangRow" class="hidden hp-lang-row">
                     <label class="form-label" for="searchLanguage">Spoken language</label>
@@ -175,6 +182,8 @@
                    own limit (+ remaining) so a 180-min legacy account is never told
                    "60 in total" next to a correct balance banner. Own-key users: hide. #}
                 {% if current_user.is_authenticated and trial and not trial.on_own_key %}
+                <details class="hp-trial">
+                <summary>How your free minutes work</summary>
                 <p class="form-hint hp-fine">
                     The free trial covers {{ trial.limit_minutes }} minutes of audio in total{% if trial.limit_minutes >= 120 %} (about {{ trial.limit_minutes // 60 }} hours){% endif %}{% if not trial.exhausted %} — {{ trial.remaining_minutes }} left{% endif %}.
                     Longer episodes get a free preview of your remaining minutes; buy a pack or add your own key to finish.
@@ -186,20 +195,25 @@
                     {% endif %}
                     <a href="{{ url_for('pricing') }}">See pricing</a>.
                 </p>
+                </details>
                 {% endif %}
             </div>
         </div>
 
+        {% if not app_hero %}
         {{ works_with([('Spotify', None), ('Apple Podcasts', None), ('RSS', None),
                        ('ChatGPT', url_for('guide_chatgpt')), ('Claude', url_for('guide_claude'))]) }}
+        {% endif %}
     </div>
 
+    {% if not app_hero %}
     {{ transcript_window('Why we write things down', 'The Long Form · Episode 212 · 1:04:18', [
         ('00:14', 'Welcome back. Today we are talking about why a written version of a conversation is often more useful than the recording.'),
         ('00:31', 'You can search it, quote it and skim it. None of that works with audio.'),
         ('00:47', 'And once it is text, you can hand it to an assistant and ask what the guest actually said.'),
         ('01:09', 'That is the part people underestimate. The transcript is where the episode starts being useful.')],
         caption='Illustrated example. Download as .txt or as .srt subtitles with timestamps.', anchor=true, class='hp-window') }}
+    {% endif %}
 
     {# Fine print for anonymous visitors, after the action and the reasons to take it. #}
     {% if trial_minutes and not current_user.is_authenticated %}
@@ -218,6 +232,8 @@
     {% endif %}
 </section>
 
+{# Signed-in users have already been through this; it is pitch, not help. #}
+{% if not app_hero %}
 <section class="hp-section" aria-labelledby="howHeading">
     <h2 id="howHeading">How it works</h2>
     <div class="hp-steps">
@@ -245,6 +261,7 @@
         </div>
     </div>
 </section>
+{% endif %}
 
 <section class="hp-section ds-mcp-promotion" aria-labelledby="aiHeading" id="use-in-ai">
     <h2 id="aiHeading">Ask your AI about a podcast</h2>
