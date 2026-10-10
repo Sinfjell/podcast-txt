@@ -30,7 +30,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import urlencode, urlparse, urlunparse
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
 import requests
 from flask import (Response, current_app, flash, g, jsonify, redirect, render_template,
@@ -66,8 +66,9 @@ CLAUDE_AI_CALLBACK = 'https://claude.ai/api/mcp/auth_callback'
 CIMD_FETCH_TIMEOUT_SEC = 5
 CIMD_FETCH_MAX_BYTES = 64 * 1024
 JWKS_CACHE_SECONDS = int(os.getenv('OAUTH_JWKS_CACHE_SECONDS', '300'))
-JWT_ASSERTION_LEEWAY_SEC = 30
-JWT_ASSERTION_MAX_LIFETIME_SEC = 300
+# Clock skew + ChatGPT assertion windows (PODSKRIFT-P).
+JWT_ASSERTION_LEEWAY_SEC = 60
+JWT_ASSERTION_MAX_LIFETIME_SEC = 3600  # exp may be up to 1h in the future
 CLIENT_ASSERTION_TYPE = (
     'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'
 )
@@ -282,7 +283,8 @@ def _client_id_host(client_id: str | None) -> str:
 
 
 def _report_oauth_refusal(*, step: str, reason: str, error: str | None = None,
-                          client_id: str | None = None) -> None:
+                          client_id: str | None = None,
+                          extra_tags: dict | None = None) -> None:
     """Surface refused authorize/token to Sentry without secrets. Never raises."""
     try:
         import sentry_sdk
@@ -290,29 +292,41 @@ def _report_oauth_refusal(*, step: str, reason: str, error: str | None = None,
         # Strip anything that looks like a token/code/assertion fragment.
         if any(p in safe_reason.lower() for p in (
                 'poa_', 'por_', 'poc_', 'psk_', 'bearer ', 'eyj')):
-            safe_reason = error or 'refused'
+            safe_reason = (error or reason or 'refused')[:160]
+            if any(p in safe_reason.lower() for p in (
+                    'poa_', 'por_', 'poc_', 'psk_', 'bearer ', 'eyj')):
+                safe_reason = 'refused'
+        tags = {
+            'oauth_step': (step or 'unknown')[:64],
+            'reason': safe_reason[:120],
+            'client_id_host': _client_id_host(client_id),
+            'oauth_error': (error or '')[:64],
+        }
+        if extra_tags:
+            for key, value in extra_tags.items():
+                if value is None:
+                    continue
+                tags[str(key)[:64]] = str(value)[:120]
         sentry_sdk.capture_message(
             f'OAuth {step} refused: {safe_reason}',
             level='warning',
-            tags={
-                'oauth_step': (step or 'unknown')[:64],
-                'reason': safe_reason[:120],
-                'client_id_host': _client_id_host(client_id),
-                'oauth_error': (error or '')[:64],
-            },
-            fingerprint=['oauth-refusal', step or 'unknown', (error or '')[:64]],
+            tags=tags,
+            fingerprint=['oauth-refusal', step or 'unknown', safe_reason[:64]],
         )
     except Exception:  # noqa: BLE001 — reporting must never break OAuth
         pass
 
 
 def _oauth_error(error: str, description: str | None = None, status: int = 400,
-                 *, step: str | None = None, client_id: str | None = None):
+                 *, step: str | None = None, client_id: str | None = None,
+                 reason: str | None = None, extra_tags: dict | None = None):
     # Prefer explicit args; fall back to request-scoped context set by handlers.
     step = step or getattr(g, 'oauth_step', None) or 'token'
     client_id = client_id or getattr(g, 'oauth_client_id', None)
+    refusal_reason = reason or description or error
     _report_oauth_refusal(
-        step=step, reason=description or error, error=error, client_id=client_id)
+        step=step, reason=refusal_reason, error=error, client_id=client_id,
+        extra_tags=extra_tags)
     body = {'error': error}
     if description:
         body['error_description'] = description
@@ -562,62 +576,81 @@ def _cimd_host_is_safe(hostname: str) -> bool:
     return True
 
 
-def _fetch_https_json(url: str, *, label: str) -> tuple[dict | None, str | None]:
-    """SSRF-safe HTTPS GET of a small JSON object (CIMD / JWKS)."""
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return None, f'{label} URL is invalid.'
-    if parsed.scheme.lower() != 'https' or not parsed.netloc:
-        return None, f'{label} must be an HTTPS URL.'
-    if parsed.username or parsed.password or parsed.fragment:
-        return None, f'{label} URL is invalid.'
-    try:
-        port = parsed.port
-    except ValueError:
-        return None, f'{label} URL is invalid.'
-    if port not in (None, 443):
-        return None, f'{label} host is not allowed.'
-    if not _cimd_host_is_safe(parsed.hostname or ''):
-        return None, f'{label} host is not allowed.'
-    try:
-        resp = requests.get(
-            url,
-            timeout=CIMD_FETCH_TIMEOUT_SEC,
-            allow_redirects=False,
-            headers={
-                'Accept': 'application/json',
-                'User-Agent': 'Podskrift-OAuth/1.0',
-            },
-            stream=True,
-        )
-    except requests.RequestException:
-        return None, f'Could not fetch {label}.'
-    if resp.status_code != 200:
-        resp.close()
-        return None, f'{label} fetch returned HTTP {resp.status_code}.'
-    chunks = []
-    total = 0
-    deadline = time.monotonic() + CIMD_FETCH_TIMEOUT_SEC
-    try:
-        for chunk in resp.iter_content(chunk_size=4096):
-            if time.monotonic() > deadline:
-                return None, f'{label} fetch timed out.'
-            if not chunk:
-                continue
-            total += len(chunk)
-            if total > CIMD_FETCH_MAX_BYTES:
-                return None, f'{label} document too large.'
-            chunks.append(chunk)
-    finally:
-        resp.close()
-    try:
-        doc = json.loads(b''.join(chunks).decode('utf-8'))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None, f'{label} document is not valid JSON.'
-    if not isinstance(doc, dict):
-        return None, f'{label} document must be a JSON object.'
-    return doc, None
+def _fetch_https_json(url: str, *, label: str,
+                      max_redirects: int = 3) -> tuple[dict | None, str | None]:
+    """SSRF-safe HTTPS GET of a small JSON object (CIMD / JWKS).
+
+    Follows a few same-origin HTTPS redirects (ChatGPT/CDN sometimes 302).
+    Error strings include ``HTTP <status>`` when applicable for Sentry tags.
+    """
+    current = url
+    for _ in range(max_redirects + 1):
+        try:
+            parsed = urlparse(current)
+        except ValueError:
+            return None, f'{label} URL is invalid.'
+        if parsed.scheme.lower() != 'https' or not parsed.netloc:
+            return None, f'{label} must be an HTTPS URL.'
+        if parsed.username or parsed.password or parsed.fragment:
+            return None, f'{label} URL is invalid.'
+        try:
+            port = parsed.port
+        except ValueError:
+            return None, f'{label} URL is invalid.'
+        if port not in (None, 443):
+            return None, f'{label} host is not allowed.'
+        if not _cimd_host_is_safe(parsed.hostname or ''):
+            return None, f'{label} host is not allowed.'
+        try:
+            resp = requests.get(
+                current,
+                timeout=CIMD_FETCH_TIMEOUT_SEC,
+                allow_redirects=False,
+                headers={
+                    'Accept': 'application/json',
+                    'User-Agent': 'Podskrift-OAuth/1.0',
+                },
+                stream=True,
+            )
+        except requests.RequestException:
+            return None, f'{label} fetch failed (network).'
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = resp.headers.get('Location') or ''
+            resp.close()
+            if not location:
+                return None, f'{label} fetch returned HTTP {resp.status_code}.'
+            next_url = urljoin(current, location)
+            if not _same_https_origin(next_url, current):
+                return None, f'{label} fetch returned HTTP {resp.status_code}.'
+            current = next_url
+            continue
+        if resp.status_code != 200:
+            status = resp.status_code
+            resp.close()
+            return None, f'{label} fetch returned HTTP {status}.'
+        chunks = []
+        total = 0
+        deadline = time.monotonic() + CIMD_FETCH_TIMEOUT_SEC
+        try:
+            for chunk in resp.iter_content(chunk_size=4096):
+                if time.monotonic() > deadline:
+                    return None, f'{label} fetch timed out.'
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > CIMD_FETCH_MAX_BYTES:
+                    return None, f'{label} document too large.'
+                chunks.append(chunk)
+        finally:
+            resp.close()
+        try:
+            doc = json.loads(b''.join(chunks).decode('utf-8'))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None, f'{label} document is not valid JSON.'
+        if not isinstance(doc, dict):
+            return None, f'{label} document must be a JSON object.'
+        return doc, None
+    return None, f'{label} fetch returned HTTP 310.'
 
 
 def fetch_cimd_document(client_id_url: str) -> tuple[dict | None, str | None]:
@@ -812,105 +845,166 @@ def _consume_jti(jti: str, expires_at: datetime) -> bool:
         return False
 
 
-def verify_private_key_jwt(client, assertion: str) -> tuple[bool, str | None]:
-    """Verify a private_key_jwt client_assertion (RFC 7523 / OIDC core)."""
+def _normalize_audience_value(value: str) -> str:
+    """Strip trailing slashes so issuer/token URL variants compare equal."""
+    return (value or '').strip().rstrip('/')
+
+
+def _audience_values(aud) -> list[str]:
+    if isinstance(aud, list):
+        return [str(a) for a in aud if isinstance(a, (str, int))]
+    if isinstance(aud, (str, int)):
+        return [str(aud)]
+    return []
+
+
+def _accepted_audiences() -> set[str]:
+    """RFC 7523: aud may be the AS issuer or the token endpoint URL."""
+    issuer = _normalize_audience_value(oauth_issuer())
+    token_endpoint = _normalize_audience_value(f'{oauth_issuer()}/oauth/token')
+    return {issuer, token_endpoint}
+
+
+def verify_private_key_jwt(
+        client, assertion: str,
+) -> tuple[bool, str | None, dict]:
+    """Verify a private_key_jwt client_assertion (RFC 7523 / OIDC core).
+
+    Returns ``(ok, reason_code, extra_tags)``. reason_code is one of the
+    PODSKRIFT-P tags (``aud_mismatch``, ``bad_signature``, …) on failure.
+    """
     import jwt
 
+    tags: dict = {}
     if not assertion or not isinstance(assertion, str) or len(assertion) > 8192:
-        return False, 'client_assertion is required.'
+        return False, 'bad_signature', tags
     jwks_uri = getattr(client, 'jwks_uri', None)
     if not jwks_uri:
-        return False, 'Client has no jwks_uri for private_key_jwt.'
+        return False, 'jwks_fetch_failed', tags
 
     try:
         header = jwt.get_unverified_header(assertion)
     except jwt.PyJWTError:
-        return False, 'client_assertion is not a valid JWT.'
+        return False, 'bad_signature', tags
     alg = header.get('alg')
+    kid = header.get('kid') if isinstance(header.get('kid'), str) else None
+    tags['jwt_alg'] = alg
+    tags['jwt_kid'] = kid
+
+    # Peek at unverified claims for diagnostics (never trusted alone).
+    try:
+        unverified = jwt.decode(assertion, options={'verify_signature': False})
+    except jwt.PyJWTError:
+        unverified = {}
+    if isinstance(unverified, dict):
+        tags['jwt_iss'] = unverified.get('iss')
+        aud_peek = unverified.get('aud')
+        if isinstance(aud_peek, list):
+            tags['jwt_aud'] = ','.join(str(a) for a in aud_peek[:4])
+        elif aud_peek is not None:
+            tags['jwt_aud'] = aud_peek
+
     if alg not in JWT_ALLOWED_ALGS:
-        return False, 'Unsupported client_assertion signing algorithm.'
-    kid = header.get('kid')
+        return False, 'alg_not_allowed', tags
 
     jwks, err = fetch_jwks(jwks_uri)
     if err:
-        return False, err
-    jwk = _find_jwk(jwks, kid if isinstance(kid, str) else None)
+        status_m = re.search(r'HTTP (\d+)', err or '')
+        if status_m:
+            tags['jwks_status'] = status_m.group(1)
+        return False, 'jwks_fetch_failed', tags
+    jwk = _find_jwk(jwks, kid)
     if jwk is None and kid:
         # Unknown kid → refetch once (key rotation).
         jwks, err = fetch_jwks(jwks_uri, force_refresh=True)
         if err:
-            return False, err
+            status_m = re.search(r'HTTP (\d+)', err or '')
+            if status_m:
+                tags['jwks_status'] = status_m.group(1)
+            return False, 'jwks_fetch_failed', tags
         jwk = _find_jwk(jwks, kid)
     if jwk is None:
-        return False, 'No matching JWK for client_assertion.'
+        return False, 'kid_not_found', tags
 
-    issuer = oauth_issuer()
-    token_endpoint = f'{issuer}/oauth/token'
-    audience_ok = {token_endpoint, issuer}
     try:
         key = _jwk_to_key(jwk)
+    except Exception:
+        return False, 'bad_signature', tags
+
+    # Verify signature + exp/nbf with leeway; check aud ourselves (slash-tolerant).
+    try:
         claims = jwt.decode(
             assertion,
             key=key,
             algorithms=[alg],
-            audience=list(audience_ok),
             options={
-                # iat is optional in RFC 7523; lifetime is bounded below.
-                'require': ['exp', 'iss', 'sub', 'aud', 'jti'],
-                'verify_aud': True,
+                'require': ['exp', 'iss', 'sub'],
+                'verify_aud': False,
             },
             leeway=JWT_ASSERTION_LEEWAY_SEC,
         )
+    except jwt.ExpiredSignatureError:
+        return False, 'expired', tags
+    except jwt.ImmatureSignatureError:
+        return False, 'not_yet_valid', tags
+    except jwt.InvalidSignatureError:
+        return False, 'bad_signature', tags
     except jwt.PyJWTError:
-        return False, 'client_assertion signature or claims invalid.'
+        return False, 'bad_signature', tags
 
-    if claims.get('iss') != client.client_id:
-        return False, 'client_assertion iss must equal client_id.'
-    if claims.get('sub') != client.client_id:
-        return False, 'client_assertion sub must equal client_id.'
-    aud = claims.get('aud')
-    aud_values = aud if isinstance(aud, list) else [aud]
-    if not any(a in audience_ok for a in aud_values):
-        return False, 'client_assertion aud is not this token endpoint.'
+    if (claims.get('iss') != client.client_id
+            or claims.get('sub') != client.client_id):
+        return False, 'iss_sub_mismatch', tags
+
+    aud_values = _audience_values(claims.get('aud'))
+    if not aud_values:
+        return False, 'aud_mismatch', tags
+    accepted = _accepted_audiences()
+    if not any(_normalize_audience_value(a) in accepted for a in aud_values):
+        return False, 'aud_mismatch', tags
 
     now_ts = int(_utc_now().timestamp())
     try:
         exp_ts = int(claims['exp'])
     except (TypeError, ValueError, KeyError):
-        return False, 'client_assertion exp invalid.'
-    # Short-lived only: exp may be at most MAX_LIFETIME in the future.
+        return False, 'expired', tags
+    # exp may be at most MAX_LIFETIME in the future (generous 1h for ChatGPT).
     if exp_ts - now_ts > JWT_ASSERTION_MAX_LIFETIME_SEC + JWT_ASSERTION_LEEWAY_SEC:
-        return False, 'client_assertion lifetime too long.'
+        return False, 'lifetime_too_long', tags
+
     iat = claims.get('iat')
     if iat is not None:
         try:
             iat_ts = int(iat)
         except (TypeError, ValueError):
-            return False, 'client_assertion iat invalid.'
+            return False, 'not_yet_valid', tags
         if iat_ts > now_ts + JWT_ASSERTION_LEEWAY_SEC:
-            return False, 'client_assertion iat is in the future.'
-        if exp_ts - iat_ts > JWT_ASSERTION_MAX_LIFETIME_SEC + JWT_ASSERTION_LEEWAY_SEC:
-            return False, 'client_assertion lifetime too long.'
-        if now_ts - iat_ts > JWT_ASSERTION_MAX_LIFETIME_SEC + JWT_ASSERTION_LEEWAY_SEC:
-            return False, 'client_assertion iat is too old.'
+            return False, 'not_yet_valid', tags
+
     nbf = claims.get('nbf')
     if nbf is not None:
         try:
             nbf_ts = int(nbf)
         except (TypeError, ValueError):
-            return False, 'client_assertion nbf invalid.'
+            return False, 'not_yet_valid', tags
         if nbf_ts > now_ts + JWT_ASSERTION_LEEWAY_SEC:
-            return False, 'client_assertion not yet valid.'
+            return False, 'not_yet_valid', tags
 
     jti = claims.get('jti')
-    if not isinstance(jti, str) or not jti.strip() or len(jti) > 256:
-        return False, 'client_assertion jti is required.'
-    # Keep the jti until the assertion can no longer pass exp+leeway.
-    expires_at = datetime.fromtimestamp(
-        exp_ts + JWT_ASSERTION_LEEWAY_SEC + 60, tz=timezone.utc)
-    if not _consume_jti(f'{client.client_id}\n{jti.strip()}', expires_at):
-        return False, 'client_assertion jti has already been used.'
-    return True, None
+    if isinstance(jti, str) and jti.strip() and len(jti) <= 256:
+        expires_at = datetime.fromtimestamp(
+            exp_ts + JWT_ASSERTION_LEEWAY_SEC + 60, tz=timezone.utc)
+        if not _consume_jti(f'{client.client_id}\n{jti.strip()}', expires_at):
+            return False, 'jti_replay', tags
+    else:
+        # ChatGPT usually sends jti; allow missing but log for diagnosis.
+        try:
+            current_app.logger.info(
+                'oauth private_key_jwt missing jti: client_host=%s alg=%s kid=%s',
+                _client_id_host(client.client_id), alg, kid)
+        except Exception:
+            pass
+    return True, None, tags
 
 
 def _unverified_assertion_subject(assertion: str) -> str | None:
@@ -945,8 +1039,13 @@ def _client_allowed_auth_methods(client) -> set[str]:
     return {'none'}
 
 
-def authenticate_oauth_client(client, data: dict) -> tuple[bool, str | None]:
-    """Authenticate the client at the token endpoint. Returns (ok, error_description)."""
+def authenticate_oauth_client(
+        client, data: dict,
+) -> tuple[bool, str | None, dict]:
+    """Authenticate the client at the token endpoint.
+
+    Returns ``(ok, reason_or_description, extra_tags)``.
+    """
     allowed = _client_allowed_auth_methods(client)
     assertion = (data.get('client_assertion') or '').strip()
     assertion_type = (data.get('client_assertion_type') or '').strip()
@@ -954,34 +1053,34 @@ def authenticate_oauth_client(client, data: dict) -> tuple[bool, str | None]:
     if 'client_secret_post' in allowed and 'private_key_jwt' not in allowed and 'none' not in allowed:
         secret = (data.get('client_secret') or '').strip()
         if not secret or not client.client_secret_hash:
-            return False, 'client_secret required.'
+            return False, 'client_secret required.', {}
         if not hmac.compare_digest(_hash_token(secret), client.client_secret_hash):
-            return False, 'Invalid client_secret.'
-        return True, None
+            return False, 'Invalid client_secret.', {}
+        return True, None, {}
 
     if assertion:
         if 'private_key_jwt' not in allowed:
-            return False, 'client_assertion not accepted for this client.'
+            return False, 'client_assertion not accepted for this client.', {}
         if assertion_type != CLIENT_ASSERTION_TYPE:
-            return False, 'client_assertion_type must be jwt-bearer.'
+            return False, 'client_assertion_type must be jwt-bearer.', {}
         return verify_private_key_jwt(client, assertion)
 
     # No assertion: public-client path only when 'none' is an allowed method
     # (ChatGPT advertises both none and private_key_jwt).
     if 'none' in allowed:
-        return True, None
+        return True, None, {}
 
     if 'client_secret_post' in allowed:
         secret = (data.get('client_secret') or '').strip()
         if not secret or not client.client_secret_hash:
-            return False, 'client_secret required.'
+            return False, 'client_secret required.', {}
         if not hmac.compare_digest(_hash_token(secret), client.client_secret_hash):
-            return False, 'Invalid client_secret.'
-        return True, None
+            return False, 'Invalid client_secret.', {}
+        return True, None, {}
 
     if 'private_key_jwt' in allowed:
-        return False, 'client_assertion required for private_key_jwt.'
-    return False, 'Unsupported token_endpoint_auth_method.'
+        return False, 'client_assertion required for private_key_jwt.', {}
+    return False, 'Unsupported token_endpoint_auth_method.', {}
 
 
 def upsert_cimd_client(client_id_url: str, doc: dict):
@@ -1047,6 +1146,13 @@ def resolve_oauth_client(client_id: str, *, allow_fetch: bool = True,
     if not client_id:
         return None, 'Missing client_id.'
     row = OAuthClient.query.filter_by(client_id=client_id).first()
+    if (row is not None and not force_refresh and allow_fetch
+            and getattr(row, 'registration_source', None) == 'cimd'
+            and not getattr(row, 'token_endpoint_auth_methods_json', None)):
+        # CIMD rows stored before multi-method support (e.g. ChatGPT, saved as
+        # private_key_jwt-only) must re-read the document once so a client that
+        # also declares 'none' is not locked to a single method.
+        force_refresh = True
     if row is not None and not force_refresh:
         return row, None
     if not allow_fetch or not looks_like_cimd_client_id(client_id):
@@ -1446,16 +1552,25 @@ def register_oauth(app_flask):
                 'invalid_client', client_err or 'Unknown client_id.', 401)
 
         g.oauth_client_id = client.client_id
-        ok, auth_err = authenticate_oauth_client(client, data)
+        ok, auth_err, auth_tags = authenticate_oauth_client(client, data)
         if not ok:
             # Non-sensitive reason only (no assertion/secret), so a failed
             # ChatGPT/Claude connect can be diagnosed from server logs + Sentry.
             current_app.logger.warning(
                 'oauth token client auth failed: client=%s method=%s grant=%s '
-                'reason=%s', client.client_id[:120],
-                client.token_endpoint_auth_method, grant_type, auth_err)
+                'reason=%s alg=%s kid=%s aud=%s',
+                client.client_id[:120],
+                client.token_endpoint_auth_method, grant_type, auth_err,
+                (auth_tags or {}).get('jwt_alg'),
+                (auth_tags or {}).get('jwt_kid'),
+                (auth_tags or {}).get('jwt_aud'))
             return _oauth_error(
-                'invalid_client', auth_err or 'Client authentication failed.', 401)
+                'invalid_client',
+                auth_err or 'Client authentication failed.',
+                401,
+                reason=auth_err or 'Client authentication failed.',
+                extra_tags=auth_tags or None,
+            )
 
         if not _rate_limit(
                 _token_attempts, f'client:{client_id}',

@@ -7248,14 +7248,17 @@ def test_oauth_private_key_jwt_hardening(mcp_oauth_on, monkeypatch):
     none_tok = pyjwt.encode(dict(base, exp=now + 60, jti='n1'), None,
                             algorithm='none')
     assert _exchange(none_tok).status_code == 401
-    # Long-lived assertion (exp 1h out) → reject.
+    # Long-lived assertion (exp > 1h) → reject; 1h is allowed (PODSKRIFT-P).
     long_tok = _mint_client_assertion(private_key, client_id=cimd_url,
-                                      exp_delta=3600)
+                                      exp_delta=7200)
     assert _exchange(long_tok).status_code == 401
-    # Missing jti → reject.
+    one_hour = _mint_client_assertion(private_key, client_id=cimd_url,
+                                      exp_delta=3600)
+    assert _exchange(one_hour).status_code == 200
+    # Missing jti → allowed (logged); ChatGPT usually sends one.
     no_jti = pyjwt.encode(dict(base, exp=now + 60), private_key,
                           algorithm='RS256', headers={'kid': 'test-chatgpt-kid'})
-    assert _exchange(no_jti).status_code == 401
+    assert _exchange(no_jti).status_code == 200
     # Wrong assertion_type → reject.
     code, verifier = _code()
     bad_type = _post({
@@ -7302,6 +7305,92 @@ def test_oauth_metadata_keeps_client_secret_post_for_dcr():
     methods = meta['token_endpoint_auth_methods_supported']
     assert {'none', 'private_key_jwt', 'client_secret_post'} <= set(methods)
     assert meta['token_endpoint_auth_signing_alg_values_supported'] == ['RS256']
+
+
+def test_oauth_cimd_legacy_row_refreshes_allowed_methods(mcp_oauth_on, monkeypatch):
+    """A CIMD row saved before methods_json existed is refreshed at authorize."""
+    cimd_url = 'https://chatgpt.com/oauth/client.json'
+    redirect_uri = 'https://chatgpt.com/connector_platform_oauth_redirect'
+    _priv, jwk = _rsa_keypair_and_jwk()
+    doc = _chatgpt_cimd_doc(cimd_url=cimd_url, redirect_uri=redirect_uri)
+    _patch_cimd_and_jwks(monkeypatch, cimd_url=cimd_url, doc=doc, jwks=jwk)
+    from models import db, OAuthClient
+    with A.app.app_context():
+        OAuthClient.query.filter_by(client_id=cimd_url).delete()
+        db.session.add(OAuthClient(
+            client_id=cimd_url, client_name='ChatGPT',
+            redirect_uris_json=json.dumps([redirect_uri]),
+            grant_types_json=json.dumps(['authorization_code', 'refresh_token']),
+            response_types_json=json.dumps(['code']),
+            token_endpoint_auth_method='private_key_jwt',
+            jwks_uri='https://chatgpt.com/oauth/jwks.json',
+            registration_source='cimd'))
+        db.session.commit()
+    verifier, challenge = _pkce_pair()
+    browser = _login(mcp_oauth_on['a'])
+    _, code = _oauth_approve(browser, client_id=cimd_url, redirect_uri=redirect_uri,
+                             verifier_challenge=(verifier, challenge))
+    assert code
+    with A.app.app_context():
+        row = OAuthClient.query.filter_by(client_id=cimd_url).first()
+        assert set(json.loads(row.token_endpoint_auth_methods_json)) == {
+            'none', 'private_key_jwt'}
+    # No assertion (ChatGPT 'none' path) now succeeds with PKCE.
+    tok = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code', 'code': code,
+        'redirect_uri': redirect_uri, 'client_id': cimd_url,
+        'code_verifier': verifier, 'resource': 'https://podskrift.com/mcp'})
+    assert tok.status_code == 200, tok.get_json()
+
+
+def test_oauth_chatgpt_assertion_aud_issuer_and_token_endpoint(
+        mcp_oauth_on, monkeypatch):
+    """PODSKRIFT-P: accept aud=issuer or aud=token endpoint (+ trailing slash)."""
+    cimd_url = 'https://chatgpt.com/oauth/client.json'
+    redirect_uri = 'https://chatgpt.com/connector_platform_oauth_redirect'
+    private_key, jwk = _rsa_keypair_and_jwk()
+    # Realistic ChatGPT kid shape.
+    jwk['kid'] = 'cimd-20260428030119'
+    doc = _chatgpt_cimd_doc(cimd_url=cimd_url, redirect_uri=redirect_uri)
+    _patch_cimd_and_jwks(monkeypatch, cimd_url=cimd_url, doc=doc, jwks=jwk)
+
+    def _exchange(aud):
+        verifier, challenge = _pkce_pair()
+        browser = _login(mcp_oauth_on['a'])
+        _, code = _oauth_approve(
+            browser, client_id=cimd_url, redirect_uri=redirect_uri,
+            verifier_challenge=(verifier, challenge))
+        assertion = _mint_client_assertion(
+            private_key, client_id=cimd_url, aud=aud, kid=jwk['kid'])
+        return A.app.test_client().post('/oauth/token', data={
+            'grant_type': 'authorization_code',
+            'code': code,
+            'redirect_uri': redirect_uri,
+            'client_id': cimd_url,
+            'code_verifier': verifier,
+            'resource': 'https://podskrift.com/mcp',
+            'client_assertion': assertion,
+            'client_assertion_type': OAUTH.CLIENT_ASSERTION_TYPE,
+        })
+
+    issuer = OAUTH.oauth_issuer()
+    token_ep = f'{issuer}/oauth/token'
+    for aud in (issuer, token_ep, issuer + '/', token_ep + '/',
+                [issuer], [token_ep, 'https://example.com/other']):
+        resp = _exchange(aud)
+        assert resp.status_code == 200, (aud, resp.get_json())
+
+    # Wrong aud still rejected with specific Sentry reason.
+    import sentry_sdk
+    captured = []
+    monkeypatch.setattr(
+        sentry_sdk, 'capture_message',
+        lambda msg, **kw: captured.append({'message': msg, **kw}))
+    bad = _exchange('https://evil.example/token')
+    assert bad.status_code == 401
+    assert captured
+    assert captured[-1]['tags']['reason'] == 'aud_mismatch'
+    assert 'evil.example' in str(captured[-1]['tags'].get('jwt_aud', ''))
 
 
 def test_oauth_cimd_none_still_works_without_assertion(mcp_oauth_on, monkeypatch):
