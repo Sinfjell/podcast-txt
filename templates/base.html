@@ -100,7 +100,15 @@
             --radius: 8px;
             --radius-sm: 4px;
             --radius-md: 8px; /* alias; DESIGN.md name — same as --radius */
+            --radius-lg: 12px; /* windows and the hero command bar only */
             --transition: 0.15s ease;
+            /* Motion (DESIGN.md, Motion). Everything stops under reduced motion. */
+            --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+            --dur-1: 0.18s;
+            --dur-2: 0.6s;
+            /* Effects, each with one sanctioned use (DESIGN.md, Elevation). */
+            --glow: #0A7A5529;          /* accent at 16%: hero command bar and signal wave */
+            --header-glass: #FFFFFFB8;  /* paper at 72%: the blurred sticky header */
             --font-sans: 'Schibsted Grotesk', system-ui, sans-serif;
             --font-serif: 'Newsreader', Georgia, serif;
             /* Spacing scale (DESIGN.md). Prefer these over ad-hoc px in new CSS. */
@@ -136,6 +144,8 @@
                 --danger: #F87171;
                 --danger-tint: #2A0F0C;
                 --on-danger-tint: #FCA5A5;
+                --glow: #34D39933;
+                --header-glass: #0A0F0DA8;
             }
         }
 
@@ -189,10 +199,15 @@
             position: sticky;
             top: 0;
             z-index: 100;
-            background: var(--paper);
-            border-bottom: 1px solid var(--line);
+            /* Glass lives on ::before in components.css: a backdrop-filter on
+               the bar itself would make it the containing block for the fixed
+               mobile panel inside it. */
+            background: transparent;
+            border-bottom: 1px solid transparent;
             padding: 0 24px;
+            transition: border-color var(--dur-1) ease;
         }
+        .nav-bar[data-scrolled] { border-bottom-color: var(--line); }
         .nav-inner {
             max-width: 1120px;
             margin: 0 auto;
@@ -215,7 +230,7 @@
         .nav-brand svg { flex-shrink: 0; }
         .nav-links { display: flex; gap: 4px; align-items: center; }
         .nav-links a {
-            color: var(--ink);
+            color: var(--muted);
             font-size: 15px;
             font-weight: 500;
             display: inline-flex;
@@ -237,16 +252,59 @@
             background: var(--accent-tint);
         }
         .nav-links a.nav-balance:hover { background: var(--accent-tint); color: var(--on-accent-tint); }
-        .nav-links a.nav-buy { font-weight: 700; }
-        /* The one non-accent filled button (DESIGN.md: button-nav-cta). */
-        .nav-links a.nav-cta {
+        /* The one non-accent filled button (DESIGN.md: button-nav-cta): Start free
+           when logged out, the buy link when signed in. */
+        .nav-links a.nav-cta, .nav-links a.nav-buy {
             background: var(--ink);
             color: var(--paper);
             border: 1px solid var(--ink);
             font-weight: 700;
-            padding: 0 18px;
+            padding: 0 16px;
+            gap: 6px;
+            margin-left: 4px;
         }
-        .nav-links a.nav-cta:hover { background: var(--ink); color: var(--paper); opacity: 0.88; }
+        .nav-links a.nav-cta:hover, .nav-links a.nav-buy:hover { background: var(--ink); color: var(--paper); }
+        .nav-cta svg, .nav-buy svg:not(.nav-icon) { transition: transform var(--dur-1) var(--ease-out); }
+        .nav-cta:hover svg, .nav-buy:hover svg:not(.nav-icon) { transform: translateX(2px); }
+        /* Signed in: product links after the brand, balance and account menu at
+           the far end. The account menu is a small panel under the avatar. */
+        .nav-links a.nav-mobile-only { display: none; }
+        @media (min-width: 641px) {
+            .nav-links--app { flex: 1; margin-left: 24px; }
+            .nav-end { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+        }
+        .nav-account { position: relative; }
+        .nav-account__toggle {
+            display: inline-flex; align-items: center; gap: 4px;
+            min-height: 44px; padding: 0 6px; margin-left: 4px;
+            background: none; border: 1px solid transparent; border-radius: var(--radius);
+            color: var(--muted); cursor: pointer; font: inherit;
+            transition: color var(--transition), background var(--transition);
+        }
+        .nav-account__toggle:hover, .nav-account[data-open] .nav-account__toggle { background: var(--surface); color: var(--ink); }
+        .nav-account__avatar {
+            display: grid; place-items: center; width: 32px; height: 32px;
+            border-radius: var(--radius); background: var(--ink); color: var(--paper);
+            font-size: 14px; font-weight: 700;
+        }
+        .nav-account__menu {
+            display: none; position: absolute; right: 0; top: calc(100% + 8px); z-index: 101;
+            flex-direction: column; min-width: 240px; padding: 6px;
+            background: var(--paper); border: 1px solid var(--line-strong); border-radius: var(--radius-lg);
+        }
+        .nav-account[data-open] .nav-account__menu { display: flex; }
+        .nav-account__menu a { width: 100%; }
+        .nav-account__email {
+            padding: 8px 12px 10px; margin-bottom: 4px; border-bottom: 1px solid var(--line);
+            font-size: 13px; color: var(--muted);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        /* Logged out: product links centred between the brand and the account actions. */
+        @media (min-width: 641px) {
+            .nav-links--split { flex: 1; margin-left: 24px; }
+            .nav-links--split > a:first-child,
+            .nav-links--split > a.nav-login { margin-left: auto; }
+        }
         /* Mobile-only affordances. The desktop bar is deliberately unchanged --
            icons and a home link earn their space in a full-width panel, not in
            a row where the brand already links home. */
@@ -824,6 +882,11 @@
             .nav-links a:hover, .nav-links a:active { background: none; color: var(--accent); }
             .nav-icon { display: block; color: var(--muted); flex-shrink: 0; }
             .nav-mobile-only { display: flex; }
+            .nav-links a.nav-mobile-only { display: flex; }
+            /* The account menu's contents join the panel; there is no avatar toggle. */
+            .nav-end, .nav-account, .nav-account__menu { display: contents; }
+            .nav-account__toggle { display: none; }
+            .nav-account__email { display: none; }
             .nav-links a.nav-balance,
             .nav-links a.nav-balance:hover {
                 background: none;
@@ -843,7 +906,10 @@
             .nav-links a.nav-login:hover { background: var(--surface-hover); color: var(--ink); }
             .nav-links a.nav-login .nav-icon { display: none; }
             .nav-links a.nav-cta,
-            .nav-links a.nav-cta:hover {
+            .nav-links a.nav-cta:hover,
+            .nav-links a.nav-buy,
+            .nav-links a.nav-buy:hover {
+                margin-left: 0;
                 margin-top: 10px;
                 justify-content: center;
                 min-height: 52px;
@@ -856,7 +922,8 @@
                 border-radius: var(--radius);
                 opacity: 1;
             }
-            .nav-links a.nav-cta:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+            .nav-links a.nav-cta:hover, .nav-links a.nav-buy:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+            .nav-links a.nav-buy .nav-icon { display: none; }
             .nav-links .nav-sep {
                 display: block;
                 height: 0;
@@ -1137,7 +1204,7 @@
             .nav-toggle, .nav-scrim { display: none !important; }
         }
     </style></noscript>
-    <nav class="nav-bar">
+    <nav class="nav-bar" data-ds-header>
         <div class="nav-inner">
             <a href="{{ url_for('index') }}" class="nav-brand" translate="no">
                 <svg width="30" height="28" viewBox="0 0 30 28" aria-hidden="true">
@@ -1150,33 +1217,12 @@
                     aria-label="Menu" aria-expanded="false" aria-controls="navLinks">
                 <span></span><span></span><span></span>
             </button>
-            <div class="nav-links" id="navLinks">
+            <div class="nav-links {% if current_user.is_authenticated %}nav-links--app{% else %}nav-links--split{% endif %}" id="navLinks">
                 {% if current_user.is_authenticated %}
                 <a href="{{ url_for('index') }}" class="nav-mobile-only">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
                     New transcript
                 </a>
-                {% if nav_daily_exhausted %}
-                <a href="{{ url_for('settings') }}#credits" class="nav-balance"
-                   title="Shared free minutes refill at midnight (Norway time)">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                    Free minutes refill at midnight
-                </a>
-                {% elif nav_minutes_left is not none %}
-                <a href="{{ url_for('settings') }}#credits" class="nav-balance"
-                   title="Free trial and paid minutes remaining">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                    {{ nav_minutes_left }} min left
-                </a>
-                {% endif %}
-                {% if nav_show_buy %}
-                <a href="{{ url_for('pricing') }}?from=header_pill" class="nav-buy"
-                   data-open-buy-modal data-buy-source="buy_modal_header"
-                   id="navBuyPill">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
-                    Buy minutes
-                </a>
-                {% endif %}
                 <a href="{{ url_for('history') }}">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                     History
@@ -1191,16 +1237,49 @@
                     Admin
                 </a>
                 {% endif %}
-                <a href="{{ url_for('settings') }}">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-                    Settings
-                </a>
-                <div class="nav-sep" aria-hidden="true"></div>
-                <a href="{{ url_for('logout') }}"
-                   onclick="try{if(window.posthog){posthog.reset();}}catch(e){}">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-                    Log out
-                </a>
+                <div class="nav-end">
+                    {% if nav_daily_exhausted %}
+                    <a href="{{ url_for('settings') }}#credits" class="nav-balance"
+                       title="Shared free minutes refill at midnight (Norway time)">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                        Free minutes refill at midnight
+                    </a>
+                    {% elif nav_minutes_left is not none %}
+                    <a href="{{ url_for('settings') }}#credits" class="nav-balance"
+                       title="Free trial and paid minutes remaining">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                        {{ nav_minutes_left }} min left
+                    </a>
+                    {% endif %}
+                    {% if nav_show_buy %}
+                    <a href="{{ url_for('pricing') }}?from=header_pill" class="nav-buy"
+                       data-open-buy-modal data-buy-source="buy_modal_header"
+                       id="navBuyPill">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
+                        Buy minutes<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+                    </a>
+                    {% endif %}
+                    <div class="nav-account" data-nav-account>
+                        <button type="button" class="nav-account__toggle" aria-expanded="false"
+                                aria-controls="navAccountMenu" aria-label="Account menu">
+                            <span class="nav-account__avatar" aria-hidden="true">{{ (current_user.email or '?')[:1]|upper }}</span>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+                        </button>
+                        <div class="nav-account__menu" id="navAccountMenu">
+                            <p class="nav-account__email">{{ current_user.email }}</p>
+                            <a href="{{ url_for('settings') }}">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                                Settings
+                            </a>
+                            <div class="nav-sep" aria-hidden="true"></div>
+                            <a href="{{ url_for('logout') }}"
+                               onclick="try{if(window.posthog){posthog.reset();}}catch(e){}">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                                Log out
+                            </a>
+                        </div>
+                    </div>
+                </div>
                 {% else %}
                 <a href="{{ url_for('pricing') }}">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
@@ -1218,13 +1297,13 @@
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
                     Log in
                 </a>
-                <a href="{{ url_for('register') }}" class="nav-cta">Sign up</a>
+                <a href="{{ url_for('register') }}" class="nav-cta">Start free<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
                 {% endif %}
             </div>
         </div>
     </nav>
-    <!-- Outside <nav> on purpose: .nav-bar sets backdrop-filter, which makes it
-         the containing block for position:fixed descendants. Inside it, this
+    <!-- Outside <nav> on purpose: a filter or backdrop-filter on .nav-bar makes
+         it the containing block for position:fixed descendants. Inside it, this
          element's `inset: 56px 0 0 0` resolved against a 56px-tall box and
          collapsed to zero height -- an invisible backdrop that closed nothing
          and let taps through to the controls behind the open panel. -->

@@ -311,3 +311,82 @@
 {%- endfor %}
 </ul>
 {%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# announce — "New" link above a hero title. `short` replaces the label on     #}
+{# phones. Use one per page, for something that is actually new.             #}
+{# ------------------------------------------------------------------------- #}
+{% macro announce(label, href, short=None, badge='New', attrs='', class='') -%}
+<a href="{{ href }}" class="ds-announce{% if class %} {{ class }}{% endif %}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+  <span class="ds-announce__badge">{{ badge }}</span>
+  {%- if short %}<span class="ds-announce__long">{{ label }}</span><span class="ds-announce__short">{{ short }}</span>
+  {%- else %}<span>{{ label }}</span>{% endif %}
+  <span class="ds-arrow" aria-hidden="true">→</span>
+</a>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# command_bar — the hero search: one field with the action inside it.        #}
+{# Pass the page's one primary as button_class='btn-primary' so the           #}
+{# one-primary guardrail counts it. Wrap with {% call %} to put a segmented   #}
+{# scope switch (.ds-seg with .tab buttons) between field and button.         #}
+{# `examples` (a list) are typed into the placeholder until it is touched.    #}
+{# `attrs` go on the input (aria-describedby, enterkeyhint, autofocus).       #}
+{# ------------------------------------------------------------------------- #}
+{% macro command_bar(input_id, label, placeholder, button_label='Search', button_id=None,
+                     button_class='btn-secondary', examples=None, attrs='', class='') -%}
+<div class="ds-cmd__box{% if class %} {{ class }}{% endif %}">
+  <span class="ds-cmd__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></span>
+  <input type="text" class="ds-cmd__input" id="{{ input_id }}" aria-label="{{ label }}"
+         placeholder="{{ placeholder }}" autocomplete="off"{% if examples %} data-ds-type-placeholder="{{ examples|tojson|forceescape }}"{% endif %}{% if attrs %} {{ attrs|safe }}{% endif %}>
+  {%- if caller is defined %}{{ caller() }}{% endif %}
+  <button type="button" class="btn {{ button_class }} btn-lg ds-cmd__go"{% if button_id %} id="{{ button_id }}"{% endif %}>{{ button_label }} <span class="ds-arrow" aria-hidden="true">→</span></button>
+</div>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# works_with — names of the places Podskrift works, as text, not logos.      #}
+{# items: list of (name, href or None).                                       #}
+{# ------------------------------------------------------------------------- #}
+{% macro works_with(items, label='Works with', attrs='', class='') -%}
+<p class="ds-works{% if class %} {{ class }}{% endif %}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+  <span>{{ label }}</span>
+  {%- for name, href in items %}
+  {% if href %}<a class="ds-works__item" href="{{ href }}">{{ name }}</a>{% else %}<span class="ds-works__item">{{ name }}</span>{% endif %}
+  {%- endfor %}
+</p>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# signal_wave — the hero illustration (sound bars turning into text).        #}
+{# Put it first inside an element with data-ds-signal-root and position:      #}
+{# relative; the band sits just above the child marked data-ds-signal-anchor. #}
+{# Drawn by static/components.js; decorative.                                 #}
+{# ------------------------------------------------------------------------- #}
+{% macro signal_wave(class='') -%}
+<canvas class="ds-signal{% if class %} {{ class }}{% endif %}" data-ds-signal aria-hidden="true"></canvas>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# transcript_window — product illustration: an episode with its transcript, #}
+{# the playhead moving through the timestamps. lines: list of (time, text).    #}
+{# Fictional content only, always captioned as an example.                    #}
+{# ------------------------------------------------------------------------- #}
+{% macro transcript_window(title, meta, lines, status='Transcript ready', caption='Illustrated example',
+                           anchor=false, attrs='', class='') -%}
+<figure class="ds-window{% if class %} {{ class }}{% endif %}" data-ds-window{% if anchor %} data-ds-signal-anchor{% endif %}{% if attrs %} {{ attrs|safe }}{% endif %}>
+  <div class="ds-window__bar">
+    <span class="ds-window__cover"><svg viewBox="0 0 30 28" aria-hidden="true"><g fill="var(--paper)"><rect x="2" y="9" width="3" height="10" rx="1.5"/><rect x="8" y="4" width="3" height="20" rx="1.5"/><rect x="14" y="8" width="3" height="12" rx="1.5"/></g><g fill="var(--accent)"><rect x="20" y="7" width="8" height="3" rx="1.5"/><rect x="20" y="12.5" width="8" height="3" rx="1.5"/><rect x="20" y="18" width="5" height="3" rx="1.5"/></g></svg></span>
+    <span class="ds-window__title"><strong>{{ title }}</strong><span>{{ meta }}</span></span>
+    {% if status %}<span class="ds-chip ds-window__status"><i aria-hidden="true"></i>{{ status }}</span>{% endif %}
+    <span class="ds-window__tools" aria-hidden="true"><span>Copy</span><span>.txt</span><span>.srt</span></span>
+  </div>
+  <div class="ds-window__track" aria-hidden="true"><span class="ds-window__playhead"></span></div>
+  <div class="ds-window__lines">
+    {%- for time, text in lines %}
+    <div class="ds-window__line{% if loop.first %} is-current{% endif %}"><span class="timestamp">{{ time }}</span><p class="transcript-pane">{{ text }}</p></div>
+    {%- endfor %}
+  </div>
+  {% if caption %}<figcaption class="ds-window__caption">{{ caption }}</figcaption>{% endif %}
+</figure>
+{%- endmacro %}

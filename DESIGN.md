@@ -88,6 +88,7 @@ spacing:
 rounded:
   sm: 0.25rem         # 4px - progress bar, logo bars, cover thumbnails
   md: 0.5rem          # 8px - buttons, inputs, cards, alerts; no pills
+  lg: 0.75rem         # 12px - transcript window and hero command bar only
 components:
   button-primary:
     backgroundColor: "{colors.accent}"
@@ -220,7 +221,7 @@ Voice: interface copy is English, plain and short, sentence case, no exclamation
 The design rejects, by name:
 
 - Cream, beige or off-white page backgrounds. Paper is `#FFFFFF`; the only step up is `surface`.
-- Italic titles, numbered section headings, monospace type (outside `<code>`/`<pre>`), pill buttons, gradients, shadows and left-border accent cards.
+- Italic titles, numbered section headings, monospace type (outside `<code>`/`<pre>`), pill buttons, shadows and left-border accent cards. Gradients and blur exist exactly twice, both named in Elevation & Depth.
 - Green as decoration. If a green thing does not start, mark or advance an action, it is wrong.
 
 It embraces:
@@ -228,7 +229,7 @@ It embraces:
 - One accent-filled button per screen; every other button is an outline or plain text. The one exception is the desktop nav call to action, which is ink-filled (see Components).
 - Separating areas with 1px `line` borders and one step of `surface`, never with elevation.
 - Newsreader reserved for the transcript, so the reading text is visibly different from the interface around it.
-- One motif: sound bars turning into lines of text.
+- One motif: sound bars turning into lines of text. On the home hero it runs at full width (the signal wave) and moves.
 
 ## Colors
 
@@ -304,18 +305,28 @@ Forms are one column; the field width matches the expected input; hint text sits
 
 ## Elevation & Depth
 
-There is none. No `box-shadow`, no `backdrop-filter`, no gradients. Hierarchy comes from three things only: a 1px `line` border, one step of `surface` against `paper`, and type weight. A card on `paper` takes `surface` or a `line` border, never both. The focus ring is the only layered effect: a 3px `accent` outline with 2px offset.
+Hierarchy comes from three things: a 1px `line` border, one step of `surface` against `paper`, and type weight. A card on `paper` takes `surface` or a `line` border, never both. No `box-shadow`, `text-shadow` or `drop-shadow` anywhere. The focus ring is a 3px `accent` outline with 2px offset; the hero command bar widens it to a 4px `accent-tint` outline.
+
+Two layered effects are sanctioned (decided 2026-10-10), each pinned to one rule in `static/components.css` and enforced by `test_sanctioned_effects_stay_in_their_one_rule`:
+
+| Effect | Where | Token |
+|---|---|---|
+| `backdrop-filter: blur(14px)` | `.nav-bar::before`, the sticky site header | `--header-glass` (paper at 72% / 66%) |
+| `radial-gradient` glow | `.ds-cmd__box::before`, behind the hero command bar | `--glow` (accent at 16% / 20%) |
+
+The signal wave canvas draws the same `--glow` around its scan line. No other gradient, blur or glow is allowed.
 
 ## Shapes
 
-`radius-md` (8px) on buttons, inputs, cards and alerts. `radius-sm` (4px) on the progress bar and cover thumbnails. Logo bars are fully rounded by their own geometry. There are no pill buttons, no pill badges and no other radius. Borders are 1px; the invalid input border and the active-tab underline are the only thicker strokes (2px and 3px).
+`radius-md` (8px) on buttons, inputs, cards and alerts. `radius-sm` (4px) on the progress bar and cover thumbnails. `radius-lg` (12px) on the transcript window and the hero command bar only. Logo bars are fully rounded by their own geometry. There are no pill buttons, no pill badges and no other radius. Borders are 1px; the invalid input border and the active-tab underline are the only thicker strokes (2px and 3px).
 
 ## Components
 
 Reference markup for every component is in `design-reference.html`. **Runnable Jinja macros** live in `templates/components/macros.html` with styles in `static/components.css` (tokens stay in `templates/base.html`). The live gallery is `/design/components` (DEBUG or admin only, noindex).
 
 - **Buttons.** Primary: `accent` fill, `on-accent` text, 48px tall (56px beside the hero search field), hover `accent-hover`. Secondary: `paper` fill, 1px `line-strong` border, `ink` text. Tertiary / ghost: plain `accent` text (hover: `surface` fill). Danger (cancel only): `paper` fill, 1px `danger` border and text. Disabled: `surface` fill, `muted` text, no border. All share `radius-md` and `control` type. Hover always pins `color` as well as background. **One accent-filled button per screen.**
-- **Nav call to action.** The desktop nav "Sign up" link is ink-filled (`ink` background, `paper` text, 44px tall, `radius-md`, hover pins both colours). It is the ONE allowed non-accent filled button and does not count against the one-accent-button rule. In the mobile menu panel the same link is the accent button (`accent` fill, `on-accent` text).
+- **Site header.** Sticky, 64px, glass (`--header-glass` + blur on `::before`). The 1px `line` hairline appears only after the page scrolls (`data-scrolled`, set by `components.js`). Links are `muted` 15px/500, `ink` with a `surface` fill on hover. Logged out, the product links sit centred between the brand and the account actions. Signed in, the product links (History, MCP, Admin) follow the brand, and the far end holds the minutes balance, Buy minutes when relevant, and an account menu: an `ink` square with the email's initial that opens a `radius-lg` panel with the email, Settings and Log out (`[data-nav-account]`, `components.js`). On phones that panel's links join the slide-down menu and the avatar is hidden. The logo bars bounce once on hover.
+- **Nav call to action.** The desktop nav "Start free →" link (was "Sign up") is ink-filled (`ink` background, `paper` text, 44px tall, `radius-md`, hover pins both colours). It is the ONE allowed non-accent filled button and does not count against the one-accent-button rule. In the mobile menu panel the same link is the accent button (`accent` fill, `on-accent` text).
 - **Tabs and search.** Underline tabs: 44px tall, 3px bottom border, `accent` on the active tab and transparent on the others; active text is `ink`, inactive `muted`, state exposed with `aria-selected` / `aria-pressed`. The search field is 56px tall, `line-strong` border, with its primary button beside it.
 - **Form fields.** Label above (`small`, weight 700), hint above the field in `small`/`muted`, field 48px tall with a 1px `line-strong` border. Invalid state: 2px `danger` border, and above the field an error icon plus the message in `danger` text, linked with `aria-invalid` and `aria-describedby`. Required and optional are both marked.
 - **Checklist row.** Pending (empty circle), active (accent ring), done (calm `accent` fill + check in `on-accent`), error (`danger` ring + icon). Title in body/700; detail in small/`muted`.
@@ -323,6 +334,12 @@ Reference markup for every component is in `design-reference.html`. **Runnable J
 - **Episode row.** Title (`body`, 700) over a meta line (`small`, `muted`, `tabular-nums`), a 1px `line` top border, 16px vertical padding, `surface-hover` on hover. Right side: one action, either a primary "Transcribe" button or a "View transcript" link. Only one row on a screen may carry the accent button.
 - **Job card.** `surface` fill, `radius-md`, 24px padding. Status line, 8px progress bar (`line` track, `accent` fill, `radius-sm`, `role="progressbar"`), the reassurance "It keeps going if you close the page.", and a danger Cancel button.
 - **Transcript block.** Header row with Copy, .txt and .srt as secondary buttons, then lines: a 48px timestamp column (`timestamp`, `accent`) and the text in Newsreader 20px. Newsreader appears nowhere else.
+- **Hero (home).** Centred column over the signal wave: `announce()` link, display h1 with the last phrase in `muted`, price line, lede, the command bar, an inline proof list, `works_with()`, then `transcript_window()`. Built from the macros below; the page adds nothing but spacing. **On phones (≤640px) the hero is the h1, the price line, the command bar and one proof item**: the announce link, lede, other proof items and `works_with()` are hidden with CSS (still in the DOM). A phone hero that needs scrolling to reach the input has too much text. **Signed in, the hero is a start screen** (`ds-hero--app`): a smaller h1 question and the command bar, with no announce link, lede, proof list, works-with strip, signal wave or transcript window. The trial fine print sits in a collapsed `details` under the bar.
+- **Command bar.** `command_bar()`: one 64px field with a search icon, an optional segmented scope switch (`.ds-seg` with `.tab` buttons) and the action inside it. `line-strong` border, `radius-lg`, the sanctioned glow behind it. It carries the screen's one primary button (pass `button_class='btn-primary'` so the lint counts it). `examples` are typed into the placeholder until the visitor touches the bar. On phones the field takes the first row and switch + button the second.
+- **Announce link.** `announce()`: a `line`-bordered link with an `accent-tint` "New" badge and an arrow that nudges right on hover. `short` replaces the label under 640px. One per page, only for something new.
+- **Works with.** `works_with()`: the names of the places Podskrift works, as text in `muted` 700, never logos. Names with a setup guide link to it.
+- **Signal wave.** `signal_wave()`: a full-bleed canvas behind a `data-ds-signal-root`. Bars in `line`, a scan line in `accent` that turns them into short text strokes. The band sits just above the `data-ds-signal-anchor` element. Paused off screen and in background tabs; one still frame under reduced motion. Decorative (`aria-hidden`).
+- **Transcript window.** `transcript_window()`: the product illustration. `radius-lg`, `line` border, a `surface` title bar (cover mark, episode title and meta, a status chip, Copy/.txt/.srt), a 3px `accent` playhead track, then timestamped lines in the transcript face. The current line gets a `surface` fill and `ink` text; the rest are `muted`. Fictional content, always captioned "Illustrated example".
 - **MCP chat illustration.** A static, readable example conversation, implemented in `templates/components/mcp_chat_example.html`. Use a `surface` window with an 8px radius and a `line` header divider; the user message sits on `paper`. Show an example episode, “Give me the transcript of that.”, a Podskrift transcript-ready check and timestamped sample text. Use Schibsted Grotesk for chat UI and Newsreader only for the transcript excerpt. Accent marks the completed retrieval and timestamps. Always caption it “Illustrated example”; use fictional transcript text and no fake input, send button, app branding or live status semantics. Keep the same content in `design-reference.html`.
 - **Credit pack.** `paper` fill, 1px `line-strong` border, figure ("300 minutes") in a heading weight, price on the button.
 - **Alerts / notices.** Tint fill with its `on-…` text, `radius-md`, 12px/16px padding, always an icon plus text (colour is never the only signal). Links inside inherit the `on-…` colour and are bold.
@@ -330,7 +347,7 @@ Reference markup for every component is in `design-reference.html`. **Runnable J
 
 ## How to build a page
 
-1. **Compose from macros.** Import from `templates/components/macros.html` (`button`, `link_button`, `section`/`card`, `page_header`, `tabs`/`tab_panel`, `checklist`/`checklist_row`, `snippet`, `secret_field`, `notice`, `empty_state`, `form_field`, `chip`). Prefer existing class names in `base.html` (`.btn`, `.form-input`, `.card`) when a macro is not needed yet — do not invent parallel styles.
+1. **Compose from macros.** Import from `templates/components/macros.html` (`button`, `link_button`, `section`/`card`, `page_header`, `tabs`/`tab_panel`, `checklist`/`checklist_row`, `snippet`, `secret_field`, `notice`, `empty_state`, `form_field`, `chip`, `proof_list`, and for heroes `announce`, `command_bar`, `works_with`, `signal_wave`, `transcript_window`). Prefer existing class names in `base.html` (`.btn`, `.form-input`, `.card`) when a macro is not needed yet — do not invent parallel styles.
 2. **Never hand-roll component CSS.** No page-local `<style>` block in a new template, no `style=` attributes, no hard-coded hex or `rgb()`/`hsl()` colours, no new colours or fonts, no `box-shadow`, gradients, or pill radii. Put shared rules in `static/components.css` using the tokens already defined in `base.html`. Layout spacing uses `--space-*`.
 3. **One primary button.** Exactly one `btn-primary` / accent-filled control per screen (the desktop nav Sign up CTA does not count). Demote everything else to secondary, ghost, or a link-button.
 4. **Behaviour ships with the library.** `static/components.js` (loaded from `base.html`) drives tabs (click, arrow keys, Home/End) and copy buttons. Do not write per-page handlers for them. `notice()` escapes its message; pass a link with `{% call notice(variant=...) %}`.
@@ -344,20 +361,25 @@ Anti-pattern (do not repeat): the rejected `/connect` draft used pill CTAs, mono
 
 ```yaml
 motion:
-  intensity: minimal
+  intensity: moderate   # was minimal until 2026-10-10
+  ease-out: cubic-bezier(0.16, 1, 0.3, 1)   # --ease-out
+  dur-1: 0.18s          # --dur-1: hovers, nudges, hairlines
+  dur-2: 0.6s           # --dur-2: entrances, the playhead highlight
 ```
 
-There is no background texture, grain or gradient field. The single decorative motif is **sound bars turning into text lines**: a row of ink bars (the audio) followed by three accent lines (the text), drawn as one SVG, 520x48 viewBox. It appears in the home hero and in the running-job card while a transcription runs, and as the 3-bars-plus-3-lines logo mark.
+There is no background texture or grain. The single decorative motif is **sound bars turning into text lines**: a row of bars (the audio) followed by accent lines (the text). It is the 3-bars-plus-3-lines logo mark, the running-job card while a transcription runs, and, at full width on the home hero, the signal wave.
 
-Hero animation (CSS only, Tier 1):
+What moves, and nothing else:
 
 | Part | Animation | Timing |
 |---|---|---|
-| Bars | `scaleY` 0.35 to 1, alternate, `transform-origin: center`; staggered with negative delays, every fourth bar slightly faster | about 1.1s, ease-in-out, infinite |
-| Lines | `scaleX` 0 to 1 from the left, hold, then fade out, three lines delayed 0s / 0.45s / 0.9s | 5s loop, ease-out |
-| Transcript lines beside it | fade in and rise 6px, once | 0.6s, delayed 0.6s and 1.5s |
+| Signal wave (home hero) | Bars breathe; a scan line sweeps left to right and the bars behind it become short accent text strokes that fade out; a `--glow` rides the scan line | 9s sweep, linear, canvas |
+| Transcript window | Rises 16px and fades in once; the playhead and the highlighted line step through the timestamps | `--dur-2` entrance; 2.6s per line |
+| Command bar placeholder | Types example links and show names, deletes, repeats; stops for good on first focus or tap | about 55ms per character |
+| Hover micro-interactions | Arrows nudge 2-3px right; logo bars bounce once; header hairline fades in on scroll | `--dur-1`, `--ease-out` |
+| Progress bar | Width eases | 0.4s |
 
-All three animations are removed under `prefers-reduced-motion: reduce` and the static end state is shown. Progress-bar width may ease over 0.4s. Nothing else on the site animates.
+Everything above is removed under `prefers-reduced-motion: reduce`: the wave draws one still frame, the playhead stays on the first line, the placeholder stays put.
 
 ## Accessibility & UU
 
@@ -409,7 +431,7 @@ The tightest text pair is `accent` on `surface-hover` (4.57:1): a timestamp or l
 3. **No numbered section headings.** Do not write "01 Search", "Step 2" or "1." in front of an h2 or h3. Sections are named by what they are ("How it works", "Pricing").
 4. **No monospace outside `<code>` and `<pre>`.** A monospace stack is allowed only inside `<code>`/`<pre>` (API samples, keys, the only monospace in the product); never on timestamps, labels or UI text. Timestamps are Schibsted Grotesk 700 with `font-variant-numeric: tabular-nums` in `accent`.
 5. **No pill buttons or pill badges.** `border-radius: 9999px` and `border-radius: 999px` are banned. Every control, card and alert uses `radius-md` (8px); only the progress bar and thumbnails use `radius-sm` (4px).
-6. **No gradients.** No `linear-gradient`, `radial-gradient` or mesh backgrounds, including on the hero and on `accent` fills. Use the flat token.
+6. **No gradients.** No `linear-gradient`, `radial-gradient` or mesh backgrounds, and none on `accent` fills. Use the flat token. The single exception is the `--glow` behind the hero command bar (see Elevation & Depth); do not reuse it elsewhere.
 7. **No shadows.** No `box-shadow`, `drop-shadow` or `text-shadow`. Separate areas with a 1px `line` border or a step of `surface`.
 8. **No left-border accent cards.** `border-left: 4px solid` on an alert or card is banned. Alerts are a tint fill with an icon and text.
 9. **No emoji.** Not in copy, buttons, empty states or alerts. Icons are inline SVG with a 2px stroke, round caps, in `ink` or `accent`.
@@ -424,7 +446,7 @@ The tightest text pair is `accent` on `surface-hover` (4.57:1): a timestamp or l
 - State the limit or price in the first sentence of any pricing or trial copy.
 - Give every error an icon, a plain message of what went wrong, and the next step.
 - Pin `color` on every button `:hover` rule so a background change never flips the text.
-- Draw the sound-bars-to-text motif in the hero and the running-job card, and nowhere else.
+- Draw the sound-bars-to-text motif in the hero (the signal wave) and the running-job card, and nowhere else.
 
 ## Brand Assets
 
@@ -545,6 +567,13 @@ Variable names equal the token names. The Flask app keeps them in `templates/bas
 
   --radius-sm: 0.25rem;
   --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-1: 0.18s;
+  --dur-2: 0.6s;
+  --glow: #0A7A5529;
+  --header-glass: #FFFFFFB8;
 
   --width-page: 70rem;
   --width-prose: 47.5rem;
@@ -571,6 +600,8 @@ Variable names equal the token names. The Flask app keeps them in `templates/bas
     --danger: #F87171;
     --danger-tint: #2A0F0C;
     --on-danger-tint: #FCA5A5;
+    --glow: #34D39933;
+    --header-glass: #0A0F0DA8;
   }
 }
 ```
@@ -595,3 +626,4 @@ Variable names equal the token names. The Flask app keeps them in `templates/bas
 | 2026-10-09 | Open: PNG icons and `og-image.png` still need regenerating | Predate the redesign. |
 | 2026-10-10 | Added Jinja macros (`templates/components/`), `static/components.css`, `/design/components` gallery, `test_design_system.py`, and "How to build a page" | Stop agent drift from DESIGN.md; rejected /connect draft is the anti-pattern. |
 | 2026-10-10 | Added a static MCP chat illustration to the homepage and /ai, with matching reference markup | Show the transcript request in context, using existing tokens and an explicit example caption. |
+| 2026-10-10 | Header and hero redesign ("signal"): glass sticky header, centred hero with a command bar, full-width signal wave, transcript window. New tokens `--radius-lg`, `--glow`, `--header-glass`, `--ease-out`, `--dur-1`, `--dur-2`; motion intensity minimal to moderate; two sanctioned effects (header blur, hero glow) | Sindre asked for a more modern feel in the style of x.ai, with motion and illustration, and approved the direction from a mockup. New macros: `announce`, `command_bar`, `works_with`, `signal_wave`, `transcript_window`; `proof_list` gains an inline variant. |

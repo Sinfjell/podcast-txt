@@ -632,6 +632,9 @@
     max-width: 40rem;
 }
 
+/* Gallery: room for the signal wave between the hero and its window. */
+.ds-gallery-window { margin-top: 10rem; }
+
 /* ---------------------------------------------------------------------------
    Setup guides (/guides/chatgpt, /guides/claude)
    --------------------------------------------------------------------------- */
@@ -855,41 +858,85 @@
 
 .pricing-pack-subline { margin: 0; }
 
-/* Static MCP conversation illustration; real text, no simulated controls. */
-.ds-chat-example { margin: var(--space-9) 0; max-width: 47.5rem; }
-.ds-chat-example__window { background: var(--surface); border-radius: var(--radius-md); overflow: hidden; }
-.ds-chat-example__header {
-  display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2);
-  padding: var(--space-4) var(--space-6); border-bottom: 1px solid var(--line);
+/* Static MCP conversation illustration; real text, no simulated controls.
+   Same window language as the hero's transcript window. Its parts rise in
+   turn the first time it scrolls into view ([data-ds-reveal], components.js). */
+.ds-chat-example { margin: 0; width: 100%; max-width: 47.5rem; }
+.ds-chat-example__window {
+  background: var(--paper); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg); overflow: hidden;
 }
-.ds-chat-example__header span, .ds-chat-example__label, .ds-chat-example__episode > span,
+.ds-chat-example__header {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2);
+  padding: var(--space-3) var(--space-6); background: var(--surface); border-bottom: 1px solid var(--line);
+}
+.ds-chat-example__header span, .ds-chat-example__label, .ds-chat-example__episode-text > span,
 .ds-chat-example figcaption { color: var(--muted); font-size: 0.875rem; }
+.ds-chat-example__status { display: inline-flex; align-items: center; gap: var(--space-2); }
+.ds-chat-example__status i { width: 8px; height: 8px; border-radius: 2px; background: var(--accent); animation: ds-pulse 2.4s ease-in-out infinite; }
 .ds-chat-example__conversation { display: grid; gap: var(--space-6); padding: var(--space-6); }
-.ds-chat-example__episode { display: grid; gap: var(--space-1); }
+.ds-chat-example__episode {
+  display: flex; align-items: center; gap: var(--space-4);
+  padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-md);
+}
+.ds-chat-example__cover { flex: 0 0 auto; width: 3rem; height: 3rem; border-radius: var(--radius); background: var(--accent-tint); }
+.ds-chat-example__episode-text { display: grid; gap: 2px; min-width: 0; }
+.ds-chat-example__episode-text .ds-chat-example__label { margin: 0; font-size: 0.75rem; }
 .ds-chat-example__label { display: block; margin-bottom: var(--space-2); }
 .ds-chat-example__user {
-  justify-self: end; max-width: 100%; background: var(--paper);
-  padding: var(--space-4); border-radius: var(--radius-md);
+  justify-self: end; max-width: min(100%, 26rem); background: var(--surface);
+  padding: var(--space-3) var(--space-4); border-radius: var(--radius-lg);
 }
 .ds-chat-example__user p, .ds-chat-example__reply > p { margin: 0; }
 .ds-chat-example__reply .ds-chat-example__tool {
-  color: var(--accent); font-size: 0.875rem; font-weight: 700; margin-bottom: var(--space-3);
+  display: inline-flex; gap: var(--space-2); align-items: center;
+  padding: var(--space-1) var(--space-3); margin-bottom: var(--space-3);
+  border-radius: var(--radius); background: var(--accent-tint); color: var(--on-accent-tint);
+  font-size: 0.875rem; font-weight: 700;
 }
-.ds-chat-example__transcript { margin-top: var(--space-4); }
+.ds-chat-example__transcript { margin-top: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-md); overflow: hidden; }
 .ds-chat-example__transcript p {
   display: grid; grid-template-columns: 3rem minmax(0, 1fr); gap: var(--space-3);
-  margin: 0; padding: var(--space-3) 0; border-top: 1px solid var(--line);
+  margin: 0; padding: var(--space-3) var(--space-4);
 }
+.ds-chat-example__transcript p + p { border-top: 1px solid var(--line); }
+.ds-chat-example__transcript p:first-child { background: var(--accent-tint); }
 .ds-chat-example__transcript p > span:last-child {
-  font-size: 1.25rem; line-height: 1.55;
+  font-size: 1.1875rem; line-height: 1.5;
 }
 .ds-chat-example__timestamp {
   color: var(--accent); font-size: 0.8125rem; font-weight: 700;
   font-variant-numeric: tabular-nums; padding-top: var(--space-1);
 }
 .ds-chat-example figcaption { margin-top: var(--space-3); }
+.ds-chat-example[data-ds-reveal="waiting"] .ds-chat-example__conversation > * { opacity: 0.001; transform: translateY(12px); }
+.ds-chat-example__conversation > * { transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out); }
+.ds-chat-example__conversation > :nth-child(2) { transition-delay: 0.35s; }
+.ds-chat-example__conversation > :nth-child(3) { transition-delay: 0.9s; }
 @media (max-width: 640px) {
   .ds-chat-example__header, .ds-chat-example__conversation { padding: var(--space-4); }
+  .ds-chat-example__transcript p { padding: var(--space-3); }
+  .ds-chat-example__transcript p > span:last-child { font-size: 1.0625rem; }
+}
+
+/* MCP promotion on home: copy and steps beside the chat window. */
+.ds-mcp-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: var(--space-12); align-items: start; }
+.ds-mcp-copy { display: flex; flex-direction: column; gap: var(--space-6); }
+.ds-mcp-copy h2 { font-size: clamp(1.75rem, 3vw, 2.5rem); letter-spacing: -0.03em; line-height: 1.1; }
+.ds-mcp-steps { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--space-4); counter-reset: ds-step; }
+.ds-mcp-steps li { display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: var(--space-3); counter-increment: ds-step; }
+.ds-mcp-steps li::before {
+  content: counter(ds-step); display: grid; place-items: center; width: 2rem; height: 2rem;
+  border: 1px solid var(--line-strong); border-radius: var(--radius); font-weight: 700; font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+}
+.ds-mcp-steps strong { display: block; }
+.ds-mcp-steps span { display: block; color: var(--muted); font-size: 0.9375rem; margin-top: 2px; }
+.ds-mcp-try { display: grid; gap: var(--space-2); }
+.ds-mcp-try > p { color: var(--muted); font-size: 0.875rem; }
+.ds-mcp-fine { color: var(--muted); font-size: 0.875rem; }
+@media (max-width: 900px) {
+  .ds-mcp-split { grid-template-columns: minmax(0, 1fr); gap: var(--space-9); }
 }
 
 /* proof_list: factual reassurance beside a call to action (home hero). */
@@ -907,3 +954,275 @@
 .ds-proof li { display: inline-flex; align-items: flex-start; gap: var(--space-2); }
 .ds-proof__icon { flex: none; display: inline-flex; width: 1rem; height: 1rem; margin-top: 0.125rem; color: var(--accent); }
 .ds-proof__icon svg { width: 100%; height: 100%; }
+
+/* ---------------------------------------------------------------------------
+   Site header — glass bar (DESIGN.md, Components: Site header)
+   The blur is on ::before, not on .nav-bar: a backdrop-filter on the bar
+   would make it the containing block for the fixed mobile panel inside it.
+   One of the two sanctioned effects; see test_design_system.py.
+   --------------------------------------------------------------------------- */
+.nav-bar::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--header-glass);
+  -webkit-backdrop-filter: saturate(1.4) blur(14px);
+  backdrop-filter: saturate(1.4) blur(14px);
+}
+body.nav-menu-open .nav-bar::before { background: var(--paper); }
+.nav-brand svg g:first-child rect { transform-box: fill-box; transform-origin: center; }
+.nav-brand:hover svg g:first-child rect { animation: ds-bar-bounce 0.5s var(--ease-out) both; }
+.nav-brand:hover svg g:first-child rect:nth-child(2) { animation-delay: 0.06s; }
+.nav-brand:hover svg g:first-child rect:nth-child(3) { animation-delay: 0.12s; }
+@keyframes ds-bar-bounce { 50% { transform: scaleY(0.4); } }
+
+/* ---------------------------------------------------------------------------
+   Hero — centred column over the signal wave (home)
+   --------------------------------------------------------------------------- */
+.ds-hero {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: var(--space-12) 0 0;
+}
+.ds-hero__inner {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-6);
+}
+.ds-hero h1 {
+  font-size: clamp(2.5rem, 6.4vw, 4.5rem);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.045em;
+  max-width: 17ch;
+  text-wrap: balance;
+}
+.ds-hero__soft { color: var(--muted); }
+.ds-hero__lede {
+  font-size: clamp(1.0625rem, 1.6vw, 1.25rem);
+  line-height: 1.5;
+  color: var(--muted);
+  max-width: 34rem;
+  text-wrap: balance;
+}
+/* Signed-in start screen: a question and the command bar, no pitch. */
+.ds-hero--app { padding-top: var(--space-9); }
+.ds-hero--app h1 { font-size: clamp(2rem, 4.4vw, 3rem); letter-spacing: -0.035em; max-width: 20ch; }
+
+/* Hero content that is not centred text: search results, hints. */
+.ds-hero__left { text-align: left; }
+
+/* Announcement link above a hero title. */
+.ds-announce {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 44px;
+  padding: var(--space-1) var(--space-3) var(--space-1) var(--space-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--paper);
+  color: var(--muted);
+  font-size: 0.875rem;
+  transition: border-color var(--dur-1) ease, color var(--dur-1) ease;
+}
+.ds-announce:hover { border-color: var(--line-strong); color: var(--ink); }
+.ds-announce__badge {
+  background: var(--accent-tint);
+  color: var(--on-accent-tint);
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+}
+.ds-announce__short { display: none; }
+.ds-arrow { display: inline-block; transition: transform var(--dur-1) var(--ease-out); }
+.ds-announce:hover .ds-arrow, .ds-cmd__go:hover .ds-arrow { transform: translateX(3px); }
+
+/* ---------------------------------------------------------------------------
+   Command bar — one field, a segmented scope switch and the action inside
+   --------------------------------------------------------------------------- */
+.ds-cmd { width: 100%; max-width: 44rem; display: flex; flex-direction: column; gap: var(--space-3); }
+.ds-cmd__box {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 4rem;
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--paper);
+}
+/* The one sanctioned gradient: a soft accent glow behind the hero search. */
+.ds-cmd__box::before {
+  content: "";
+  position: absolute;
+  inset: -2rem -2.5rem;
+  z-index: -1;
+  background: radial-gradient(closest-side, var(--glow), transparent);
+  pointer-events: none;
+}
+.ds-cmd__box:focus-within { outline: 4px solid var(--accent-tint); outline-offset: 0; }
+.ds-cmd__icon { flex: none; display: inline-flex; width: 1.25rem; height: 1.25rem; color: var(--muted); }
+.ds-cmd__icon svg { width: 100%; height: 100%; }
+.ds-cmd__input {
+  flex: 1;
+  min-width: 0;
+  height: 3rem;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: 500 1.0625rem var(--font-sans);
+}
+.ds-cmd__input::placeholder { color: var(--muted); }
+.ds-cmd__input:focus { outline: none; }
+.ds-cmd__go { flex: none; gap: var(--space-2); }
+
+/* Segmented scope switch (two or three options). Buttons keep class .tab so
+   page scripts that toggle .active keep working. */
+.ds-seg { flex: none; display: flex; padding: 3px; gap: 2px; background: var(--surface); border-radius: var(--radius-md); }
+.ds-seg .tab {
+  height: 2.25rem;
+  min-height: 0;
+  padding: 0 var(--space-3);
+  margin: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font: 700 0.875rem var(--font-sans);
+  cursor: pointer;
+}
+.ds-seg .tab:hover { color: var(--ink); }
+.ds-seg .tab.active, .ds-seg .tab[aria-pressed="true"] { background: var(--paper); color: var(--ink); border: 0; }
+
+.ds-proof--inline { flex-direction: row; flex-wrap: wrap; justify-content: center; gap: var(--space-2) var(--space-6); color: var(--ink); }
+
+/* "Works with" strip: names, not logos; links where a guide exists. */
+.ds-works {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-6);
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+.ds-works__item { font-size: 1rem; font-weight: 700; letter-spacing: -0.01em; color: var(--muted); }
+a.ds-works__item:hover { color: var(--ink); }
+
+/* Signal wave canvas: full-bleed across the viewport, the height of its
+   [data-ds-signal-root], behind the content. */
+.ds-signal { position: absolute; top: 0; bottom: 0; left: calc(50% - 50vw); width: 100vw; height: 100%; z-index: -1; pointer-events: none; }
+body:has(.ds-signal) { overflow-x: clip; }
+
+/* ---------------------------------------------------------------------------
+   Transcript window — product illustration with a moving playhead
+   --------------------------------------------------------------------------- */
+.ds-window {
+  width: 100%;
+  max-width: 58rem;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--paper);
+  overflow: hidden;
+  animation: ds-rise var(--dur-2) var(--ease-out) 0.2s both;
+}
+.ds-window__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.ds-window__cover {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius-sm);
+  background: var(--ink);
+}
+.ds-window__cover svg { width: 1.4rem; height: 1.3rem; }
+.ds-window__title { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.ds-window__title strong { font-size: 0.9375rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ds-window__title span { font-size: 0.8125rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ds-window__tools { display: flex; gap: var(--space-2); }
+.ds-window__tools span {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--paper);
+}
+.ds-window__status { display: inline-flex; align-items: center; gap: var(--space-2); }
+.ds-window__status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: ds-pulse 1.6s ease-in-out infinite; }
+.ds-window__track { height: 3px; background: var(--line); }
+.ds-window__playhead { display: block; height: 100%; width: 20%; background: var(--accent); transition: width 0.5s linear; }
+.ds-window__lines { display: flex; flex-direction: column; gap: var(--space-1); padding: var(--space-4); }
+.ds-window__line {
+  display: grid;
+  grid-template-columns: 3.5rem 1fr;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  transition: background var(--dur-2) var(--ease-out);
+}
+.ds-window__line .timestamp { padding-top: 0.375rem; }
+.ds-window__line p {
+  /* The text carries .transcript-pane, which sets the transcript face. */
+  max-height: none;
+  overflow: visible;
+  white-space: normal;
+  font-size: 1.25rem;
+  line-height: 1.55;
+  color: var(--muted);
+  transition: color var(--dur-2) var(--ease-out);
+}
+.ds-window__line.is-current { background: var(--surface); }
+.ds-window__line.is-current p { color: var(--ink); }
+.ds-window__caption { padding: 0 var(--space-6) var(--space-4); font-size: 0.75rem; color: var(--muted); }
+
+@keyframes ds-rise { from { opacity: 0.001; transform: translateY(16px); } }
+@keyframes ds-pulse { 50% { opacity: 0.35; } }
+
+@media (max-width: 640px) {
+  .ds-hero { padding-top: var(--space-9); }
+  .ds-hero__inner { gap: var(--space-4); }
+  .ds-announce__long { display: none; }
+  .ds-announce__short { display: inline; }
+  /* Phones get the title, the command bar and one reason. The rest is still in
+     the DOM for screen readers and search, and the transcript window below
+     shows what the lede says. */
+  .ds-hero .ds-announce, .ds-hero__lede, .ds-hero .ds-works,
+  .ds-hero .ds-proof--inline li + li { display: none; }
+  .ds-cmd__box { flex-wrap: wrap; padding: var(--space-2); }
+  .ds-cmd__box::before { inset: -2rem 0; }
+  .ds-seg .tab { padding: 0 var(--space-2); }
+  .ds-cmd__go { min-width: 0; padding: 0 var(--space-4); }
+  .ds-cmd__icon { display: none; }
+  .ds-cmd__input { flex: 1 1 100%; padding: 0 var(--space-2); }
+  .ds-cmd__go { flex: 1; justify-content: center; }
+  .ds-proof--inline { gap: var(--space-2) var(--space-4); }
+  .ds-window__tools, .ds-window__status { display: none; }
+  .ds-window__lines { padding: var(--space-2); }
+  .ds-window__line { grid-template-columns: 2.75rem 1fr; gap: var(--space-2); padding: var(--space-2); }
+  .ds-window__line p { font-size: 1.0625rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-brand:hover svg g:first-child rect, .ds-window, .ds-window__status i, .ds-chat-example__status i { animation: none; }
+  .ds-arrow, .ds-window__line, .ds-window__line p, .ds-window__playhead, .nav-cta svg, .ds-chat-example__conversation > * { transition: none; }
+}
