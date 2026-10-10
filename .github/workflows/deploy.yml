@@ -107,7 +107,7 @@ jobs:
           printf '%s\n' "$PODSKRIFT_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
-      - name: Pull main, drain in-flight jobs, restart podskrift
+      - name: Pull main, drain in-flight jobs, install deps, restart podskrift
         env:
           PODSKRIFT_SSH_HOST: ${{ secrets.PODSKRIFT_SSH_HOST }}
           PODSKRIFT_SSH_USER: ${{ secrets.PODSKRIFT_SSH_USER }}
@@ -132,6 +132,12 @@ jobs:
                git show origin/main:ops/drain-in-flight.sh \
                  | PODSKRIFT_DRAIN_MAX_WAIT_SEC=1200 bash -s
                git pull --ff-only origin main
+               # Install/update runtime deps into the app venv before restart.
+               # A failed install or import smoke check fails the deploy (set -e)
+               # so we never restart onto a tree whose requirements are missing
+               # from the venv (PODSKRIFT-N: PyJWT added in git, never pip installed).
+               .venv/bin/pip install -q -r requirements.txt
+               .venv/bin/python -c "import jwt, flask, openai, stripe"
                systemctl restart podskrift
                systemctl is-active --quiet podskrift
                echo "podskrift is active"

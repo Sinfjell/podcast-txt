@@ -18,12 +18,17 @@ Lookup, writes ~150 shows. Live pages never call Apple at request time.
 On every push to `main` (merge or direct), [.github/workflows/deploy.yml](../.github/workflows/deploy.yml)
 SSHs into the Hetzner/Plesk host and runs:
 
-1. `git fetch` / `checkout main` / `pull --ff-only`
-2. **Deploy drain** — `ops/drain-in-flight.sh` polls
-   `http://127.0.0.1:5002/internal/in-flight` until there are no
-   queued/running transcriptions, or until **20 minutes** elapse (then
-   proceeds anyway so the Actions job stays inside its 30-minute timeout)
-3. `systemctl restart podskrift`, asserts the unit is active, prints HEAD
+1. `git fetch` / `checkout main`
+2. **Deploy drain** — `ops/drain-in-flight.sh` (from `origin/main`, without
+   touching the working tree) polls `http://127.0.0.1:5002/internal/in-flight`
+   until there are no queued/running transcriptions, or until **20 minutes**
+   elapse (then proceeds anyway so the Actions job stays inside its 30-minute
+   timeout)
+3. `git pull --ff-only origin main`
+4. `.venv/bin/pip install -q -r requirements.txt` into the app venv, then a
+   short import smoke check (`.venv/bin/python -c 'import jwt, flask, openai, stripe'`).
+   A failed install or import fails the job **before** restart.
+5. `systemctl restart podskrift`, asserts the unit is active, prints HEAD
 
 New jobs keep being accepted during the drain; anything still mid-flight when
 the process exits is **re-queued once on boot** (same task id and trial/paid
@@ -32,9 +37,16 @@ clear “server restarted” message instead of blaming the audio file.
 
 Manual re-run: Actions → **Deploy production** → **Run workflow**.
 
-No `pip install` — same as the current pull+restart. If a change needs new
-Python deps, install them on the host once (as the app user / into `.venv`)
-before or right after that deploy; see Sentry / PostHog install notes below.
+Manual deploy (same ordering, from the app directory on the host):
+
+```bash
+git fetch origin && git checkout main
+git show origin/main:ops/drain-in-flight.sh | PODSKRIFT_DRAIN_MAX_WAIT_SEC=1200 bash -s
+git pull --ff-only origin main
+.venv/bin/pip install -q -r requirements.txt
+.venv/bin/python -c 'import jwt, flask, openai, stripe'
+systemctl restart podskrift
+```
 
 ### Gunicorn graceful shutdown
 
@@ -58,7 +70,8 @@ then `systemctl daemon-reload`.
 | `PODSKRIFT_SSH_KEY` | Private key whose public half is in `authorized_keys` on the host. Prefer a deploy-only ed25519 key, not a personal laptop key. |
 | `PODSKRIFT_SSH_KNOWN_HOSTS` | Output of `ssh-keyscan -t ed25519,rsa 37.27.191.154` (paste the host lines only). The workflow uses `StrictHostKeyChecking=yes` — never `no`. |
 
-A failed SSH, non-ff pull, or inactive unit fails the job red.
+A failed SSH, non-ff pull, `pip install`, import smoke check, or inactive unit
+fails the job red.
 
 ### Rollback
 
@@ -269,7 +282,9 @@ after any URL or path (requests quotes bare paths) are redacted from every event
 test check event above must arrive with its fake key as `[redacted]`.
 
 If sentry-sdk is missing from the venv the app still boots and logs an error
-that reporting is off -- a deploy that skips `pip install` degrades, not dies.
+that reporting is off -- soft-import degrades, not dies. Normal deploys run
+`pip install -r requirements.txt` so this should only happen after a manual
+skip or a broken venv.
 
 ## Product analytics (PostHog)
 
