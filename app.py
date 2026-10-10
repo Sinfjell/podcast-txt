@@ -925,9 +925,31 @@ CHECKOUT_EXPIRES_HOURS = _env_hours('CHECKOUT_EXPIRES_HOURS', 2)
 CHECKOUT_RECOVERY_ENABLED = os.getenv(
     'CHECKOUT_RECOVERY_ENABLED', '1').strip().lower() not in (
         '0', 'false', 'no', 'off')
+#: consent_collection.promotions — Stripe supports this only for US merchants
+#: and US customers. Off by default: non-US accounts (e.g. Norway) get
+#: InvalidRequestError ("not available in your country") and checkout dies.
+#: after_expiration.recovery still works without this param.
+CHECKOUT_PROMOTIONS_CONSENT_ENABLED = os.getenv(
+    'CHECKOUT_PROMOTIONS_CONSENT_ENABLED', '0').strip().lower() not in (
+        '0', 'false', 'no', 'off')
 
 if stripe is not None and STRIPE_API_VERSION:
     stripe.api_version = STRIPE_API_VERSION
+
+
+def _stripe_rejected_optional_checkout_params(exc, params):
+    """True when Stripe rejected optional recovery/consent Checkout knobs.
+
+    Those params must never block a purchase; callers retry without them.
+    """
+    if 'after_expiration' not in params and 'consent_collection' not in params:
+        return False
+    msg = str(exc).lower()
+    return (
+        'consent_collection' in msg
+        or 'after_expiration' in msg
+        or ('promotions' in msg and 'not available' in msg)
+    )
 
 
 def stripe_webhook_enabled():
@@ -5033,18 +5055,19 @@ def billing_checkout():
     }
     if CHECKOUT_RECOVERY_ENABLED:
         # Stripe emails a one-time recovery URL after the session expires.
-        # promotions=auto is required for recovery emails in jurisdictions that
-        # need promotional consent; allow_promotion_codes on the recovery link
-        # matches our one-time pack (no subscription coupons).
+        # allow_promotion_codes on the recovery link matches our one-time pack.
+        # Do not send consent_collection.promotions unless explicitly opted in —
+        # that field is US-only and rejects Norwegian (and other non-US) accounts.
         params['after_expiration'] = {
             'recovery': {
                 'enabled': True,
                 'allow_promotion_codes': True,
             },
         }
-        params['consent_collection'] = {
-            'promotions': 'auto',
-        }
+        if CHECKOUT_PROMOTIONS_CONSENT_ENABLED:
+            params['consent_collection'] = {
+                'promotions': 'auto',
+            }
     if STRIPE_MANAGED_PAYMENTS:
         # Managed Payments rejects automatic_tax: Stripe owns the tax.
         params['managed_payments'] = {'enabled': True}
@@ -5055,10 +5078,31 @@ def billing_checkout():
         client = stripe_client()
         if client is None:
             raise RuntimeError('Stripe client unavailable')
-        checkout_session = client.v1.checkout.sessions.create(
-            params=params,
-            options={'idempotency_key': f'checkout-{current_user.id}-{uuid.uuid4()}'},
-        )
+        try:
+            checkout_session = client.v1.checkout.sessions.create(
+                params=params,
+                options={
+                    'idempotency_key': (
+                        f'checkout-{current_user.id}-{uuid.uuid4()}'),
+                },
+            )
+        except Exception as recovery_exc:  # noqa: BLE001
+            # Optional recovery/consent knobs must not block purchase (PODSKRIFT-W).
+            if not _stripe_rejected_optional_checkout_params(
+                    recovery_exc, params):
+                raise
+            app.logger.warning(
+                'Stripe rejected optional checkout recovery params; '
+                'retrying without them: %s', recovery_exc)
+            params.pop('after_expiration', None)
+            params.pop('consent_collection', None)
+            checkout_session = client.v1.checkout.sessions.create(
+                params=params,
+                options={
+                    'idempotency_key': (
+                        f'checkout-{current_user.id}-{uuid.uuid4()}'),
+                },
+            )
     except Exception as exc:  # noqa: BLE001 - never surface Stripe internals
         app.logger.exception('Stripe Checkout Session create failed')
         _capture_purchase_failed(
@@ -5072,6 +5116,9 @@ def billing_checkout():
 
     cs_id = getattr(checkout_session, 'id', None) or (
         checkout_session.get('id') if isinstance(checkout_session, dict) else None)
+    recovery_applied = bool(
+        ((params.get('after_expiration') or {}).get('recovery') or {})
+        .get('enabled'))
     started_props = {
         'location': source,
         'source': source,
@@ -5084,7 +5131,7 @@ def billing_checkout():
         'trial_remaining_min': trial_remaining_min,
         'paid_remaining_min': paid_remaining_min,
         'expires_hours': CHECKOUT_EXPIRES_HOURS,
-        'recovery_enabled': bool(CHECKOUT_RECOVERY_ENABLED),
+        'recovery_enabled': recovery_applied,
     }
     started_props.update(trial_variant_props(current_user))
     if ph_sid:
