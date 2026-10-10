@@ -421,7 +421,6 @@ def authorization_server_metadata() -> dict:
         # CIMD public clients use none; DCR may use client_secret_post.
         'token_endpoint_auth_methods_supported': ['none', 'client_secret_post'],
         'authorization_response_iss_parameter_supported': True,
-        'revocation_endpoint_auth_methods_supported': ['none'],
     }
 
 
@@ -437,15 +436,27 @@ def looks_like_cimd_client_id(client_id: str) -> bool:
         return False
     if parsed.username or parsed.password or parsed.fragment:
         return False
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    if port not in (None, 443):
+        return False
     path = parsed.path or ''
     return bool(path) and path != '/'
 
 
 def _ip_is_public(ip_str: str) -> bool:
     try:
-        ip = ipaddress.ip_address(ip_str)
+        ip = ipaddress.ip_address((ip_str or '').split('%', 1)[0])
     except ValueError:
         return False
+    if ip.version == 6:
+        embedded = ip.ipv4_mapped or ip.sixtofour
+        if embedded is None and ip in ipaddress.ip_network('64:ff9b::/96'):
+            embedded = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        if embedded is not None and not embedded.is_global:
+            return False
     return bool(ip.is_global)
 
 
@@ -495,8 +506,11 @@ def fetch_cimd_document(client_id_url: str) -> tuple[dict | None, str | None]:
     # Cap body size before json parse.
     chunks = []
     total = 0
+    deadline = time.monotonic() + CIMD_FETCH_TIMEOUT_SEC
     try:
         for chunk in resp.iter_content(chunk_size=4096):
+            if time.monotonic() > deadline:
+                return None, 'CIMD fetch timed out.'
             if not chunk:
                 continue
             total += len(chunk)
@@ -824,10 +838,13 @@ def register_oauth(app_flask):
         client_label = client.client_name or client.client_id
 
         if request.method == 'GET':
-            return render_template(
+            page = Response(render_template(
                 'oauth_consent.html',
                 client_name=client_label,
                 client_id=client.client_id,
+                redirect_host=(urlparse(redirect_uri).hostname or ''),
+                client_host=(urlparse(client.client_id).hostname
+                             if looks_like_cimd_client_id(client.client_id) else None),
                 redirect_uri=redirect_uri,
                 response_type=response_type,
                 state=state or '',
@@ -836,7 +853,14 @@ def register_oauth(app_flask):
                 code_challenge_method=code_challenge_method,
                 resource=normalize_resource(resource) or mcp_resource_url(),
                 csrf_token=A.generate_csrf_token(),
-            )
+            ), mimetype='text/html')
+            # Consent must never be framed (clickjacking), not even by the
+            # PostHog toolbar origins the site-wide CSP allows.
+            page.headers['X-Frame-Options'] = 'DENY'
+            page.headers['Content-Security-Policy'] = (
+                "frame-ancestors 'none'; base-uri 'self'; object-src 'none'")
+            page.headers['Cache-Control'] = 'no-store'
+            return page
 
         if not A.validate_csrf_token():
             flash('That form expired. Please try again.', 'error')
@@ -904,7 +928,9 @@ def register_oauth(app_flask):
         from models import (OAuthAccessToken, OAuthAuthorizationCode,
                             OAuthRefreshToken, db)
 
-        client, client_err = resolve_oauth_client(client_id)
+        # No outbound CIMD fetch from this unauthenticated endpoint: a client
+        # that completed /oauth/authorize is already stored.
+        client, client_err = resolve_oauth_client(client_id, allow_fetch=False)
         if client is None:
             return _oauth_error(
                 'invalid_client', client_err or 'Unknown client_id.', 401)
@@ -952,8 +978,11 @@ def register_oauth(app_flask):
         if row is None:
             return _oauth_error('invalid_grant', 'Invalid authorization code.')
 
-        # Reuse / already used → refuse (and leave used_at set).
+        # Reuse / already used → refuse, and revoke tokens issued to this
+        # user×client: a replayed code means it leaked (RFC 6749 §4.1.2).
         if row.used_at is not None:
+            if row.client_id == client.client_id:
+                revoke_user_client(row.user_id, row.client_id)
             return _oauth_error(
                 'invalid_grant', 'Authorization code has already been used.')
 
@@ -1013,6 +1042,10 @@ def register_oauth(app_flask):
         if row is None:
             return _oauth_error('invalid_grant', 'Invalid refresh token.')
         if row.revoked_at is not None:
+            # Replay of an already-rotated token: assume theft and revoke the
+            # whole user×client family (OAuth 2.1 §4.3.1 / BCP 4.14.2).
+            if row.replaced_by_hash and row.client_id == client.client_id:
+                revoke_user_client(row.user_id, row.client_id)
             return _oauth_error('invalid_grant', 'Refresh token revoked.')
         if _as_utc(row.expires_at) <= _utc_now():
             return _oauth_error('invalid_grant', 'Refresh token expired.')

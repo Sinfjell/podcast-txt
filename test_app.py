@@ -6656,7 +6656,14 @@ def test_oauth_full_flow_register_authorize_token_mcp_refresh_revoke(mcp_oauth_o
     assert new_tokens['refresh_token'] != old_refresh
     assert new_tokens['access_token'] != tokens['access_token']
 
-    # Old refresh cannot be reused
+    # Settings lists the app (checked before the replay below, which now
+    # revokes the whole family by design).
+    settings = client.get('/settings')
+    assert settings.status_code == 200
+    assert b'Connected apps' in settings.data
+    assert b'ChatGPT Test' in settings.data
+
+    # Old refresh cannot be reused (replay also revokes the family)
     reuse = A.app.test_client().post('/oauth/token', data={
         'grant_type': 'refresh_token',
         'refresh_token': old_refresh,
@@ -6665,11 +6672,7 @@ def test_oauth_full_flow_register_authorize_token_mcp_refresh_revoke(mcp_oauth_o
     assert reuse.status_code == 400
     assert reuse.get_json()['error'] == 'invalid_grant'
 
-    # Settings lists the app; revoke kills the new access token
-    settings = client.get('/settings')
-    assert settings.status_code == 200
-    assert b'Connected apps' in settings.data
-    assert b'ChatGPT Test' in settings.data
+    # Revoke from Settings still succeeds (idempotent) and the token is dead
     with client.session_transaction() as sess:
         csrf = sess.get('_csrf_token') or 'tok'
         sess['_csrf_token'] = csrf
@@ -13906,3 +13909,114 @@ def test_admin_costs_still_404_for_non_admin():
     uid = _make_user('not-costs-admin@example.com')
     client = _login(uid)
     assert client.get('/admin').status_code == 404
+
+
+# --- Security review follow-ups (PR #86) -----------------------------------
+
+def test_oauth_cimd_rejects_non_default_port_and_mapped_private_ips():
+    assert OAUTH.looks_like_cimd_client_id('https://example.com/client.json')
+    assert not OAUTH.looks_like_cimd_client_id('https://example.com:8443/client.json')
+    for addr in ('::ffff:127.0.0.1', '::ffff:10.0.0.5', '2002:7f00:1::',
+                 '64:ff9b::a00:1', '169.254.169.254', '::1', '10.1.2.3'):
+        assert not OAUTH._ip_is_public(addr), addr
+    assert OAUTH._ip_is_public('8.8.8.8')
+
+
+def test_oauth_metadata_has_no_dangling_revocation_fields(mcp_oauth_on):
+    body = A.app.test_client().get('/.well-known/oauth-authorization-server').get_json()
+    assert 'revocation_endpoint_auth_methods_supported' not in body or body.get(
+        'revocation_endpoint')
+
+
+def test_oauth_token_endpoint_never_fetches_cimd(mcp_oauth_on, monkeypatch):
+    calls = []
+    monkeypatch.setattr(OAUTH, 'fetch_cimd_document',
+                        lambda url: calls.append(url) or (None, 'nope'))
+    r = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code',
+        'client_id': 'https://attacker.example/cimd.json',
+        'code': 'x', 'redirect_uri': 'https://attacker.example/cb',
+        'code_verifier': 'v' * 43,
+    })
+    assert r.status_code == 401
+    assert calls == []
+
+
+def _oauth_login_and_tokens(mcp_on):
+    reg = _oauth_register(redirect_uris=['http://127.0.0.1/callback']).get_json()
+    client_id = reg['client_id']
+    c = _login(mcp_on['a'])
+    pair = _pkce_pair()
+    _, code = _oauth_approve(c, client_id=client_id,
+                             redirect_uri='http://127.0.0.1/callback',
+                             verifier_challenge=pair)
+    tok = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code', 'client_id': client_id, 'code': code,
+        'redirect_uri': 'http://127.0.0.1/callback', 'code_verifier': pair[0],
+        'resource': OAUTH.mcp_resource_url(),
+    })
+    assert tok.status_code == 200, tok.data
+    return c, client_id, code, pair, tok.get_json()
+
+
+def _mcp_list_with(token):
+    return A.app.test_client().post('/mcp', json={
+        'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'},
+        headers={'Authorization': f'Bearer {token}'})
+
+
+def test_oauth_refresh_reuse_revokes_family(mcp_oauth_on):
+    _, client_id, _, _, t1 = _oauth_login_and_tokens(mcp_oauth_on)
+    c = A.app.test_client()
+    r2 = c.post('/oauth/token', data={'grant_type': 'refresh_token',
+                                      'client_id': client_id,
+                                      'refresh_token': t1['refresh_token']})
+    assert r2.status_code == 200
+    t2 = r2.get_json()
+    assert _mcp_list_with(t2['access_token']).status_code == 200
+    # Replay the rotated (old) refresh token -> refused AND family revoked.
+    replay = c.post('/oauth/token', data={'grant_type': 'refresh_token',
+                                          'client_id': client_id,
+                                          'refresh_token': t1['refresh_token']})
+    assert replay.status_code == 400
+    assert _mcp_list_with(t2['access_token']).status_code == 401
+    again = c.post('/oauth/token', data={'grant_type': 'refresh_token',
+                                         'client_id': client_id,
+                                         'refresh_token': t2['refresh_token']})
+    assert again.status_code == 400
+
+
+def test_oauth_code_replay_revokes_issued_tokens(mcp_oauth_on):
+    _, client_id, code, pair, t1 = _oauth_login_and_tokens(mcp_oauth_on)
+    assert _mcp_list_with(t1['access_token']).status_code == 200
+    replay = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code', 'client_id': client_id, 'code': code,
+        'redirect_uri': 'http://127.0.0.1/callback', 'code_verifier': pair[0]})
+    assert replay.status_code == 400
+    assert _mcp_list_with(t1['access_token']).status_code == 401
+
+
+def test_oauth_consent_not_frameable_and_shows_destination(mcp_oauth_on):
+    reg = _oauth_register(redirect_uris=['https://evil.example/cb'],
+                          client_name='ChatGPT').get_json()
+    c = _login(mcp_oauth_on['a'])
+    _, challenge = _pkce_pair()
+    page = c.get('/oauth/authorize', query_string={
+        'response_type': 'code', 'client_id': reg['client_id'],
+        'redirect_uri': 'https://evil.example/cb', 'code_challenge': challenge,
+        'code_challenge_method': 'S256', 'resource': OAUTH.mcp_resource_url()})
+    assert page.status_code == 200
+    assert page.headers['X-Frame-Options'] == 'DENY'
+    assert "frame-ancestors 'none'" in page.headers['Content-Security-Policy']
+    assert b'evil.example' in page.data
+    assert b'not verified' in page.data
+
+
+def test_oauth_settings_revoke_confirm_is_not_injectable(mcp_oauth_on):
+    evil = "x');alert(document.domain);('"
+    _oauth_register(client_name=evil)
+    from markupsafe import Markup  # noqa: F401
+    html = A.app.jinja_env.from_string(
+        """<form onsubmit='return confirm({{ ("Revoke access for " ~ name ~ "?")|tojson }});'>"""
+    ).render(name=evil)
+    assert "'" not in html.split("onsubmit='", 1)[1].split("'>", 1)[0]

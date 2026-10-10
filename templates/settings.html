@@ -242,8 +242,10 @@
                         </span>
                         {% endif %}
                     </div>
+                    {# client_name is registrant-controlled: tojson (htmlsafe) inside a
+                       single-quoted attribute, never raw inside a JS string. #}
                     <form method="POST" action="{{ url_for('settings_oauth_revoke') }}"
-                          onsubmit="return confirm('Revoke access for {{ app.client_name }}?');">
+                          onsubmit='return confirm({{ ("Revoke access for " ~ app.client_name ~ "?")|tojson }});'>
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <input type="hidden" name="client_id" value="{{ app.client_id }}">
                         <button type="submit" class="btn btn-danger">Revoke</button>

@@ -29,6 +29,12 @@
         <strong>{{ client_name }}</strong> wants access on your account
         ({{ current_user.email }}).
     </p>
+    <p class="oauth-lede">
+        After you allow, you will be sent to <strong>{{ redirect_host }}</strong>.
+        {% if client_host %}App published by <strong>{{ client_host }}</strong>.
+        {% else %}This app registered itself and is not verified by Podskrift; only
+        continue if you started this connection yourself.{% endif %}
+    </p>
     <ul class="oauth-list">
         <li>
             <strong>Search podcasts</strong>
