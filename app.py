@@ -922,8 +922,10 @@ def _env_hours(name, default):
 #: we keep a 1 h floor for simplicity.
 CHECKOUT_EXPIRES_HOURS = _env_hours('CHECKOUT_EXPIRES_HOURS', 2)
 #: Abandoned Checkout recovery (Stripe emails a resume link after expiry).
+#: Off by default: recovery emails require consent_collection.promotions,
+#: which Stripe rejects for Norway (and some other) account countries.
 CHECKOUT_RECOVERY_ENABLED = os.getenv(
-    'CHECKOUT_RECOVERY_ENABLED', '1').strip().lower() not in (
+    'CHECKOUT_RECOVERY_ENABLED', '0').strip().lower() not in (
         '0', 'false', 'no', 'off')
 
 if stripe is not None and STRIPE_API_VERSION:
@@ -5033,17 +5035,15 @@ def billing_checkout():
     }
     if CHECKOUT_RECOVERY_ENABLED:
         # Stripe emails a one-time recovery URL after the session expires.
-        # promotions=auto is required for recovery emails in jurisdictions that
-        # need promotional consent; allow_promotion_codes on the recovery link
-        # matches our one-time pack (no subscription coupons).
+        # Do NOT set consent_collection.promotions — unavailable for Norway
+        # (and some other) account countries, and it breaks Session create.
+        # Do NOT set allow_promotion_codes: credit only applies to the full
+        # undiscounted pack amount; a promo-code purchase would pay without
+        # being credited.
         params['after_expiration'] = {
             'recovery': {
                 'enabled': True,
-                'allow_promotion_codes': True,
             },
-        }
-        params['consent_collection'] = {
-            'promotions': 'auto',
         }
     if STRIPE_MANAGED_PAYMENTS:
         # Managed Payments rejects automatic_tax: Stripe owns the tax.
