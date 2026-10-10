@@ -265,4 +265,50 @@ the episode is longer than your remaining minutes, it refuses and includes
 
 Replace `psk_…` with your key from Settings. Long episodes can take several
 minutes — poll `get_transcript_status` until `transcript_status` is `ready`.
+
+<!-- mcp-oauth-section -->
+### OAuth for ChatGPT and Claude.ai
+
+ChatGPT connectors and Claude.ai custom connectors use OAuth 2.1 (MCP
+authorization spec) instead of pasting an API key. Podskrift runs its own
+authorization server on the same host — no third-party IdP.
+
+**MCP URL:** `https://podskrift.com/mcp`
+
+**Discovery:** clients fetch
+`https://podskrift.com/.well-known/oauth-protected-resource`
+(and authorization-server metadata at
+`/.well-known/oauth-authorization-server`). Unauthenticated `/mcp` calls
+return `401` with a `WWW-Authenticate` header pointing at that metadata.
+
+#### ChatGPT
+
+1. Turn on **Developer mode** (Settings → Apps → Advanced settings), or create
+   a custom app from workspace Apps settings. See OpenAI’s
+   [Developer mode and MCP apps](https://help.openai.com/en/articles/12584461)
+   and [plugin authentication](https://developers.openai.com/plugins/build/auth).
+2. Add a custom MCP server / plugin with URL `https://podskrift.com/mcp`.
+3. Choose OAuth. ChatGPT registers a client (dynamic client registration) and
+   opens Podskrift’s consent page — log in if needed, then **Allow**.
+4. Manage or disconnect the app under ChatGPT’s Apps settings; you can also
+   revoke it in Podskrift **Settings → Connected apps**.
+
+#### Claude.ai
+
+1. Open Claude → **Customize** / connectors → **Add custom connector** (wording
+   varies by plan). See Anthropic’s
+   [custom connectors](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
+   and [authentication for connectors](https://claude.com/docs/connectors/building/authentication).
+2. Set the MCP server URL to `https://podskrift.com/mcp`.
+3. Under authentication, choose sign-in (OAuth). Prefer **Register
+   automatically** (dynamic client registration) unless you already have a
+   client id. Claude’s hosted callback is
+   `https://claude.ai/api/mcp/auth_callback`.
+4. Complete the Podskrift consent screen, then use tools in chat. Revoke from
+   Claude’s connector settings or Podskrift **Settings → Connected apps**.
+
+OAuth access tokens last one hour; refresh tokens rotate and last 30 days.
+Transcription still uses your trial / paid minutes / BYOK — same metering as
+the website and the `psk_…` API key path.
+<!-- /mcp-oauth-section -->
 <!-- /mcp-section -->

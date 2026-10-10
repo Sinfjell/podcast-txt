@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Connect {{ client_name }} — Podskrift{% endblock %}
+
+{% block content %}
+<style>
+    .oauth-wrap { max-width: 480px; margin: 24px auto 48px; }
+    .oauth-title {
+        font-size: clamp(28px, 4vw, 40px); font-weight: 800; letter-spacing: -0.03em;
+        line-height: 1.05; margin-bottom: 12px;
+    }
+    .oauth-lede { color: var(--muted); font-size: 16px; line-height: 1.5; margin-bottom: 28px; }
+    .oauth-list {
+        list-style: none; padding: 0; margin: 0 0 28px;
+        border-top: 1px solid var(--line);
+    }
+    .oauth-list li {
+        padding: 14px 0; border-bottom: 1px solid var(--line);
+        font-size: 15px; line-height: 1.45;
+    }
+    .oauth-list strong { display: block; margin-bottom: 2px; }
+    .oauth-list span { color: var(--muted); font-size: 14px; }
+    .oauth-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+    .oauth-actions .btn { min-width: 140px; }
+    .oauth-note { margin-top: 24px; font-size: 14px; color: var(--muted); line-height: 1.5; }
+</style>
+<div class="oauth-wrap">
+    <h1 class="oauth-title">Allow {{ client_name }} to connect?</h1>
+    <p class="oauth-lede">
+        <strong>{{ client_name }}</strong> wants to use Podskrift on your account
+        ({{ current_user.email }}).
+    </p>
+    <ul class="oauth-list">
+        <li>
+            <strong>Search podcasts</strong>
+            <span>Look up shows in the public podcast directory.</span>
+        </li>
+        <li>
+            <strong>List episodes</strong>
+            <span>Read episode titles and dates from public feeds.</span>
+        </li>
+        <li>
+            <strong>Start transcriptions</strong>
+            <span>Use your free trial minutes, paid minutes, or your own OpenAI key — same rules as the website.</span>
+        </li>
+    </ul>
+    <form method="POST" action="{{ url_for('oauth_authorize') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="client_id" value="{{ client_id }}">
+        <input type="hidden" name="redirect_uri" value="{{ redirect_uri }}">
+        <input type="hidden" name="response_type" value="{{ response_type }}">
+        <input type="hidden" name="state" value="{{ state }}">
+        <input type="hidden" name="scope" value="{{ scope }}">
+        <input type="hidden" name="code_challenge" value="{{ code_challenge }}">
+        <input type="hidden" name="code_challenge_method" value="{{ code_challenge_method }}">
+        <input type="hidden" name="resource" value="{{ resource }}">
+        <div class="oauth-actions">
+            <button type="submit" name="decision" value="approve" class="btn btn-primary">Allow</button>
+            <button type="submit" name="decision" value="deny" class="btn btn-secondary">Deny</button>
+        </div>
+    </form>
+    <p class="oauth-note">
+        You can revoke access later in
+        <a href="{{ url_for('settings') }}#connected-apps">Settings → Connected apps</a>.
+    </p>
+</div>
+{% endblock %}

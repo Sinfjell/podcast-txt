@@ -6361,15 +6361,25 @@ def test_mcp_batch_consumes_rate_limit(mcp_on, monkeypatch):
 
 def test_mcp_docs_section_only_when_flag_on(trial_on, monkeypatch):
     monkeypatch.setenv('MCP_ENABLED', '0')
+    monkeypatch.setenv('MCP_OAUTH_ENABLED', '0')
     off = A.app.test_client().get('/docs/api').data.decode()
     assert 'MCP' not in off
     assert 'podskrift.com/mcp' not in off
 
     monkeypatch.setenv('MCP_ENABLED', '1')
+    monkeypatch.setenv('MCP_OAUTH_ENABLED', '0')
     on = A.app.test_client().get('/docs/api').data.decode()
     assert 'MCP (ChatGPT / Claude / Cursor)' in on
     assert 'podskrift.com/mcp' in on
     assert 'search_podcasts' in on
+    # OAuth connector steps stay hidden until MCP_OAUTH_ENABLED.
+    assert 'OAuth for ChatGPT' not in on
+    assert 'claude.ai/api/mcp/auth_callback' not in on
+
+    monkeypatch.setenv('MCP_OAUTH_ENABLED', '1')
+    oauth_on = A.app.test_client().get('/docs/api').data.decode()
+    assert 'OAuth for ChatGPT and Claude.ai' in oauth_on
+    assert 'claude.ai/api/mcp/auth_callback' in oauth_on
 
 
 def test_mcp_path_not_redirected_off_canonical_host(monkeypatch):
@@ -6382,6 +6392,323 @@ def test_mcp_path_not_redirected_off_canonical_host(monkeypatch):
     )
     # Auth fails closed with 401 — must not 301/308 off the host.
     assert r.status_code == 401
+
+
+# --------------------------------------------------------------------------
+# MCP OAuth 2.1 (ChatGPT / Claude.ai connectors)
+# --------------------------------------------------------------------------
+
+import base64 as _b64
+import hashlib as _hashlib
+import oauth_server as OAUTH  # noqa: E402
+
+
+def _pkce_pair():
+    verifier = secrets.token_urlsafe(48)
+    challenge = _b64.urlsafe_b64encode(
+        _hashlib.sha256(verifier.encode('ascii')).digest()
+    ).rstrip(b'=').decode('ascii')
+    return verifier, challenge
+
+
+@pytest.fixture
+def mcp_oauth_on(mcp_on, monkeypatch):
+    """MCP + OAuth flags; reuse customer_api stubs from mcp_on."""
+    monkeypatch.setenv('MCP_OAUTH_ENABLED', '1')
+    monkeypatch.setenv('PUBLIC_BASE_URL', 'https://podskrift.com')
+    OAUTH._register_attempts.clear()
+    OAUTH._token_attempts.clear()
+    return mcp_on
+
+
+def _oauth_register(redirect_uris=None, client_name='Test Connector'):
+    r = A.app.test_client().post('/oauth/register', json={
+        'client_name': client_name,
+        'redirect_uris': redirect_uris or ['http://127.0.0.1/callback'],
+        'token_endpoint_auth_method': 'none',
+        'grant_types': ['authorization_code', 'refresh_token'],
+        'response_types': ['code'],
+    })
+    return r
+
+
+def _oauth_approve(client, *, client_id, redirect_uri, verifier_challenge,
+                   state='xyz'):
+    """GET consent + POST approve; return (response, code|None)."""
+    verifier, challenge = verifier_challenge
+    resource = OAUTH.mcp_resource_url()
+    q = {
+        'response_type': 'code',
+        'client_id': client_id,
+        'redirect_uri': redirect_uri,
+        'state': state,
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+        'resource': resource,
+        'scope': 'mcp offline_access',
+    }
+    page = client.get('/oauth/authorize', query_string=q)
+    assert page.status_code == 200, page.data[:500]
+    assert b'Allow' in page.data
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token') or 'tok'
+        sess['_csrf_token'] = token
+    approved = client.post('/oauth/authorize', data={
+        'csrf_token': token,
+        'decision': 'approve',
+        'client_id': client_id,
+        'redirect_uri': redirect_uri,
+        'response_type': 'code',
+        'state': state,
+        'scope': 'mcp offline_access',
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+        'resource': resource,
+    }, follow_redirects=False)
+    assert approved.status_code in (302, 303), approved.data[:500]
+    loc = approved.headers['Location']
+    from urllib.parse import urlparse, parse_qs
+    params = parse_qs(urlparse(loc).query)
+    assert params.get('iss') == ['https://podskrift.com']
+    code = (params.get('code') or [None])[0]
+    return approved, code
+
+
+def test_oauth_flag_off_returns_404(monkeypatch):
+    monkeypatch.setenv('MCP_OAUTH_ENABLED', '0')
+    c = A.app.test_client()
+    assert c.get('/.well-known/oauth-protected-resource').status_code == 404
+    assert c.get('/.well-known/oauth-authorization-server').status_code == 404
+    assert c.post('/oauth/register', json={
+        'redirect_uris': ['http://127.0.0.1/callback'],
+    }).status_code == 404
+    assert c.get('/oauth/authorize').status_code == 404
+    assert c.post('/oauth/token').status_code == 404
+
+
+def test_oauth_metadata_and_www_authenticate(mcp_oauth_on):
+    c = A.app.test_client()
+    prm = c.get('/.well-known/oauth-protected-resource')
+    assert prm.status_code == 200
+    body = prm.get_json()
+    assert body['resource'] == 'https://podskrift.com/mcp'
+    assert body['authorization_servers'] == ['https://podskrift.com']
+
+    # Path-appended variant for Claude discovery when MCP URL has /mcp.
+    prm2 = c.get('/.well-known/oauth-protected-resource/mcp')
+    assert prm2.status_code == 200
+    assert prm2.get_json()['resource'] == body['resource']
+
+    asm = c.get('/.well-known/oauth-authorization-server')
+    assert asm.status_code == 200
+    meta = asm.get_json()
+    assert meta['issuer'] == 'https://podskrift.com'
+    assert 'S256' in meta['code_challenge_methods_supported']
+    assert meta['registration_endpoint'].endswith('/oauth/register')
+    assert meta['authorization_response_iss_parameter_supported'] is True
+
+    unauth = c.post('/mcp', json={
+        'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {},
+    })
+    assert unauth.status_code == 401
+    www = unauth.headers.get('WWW-Authenticate', '')
+    assert 'resource_metadata=' in www
+    assert '/.well-known/oauth-protected-resource' in www
+
+
+def test_oauth_full_flow_register_authorize_token_mcp_refresh_revoke(mcp_oauth_on):
+    uid = mcp_oauth_on['a']
+    redirect_uri = 'http://127.0.0.1/callback'
+    reg = _oauth_register(redirect_uris=[redirect_uri], client_name='ChatGPT Test')
+    assert reg.status_code == 201, reg.get_json()
+    client_id = reg.get_json()['client_id']
+    assert client_id.startswith('poc_')
+
+    verifier, challenge = _pkce_pair()
+    client = _login(uid)
+    _, code = _oauth_approve(
+        client, client_id=client_id, redirect_uri=redirect_uri,
+        verifier_challenge=(verifier, challenge))
+    assert code
+
+    tok = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': redirect_uri,
+        'client_id': client_id,
+        'code_verifier': verifier,
+        'resource': 'https://podskrift.com/mcp',
+    })
+    assert tok.status_code == 200, tok.get_json()
+    tokens = tok.get_json()
+    assert tokens['access_token'].startswith('poa_')
+    assert tokens['refresh_token'].startswith('por_')
+    assert tokens['expires_in'] == 3600
+
+    # Access token works on /mcp
+    mcp = A.app.test_client().post(
+        '/mcp',
+        json={'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
+              'params': {'protocolVersion': '2025-03-26', 'capabilities': {},
+                         'clientInfo': {'name': 't', 'version': '0'}}},
+        headers={'Authorization': f'Bearer {tokens["access_token"]}'})
+    assert mcp.status_code == 200
+    assert mcp.get_json()['result']['serverInfo']['name'] == 'podskrift'
+
+    # psk_ API key still works alongside OAuth
+    assert _mcp_rpc(mcp_oauth_on['key_a'], 'tools/list').status_code == 200
+
+    # Refresh rotates
+    old_refresh = tokens['refresh_token']
+    refreshed = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'refresh_token',
+        'refresh_token': old_refresh,
+        'client_id': client_id,
+        'resource': 'https://podskrift.com/mcp',
+    })
+    assert refreshed.status_code == 200, refreshed.get_json()
+    new_tokens = refreshed.get_json()
+    assert new_tokens['refresh_token'] != old_refresh
+    assert new_tokens['access_token'] != tokens['access_token']
+
+    # Old refresh cannot be reused
+    reuse = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'refresh_token',
+        'refresh_token': old_refresh,
+        'client_id': client_id,
+    })
+    assert reuse.status_code == 400
+    assert reuse.get_json()['error'] == 'invalid_grant'
+
+    # Settings lists the app; revoke kills the new access token
+    settings = client.get('/settings')
+    assert settings.status_code == 200
+    assert b'Connected apps' in settings.data
+    assert b'ChatGPT Test' in settings.data
+    with client.session_transaction() as sess:
+        csrf = sess.get('_csrf_token') or 'tok'
+        sess['_csrf_token'] = csrf
+    rev = client.post('/settings/oauth/revoke', data={
+        'csrf_token': csrf,
+        'client_id': client_id,
+    }, follow_redirects=True)
+    assert rev.status_code == 200
+    assert b'Access revoked' in rev.data or b'already disconnected' in rev.data
+
+    dead = A.app.test_client().post(
+        '/mcp',
+        json={'jsonrpc': '2.0', 'id': 1, 'method': 'ping', 'params': {}},
+        headers={'Authorization': f'Bearer {new_tokens["access_token"]}'})
+    assert dead.status_code == 401
+
+
+def test_oauth_bad_pkce_rejected(mcp_oauth_on):
+    redirect_uri = 'http://127.0.0.1/callback'
+    client_id = _oauth_register(redirect_uris=[redirect_uri]).get_json()['client_id']
+    verifier, challenge = _pkce_pair()
+    client = _login(mcp_oauth_on['a'])
+    _, code = _oauth_approve(
+        client, client_id=client_id, redirect_uri=redirect_uri,
+        verifier_challenge=(verifier, challenge))
+    bad = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': redirect_uri,
+        'client_id': client_id,
+        'code_verifier': secrets.token_urlsafe(48),  # wrong verifier
+        'resource': 'https://podskrift.com/mcp',
+    })
+    assert bad.status_code == 400
+    assert bad.get_json()['error'] == 'invalid_grant'
+
+
+def test_oauth_wrong_redirect_rejected(mcp_oauth_on):
+    reg = _oauth_register(redirect_uris=['http://127.0.0.1/callback'])
+    client_id = reg.get_json()['client_id']
+    verifier, challenge = _pkce_pair()
+    client = _login(mcp_oauth_on['a'])
+    q = {
+        'response_type': 'code',
+        'client_id': client_id,
+        'redirect_uri': 'http://127.0.0.1/evil',
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+        'resource': OAUTH.mcp_resource_url(),
+    }
+    r = client.get('/oauth/authorize', query_string=q)
+    assert r.status_code == 400
+    assert r.get_json()['error'] == 'invalid_request'
+
+
+def test_oauth_expired_code_and_reuse(mcp_oauth_on):
+    from models import db, OAuthAuthorizationCode
+    redirect_uri = 'http://127.0.0.1/callback'
+    client_id = _oauth_register(redirect_uris=[redirect_uri]).get_json()['client_id']
+    verifier, challenge = _pkce_pair()
+    client = _login(mcp_oauth_on['a'])
+    _, code = _oauth_approve(
+        client, client_id=client_id, redirect_uri=redirect_uri,
+        verifier_challenge=(verifier, challenge))
+
+    # Expire the code before exchange
+    with A.app.app_context():
+        row = OAuthAuthorizationCode.query.filter_by(
+            code_hash=OAUTH._hash_token(code)).first()
+        row.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.session.commit()
+
+    expired = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': redirect_uri,
+        'client_id': client_id,
+        'code_verifier': verifier,
+        'resource': 'https://podskrift.com/mcp',
+    })
+    assert expired.status_code == 400
+    assert expired.get_json()['error'] == 'invalid_grant'
+
+    # Fresh code, then reuse
+    verifier2, challenge2 = _pkce_pair()
+    _, code2 = _oauth_approve(
+        client, client_id=client_id, redirect_uri=redirect_uri,
+        verifier_challenge=(verifier2, challenge2), state='s2')
+    first = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code',
+        'code': code2,
+        'redirect_uri': redirect_uri,
+        'client_id': client_id,
+        'code_verifier': verifier2,
+        'resource': 'https://podskrift.com/mcp',
+    })
+    assert first.status_code == 200
+    second = A.app.test_client().post('/oauth/token', data={
+        'grant_type': 'authorization_code',
+        'code': code2,
+        'redirect_uri': redirect_uri,
+        'client_id': client_id,
+        'code_verifier': verifier2,
+        'resource': 'https://podskrift.com/mcp',
+    })
+    assert second.status_code == 400
+    assert second.get_json()['error'] == 'invalid_grant'
+
+
+def test_oauth_register_rejects_non_https_remote_redirect(mcp_oauth_on):
+    r = _oauth_register(redirect_uris=['http://evil.example/callback'])
+    assert r.status_code == 400
+    assert r.get_json()['error'] == 'invalid_redirect_uri'
+
+
+def test_oauth_tables_ensure_is_idempotent():
+    """Additive migration must be safe to re-run (prod deploy / two workers)."""
+    with A.app.app_context():
+        OAUTH.ensure_oauth_tables()
+        OAUTH.ensure_oauth_tables()
+        assert 'client_id' in A._live_columns('oauth_clients')
+        cols = A._live_columns('oauth_refresh_tokens')
+        assert 'token_hash' in cols
+        assert 'replaced_by_hash' in cols
 
 
 # --------------------------------------------------------------------------
