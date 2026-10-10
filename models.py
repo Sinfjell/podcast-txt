@@ -61,6 +61,8 @@ class User(UserMixin, db.Model):
                                         cascade='all, delete-orphan')
     password_reset_tokens = db.relationship(
         'PasswordResetToken', backref='user', lazy=True, cascade='all, delete-orphan')
+    mcp_credentials = db.relationship(
+        'McpCredential', backref='user', lazy=True, cascade='all, delete-orphan')
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -78,6 +80,43 @@ class User(UserMixin, db.Model):
     @property
     def has_api_key(self):
         return bool(self.api_key_hash)
+
+
+class McpCredential(db.Model):
+    """Per-client API key (or future OAuth row) for MCP /connect.
+
+    Multiple labelled keys per user so minting for Cursor does not revoke a
+    VS Code or script key. Legacy ``users.api_key_*`` stays valid and is
+    migrated into a 'Legacy key' row idempotently.
+    """
+    __tablename__ = 'mcp_credentials'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    kind = db.Column(db.String(16), nullable=False, default='key')  # key | oauth
+    client = db.Column(db.String(32), nullable=False, default='other')
+    label = db.Column(db.String(64), nullable=False, default='API key')
+    key_hash = db.Column(db.String(64), nullable=True, index=True)
+    key_prefix = db.Column(db.String(16), nullable=True)
+    oauth_client_id = db.Column(db.String(255), nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    revoked_at = db.Column(db.DateTime, nullable=True)
+    first_initialize_at = db.Column(db.DateTime, nullable=True)
+    last_seen_at = db.Column(db.DateTime, nullable=True)
+    client_name = db.Column(db.String(128), nullable=True)
+    client_version = db.Column(db.String(64), nullable=True)
+    first_tool_ok_at = db.Column(db.DateTime, nullable=True)
+    first_transcript_at = db.Column(db.DateTime, nullable=True)
+    tool_error_count = db.Column(db.Integer, nullable=False, default=0,
+                                 server_default='0')
+    last_insufficient_balance_at = db.Column(db.DateTime, nullable=True)
+    last_revoked_hit_at = db.Column(db.DateTime, nullable=True)
+
+    @property
+    def is_active(self):
+        return self.revoked_at is None and (
+            self.kind == 'oauth' or bool(self.key_hash)
+        )
 
 
 class PasswordResetToken(db.Model):
@@ -201,6 +240,12 @@ class TranscriptionTask(db.Model):
     # When this row is a read-only copy for a summary-email subscriber, points at
     # the shared source task (same audio transcribed once).
     summary_source_task_id = db.Column(db.String(36), nullable=True)
+
+    # MCP /connect: which credential started this job (nullable for web/API).
+    credential_id = db.Column(db.Integer, db.ForeignKey('mcp_credentials.id'),
+                              nullable=True)
+    # Analytics/origin label persisted for connect checklist (web|api|mcp).
+    source = db.Column(db.String(16), nullable=True)
 
 
 class TranscriptShare(db.Model):
@@ -358,6 +403,8 @@ TASK_COLUMN_MIGRATIONS = {
     'summary_completion_tokens': 'INTEGER',
     'summary_cost_usd_est': 'FLOAT',
     'summary_source_task_id': 'VARCHAR(36)',
+    'credential_id': 'INTEGER',
+    'source': 'VARCHAR(16)',
 }
 
 #: Same, for the users table.
@@ -412,6 +459,28 @@ CREDIT_PURCHASE_COLUMN_MIGRATIONS = {
 #: a column are created only after that column is present.
 TRANSCRIPT_SHARE_COLUMN_MIGRATIONS = {
     'revoked_at': 'DATETIME',
+}
+
+#: Additive columns for mcp_credentials. Applied by
+#: ensure_mcp_credentials_table AFTER the table exists.
+MCP_CREDENTIAL_COLUMN_MIGRATIONS = {
+    'oauth_client_id': 'VARCHAR(255)',
+    'first_initialize_at': 'DATETIME',
+    'last_seen_at': 'DATETIME',
+    'client_name': 'VARCHAR(128)',
+    'client_version': 'VARCHAR(64)',
+    'first_tool_ok_at': 'DATETIME',
+    'first_transcript_at': 'DATETIME',
+    'tool_error_count': 'INTEGER NOT NULL DEFAULT 0',
+    'last_insufficient_balance_at': 'DATETIME',
+    'last_revoked_hit_at': 'DATETIME',
+    'revoked_at': 'DATETIME',
+    'key_prefix': 'VARCHAR(16)',
+    'key_hash': 'VARCHAR(64)',
+    'label': "VARCHAR(64) NOT NULL DEFAULT 'API key'",
+    'client': "VARCHAR(32) NOT NULL DEFAULT 'other'",
+    'kind': "VARCHAR(16) NOT NULL DEFAULT 'key'",
+    'created_at': 'DATETIME',
 }
 
 

@@ -64,12 +64,20 @@
         Same free trial as the web UI: <strong>{{ trial_minutes }} minutes</strong>
         of audio on signup. Create a key in
         <a href="{{ url_for('settings') }}">Settings</a>, then call the endpoints below.
+        {% if mcp_enabled %}
+        For Cursor, VS Code or Claude Code, use
+        <a href="{{ url_for('connect_page') }}">Connect</a>.
+        {% endif %}
     </p>
     {% else %}
     <p class="docs-callout">
         Create a key in <a href="{{ url_for('settings') }}">Settings</a>, then
         call the endpoints below. Transcription uses your OpenAI key (or the
         account trial when available).
+        {% if mcp_enabled %}
+        For Cursor, VS Code or Claude Code, use
+        <a href="{{ url_for('connect_page') }}">Connect</a>.
+        {% endif %}
     </p>
     {% endif %}
     <div class="docs-body">

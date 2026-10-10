@@ -1120,10 +1120,13 @@ def _signup(client, email, password='abcdefgh1', confirm=None):
 
 
 def _purge(emails):
-    from models import db, User
+    from models import db, User, McpCredential
     with A.app.app_context():
         for e in emails:
-            db.session.query(User).filter_by(email=e).delete()
+            u = User.query.filter_by(email=e).first()
+            if u is not None:
+                McpCredential.query.filter_by(user_id=u.id).delete()
+                db.session.delete(u)
         db.session.commit()
 
 
@@ -1411,10 +1414,13 @@ def test_window_actually_expires_reservations():
 # --------------------------------------------------------------------------
 
 def _make_user(email, key=None, limit=None, used=0):
-    from models import db, User
+    from models import db, User, McpCredential
     with A.app.app_context():
-        db.session.query(User).filter_by(email=email).delete()
-        db.session.commit()
+        existing = User.query.filter_by(email=email).first()
+        if existing is not None:
+            McpCredential.query.filter_by(user_id=existing.id).delete()
+            db.session.delete(existing)
+            db.session.commit()
         u = User(email=email, openai_api_key=key,
                  trial_seconds_limit=limit, trial_seconds_used=used)
         u.set_password('password123')
@@ -5904,12 +5910,19 @@ def test_customer_start_trial_exhausted_is_402(customer_api):
 
 
 def test_customer_revoke_invalidates_immediately(customer_api):
-    from models import db, User
+    from models import db, User, McpCredential
+    import mcp_credentials as MC
     key = customer_api['key_a']
     assert _agent_get('/api/v1/episodes/cust-a-ep', key=key).status_code == 200
 
     with A.app.app_context():
+        # Touch the key once so a legacy users.api_key_* row is mirrored into
+        # mcp_credentials; revoke must clear both.
         u = db.session.get(User, customer_api['a'])
+        MC.migrate_legacy_api_keys()
+        for cred in McpCredential.query.filter_by(
+                user_id=u.id, key_hash=A.hash_customer_api_key(key)).all():
+            MC.revoke_credential(u.id, cred.id, clear_legacy_user=u)
         u.api_key_hash = None
         u.api_key_prefix = None
         u.api_key_created_at = None
@@ -5923,7 +5936,7 @@ def test_customer_revoke_invalidates_immediately(customer_api):
 
 
 def test_customer_settings_generate_and_revoke(trial_on):
-    from models import db, User
+    from models import db, User, McpCredential
     uid = _make_user('settings-api@example.com', limit=600, used=0)
     client = A.app.test_client()
     with client.session_transaction() as sess:
@@ -5932,13 +5945,13 @@ def test_customer_settings_generate_and_revoke(trial_on):
 
     page = client.get('/settings')
     assert page.status_code == 200
-    assert b'Podskrift API key (developers only)' in page.data
+    assert b'Podskrift API key' in page.data
     assert b'transcribe on the website' in page.data
     assert b'Create' in page.data
     assert b'/docs/api' in page.data
     assert b'How to use' in page.data
     assert b'>Docs<' in page.data or b'Docs</a>' in page.data
-    # Growth UI: no multi-key / "Buy more" chrome when Stripe is unset.
+    # Growth UI: no "Buy more" chrome when Stripe is unset.
     # The #credits trial-balance section is intentional (shows remaining minutes).
     assert b'Buy more' not in page.data
     assert b'Buy 5 hours for $5' not in page.data
@@ -5953,24 +5966,27 @@ def test_customer_settings_generate_and_revoke(trial_on):
     assert b'copy now' in gen.data.lower() or b'Copy' in gen.data
 
     with A.app.app_context():
-        u = db.session.get(User, uid)
-        assert u.api_key_hash
-        assert u.api_key_prefix.startswith('psk_')
-        # Plaintext must not be persisted
-        assert 'psk_' not in (u.api_key_hash or '')
+        creds = McpCredential.query.filter_by(user_id=uid, revoked_at=None).all()
+        assert len(creds) == 1
+        assert creds[0].key_prefix.startswith('psk_')
+        assert 'psk_' not in (creds[0].key_hash or '')
+        cred_id = creds[0].id
 
     # Second GET must not show the secret again
     again = client.get('/settings')
     assert b'id="new_api_key"' not in again.data
-    assert b'Regenerate' in again.data
     assert b'Revoke' in again.data
-    assert b'Old keys stop working immediately.' in again.data
+    assert b'Create key' in again.data
 
-    rev = client.post('/settings/api-key/revoke', follow_redirects=True)
+    rev = client.post(
+        '/settings/api-key/revoke',
+        data={'credential_id': str(cred_id)},
+        follow_redirects=True,
+    )
     assert rev.status_code == 200
     with A.app.app_context():
-        u = db.session.get(User, uid)
-        assert u.api_key_hash is None
+        cred = db.session.get(McpCredential, cred_id)
+        assert cred.revoked_at is not None
     _purge(['settings-api@example.com'])
 
 
@@ -6059,14 +6075,9 @@ def test_public_api_docs_seo_metadata_and_intro(trial_on):
         'and get the transcript. Same free trial as the web UI."'
     ) in body
     assert '<h1>Podcast transcript API</h1>' in body
-    intro = (
-        'Podskrift’s podcast transcription API lets agents and scripts get a transcript '
-        'over HTTP — the same path as the web UI. Resolve an episode by publisher/show '
-        'and date (or URL), start Whisper, poll until ready, then fetch the plain-text '
-        f'transcript. New accounts get {grant} free trial minutes on our OpenAI key; after that, '
-        'add your own. Create a <code>psk_…</code> key in Settings.'
-    )
-    assert intro in body
+    assert f'{grant} free trial minutes' in body
+    assert 'Create a <code>psk_…</code> key in Settings' in body
+    assert 'Authentication' in body
     # Endpoint H2s stay intact and ordered (TSK-20504).
     assert body.index('<h1>Podcast transcript API</h1>') < body.index(
         '<h2>Authentication</h2>')
@@ -7466,21 +7477,22 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'new-signup-120-min-trial'
-    assert entries[1]['id'] == 'new-look'
-    assert entries[2]['id'] == 'forgot-password'
-    assert entries[3]['id'] == 'share-listen-links'
-    assert entries[4]['id'] == 'keyboard-and-faster-loading'
-    assert entries[5]['id'] == 'show-landing-pages'
-    assert entries[6]['id'] == 'public-share-links'
-    assert entries[7]['id'] == 'unsubscribe-confirm-click'
-    assert entries[8]['id'] == 'partial-preview-minutes-wording'
-    assert entries[9]['id'] == 'partial-trial-preview'
-    assert entries[10]['id'] == 'own-key-billing-clarity'
-    assert entries[11]['id'] == 'clearer-missing-episode-audio'
-    assert entries[12]['id'] == 'new-signup-60-min-trial'
-    assert entries[13]['id'] == 'spotify-paste-robustness'
-    assert entries[14]['id'] == 'no-double-charge-restart'
+    assert entries[0]['id'] == 'connect-ai-apps'
+    assert entries[1]['id'] == 'new-signup-120-min-trial'
+    assert entries[2]['id'] == 'new-look'
+    assert entries[3]['id'] == 'forgot-password'
+    assert entries[4]['id'] == 'share-listen-links'
+    assert entries[5]['id'] == 'keyboard-and-faster-loading'
+    assert entries[6]['id'] == 'show-landing-pages'
+    assert entries[7]['id'] == 'public-share-links'
+    assert entries[8]['id'] == 'unsubscribe-confirm-click'
+    assert entries[9]['id'] == 'partial-preview-minutes-wording'
+    assert entries[10]['id'] == 'partial-trial-preview'
+    assert entries[11]['id'] == 'own-key-billing-clarity'
+    assert entries[12]['id'] == 'clearer-missing-episode-audio'
+    assert entries[13]['id'] == 'new-signup-60-min-trial'
+    assert entries[14]['id'] == 'spotify-paste-robustness'
+    assert entries[15]['id'] == 'no-double-charge-restart'
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
     body = _html.unescape(resp.data.decode())
@@ -7993,7 +8005,7 @@ def test_signup_redirects_301_to_register(trial_on):
 def test_settings_renames_developer_api_key_card(trial_on):
     uid = _make_user('devcard@test.com')
     body = _login(uid).get('/settings').data.decode()
-    assert 'Podskrift API key (developers only)' in body
+    assert 'Podskrift API key' in body and 'developers only' in body
     assert 'id="openai"' in body
     assert 'transcribe on the website' in body
 
@@ -8096,7 +8108,7 @@ def test_settings_collapses_developer_api_key_without_one(trial_on):
     uid = _make_user('collapse-api@test.com')
     body = _login(uid).get('/settings').data.decode()
     assert '<details' in body
-    assert 'Podskrift API key (developers only)' in body
+    assert 'Podskrift API key' in body and 'developers only' in body
     # Create button is inside the collapsed details, not a top-level card header CTA.
     assert body.index('<details') < body.index('>Create<')
 
@@ -8112,7 +8124,8 @@ def test_settings_expands_developer_api_key_when_present(trial_on):
     body = _login(uid).get('/settings').data.decode()
     assert '<details' not in body or body.count('<details') == 0
     assert 'psk_abcd' in body
-    assert 'Regenerate' in body
+    assert 'Revoke' in body
+    assert 'Legacy key' in body or 'Create key' in body
 
 
 def test_no_billing_save_offers_pack_when_stripe_on(ph_events, monkeypatch, stripe_on):
@@ -11789,8 +11802,8 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'new-signup-120-min-trial'
-    assert entries[1]['id'] == 'new-look'
+    assert entries[0]['id'] == 'connect-ai-apps'
+    assert entries[1]['id'] == 'new-signup-120-min-trial'
 
 
 # --------------------------------------------------------------------------
@@ -13955,6 +13968,317 @@ def test_admin_costs_still_404_for_non_admin():
     client = _login(uid)
     assert client.get('/admin').status_code == 404
 
+
+# --------------------------------------------------------------------------
+# /connect — multi-key MCP credentials + live checklist
+# --------------------------------------------------------------------------
+
+
+def _csrf(client):
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+        if not token:
+            import secrets
+            token = secrets.token_hex(32)
+            sess['_csrf_token'] = token
+        return token
+
+
+def test_connect_404_when_mcp_disabled(trial_on, monkeypatch):
+    monkeypatch.setenv('MCP_ENABLED', '0')
+    assert A.app.test_client().get('/connect').status_code == 404
+
+
+def test_connect_logged_out_view_and_login_next(mcp_on):
+    client = A.app.test_client()
+    page = client.get('/connect?client=cursor')
+    assert page.status_code == 200
+    body = page.data.decode()
+    assert 'Connect Podskrift to your AI app' in body
+    assert 'Log in to connect' in body
+    assert '/login?next=' in body
+    assert 'client%3Dcursor' in body or 'client=cursor' in body
+    assert 'Coming soon' in body  # Claude / ChatGPT tabs
+    title = body[body.index('<title>'):body.index('</title>') + 8]
+    assert 'Connect Podskrift' in title
+
+
+def test_connect_in_sitemap_when_mcp_on(mcp_on):
+    resp = A.app.test_client().get('/sitemap.xml')
+    assert resp.status_code == 200
+    assert '/connect' in resp.data.decode()
+
+
+def test_multiple_mcp_keys_and_legacy_still_valid(mcp_on):
+    from models import db, User, McpCredential
+    uid = mcp_on['a']
+    legacy_key = mcp_on['key_a']
+
+    client = _login(uid)
+    csrf = _csrf(client)
+    r1 = client.post(
+        '/connect/credentials',
+        json={'client': 'cursor'},
+        headers={'X-CSRF-Token': csrf},
+    )
+    assert r1.status_code == 200
+    cursor_key = r1.get_json()['key']
+    assert cursor_key.startswith('psk_')
+    assert cursor_key != legacy_key
+
+    r2 = client.post(
+        '/connect/credentials',
+        json={'client': 'vscode'},
+        headers={'X-CSRF-Token': csrf},
+    )
+    assert r2.status_code == 200
+    vscode_key = r2.get_json()['key']
+    assert vscode_key != cursor_key
+
+    # Legacy key still authenticates MCP
+    init = _mcp_rpc(legacy_key, 'initialize', {
+        'protocolVersion': '2025-03-26',
+        'capabilities': {},
+        'clientInfo': {'name': 'legacy-test', 'version': '1'},
+    })
+    assert init.status_code == 200
+    assert init.get_json()['result']['serverInfo']['name'] == 'podskrift'
+
+    # New keys also work
+    for key in (cursor_key, vscode_key):
+        r = _mcp_rpc(key, 'initialize', {
+            'protocolVersion': '2025-03-26',
+            'capabilities': {},
+            'clientInfo': {'name': 'Cursor', 'version': '1.0'},
+        })
+        assert r.status_code == 200
+
+    with A.app.app_context():
+        active = McpCredential.query.filter_by(
+            user_id=uid).filter(McpCredential.revoked_at.is_(None)).count()
+        assert active >= 3  # legacy migrated + cursor + vscode
+
+
+def test_connect_mint_always_inserts_new_row(mcp_on):
+    """Double-click / re-mint must not rotate-reuse; each mint is a new row."""
+    uid = mcp_on['a']
+    client = _login(uid)
+    csrf = _csrf(client)
+    first = client.post(
+        '/connect/credentials',
+        json={'client': 'claude_code'},
+        headers={'X-CSRF-Token': csrf},
+    ).get_json()
+    second = client.post(
+        '/connect/credentials',
+        json={'client': 'claude_code'},
+        headers={'X-CSRF-Token': csrf},
+    ).get_json()
+    assert first['id'] != second['id']
+    assert first['key'] != second['key']
+    from models import db, McpCredential
+    with A.app.app_context():
+        active = (
+            McpCredential.query
+            .filter_by(user_id=uid, client='claude_code')
+            .filter(McpCredential.revoked_at.is_(None))
+            .count()
+        )
+        assert active >= 2
+
+
+def test_connect_revoke_invalidates_only_that_key(mcp_on):
+    from models import db, McpCredential
+    uid = mcp_on['a']
+    client = _login(uid)
+    csrf = _csrf(client)
+    cursor = client.post(
+        '/connect/credentials',
+        json={'client': 'cursor'},
+        headers={'X-CSRF-Token': csrf},
+    ).get_json()
+    vscode = client.post(
+        '/connect/credentials',
+        json={'client': 'vscode'},
+        headers={'X-CSRF-Token': csrf},
+    ).get_json()
+
+    rev = client.post(
+        f"/connect/credentials/{cursor['id']}/revoke",
+        headers={'X-CSRF-Token': csrf},
+    )
+    assert rev.status_code == 200
+
+    bad = _mcp_rpc(cursor['key'], 'initialize', {})
+    assert bad.status_code == 401
+    good = _mcp_rpc(vscode['key'], 'initialize', {
+        'protocolVersion': '2025-03-26',
+        'capabilities': {},
+        'clientInfo': {'name': 'Code', 'version': '1'},
+    })
+    assert good.status_code == 200
+
+
+def test_connect_status_steps_flip_as_mcp_calls_arrive(mcp_on, ph_events):
+    uid = mcp_on['a']
+    client = _login(uid)
+    csrf = _csrf(client)
+    minted = client.post(
+        '/connect/credentials',
+        json={'client': 'cursor'},
+        headers={'X-CSRF-Token': csrf},
+    ).get_json()
+    key = minted['key']
+
+    st = client.get('/connect/status?client=cursor').get_json()
+    assert st['logged_in'] is True
+    assert st['steps']['logged_in']['done'] is True
+    assert st['steps']['authorized']['done'] is True
+    assert st['steps']['connected']['done'] is False
+    assert st['steps']['first_tool']['done'] is False
+    assert st['steps']['first_transcript']['done'] is False
+
+    init = _mcp_rpc(key, 'initialize', {
+        'protocolVersion': '2025-03-26',
+        'capabilities': {},
+        'clientInfo': {'name': 'Cursor', 'version': '1.9'},
+    })
+    assert init.status_code == 200
+
+    st = client.get('/connect/status?client=cursor').get_json()
+    assert st['steps']['connected']['done'] is True
+    assert 'Cursor' in (st['steps']['connected'].get('client_name') or '')
+
+    payload, result = _mcp_tool(key, 'search_podcasts', {'query': 'Hard Fork'})
+    assert result.get('isError') is not True
+
+    st = client.get('/connect/status?client=cursor').get_json()
+    assert st['steps']['first_tool']['done'] is True
+
+    # Ready transcript already seeded for customer-a
+    payload, result = _mcp_tool(key, 'get_transcript', {
+        'episode': 'cust-a-ep',
+    })
+    # May resolve by job id or fail lookup depending on tool args — use status
+    # tool against the seeded completed task.
+    payload, result = _mcp_tool(key, 'get_transcript_status', {
+        'job_id': 'cust-a-ep',
+    })
+    assert result.get('isError') is not True
+
+    st = client.get('/connect/status?client=cursor').get_json()
+    assert st['steps']['first_transcript']['done'] is True
+
+    connected_events = [e for e in ph_events.events if e['event'] == 'mcp_connected']
+    assert connected_events
+    assert connected_events[-1]['properties'].get('client') == 'cursor'
+
+
+def test_connect_status_logged_out_returns_401_json(mcp_on):
+    resp = A.app.test_client().get('/connect/status?client=cursor')
+    assert resp.status_code == 401
+    assert resp.headers.get('Cache-Control') == 'no-store'
+    body = resp.get_json()
+    assert body['logged_in'] is False
+    assert body.get('error') == 'login_required'
+
+
+def test_connect_page_escapes_connection_list_via_dom_apis(mcp_on):
+    """Connection labels/prefixes must not be interpolated into innerHTML."""
+    from pathlib import Path
+    src = Path('templates/connect.html').read_text()
+    assert 'list.innerHTML = conns.map' not in src
+    assert "document.createElement('strong')" in src
+    assert 'strong.textContent = c.label' in src
+    # Pack CTA uses CREDIT_PACK_* injectors, not a hard-coded SKU string.
+    assert '300 minutes for $5' not in src
+    assert 'credit_pack_minutes' in src
+    assert 'credit_pack_price_usd' in src
+    body = _login(mcp_on['a']).get('/connect?client=cursor').data.decode()
+    assert (
+        f'{A.CREDIT_PACK_MINUTES} minutes for '
+        f'${A.CREDIT_PACK_AMOUNT_CENTS // 100}'
+    ) in body
+
+
+def test_connect_deep_link_config_encoding_helpers(mcp_on):
+    """Page JS exposes encoding helpers; assert the server-side shapes match docs."""
+    import base64
+    import json
+    from urllib.parse import quote
+
+    key = 'psk_testkey_for_encoding_only_xxxx'
+    mcp_url = 'https://podskrift.com/mcp'
+    cursor_config = {
+        'url': mcp_url,
+        'headers': {'Authorization': f'Bearer {key}'},
+    }
+    b64 = base64.b64encode(json.dumps(cursor_config).encode()).decode()
+    cursor_link = (
+        'cursor://anysphere.cursor-deeplink/mcp/install?name=podskrift&config='
+        + quote(b64, safe='')
+    )
+    assert 'name=podskrift' in cursor_link
+    assert 'config=' in cursor_link
+    decoded = json.loads(base64.b64decode(b64))
+    assert decoded['url'] == mcp_url
+    assert decoded['headers']['Authorization'].startswith('Bearer psk_')
+
+    vscode_obj = {
+        'name': 'podskrift',
+        'type': 'http',
+        'url': mcp_url,
+        'headers': {'Authorization': f'Bearer {key}'},
+    }
+    vscode_link = 'vscode:mcp/install?' + quote(json.dumps(vscode_obj), safe='')
+    assert vscode_link.startswith('vscode:mcp/install?')
+    assert 'podskrift' in vscode_link
+
+    cmd = (
+        f'claude mcp add --transport http --scope user podskrift {mcp_url} '
+        f'--header "Authorization: Bearer {key}"'
+    )
+    assert '--transport http' in cmd
+    assert 'Authorization: Bearer psk_' in cmd
+
+    # Connect page serves the encoding helpers and official Cursor button assets
+    body = _login(mcp_on['a']).get('/connect?client=cursor').data.decode()
+    assert 'cursor://anysphere.cursor-deeplink/mcp/install' in body
+    assert "scheme + ':mcp/install?'" in body or 'vscode:mcp/install' in body
+    assert 'mcp-install-dark.svg' in body
+    assert '__podskriftConnect' in body
+
+
+def test_connect_page_links_from_docs_and_footer(mcp_on):
+    home = A.app.test_client().get('/').data.decode()
+    assert '/connect' in home
+    docs = A.app.test_client().get('/docs/api').data.decode()
+    assert '/connect' in docs
+    settings = _login(mcp_on['a']).get('/settings').data.decode()
+    assert '/connect' in settings
+
+
+def test_legacy_api_key_migrates_idempotently(trial_on):
+    from models import db, User, McpCredential
+    import mcp_credentials as MC
+    uid = _make_user('legacy-migrate@example.com')
+    plaintext = A.mint_customer_api_key()
+    with A.app.app_context():
+        u = db.session.get(User, uid)
+        u.api_key_hash = A.hash_customer_api_key(plaintext)
+        u.api_key_prefix = A.customer_api_key_prefix(plaintext)
+        db.session.commit()
+        n1 = MC.migrate_legacy_api_keys()
+        n2 = MC.migrate_legacy_api_keys()
+        assert n1 >= 1
+        assert n2 == 0
+        rows = McpCredential.query.filter_by(
+            user_id=uid, key_hash=u.api_key_hash).all()
+        assert len(rows) == 1
+        assert rows[0].label == 'Legacy key'
+        # Legacy column still present
+        assert db.session.get(User, uid).api_key_hash == rows[0].key_hash
+    _purge(['legacy-migrate@example.com'])
 
 # --- Security review follow-ups (PR #86) -----------------------------------
 

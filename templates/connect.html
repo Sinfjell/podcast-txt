@@ -1,0 +1,984 @@
+{% extends "base.html" %}
+{% block title %}Connect Podskrift to Cursor, VS Code or Claude Code | Podskrift{% endblock %}
+{% block meta_description %}Connect Podskrift to your AI app in one click. Ask for any podcast episode in Cursor, VS Code or Claude Code and get the transcript. Uses your Podskrift minutes.{% endblock %}
+{% block og_title %}Connect Podskrift to your AI app{% endblock %}
+{% block og_description %}One-click install for Cursor and VS Code, or a single command for Claude Code. Live checklist turns green as each step completes.{% endblock %}
+
+{% block container_class %}container-prose{% endblock %}
+
+{% block content %}
+<style>
+    .connect-page { max-width: var(--width-prose); margin: 0 auto 48px; }
+    .connect-page h1 {
+        font-size: var(--title-fluid);
+        font-weight: 800;
+        letter-spacing: -0.03em;
+        line-height: 1.05;
+        margin: 0 0 var(--space-1);
+        color: var(--ink);
+    }
+    .connect-lead {
+        color: var(--muted);
+        font-size: 17px;
+        line-height: 1.55;
+        margin: 0 0 var(--space-9);
+        max-width: 40rem;
+    }
+    .connect-tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1.5rem;
+        border-bottom: 1px solid var(--line);
+        margin-bottom: var(--space-6);
+    }
+    .connect-tabs .tab {
+        margin: 0;
+        padding: 0 0 8px;
+    }
+    .connect-tabs .tab[aria-pressed="true"] {
+        color: var(--ink);
+        font-weight: 700;
+        border-bottom-color: var(--accent);
+    }
+    .connect-done-banner[hidden],
+    #cursorOfficialBtn[hidden],
+    #primaryActionBtn[hidden],
+    .connect-manual[hidden],
+    #keyOnce[hidden],
+    #cmdOnce[hidden],
+    #connectionsSection[hidden],
+    #comingSoonBtn[hidden],
+    #emailWhenReady[hidden],
+    #insidersLinkWrap[hidden],
+    #tryPromptRow[hidden],
+    #checklist[hidden],
+    #setupProgress[hidden],
+    .cursor-btn-dark[hidden],
+    .cursor-btn-light[hidden] {
+        display: none !important;
+    }
+    .connect-card {
+        background: var(--surface);
+        border-radius: var(--radius-md);
+        padding: var(--space-6);
+        margin-bottom: var(--space-9);
+    }
+    .connect-card h2 {
+        font-size: 1.5rem;
+        font-weight: 700;
+        letter-spacing: -0.015em;
+        line-height: 1.2;
+        margin: 0 0 var(--space-1);
+        color: var(--ink);
+    }
+    .connect-card .connect-card-lead {
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.5;
+        margin: 0 0 var(--space-6);
+    }
+    .connect-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
+    .connect-add-cursor {
+        display: inline-block;
+        line-height: 0;
+        border-radius: var(--radius-md);
+    }
+    .connect-add-cursor img { display: block; height: 28px; width: auto; }
+    .connect-add-cursor:focus-visible {
+        outline: 3px solid var(--accent);
+        outline-offset: 2px;
+    }
+    .connect-manual { margin-top: var(--space-4); }
+    .connect-manual[hidden] { display: none !important; }
+    .connect-manual pre, .connect-key-once pre, .connect-cmd pre {
+        background: var(--paper);
+        border: 1px solid var(--line);
+        border-radius: var(--radius-md);
+        padding: var(--space-4);
+        overflow-x: auto;
+        font-size: 14px;
+        line-height: 1.55;
+        margin: var(--space-3) 0;
+    }
+    .connect-key-once {
+        margin-top: var(--space-4);
+        padding: var(--space-4);
+        background: var(--warning-tint);
+        color: var(--on-warning-tint);
+        border-radius: var(--radius-md);
+    }
+    .connect-key-once p { margin: 0 0 var(--space-3); font-size: 14px; }
+    .connect-section { margin-bottom: var(--space-9); }
+    .connect-section h2 {
+        font-size: 1.5rem;
+        font-weight: 700;
+        letter-spacing: -0.015em;
+        margin: 0 0 var(--space-4);
+        color: var(--ink);
+    }
+    .connect-progress {
+        font-size: 14px;
+        color: var(--muted);
+        margin: 0 0 var(--space-3);
+    }
+    .connect-checklist { list-style: none; margin: 0; padding: 0; }
+    .connect-step {
+        display: grid;
+        grid-template-columns: 24px 1fr;
+        gap: var(--space-3);
+        align-items: start;
+        padding: var(--space-4) 0;
+        border-top: 1px solid var(--line);
+    }
+    .connect-step:first-child { border-top: none; }
+    .connect-step.is-done .connect-step-title,
+    .connect-step.is-done .connect-step-meta { color: var(--muted); }
+    .connect-step-icon {
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        border: 1px solid var(--line-strong);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        margin-top: 2px;
+    }
+    .connect-step.is-done .connect-step-icon {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: var(--on-accent);
+    }
+    .connect-step-title {
+        font-size: 17px;
+        font-weight: 700;
+        line-height: 1.55;
+        color: var(--ink);
+        margin: 0;
+    }
+    .connect-step-meta {
+        font-size: 14px;
+        color: var(--muted);
+        line-height: 1.5;
+        margin: var(--space-1) 0 0;
+        font-variant-numeric: tabular-nums;
+    }
+    .connect-step-meta .waiting-pulse::after {
+        content: '';
+        animation: connect-dots 1.2s steps(4, end) infinite;
+    }
+    @keyframes connect-dots {
+        0% { content: ''; }
+        25% { content: '.'; }
+        50% { content: '..'; }
+        75% { content: '...'; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .connect-step-meta .waiting-pulse::after { animation: none; content: '…'; }
+    }
+    .connect-done-banner {
+        display: flex;
+        gap: var(--space-3);
+        align-items: flex-start;
+        padding: 12px 16px;
+        background: var(--accent-tint);
+        color: var(--on-accent-tint);
+        border-radius: var(--radius-md);
+        margin-bottom: var(--space-4);
+    }
+    .connect-done-banner p { margin: 0; font-size: 15px; line-height: 1.45; }
+    .connect-alert {
+        display: flex;
+        gap: var(--space-3);
+        align-items: flex-start;
+        padding: 12px 16px;
+        border-radius: var(--radius-md);
+        margin: 0 0 var(--space-4);
+        font-size: 15px;
+        line-height: 1.45;
+    }
+    .connect-alert-warning { background: var(--warning-tint); color: var(--on-warning-tint); }
+    .connect-alert-danger { background: var(--danger-tint); color: var(--on-danger-tint); }
+    .connect-alert a { color: inherit; font-weight: 700; }
+    .connect-connections { list-style: none; margin: 0; padding: 0; }
+    .connect-conn {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--space-3);
+        padding: var(--space-4) 0;
+        border-top: 1px solid var(--line);
+        font-size: 15px;
+    }
+    .connect-conn:first-child { border-top: none; }
+    .connect-conn-meta { color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+    .btn-disabled-look {
+        background: var(--surface);
+        color: var(--muted);
+        border: none;
+        cursor: not-allowed;
+        min-height: 48px;
+        padding: 0 24px;
+        border-radius: var(--radius-md);
+        font-weight: 700;
+    }
+    .connect-try {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--space-3);
+        margin-top: var(--space-2);
+    }
+    .connect-try code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 14px;
+        background: var(--surface);
+        padding: 2px 6px;
+        border-radius: var(--radius-sm);
+    }
+</style>
+
+<div class="connect-page" id="connectPage"
+     data-client="{{ client }}"
+     data-mcp-url="{{ mcp_url }}"
+     data-logged-in="{{ '1' if current_user.is_authenticated else '0' }}"
+     data-csrf="{{ csrf_token() }}"
+     data-status-url="{{ url_for('connect_status') }}"
+     data-mint-url="{{ url_for('connect_mint_credential') }}"
+     data-login-url="{{ url_for('login', next=login_next) }}">
+
+    <h1>Connect Podskrift to your AI app</h1>
+    <p class="connect-lead">
+        Ask for any podcast episode in your AI app and get the transcript.
+        Uses your Podskrift minutes.
+        {% if trial_minutes %}{{ trial_minutes }} free minutes to start.{% endif %}
+    </p>
+
+    <div class="connect-tabs tabs" role="tablist" aria-label="AI apps">
+        {% for key, label in [
+            ('cursor', 'Cursor'),
+            ('vscode', 'VS Code'),
+            ('claude_code', 'Claude Code'),
+            ('claude', 'Claude'),
+            ('chatgpt', 'ChatGPT'),
+        ] %}
+        <button type="button" class="tab{% if client == key %} active{% endif %}"
+                role="tab"
+                data-client="{{ key }}"
+                aria-pressed="{{ 'true' if client == key else 'false' }}"
+                id="tab-{{ key }}">{{ label }}</button>
+        {% endfor %}
+    </div>
+    {% if client == 'claude' %}
+    <p class="form-hint" style="margin-top: -8px; margin-bottom: 24px;">Claude.ai and Claude Desktop</p>
+    {% endif %}
+
+    <div id="connectAlerts" aria-live="polite"></div>
+
+    <section class="connect-card" id="connectCard">
+        <h2 id="cardHeading">Add Podskrift to Cursor</h2>
+        <p class="connect-card-lead" id="cardLead">Cursor opens and asks you to confirm. That is all.</p>
+
+        <div class="connect-actions" id="connectPrimaryActions">
+            {% if not current_user.is_authenticated %}
+            <a class="btn btn-primary" id="loginConnectBtn"
+               href="{{ url_for('login', next=login_next) }}">Log in to connect</a>
+            <a class="btn btn-text" href="{{ url_for('register', next=login_next) }}">No account? Sign up{% if trial_minutes %}, {{ trial_minutes }} free minutes{% endif %}</a>
+            {% else %}
+            <button type="button" class="btn btn-primary" id="primaryActionBtn">Add to Cursor</button>
+            <a href="#" id="cursorOfficialBtn" hidden aria-label="Add to Cursor">
+                <span class="connect-add-cursor">
+                    <img src="{{ url_for('static', filename='img/mcp-install-dark.svg') }}"
+                         alt="Add to Cursor" width="126" height="28"
+                         class="cursor-btn-dark">
+                    <img src="{{ url_for('static', filename='img/mcp-install-light.svg') }}"
+                         alt="Add to Cursor" width="126" height="28"
+                         class="cursor-btn-light" hidden>
+                </span>
+            </a>
+            {% endif %}
+        </div>
+        <p id="insidersLinkWrap" hidden style="margin-top: 12px;">
+            <button type="button" class="btn btn-text" id="insidersLink" style="padding: 0; min-height: auto;">Using Insiders?</button>
+        </p>
+        <p style="margin-top: 16px;">
+            <button type="button" class="btn btn-text" id="manualToggle" style="padding: 0; min-height: auto;">Not working? Set it up by hand</button>
+        </p>
+        <div class="connect-manual" id="manualSnippet" hidden>
+            <p class="form-hint" id="manualHint"></p>
+            <pre><code id="manualCode" class="ph-no-capture" data-ph-no-capture></code></pre>
+            <button type="button" class="btn btn-secondary" id="manualCreateKey">Create key</button>
+            <button type="button" class="btn btn-secondary" id="manualCopy" hidden>Copy</button>
+        </div>
+        <div class="connect-key-once" id="keyOnce" hidden>
+            <p>We show this key once. It is saved in your app now.</p>
+            <pre><code id="keyOnceValue" class="ph-no-capture" data-ph-no-capture></code></pre>
+            <button type="button" class="btn btn-secondary" id="copyKeyBtn">Copy key</button>
+        </div>
+        <div class="connect-cmd" id="cmdOnce" hidden>
+            <pre><code id="cmdOnceValue" class="ph-no-capture" data-ph-no-capture></code></pre>
+            <button type="button" class="btn btn-secondary" id="copyCmdBtn">Copy command</button>
+        </div>
+    </section>
+
+    <section class="connect-section" id="setupSection">
+        <h2>Setup</h2>
+        <p class="connect-progress" id="setupProgress" aria-live="polite">0 of 5 done</p>
+        <div id="allDoneBanner" class="connect-done-banner" hidden>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            <div>
+                <p id="allDoneText">Podskrift is connected. Ask for any episode.</p>
+                <p style="margin-top: 8px;"><a href="#" id="allDoneOpen" class="btn btn-text" style="padding: 0; min-height: auto;">Open Cursor</a></p>
+            </div>
+        </div>
+        <ol class="connect-checklist" id="checklist">
+            <li class="connect-step" data-step="logged_in">
+                <span class="connect-step-icon" aria-hidden="true"></span>
+                <div>
+                    <p class="connect-step-title">Logged in</p>
+                    <p class="connect-step-meta" data-meta></p>
+                </div>
+            </li>
+            <li class="connect-step" data-step="authorized">
+                <span class="connect-step-icon" aria-hidden="true"></span>
+                <div>
+                    <p class="connect-step-title" data-auth-title>Key created</p>
+                    <p class="connect-step-meta" data-meta></p>
+                </div>
+            </li>
+            <li class="connect-step" data-step="connected">
+                <span class="connect-step-icon" aria-hidden="true"></span>
+                <div>
+                    <p class="connect-step-title" data-connected-title>App connected</p>
+                    <p class="connect-step-meta" data-meta></p>
+                </div>
+            </li>
+            <li class="connect-step" data-step="first_tool">
+                <span class="connect-step-icon" aria-hidden="true"></span>
+                <div>
+                    <p class="connect-step-title">First tool call</p>
+                    <p class="connect-step-meta" data-meta></p>
+                </div>
+            </li>
+            <li class="connect-step" data-step="first_transcript">
+                <span class="connect-step-icon" aria-hidden="true"></span>
+                <div>
+                    <p class="connect-step-title">First transcript</p>
+                    <p class="connect-step-meta" data-meta></p>
+                    <div class="connect-try" id="tryPromptRow">
+                        <span>Try: <code id="tryPrompt">Transcribe the latest episode of Hard Fork and summarise it.</code></span>
+                        <button type="button" class="btn btn-secondary btn-sm" id="copyPromptBtn">Copy</button>
+                    </div>
+                </div>
+            </li>
+        </ol>
+    </section>
+
+    <section class="connect-section" id="connectionsSection" hidden>
+        <h2>Your connections</h2>
+        <ul class="connect-connections" id="connectionsList"></ul>
+    </section>
+</div>
+
+<script>
+(function () {
+    var root = document.getElementById('connectPage');
+    if (!root) return;
+
+    var CLIENTS = {
+        cursor: {
+            label: 'Cursor',
+            heading: 'Add Podskrift to Cursor',
+            lead: 'Cursor opens and asks you to confirm. That is all.',
+            primary: 'Add to Cursor',
+            waiting: 'Waiting for Cursor. Confirm the install in Cursor.',
+            waitingLong: 'Still waiting. Restart Cursor, or check Settings → MCP shows Podskrift.',
+            openLabel: 'Open Cursor',
+            openHref: 'cursor://',
+            live: true,
+            useOfficialBtn: true
+        },
+        vscode: {
+            label: 'VS Code',
+            heading: 'Add Podskrift to VS Code',
+            lead: 'VS Code opens and asks you to install the MCP server.',
+            primary: 'Add to VS Code',
+            waiting: 'Waiting for VS Code. Confirm the install in VS Code.',
+            waitingLong: 'Still waiting. Restart VS Code, or check MCP settings shows Podskrift.',
+            openLabel: 'Open VS Code',
+            openHref: 'vscode://',
+            live: true,
+            insiders: true
+        },
+        claude_code: {
+            label: 'Claude Code',
+            heading: 'Add Podskrift to Claude Code',
+            lead: 'Copy the command, paste it in a terminal, then start a new Claude Code session.',
+            primary: 'Copy command',
+            waiting: 'Waiting. Start a new Claude Code session.',
+            waitingLong: 'Still waiting. Run the command again, then start a new session.',
+            openLabel: 'Claude Code docs',
+            openHref: 'https://docs.claude.com/en/docs/claude-code/mcp',
+            live: true,
+            copyCommand: true
+        },
+        claude: {
+            label: 'Claude',
+            heading: 'Add Podskrift to Claude',
+            lead: 'Claude.ai and Claude Desktop will connect with OAuth soon.',
+            primary: 'Coming soon',
+            waiting: 'Waiting. Click Connect in Claude.',
+            live: false
+        },
+        chatgpt: {
+            label: 'ChatGPT',
+            heading: 'Add Podskrift to ChatGPT',
+            lead: 'ChatGPT custom MCP apps will connect with OAuth soon.',
+            primary: 'Coming soon',
+            waiting: 'Waiting for ChatGPT.',
+            live: false
+        }
+    };
+
+    var state = {
+        client: root.getAttribute('data-client') || 'cursor',
+        mcpUrl: root.getAttribute('data-mcp-url'),
+        loggedIn: root.getAttribute('data-logged-in') === '1',
+        csrf: root.getAttribute('data-csrf'),
+        statusUrl: root.getAttribute('data-status-url'),
+        mintUrl: root.getAttribute('data-mint-url'),
+        loginUrl: root.getAttribute('data-login-url'),
+        key: null,
+        keyShownAt: 0,
+        vscodeInsiders: false,
+        clickAt: 0,
+        authorizeAt: 0,
+        pollStarted: Date.now(),
+        timer: null,
+        status: null
+    };
+
+    try {
+        var remembered = localStorage.getItem('podskrift_connect_client');
+        if (remembered && CLIENTS[remembered] && !location.search.includes('client=')) {
+            // Prefer ?client=; otherwise use last choice.
+        }
+        if (!location.search.includes('client=') && remembered && CLIENTS[remembered]) {
+            state.client = remembered;
+        }
+    } catch (e) {}
+
+    function syncCursorButtonTheme() {
+        var dark = document.querySelector('.cursor-btn-dark');
+        var light = document.querySelector('.cursor-btn-light');
+        if (!dark || !light) return;
+        var prefersDark = window.matchMedia &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches;
+        dark.hidden = !!prefersDark;
+        light.hidden = !prefersDark;
+    }
+    syncCursorButtonTheme();
+    if (window.matchMedia) {
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener(
+            'change', syncCursorButtonTheme);
+    }
+
+    function encodeBase64Json(obj) {
+        var json = JSON.stringify(obj);
+        return btoa(unescape(encodeURIComponent(json)));
+    }
+
+    function cursorDeepLink(key) {
+        var config = encodeBase64Json({
+            url: state.mcpUrl,
+            headers: { Authorization: 'Bearer ' + key }
+        });
+        return 'cursor://anysphere.cursor-deeplink/mcp/install?name=podskrift&config=' +
+            encodeURIComponent(config);
+    }
+
+    function vscodeDeepLink(key, insiders) {
+        var obj = {
+            name: 'podskrift',
+            type: 'http',
+            url: state.mcpUrl,
+            headers: { Authorization: 'Bearer ' + key }
+        };
+        // Official VS Code install URL: vscode:mcp/install?<urlencoded JSON>
+        var scheme = insiders ? 'vscode-insiders' : 'vscode';
+        return scheme + ':mcp/install?' + encodeURIComponent(JSON.stringify(obj));
+    }
+
+    function claudeCommand(key) {
+        return 'claude mcp add --transport http --scope user podskrift ' +
+            state.mcpUrl + ' --header "Authorization: Bearer ' + key + '"';
+    }
+
+    function manualSnippet(client, key) {
+        var k = key || 'psk_…';
+        if (client === 'cursor') {
+            return '{\n  "mcpServers": {\n    "podskrift": {\n      "url": "' +
+                state.mcpUrl + '",\n      "headers": { "Authorization": "Bearer ' +
+                k + '" }\n    }\n  }\n}';
+        }
+        if (client === 'vscode') {
+            return '{\n  "servers": {\n    "podskrift": {\n      "type": "http",\n      "url": "' +
+                state.mcpUrl + '",\n      "headers": { "Authorization": "Bearer ' +
+                k + '" }\n    }\n  }\n}';
+        }
+        return 'Server URL ' + state.mcpUrl +
+            '\nHeader Authorization: Bearer ' + k +
+            '\n(or X-Api-Key: ' + k + ')';
+    }
+
+    function setClient(client, pushUrl) {
+        if (!CLIENTS[client]) client = 'cursor';
+        state.client = client;
+        try { localStorage.setItem('podskrift_connect_client', client); } catch (e) {}
+        if (pushUrl) {
+            var u = new URL(location.href);
+            u.searchParams.set('client', client);
+            history.replaceState({}, '', u.pathname + '?' + u.searchParams.toString());
+        }
+        document.querySelectorAll('.connect-tabs .tab').forEach(function (btn) {
+            var on = btn.getAttribute('data-client') === client;
+            btn.classList.toggle('active', on);
+            btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+        });
+        renderCard();
+        pollStatus(true);
+    }
+
+    function renderCard() {
+        var cfg = CLIENTS[state.client];
+        document.getElementById('cardHeading').textContent = cfg.heading;
+        document.getElementById('cardLead').textContent = cfg.lead;
+        var primary = document.getElementById('primaryActionBtn');
+        var official = document.getElementById('cursorOfficialBtn');
+        var loginBtn = document.getElementById('loginConnectBtn');
+        if (loginBtn) {
+            loginBtn.href = state.loginUrl.replace(/client=[^&]*/, 'client=' + state.client);
+            if (!state.loginUrl.includes('client=')) {
+                loginBtn.href = '{{ url_for("login") }}?next=' +
+                    encodeURIComponent('/connect?client=' + state.client);
+            }
+        }
+        document.getElementById('insidersLinkWrap').hidden = !(cfg.insiders && state.loggedIn && cfg.live);
+        if (!state.loggedIn) return;
+        if (!cfg.live) {
+            if (primary) {
+                primary.hidden = true;
+            }
+            if (official) official.hidden = true;
+            var wrap = document.getElementById('connectPrimaryActions');
+            var soon = document.getElementById('comingSoonBtn');
+            if (!soon) {
+                soon = document.createElement('button');
+                soon.type = 'button';
+                soon.id = 'comingSoonBtn';
+                soon.className = 'btn-disabled-look';
+                soon.disabled = true;
+                soon.textContent = 'Coming soon';
+                wrap.insertBefore(soon, wrap.firstChild);
+            }
+            soon.hidden = false;
+            var email = document.getElementById('emailWhenReady');
+            if (!email) {
+                email = document.createElement('a');
+                email.id = 'emailWhenReady';
+                email.className = 'btn btn-text';
+                email.href = 'https://productivitytech.io/contact/';
+                email.target = '_blank';
+                email.rel = 'noopener';
+                email.textContent = 'Email me when it is ready';
+                wrap.appendChild(email);
+            }
+            email.hidden = false;
+            document.getElementById('manualToggle').hidden = true;
+            return;
+        }
+        var soonBtn = document.getElementById('comingSoonBtn');
+        if (soonBtn) soonBtn.hidden = true;
+        var emailLink = document.getElementById('emailWhenReady');
+        if (emailLink) emailLink.hidden = true;
+        document.getElementById('manualToggle').hidden = false;
+        if (cfg.useOfficialBtn && official) {
+            if (primary) primary.hidden = true;
+            official.hidden = false;
+            syncCursorButtonTheme();
+            official.onclick = function (e) {
+                e.preventDefault();
+                runPrimary();
+            };
+        } else {
+            if (official) official.hidden = true;
+            if (primary) {
+                primary.hidden = false;
+                primary.disabled = false;
+                primary.textContent = cfg.primary;
+                primary.className = 'btn btn-primary';
+            }
+        }
+        var connectedTitle = document.querySelector('[data-connected-title]');
+        if (connectedTitle) connectedTitle.textContent = cfg.label + ' connected';
+    }
+
+    function mintKey() {
+        return fetch(state.mintUrl, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': state.csrf,
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify({ client: state.client })
+        }).then(function (r) {
+            if (!r.ok) throw new Error('mint failed');
+            return r.json();
+        }).then(function (data) {
+            state.key = data.key;
+            state.keyShownAt = Date.now();
+            state.authorizeAt = Date.now();
+            showKeyOnce(data.key);
+            return data.key;
+        });
+    }
+
+    function showKeyOnce(key) {
+        var box = document.getElementById('keyOnce');
+        document.getElementById('keyOnceValue').textContent = key;
+        box.hidden = false;
+        setTimeout(function () {
+            if (Date.now() - state.keyShownAt >= 10 * 60 * 1000) {
+                document.getElementById('keyOnceValue').textContent =
+                    (key || '').slice(0, 12) + '…';
+            }
+        }, 10 * 60 * 1000);
+    }
+
+    function runPrimary() {
+        var cfg = CLIENTS[state.client];
+        if (!state.loggedIn) {
+            location.href = '{{ url_for("login") }}?next=' +
+                encodeURIComponent('/connect?client=' + state.client);
+            return;
+        }
+        if (!cfg.live) return;
+        mintKey().then(function (key) {
+            state.clickAt = Date.now();
+            if (cfg.copyCommand) {
+                var cmd = claudeCommand(key);
+                document.getElementById('cmdOnceValue').textContent = cmd;
+                document.getElementById('cmdOnce').hidden = false;
+                copyText(cmd);
+                setTimeout(function () {
+                    var el = document.getElementById('cmdOnceValue');
+                    if (el && state.key) {
+                        el.textContent = claudeCommand(state.key.slice(0, 12) + '…');
+                    }
+                }, 60000);
+            } else if (state.client === 'cursor') {
+                location.href = cursorDeepLink(key);
+            } else if (state.client === 'vscode') {
+                location.href = vscodeDeepLink(key, state.vscodeInsiders);
+            }
+            pollStatus(true);
+            setTimeout(checkDeepLinkMiss, 4000);
+        }).catch(function () {
+            showAlert('danger', 'Could not create a key. Refresh and try again.');
+        });
+    }
+
+    function checkDeepLinkMiss() {
+        var cfg = CLIENTS[state.client];
+        if (!cfg.live || cfg.copyCommand) return;
+        if (!document.hasFocus()) return;
+        var st = state.status && state.status.steps;
+        if (st && st.connected && st.connected.done) return;
+        if (Date.now() - state.clickAt < 3500) return;
+        showAlert('warning',
+            'Did ' + cfg.label + ' not open? Install ' + cfg.label +
+            ', or <a href="#" id="alertManualLink">set it up by hand</a>.');
+        var link = document.getElementById('alertManualLink');
+        if (link) link.onclick = function (e) {
+            e.preventDefault();
+            openManual(true);
+        };
+    }
+
+    function showAlert(kind, html) {
+        var box = document.getElementById('connectAlerts');
+        box.innerHTML = '<div class="connect-alert connect-alert-' + kind + '" role="status">' +
+            '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' +
+            '<div>' + html + '</div></div>';
+    }
+
+    function openManual(mint) {
+        var panel = document.getElementById('manualSnippet');
+        panel.hidden = false;
+        document.getElementById('manualHint').textContent =
+            state.client === 'cursor' ? 'Add this to ~/.cursor/mcp.json' :
+            state.client === 'vscode' ? 'Add this to your mcp.json (user or workspace)' :
+            'Use these values in any MCP client';
+        document.getElementById('manualCode').textContent = manualSnippet(state.client, state.key);
+        document.getElementById('manualCopy').hidden = !state.key;
+        if (mint && state.loggedIn && !state.key) {
+            mintKey().then(function (key) {
+                document.getElementById('manualCode').textContent = manualSnippet(state.client, key);
+                document.getElementById('manualCopy').hidden = false;
+            });
+        }
+    }
+
+    function copyText(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            return navigator.clipboard.writeText(text);
+        }
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch (e) {}
+        document.body.removeChild(ta);
+        return Promise.resolve();
+    }
+
+    function checkIconSvg() {
+        return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
+    }
+
+    function renderStatus(data) {
+        state.status = data;
+        var steps = data.steps || {};
+        var order = ['logged_in', 'authorized', 'connected', 'first_tool', 'first_transcript'];
+        var doneCount = 0;
+        var cfg = CLIENTS[state.client];
+        order.forEach(function (key) {
+            var row = document.querySelector('.connect-step[data-step="' + key + '"]');
+            if (!row) return;
+            var step = steps[key] || { done: false };
+            var meta = row.querySelector('[data-meta]');
+            row.classList.toggle('is-done', !!step.done);
+            var icon = row.querySelector('.connect-step-icon');
+            icon.innerHTML = step.done ? checkIconSvg() : '';
+            if (step.done) doneCount += 1;
+            if (key === 'logged_in') {
+                meta.textContent = step.done
+                    ? ('as ' + (step.email || 'you'))
+                    : 'Log in to connect your AI app';
+            } else if (key === 'authorized') {
+                meta.textContent = step.done
+                    ? ((step.label || cfg.label + ' key') +
+                        (step.prefix ? ', ' + step.prefix + '…' : ''))
+                    : 'Not created yet';
+            } else if (key === 'connected') {
+                if (step.done) {
+                    meta.textContent = 'Connected' +
+                        (step.client_name ? ' · ' + step.client_name : '');
+                } else if (steps.authorized && steps.authorized.done) {
+                    var waited = state.authorizeAt
+                        ? (Date.now() - state.authorizeAt)
+                        : 0;
+                    if (waited > 3 * 60 * 1000) {
+                        meta.innerHTML = cfg.waitingLong +
+                            ' <a href="#" id="waitManual">Set it up by hand</a>';
+                        var wm = document.getElementById('waitManual');
+                        if (wm) wm.onclick = function (e) {
+                            e.preventDefault();
+                            openManual(true);
+                        };
+                    } else {
+                        meta.innerHTML = '<span class="waiting-pulse">' + cfg.waiting + '</span>';
+                    }
+                } else {
+                    meta.textContent = '';
+                }
+            } else if (key === 'first_tool') {
+                meta.textContent = step.done ? 'Tool call succeeded' : '';
+            } else if (key === 'first_transcript') {
+                meta.textContent = step.done ? 'Transcript ready' : '';
+            }
+        });
+        document.getElementById('setupProgress').textContent = doneCount + ' of 5 done';
+        var allDone = doneCount === 5;
+        document.getElementById('checklist').hidden = allDone;
+        document.getElementById('setupProgress').hidden = allDone;
+        var banner = document.getElementById('allDoneBanner');
+        banner.hidden = !allDone;
+        if (allDone) {
+            document.getElementById('allDoneText').textContent =
+                'Podskrift is connected to ' + cfg.label + '. Ask for any episode.';
+            var open = document.getElementById('allDoneOpen');
+            open.textContent = cfg.openLabel;
+            open.href = cfg.openHref || '#';
+        }
+        document.getElementById('tryPromptRow').hidden =
+            !!(steps.first_transcript && steps.first_transcript.done);
+
+        var alerts = document.getElementById('connectAlerts');
+        if (data.problem === 'revoked_key_in_use') {
+            showAlert('danger', cfg.label +
+                ' is using an old key. Click ' + cfg.primary + ' again to replace it.');
+        } else if (data.problem === 'no_minutes') {
+            showAlert('warning',
+                'Your free minutes are used up. <a href="{{ url_for("pricing") }}">{{ credit_pack_minutes }} minutes for ${{ credit_pack_price_usd }}</a>.');
+        } else if (data.problem === 'tool_errors') {
+            showAlert('danger',
+                'Podskrift got requests from ' + cfg.label +
+                ' but they failed. Try the prompt above, or email support.');
+        } else if (!state.clickAt) {
+            alerts.innerHTML = '';
+        }
+
+        var list = document.getElementById('connectionsList');
+        var section = document.getElementById('connectionsSection');
+        var conns = data.connections || [];
+        list.textContent = '';
+        if (!conns.length) {
+            section.hidden = true;
+        } else {
+            section.hidden = false;
+            conns.forEach(function (c) {
+                var li = document.createElement('li');
+                li.className = 'connect-conn';
+                li.setAttribute('data-id', String(c.id));
+                var info = document.createElement('div');
+                var strong = document.createElement('strong');
+                strong.textContent = c.label || c.client || '';
+                info.appendChild(strong);
+                info.appendChild(document.createTextNode(' '));
+                var metaBits = [];
+                if (c.connected) metaBits.push('connected');
+                if (c.last_seen_at) metaBits.push('last used recently');
+                if (c.prefix) metaBits.push(String(c.prefix) + '…');
+                var meta = document.createElement('span');
+                meta.className = 'connect-conn-meta';
+                meta.textContent = metaBits.join(' · ');
+                info.appendChild(meta);
+                li.appendChild(info);
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'btn btn-danger btn-sm';
+                btn.textContent = 'Disconnect';
+                btn.setAttribute('data-revoke', String(c.id));
+                btn.onclick = function () {
+                    var name = (CLIENTS[state.client] || {}).label || 'this app';
+                    if (!confirm('Disconnect ' + name +
+                        '? It stops working with Podskrift until you connect again.')) {
+                        return;
+                    }
+                    fetch('/connect/credentials/' + c.id + '/revoke', {
+                        method: 'POST',
+                        credentials: 'same-origin',
+                        headers: { 'X-CSRF-Token': state.csrf, 'Accept': 'application/json' }
+                    }).then(function () { pollStatus(true); });
+                };
+                li.appendChild(btn);
+                list.appendChild(li);
+            });
+        }
+        return allDone;
+    }
+
+    function pollInterval() {
+        var elapsed = Date.now() - state.pollStarted;
+        if (elapsed > 15 * 60 * 1000) return null;
+        if (elapsed > 2 * 60 * 1000) return 10000;
+        return 2000;
+    }
+
+    function pollStatus(immediate) {
+        if (state.timer) {
+            clearTimeout(state.timer);
+            state.timer = null;
+        }
+        function tick() {
+            if (document.hidden) {
+                schedule();
+                return;
+            }
+            var url = state.statusUrl + '?client=' + encodeURIComponent(state.client);
+            fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+                .then(function (r) {
+                    if (r.status === 401) return null;  // logged out — stop polling
+                    return r.json();
+                })
+                .then(function (data) {
+                    if (!data) return;
+                    var done = renderStatus(data);
+                    if (!done) schedule();
+                })
+                .catch(function () { schedule(); });
+        }
+        function schedule() {
+            var ms = pollInterval();
+            if (ms == null) return;
+            state.timer = setTimeout(tick, ms);
+        }
+        if (immediate) tick();
+        else schedule();
+    }
+
+    document.querySelectorAll('.connect-tabs .tab').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            setClient(btn.getAttribute('data-client'), true);
+        });
+    });
+    var primary = document.getElementById('primaryActionBtn');
+    if (primary) primary.addEventListener('click', runPrimary);
+    document.getElementById('manualToggle').addEventListener('click', function (e) {
+        e.preventDefault();
+        openManual(false);
+    });
+    document.getElementById('manualCreateKey').addEventListener('click', function () {
+        if (!state.loggedIn) {
+            location.href = '{{ url_for("login") }}?next=' +
+                encodeURIComponent('/connect?client=' + state.client);
+            return;
+        }
+        openManual(true);
+    });
+    document.getElementById('manualCopy').addEventListener('click', function () {
+        copyText(document.getElementById('manualCode').textContent);
+    });
+    document.getElementById('copyKeyBtn').addEventListener('click', function () {
+        copyText(state.key || document.getElementById('keyOnceValue').textContent);
+    });
+    document.getElementById('copyCmdBtn').addEventListener('click', function () {
+        if (state.key) copyText(claudeCommand(state.key));
+        else copyText(document.getElementById('cmdOnceValue').textContent);
+    });
+    document.getElementById('copyPromptBtn').addEventListener('click', function () {
+        copyText(document.getElementById('tryPrompt').textContent);
+    });
+    document.getElementById('insidersLink').addEventListener('click', function () {
+        state.vscodeInsiders = !state.vscodeInsiders;
+        this.textContent = state.vscodeInsiders
+            ? 'Using Stable VS Code?'
+            : 'Using Insiders?';
+    });
+    document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) pollStatus(true);
+    });
+
+    // Initial paint from server-rendered status
+    setClient(state.client, false);
+    {% if status %}
+    renderStatus({{ status | tojson }});
+    {% endif %}
+    state.pollStarted = Date.now();
+    pollStatus(true);
+
+    // Expose for tests
+    window.__podskriftConnect = {
+        cursorDeepLink: cursorDeepLink,
+        vscodeDeepLink: vscodeDeepLink,
+        claudeCommand: claudeCommand,
+        encodeBase64Json: encodeBase64Json,
+        manualSnippet: manualSnippet
+    };
+})();
+</script>
+{% endblock %}

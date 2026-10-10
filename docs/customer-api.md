@@ -1,11 +1,12 @@
 # Podcast transcript API
 
-Podskrift’s podcast transcription API lets agents and scripts get a transcript over HTTP — the same path as the web UI. Resolve an episode by publisher/show and date (or URL), start Whisper, poll until ready, then fetch the plain-text transcript. New accounts get 120 free trial minutes on our OpenAI key; after that, add your own. Create a `psk_…` key in Settings.
+Podskrift’s podcast transcription API lets agents and scripts get a transcript over HTTP — the same path as the web UI. Resolve an episode by publisher/show and date (or URL), start Whisper, poll until ready, then fetch the plain-text transcript. New accounts get 120 free trial minutes on our OpenAI key; after that, add your own. Create a `psk_…` key in Settings, or connect Cursor / VS Code / Claude Code from **[Connect](https://podskrift.com/connect)**.
 
 ## Authentication
 
-Generate a key in **[Settings](https://podskrift.com/settings)** → API key
-(`psk_…`). One key per account.
+Generate a key in **[Settings](https://podskrift.com/settings)** → API keys
+(`psk_…`), or mint a labelled key from **[Connect](https://podskrift.com/connect)**.
+You can have multiple keys; minting one for Cursor does not revoke another.
 
 Send it on every request as either:
 
@@ -15,8 +16,8 @@ or
 
 `X-Api-Key: psk_…`
 
-Revoke or Regenerate in Settings — old keys stop working immediately. Never
-commit a real key.
+Revoke a key in Settings — that key stops working immediately; others stay
+valid. Never commit a real key.
 
 ```bash
 export PODSKRIFT_API_KEY='psk_…'   # from Settings — never commit
@@ -233,7 +234,8 @@ as this HTTP API.
 
 **Endpoint:** `https://podskrift.com/mcp` (Streamable HTTP, JSON-RPC 2.0)
 
-**Auth:** the same Settings API key — `Authorization: Bearer psk_…`
+**Auth:** the same API key — `Authorization: Bearer psk_…`
+(easiest path: [Connect](https://podskrift.com/connect) for Cursor, VS Code, or Claude Code)
 
 **Tools**
 
@@ -263,8 +265,9 @@ the episode is longer than your remaining minutes, it refuses and includes
 }
 ```
 
-Replace `psk_…` with your key from Settings. Long episodes can take several
-minutes — poll `get_transcript_status` until `transcript_status` is `ready`.
+Replace `psk_…` with your key from Connect or Settings. Long episodes can take
+several minutes — poll `get_transcript_status` until `transcript_status` is
+`ready`. Prefer [Connect](https://podskrift.com/connect) for one-click install.
 
 <!-- mcp-oauth-section -->
 ### OAuth for ChatGPT and Claude.ai
