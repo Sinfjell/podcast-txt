@@ -33,7 +33,7 @@ from typing import Any
 from urllib.parse import urlencode, urlparse, urlunparse
 
 import requests
-from flask import (Response, flash, g, jsonify, redirect, render_template,
+from flask import (Response, current_app, flash, g, jsonify, redirect, render_template,
                    request, session, url_for)
 from flask_login import current_user
 
@@ -1282,6 +1282,12 @@ def register_oauth(app_flask):
 
         ok, auth_err = authenticate_oauth_client(client, data)
         if not ok:
+            # Non-sensitive reason only (no assertion/secret), so a failed
+            # ChatGPT/Claude connect can be diagnosed from server logs.
+            current_app.logger.warning(
+                'oauth token client auth failed: client=%s method=%s grant=%s '
+                'reason=%s', client.client_id[:120],
+                client.token_endpoint_auth_method, grant_type, auth_err)
             return _oauth_error(
                 'invalid_client', auth_err or 'Client authentication failed.', 401)
 
