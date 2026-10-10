@@ -9313,7 +9313,12 @@ def test_register_rejects_off_site_next_and_keeps_flash(monkeypatch, trial_on):
     )
     body = resp.data.decode()
     assert 'Account created' in body
-    assert f'{A.NEW_USER_TRIAL_SECONDS // 60} free minutes' in body
+    # The grant is the A/B split arm for this user id (60 or 120), so read it
+    # back rather than assuming NEW_USER_TRIAL_SECONDS: which arm a fresh id
+    # hashes into depends on how many users earlier tests created.
+    with A.app.app_context():
+        granted = A.User.query.filter_by(email=email).one().trial_seconds_limit // 60
+    assert f'{granted} free minutes' in body
     assert 'evil.example' not in resp.request.url
     assert resp.request.path == '/'
     _purge([email])

@@ -1155,6 +1155,11 @@ body:has(.ds-signal) { overflow-x: clip; }
   .ds-hero__inner { gap: var(--space-4); }
   .ds-announce__long { display: none; }
   .ds-announce__short { display: inline; }
+  /* Phones get the title, the command bar and one reason. The rest is still in
+     the DOM for screen readers and search, and the transcript window below
+     shows what the lede says. */
+  .ds-hero .ds-announce, .ds-hero__lede, .ds-hero .ds-works,
+  .ds-hero .ds-proof--inline li + li { display: none; }
   .ds-cmd__box { flex-wrap: wrap; padding: var(--space-2); }
   .ds-cmd__box::before { inset: -2rem 0; }
   .ds-seg .tab { padding: 0 var(--space-2); }
