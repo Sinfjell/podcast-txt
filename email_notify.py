@@ -10,6 +10,7 @@ from __future__ import annotations
 import html as html_lib
 import json
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlencode
@@ -31,6 +32,10 @@ PASSWORD_CHANGED = 'password_changed'
 # Job finished quickly *and* the owner was still polling → skip the email.
 TRANSCRIPT_READY_MIN_DURATION_SEC = 60
 TRANSCRIPT_READY_AWAY_SEC = 120
+
+# Soft pack CTA when remaining is thin or the user has never bought minutes.
+EMAIL_PACK_OFFER_BELOW_MINUTES = 60
+EMAIL_TYPICAL_EPISODE_MIN = 45
 
 
 def _serializer(secret_key: str) -> URLSafeTimedSerializer:
@@ -200,6 +205,100 @@ def task_is_partial_preview(task) -> bool:
     return isinstance(data, dict) and data.get('partial_seconds') is not None
 
 
+def approx_episodes_phrase(minutes_left: int,
+                           typical_episode_min: float | None = None) -> str:
+    """Plain “about N more episodes” (or a short range) for email copy."""
+    typical = max(5.0, float(typical_episode_min or EMAIL_TYPICAL_EPISODE_MIN))
+    left = max(0, int(minutes_left))
+    ratio = left / typical
+    if ratio < 0.5:
+        return 'less than 1 more episode'
+    lo = max(1, int(math.floor(ratio)))
+    hi = max(lo, int(math.ceil(ratio)))
+    if lo == hi:
+        if lo == 1:
+            return 'about 1 more episode'
+        return f'about {lo} more episodes'
+    return f'about {lo}-{hi} more episodes'
+
+
+def format_remaining_minutes_line(
+    free_min: int,
+    paid_min: int,
+    *,
+    typical_episode_min: float | None = None,
+) -> str:
+    """One short balance sentence, e.g. free minutes + episode estimate."""
+    free_min = max(0, int(free_min))
+    paid_min = max(0, int(paid_min))
+    total = free_min + paid_min
+    if free_min and paid_min:
+        head = f'You have {free_min} free + {paid_min} paid minutes left'
+    elif paid_min:
+        head = f'You have {paid_min} paid minutes left'
+    else:
+        head = f'You have {free_min} free minutes left'
+    ep = approx_episodes_phrase(total, typical_episode_min)
+    return f'{head} ({ep}).'
+
+
+def should_include_pack_offer(
+    free_min: int,
+    paid_min: int,
+    *,
+    is_partial: bool = False,
+    below_minutes: int = EMAIL_PACK_OFFER_BELOW_MINUTES,
+) -> bool:
+    """True when remaining is under ~60 min, trial-only, or a free preview.
+
+    Trial-only means no paid balance left (still on free minutes). Paying
+    customers with a healthy paid runway do not get the pack line.
+    """
+    free_min = max(0, int(free_min))
+    paid_min = max(0, int(paid_min))
+    if is_partial:
+        return True
+    if paid_min <= 0:
+        return True
+    return (free_min + paid_min) < max(0, int(below_minutes))
+
+
+def metered_email_balance(user) -> dict[str, Any] | None:
+    """Free/paid minutes + typical episode length for metered users.
+
+    Returns None for BYOK / missing users so the email stays quiet.
+    Lazy-imports app helpers to avoid an import cycle at module load.
+    """
+    if user is None:
+        return None
+    try:
+        import app as app_module
+    except Exception:  # noqa: BLE001
+        logger.exception('metered_email_balance: could not import app')
+        return None
+    try:
+        _, key_source = app_module.resolve_openai_key(user)
+        if key_source == 'user':
+            return None
+        trial_rem, paid_rem = app_module._platform_remaining_seconds(user.id)
+        trial_rem = max(0, int(trial_rem))
+        paid_rem = max(0, int(paid_rem))
+        # No platform minutes in play (trial off, empty paid) → omit the line.
+        if trial_rem <= 0 and paid_rem <= 0 and key_source is None:
+            return None
+        typical = app_module.user_median_episode_minutes(user.id)
+        return {
+            'free_min': trial_rem // 60,
+            'paid_min': paid_rem // 60,
+            'typical_episode_min': float(typical),
+        }
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            'metered_email_balance failed for user %s',
+            getattr(user, 'id', '?'))
+        return None
+
+
 def build_transcript_ready_bodies(
     *,
     podcast_name: str,
@@ -208,12 +307,16 @@ def build_transcript_ready_bodies(
     unsub_url: str,
     is_partial: bool = False,
     pack_url: str | None = None,
+    remaining_free_min: int | None = None,
+    remaining_paid_min: int | None = None,
+    typical_episode_min: float | None = None,
 ) -> tuple[str, str, str]:
     """Return (subject, text, html).
 
     Partial free-preview jobs use “your free preview is ready” wording so we
-    never imply the full episode was transcribed. When ``pack_url`` is set,
-    a single plain line offers the 300 min / $5 pack (unsubscribe unchanged).
+    never imply the full episode was transcribed. When balance minutes are
+    provided, a short remaining line is added. ``pack_url`` is only rendered
+    when the caller passes it (low remaining / trial-only / preview).
     """
     show = (podcast_name or '').strip() or 'your podcast'
     ep = (episode_title or '').strip() or 'Episode'
@@ -222,6 +325,13 @@ def build_transcript_ready_bodies(
     if pack_url:
         pack_link = with_utm(
             pack_url, TRANSCRIPT_READY, content='pack_offer', ref='email_pack')
+    balance_line = ''
+    if remaining_free_min is not None or remaining_paid_min is not None:
+        balance_line = format_remaining_minutes_line(
+            remaining_free_min or 0,
+            remaining_paid_min or 0,
+            typical_episode_min=typical_episode_min,
+        )
     if is_partial:
         subject = f'Free preview ready: {ep}'
         lead = (
@@ -236,6 +346,7 @@ def build_transcript_ready_bodies(
         lead = f'Your transcript of “{ep}” from {show} is ready.'
         cta_label = 'Open the transcript'
         tip = 'Search for another episode whenever you are ready.'
+    balance_block = f'{balance_line}\n\n' if balance_line else ''
     pack_line = (
         f'Need more minutes? 300 min for $5: {pack_link}\n\n'
         if pack_link else ''
@@ -243,6 +354,7 @@ def build_transcript_ready_bodies(
     text = (
         f'{lead}\n\n'
         f'{cta_label}: {link}\n\n'
+        f'{balance_block}'
         f'{pack_line}'
         f'{tip}\n'
         f'{_footer_text(unsub_url)}'
@@ -262,6 +374,9 @@ def build_transcript_ready_bodies(
             f'<p>Your transcript of <strong>{safe_ep}</strong> from '
             f'{safe_show} is ready.</p>'
         )
+    html_balance = ''
+    if balance_line:
+        html_balance = f'<p>{html_lib.escape(balance_line)}</p>'
     html_pack = ''
     if pack_link:
         safe_pack = html_lib.escape(pack_link, quote=True)
@@ -272,6 +387,7 @@ def build_transcript_ready_bodies(
     html = (
         f'{html_lead}'
         f'<p><a href="{safe_link}">{safe_cta}</a></p>'
+        f'{html_balance}'
         f'{html_pack}'
         f'<p>{html_lib.escape(tip)}</p>'
         f'{_footer_html(unsub_url)}'
@@ -308,9 +424,22 @@ def notify_transcript_ready(
         base = (public_base_url or '').rstrip('/')
         transcript_path = f'/transcription/{task_id}'
         transcript_url = f'{base}{transcript_path}' if base else transcript_path
-        pack_url = f'{base}/pricing' if base else '/pricing'
         unsub = unsubscribe_url(public_base_url, secret_key, user.id)
         is_partial = task_is_partial_preview(task)
+        bal = metered_email_balance(user)
+        free_min = paid_min = None
+        typical = None
+        pack_url = None
+        if bal is not None:
+            free_min = int(bal['free_min'])
+            paid_min = int(bal['paid_min'])
+            typical = bal.get('typical_episode_min')
+            if should_include_pack_offer(
+                    free_min, paid_min, is_partial=is_partial):
+                pack_url = f'{base}/pricing' if base else '/pricing'
+        elif is_partial:
+            # Preview without a balance snapshot — still offer the pack once.
+            pack_url = f'{base}/pricing' if base else '/pricing'
         subject, text, html = build_transcript_ready_bodies(
             podcast_name=getattr(task, 'podcast_name', None) or '',
             episode_title=getattr(task, 'episode_title', None) or '',
@@ -318,6 +447,9 @@ def notify_transcript_ready(
             unsub_url=unsub,
             is_partial=is_partial,
             pack_url=pack_url,
+            remaining_free_min=free_min,
+            remaining_paid_min=paid_min,
+            typical_episode_min=typical,
         )
         outcome = mailer.send_email(
             to=user.email,

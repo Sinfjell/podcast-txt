@@ -605,15 +605,37 @@ def test_partial_preview_email_wording(monkeypatch):
         assert 'unsubscribe' in pairs['text'].lower()
 
 
-def test_transcript_ready_email_includes_pack_offer_line():
+def test_remaining_minutes_line_and_pack_offer_helpers():
+    assert email_notify.approx_episodes_phrase(63, 45) == 'about 1-2 more episodes'
+    assert email_notify.approx_episodes_phrase(90, 45) == 'about 2 more episodes'
+    assert email_notify.approx_episodes_phrase(10, 45) == 'less than 1 more episode'
+    line = email_notify.format_remaining_minutes_line(63, 0, typical_episode_min=45)
+    assert line == 'You have 63 free minutes left (about 1-2 more episodes).'
+    mixed = email_notify.format_remaining_minutes_line(20, 40, typical_episode_min=45)
+    assert '20 free + 40 paid' in mixed
+    assert email_notify.should_include_pack_offer(30, 0) is True
+    assert email_notify.should_include_pack_offer(63, 0) is True  # trial-only
+    assert email_notify.should_include_pack_offer(0, 200) is False
+    assert email_notify.should_include_pack_offer(10, 100) is False
+    assert email_notify.should_include_pack_offer(0, 40) is True  # low paid
+    assert email_notify.should_include_pack_offer(200, 0, is_partial=True) is True
+
+
+def test_transcript_ready_email_low_minutes_includes_pack_offer():
+    """Low remaining (or trial-only) → remaining line + single 300-for-$5 link."""
     subject, text, html = email_notify.build_transcript_ready_bodies(
         podcast_name='Show',
         episode_title='Ep One',
         transcript_url='https://podskrift.com/transcription/abc',
         unsub_url='https://podskrift.com/email/unsubscribe/tok',
         pack_url='https://podskrift.com/pricing',
+        remaining_free_min=30,
+        remaining_paid_min=0,
+        typical_episode_min=45,
     )
     assert subject.startswith('Transcript ready:')
+    assert 'You have 30 free minutes left' in text
+    assert 'about 1 more episode' in text
     assert 'Need more minutes? 300 min for $5:' in text
     assert 'utm_source=email' in text
     assert 'utm_content=pack_offer' in text
@@ -622,6 +644,101 @@ def test_transcript_ready_email_includes_pack_offer_line():
     assert 'unsubscribe' in text.lower()
     assert '300 min for $5' in html
     assert 'utm_content=pack_offer' in html
+    assert 'You have 30 free minutes left' in html
+
+
+def test_transcript_ready_email_plenty_minutes_skips_pack_offer():
+    """Plenty of paid minutes → remaining line only; no pack CTA."""
+    subject, text, html = email_notify.build_transcript_ready_bodies(
+        podcast_name='Show',
+        episode_title='Ep Two',
+        transcript_url='https://podskrift.com/transcription/xyz',
+        unsub_url='https://podskrift.com/email/unsubscribe/tok',
+        pack_url=None,
+        remaining_free_min=0,
+        remaining_paid_min=200,
+        typical_episode_min=45,
+    )
+    assert subject.startswith('Transcript ready:')
+    assert 'You have 200 paid minutes left' in text
+    assert 'about 4-5 more episodes' in text
+    assert '300 min for $5' not in text
+    assert 'utm_content=pack_offer' not in text
+    assert 'Need more minutes?' not in text
+    assert 'unsubscribe' in text.lower()
+    assert 'You have 200 paid minutes left' in html
+    assert '300 min for $5' not in html
+    assert 'utm_content=pack_offer' not in html
+
+    # Remaining-line sample from the product ask (trial-only still gets CTA).
+    _, sample, _ = email_notify.build_transcript_ready_bodies(
+        podcast_name='Show',
+        episode_title='Ep',
+        transcript_url='https://podskrift.com/transcription/x',
+        unsub_url='https://podskrift.com/email/unsubscribe/tok',
+        pack_url='https://podskrift.com/pricing',
+        remaining_free_min=63,
+        remaining_paid_min=0,
+        typical_episode_min=45,
+    )
+    assert 'You have 63 free minutes left (about 1-2 more episodes).' in sample
+    assert '300 min for $5' in sample
+
+
+def _enable_trial(monkeypatch):
+    monkeypatch.setattr(A, 'GLOBAL_OPENAI_KEY', 'sk-global-not-a-real-key')
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', True)
+    monkeypatch.setattr(A, 'TRIAL_DEFAULT_SECONDS', 180 * 60)
+    monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', 10 ** 7)
+    monkeypatch.setattr(A, 'TRIAL_GLOBAL_SECONDS', 0)
+
+
+def test_notify_transcript_ready_low_vs_plenty_minutes(monkeypatch):
+    """Integration: Mailgun body includes balance; pack CTA only when low."""
+    _enable_mail(monkeypatch)
+    _enable_trial(monkeypatch)
+
+    def _send(email, *, limit, used, paid=0, task_id):
+        uid = _make_user(email, limit=limit, used=used)
+        with A.app.app_context():
+            u = A.db.session.get(A.User, uid)
+            u.paid_seconds_balance = paid
+            A.db.session.commit()
+            task = A.TranscriptionTask(
+                id=task_id, user_id=uid,
+                episode_title='Balance Ep', podcast_name='Show',
+                status='completed',
+                audio_duration=45 * 60.0,
+                started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+                completed_at=datetime.now(timezone.utc),
+            )
+            A.db.session.add(task)
+            A.db.session.commit()
+            user = A.db.session.get(A.User, uid)
+            fake = mock.Mock(status_code=200, text='ok')
+            with mock.patch.object(mailer.requests, 'post', return_value=fake) as post:
+                assert email_notify.notify_transcript_ready(
+                    db=A.db, user=user, task=task, EmailSentLog=A.EmailSentLog,
+                    public_base_url='https://podskrift.com',
+                    secret_key=A.app.secret_key,
+                )
+            return dict(post.call_args.kwargs['data'])
+
+    low = _send('low-bal@test.com', limit=40 * 60, used=10 * 60, task_id='bal-low')
+    assert 'You have 30 free minutes left' in low['text']
+    assert '300 min for $5' in low['text']
+    assert 'utm_content=pack_offer' in low['text']
+    assert 'ref=email_pack' in low['text']
+    assert 'unsubscribe' in low['text'].lower()
+
+    # Plenty of paid minutes (not trial-only) → balance line, no pack CTA.
+    plenty = _send(
+        'plenty-bal@test.com', limit=10 * 60, used=10 * 60,
+        paid=200 * 60, task_id='bal-plenty')
+    assert 'You have 200 paid minutes left' in plenty['text']
+    assert '300 min for $5' not in plenty['text']
+    assert 'utm_content=pack_offer' not in plenty['text']
+    assert 'unsubscribe' in plenty['text'].lower()
 
 
 def test_changelog_hides_email_keeps_user_visible_first():
