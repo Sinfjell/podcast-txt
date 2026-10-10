@@ -27,14 +27,35 @@
     .connect-tabs {
         display: flex;
         flex-wrap: wrap;
-        gap: var(--space-6);
+        gap: 1.5rem;
         border-bottom: 1px solid var(--line);
         margin-bottom: var(--space-6);
+    }
+    .connect-tabs .tab {
+        margin: 0;
+        padding: 0 0 8px;
     }
     .connect-tabs .tab[aria-pressed="true"] {
         color: var(--ink);
         font-weight: 700;
         border-bottom-color: var(--accent);
+    }
+    .connect-done-banner[hidden],
+    #cursorOfficialBtn[hidden],
+    #primaryActionBtn[hidden],
+    .connect-manual[hidden],
+    #keyOnce[hidden],
+    #cmdOnce[hidden],
+    #connectionsSection[hidden],
+    #comingSoonBtn[hidden],
+    #emailWhenReady[hidden],
+    #insidersLinkWrap[hidden],
+    #tryPromptRow[hidden],
+    #checklist[hidden],
+    #setupProgress[hidden],
+    .cursor-btn-dark[hidden],
+    .cursor-btn-light[hidden] {
+        display: none !important;
     }
     .connect-card {
         background: var(--surface);
@@ -230,7 +251,8 @@
     <h1>Connect Podskrift to your AI app</h1>
     <p class="connect-lead">
         Ask for any podcast episode in your AI app and get the transcript.
-        Uses your Podskrift minutes. {{ trial_minutes }} free minutes to start.
+        Uses your Podskrift minutes.
+        {% if trial_minutes %}{{ trial_minutes }} free minutes to start.{% endif %}
     </p>
 
     <div class="connect-tabs tabs" role="tablist" aria-label="AI apps">
@@ -262,10 +284,10 @@
             {% if not current_user.is_authenticated %}
             <a class="btn btn-primary" id="loginConnectBtn"
                href="{{ url_for('login', next=login_next) }}">Log in to connect</a>
-            <a class="btn btn-text" href="{{ url_for('register', next=login_next) }}">No account? Sign up, {{ trial_minutes }} free minutes</a>
+            <a class="btn btn-text" href="{{ url_for('register', next=login_next) }}">No account? Sign up{% if trial_minutes %}, {{ trial_minutes }} free minutes{% endif %}</a>
             {% else %}
             <button type="button" class="btn btn-primary" id="primaryActionBtn">Add to Cursor</button>
-            <a href="#" class="btn btn-text" id="cursorOfficialBtn" hidden aria-label="Add to Cursor">
+            <a href="#" id="cursorOfficialBtn" hidden aria-label="Add to Cursor">
                 <span class="connect-add-cursor">
                     <img src="{{ url_for('static', filename='img/mcp-install-dark.svg') }}"
                          alt="Add to Cursor" width="126" height="28"
@@ -447,17 +469,19 @@
         }
     } catch (e) {}
 
-    function checkSvg() {
+    function syncCursorButtonTheme() {
         var dark = document.querySelector('.cursor-btn-dark');
         var light = document.querySelector('.cursor-btn-light');
         if (!dark || !light) return;
-        var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-        dark.hidden = prefersDark;
+        var prefersDark = window.matchMedia &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches;
+        dark.hidden = !!prefersDark;
         light.hidden = !prefersDark;
     }
-    checkSvg();
+    syncCursorButtonTheme();
     if (window.matchMedia) {
-        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', checkSvg);
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener(
+            'change', syncCursorButtonTheme);
     }
 
     function encodeBase64Json(obj) {
@@ -582,6 +606,7 @@
         if (cfg.useOfficialBtn && official) {
             if (primary) primary.hidden = true;
             official.hidden = false;
+            syncCursorButtonTheme();
             official.onclick = function (e) {
                 e.preventDefault();
                 runPrimary();
