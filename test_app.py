@@ -2654,6 +2654,47 @@ def test_preparing_audio_shrinks_it_and_keeps_every_second(tmp_path):
     assert abs(A.probe_audio_duration(parts[0]) - duration) < 1.0
 
 
+def _tagged_audio(tmp_path, seconds=30):
+    """An episode carrying ~90 KB of ID3 text, as show notes and chapter
+    lists often do."""
+    import subprocess as sp
+    plain = _make_audio(tmp_path / 'plain.mp3', seconds)
+    tagged = tmp_path / 'tagged.mp3'
+    sp.run(['ffmpeg', '-v', 'error', '-y', '-i', plain,
+            '-metadata', 'comment=' + 'show notes ' * 8000,
+            '-c', 'copy', str(tagged)], check=True)
+    return str(tagged)
+
+
+def _tags(path):
+    import json
+    import subprocess as sp
+    out = sp.run(['ffprobe', '-v', 'error', '-show_entries', 'format_tags',
+                  '-of', 'json', path], capture_output=True, text=True, check=True)
+    return json.loads(out.stdout).get('format', {}).get('tags', {})
+
+
+def test_prepared_parts_carry_no_episode_metadata(tmp_path):
+    """Without -map_metadata -1 every part repeats the episode's tags, so a
+    feed with long show notes pays for them once per part."""
+    source = _tagged_audio(tmp_path)
+    assert 'comment' in _tags(source), 'fixture did not embed the tag'
+
+    parts = A.prepare_audio_for_whisper(source)
+
+    for part in parts:
+        assert 'comment' not in _tags(part), 'episode metadata copied into a part'
+
+
+def test_trimmed_audio_carries_no_episode_metadata(tmp_path):
+    source = _tagged_audio(tmp_path)
+
+    A.trim_audio_file(source, 10)
+
+    assert 'comment' not in _tags(source), 'episode metadata survived the trim'
+    assert abs(A.probe_audio_duration(source) - 10) < 1.0
+
+
 def test_variable_input_bitrate_gives_evenly_sized_parts(tmp_path, monkeypatch):
     """The defect stream-copying had: bytes are not proportional to time in a
     VBR file, so time-equal cuts were not byte-equal -- a dense first half
