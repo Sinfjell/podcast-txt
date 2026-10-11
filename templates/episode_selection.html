@@ -313,14 +313,10 @@ document.addEventListener('DOMContentLoaded', function() {
             if (FREE_MIN > 0) {
                 return 'This episode uses ~' + n + ' min · ' + FREE_MIN + ' free after signup';
             }
-            var anonPrice = episodePrice(durationMin, 0);
-            return 'This episode uses ~' + n + ' min' + (anonPrice ? ' · ' + anonPrice + ' after signup' : '');
+            // The price is on the button ("Transcribe for $X"); not twice.
+            return 'This episode uses ~' + n + ' min';
         }
         if (left == null) return '';
-        var shortPrice = episodePrice(durationMin, left);
-        if (left <= 0 && shortPrice) {
-            return 'This episode uses ~' + n + ' min · ' + shortPrice + ' to transcribe';
-        }
         return 'This episode uses ~' + n + ' min · you have ' + left + ' left';
     }
 
