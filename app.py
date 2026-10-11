@@ -4254,15 +4254,13 @@ def pending_transcription():
     return redirect(url_for('register', next=url_for('resume_transcription')))
 
 
-@app.route('/resume-transcription', methods=['GET', 'POST'])
-@login_required
-def resume_transcription():
-    """Start the episode stashed before signup/login, if any."""
-    pending = session.pop(PENDING_TRANSCRIPTION_KEY, None)
-    if not pending:
-        flash('Nothing to resume — search for an episode to transcribe.', 'info')
-        return redirect(url_for('index'))
+def _pending_transcription_meta(pending):
+    """Build enqueue_transcription() input from a stashed pick.
 
+    Returns ``(meta, rss_url, language, error)``. The RSS path re-reads the
+    feed, so title, audio URL and duration come from the feed, not from
+    whatever the browser stashed.
+    """
     language = normalize_language_code(pending.get('language') or '')
     rss_url = pending.get('rss_url')
     episode_index = pending.get('episode_index')
@@ -4271,8 +4269,7 @@ def resume_transcription():
     if rss_url is not None and episode_index is not None:
         episodes, error = get_episodes_from_rss(rss_url)
         if error or episode_index < 0 or episode_index >= len(episodes):
-            flash(error or 'Invalid episode selection', 'error')
-            return redirect(url_for('index'))
+            return None, rss_url, language, (error or 'Invalid episode selection')
         episode = episodes[episode_index]
         meta = {
             'title': episode['title'],
@@ -4290,8 +4287,7 @@ def resume_transcription():
     else:
         audio_url = (pending.get('audio_url') or '').strip()
         if not audio_url or not _is_fetchable_url(audio_url):
-            flash('That audio URL cannot be fetched.', 'error')
-            return redirect(url_for('index'))
+            return None, rss_url, language, 'That audio URL cannot be fetched.'
         meta = {
             'title': pending.get('title') or 'Episode',
             'audio_url': audio_url,
@@ -4306,6 +4302,26 @@ def resume_transcription():
             'website_url': pending.get('website_url') or '',
             'show_link': pending.get('show_link') or '',
         }
+    return meta, rss_url, language, None
+
+
+TRANSCRIPT_STARTED_FLASH = (
+    "Your transcript has started. You can close this page; it'll be in History.")
+
+
+@app.route('/resume-transcription', methods=['GET', 'POST'])
+@login_required
+def resume_transcription():
+    """Start the episode stashed before signup/login, if any."""
+    pending = session.pop(PENDING_TRANSCRIPTION_KEY, None)
+    if not pending:
+        flash('Nothing to resume — search for an episode to transcribe.', 'info')
+        return redirect(url_for('index'))
+
+    meta, rss_url, language, error = _pending_transcription_meta(pending)
+    if error:
+        flash(error, 'error')
+        return redirect(url_for('index'))
 
     payload, status = enqueue_transcription(
         current_user, meta, rss_url=rss_url, language=language)
@@ -4314,11 +4330,75 @@ def resume_transcription():
         # start would via flash, since this is a browser redirect not XHR.
         flash(payload.get('error') or 'Could not start transcription.', 'error')
         return redirect(url_for('index'))
-    flash(
-        "Your transcript has started. You can close this page; it'll be in History.",
-        'success',
-    )
+    flash(TRANSCRIPT_STARTED_FLASH, 'success')
     return redirect(url_for('transcription_page', task_id=payload['task_id']))
+
+
+def _autostart_after_payment(session_id, balance_minutes):
+    """Start the stashed episode once its purchase is confirmed paid.
+
+    Called only from /billing/success after Stripe has said ``paid`` for a
+    session owned by this user. Returns a task id to redirect to, or None to
+    show the success page with its "Start transcript" button as before.
+
+    At most one start per Checkout Session: the purchase row must exist
+    (fulfilled by the success page or the webhook, whichever came first) and
+    is claimed with one conditional UPDATE, so a refresh, a second tab or two
+    gunicorn workers cannot start it twice. enqueue_transcription()'s
+    duplicate guard backs that up for a job that is already live.
+    """
+    pending = session.get(PENDING_TRANSCRIPTION_KEY)
+    if not pending:
+        return None
+    purchase = CreditPurchase.query.filter_by(
+        stripe_session_id=session_id, user_id=current_user.id).first()
+    if purchase is None or purchase.status != 'credited':
+        return None
+    meta, rss_url, language, error = _pending_transcription_meta(pending)
+    if error:
+        return None
+    duration = meta.get('duration_min')
+    # Balance must cover the whole episode: an unknown length or a shortfall
+    # leaves the decision (and the button) with the user.
+    if duration is None or math.ceil(float(duration)) > int(balance_minutes):
+        return None
+
+    claimed = db.session.execute(
+        db.update(CreditPurchase)
+        .where(CreditPurchase.id == purchase.id,
+               CreditPurchase.autostart_claimed_at.is_(None))
+        .values(autostart_claimed_at=datetime.now(timezone.utc))
+    ).rowcount
+    db.session.commit()
+    if claimed != 1:
+        return None
+
+    session.pop(PENDING_TRANSCRIPTION_KEY, None)
+    session.modified = True
+    payload, status = enqueue_transcription(
+        current_user, meta, rss_url=rss_url, language=language)
+    if status != 200 or not payload.get('task_id'):
+        # Refused (capacity, disk …): give the pick and the claim back so the
+        # button on the success page still works.
+        session[PENDING_TRANSCRIPTION_KEY] = pending
+        db.session.execute(
+            db.update(CreditPurchase)
+            .where(CreditPurchase.id == purchase.id)
+            .values(autostart_claimed_at=None))
+        db.session.commit()
+        return None
+    task_id = payload['task_id']
+    db.session.execute(
+        db.update(CreditPurchase)
+        .where(CreditPurchase.id == purchase.id)
+        .values(autostart_task_id=str(task_id)))
+    db.session.commit()
+    product_analytics.capture('checkout_autostarted', current_user.id, {
+        'checkout_session_id': session_id,
+        'task_id': task_id,
+        'existing': bool(payload.get('existing')),
+    })
+    return task_id
 
 
 @app.route('/logout')
@@ -5442,6 +5522,23 @@ def billing_success():
     if trial_available() and not getattr(current_user, 'openai_api_key', None):
         trial_left = trial_status(current_user)[2] // 60
     balance_minutes = paid_minutes + trial_left
+
+    if paid_ready and session_id.startswith('cs_'):
+        # Refresh of an already auto-started purchase: back to its progress page.
+        done = CreditPurchase.query.filter_by(
+            stripe_session_id=session_id, user_id=current_user.id).first()
+        if done is not None and done.autostart_task_id:
+            return redirect(url_for('transcription_page', task_id=done.autostart_task_id))
+        try:
+            task_id = _autostart_after_payment(session_id, balance_minutes)
+        except Exception:  # noqa: BLE001 - the purchase is done; the button remains
+            db.session.rollback()
+            app.logger.exception('post-payment autostart failed for %s', session_id)
+            task_id = None
+        if task_id:
+            session.pop(BILLING_RETURN_TO_KEY, None)
+            flash(TRANSCRIPT_STARTED_FLASH, 'success')
+            return redirect(url_for('transcription_page', task_id=task_id))
 
     pending_episode = session.get(PENDING_TRANSCRIPTION_KEY)
     return_to = safe_return_to(session.get(BILLING_RETURN_TO_KEY) or '')

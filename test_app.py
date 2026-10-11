@@ -12115,7 +12115,8 @@ def test_billing_success_shows_episode_start_button(stripe_on):
         sess[A.PENDING_TRANSCRIPTION_KEY] = {
             'title': 'Return To Task Ep',
             'audio_url': 'https://cdn.example.com/r.mp3',
-            'duration_min': 40.0,
+            # Unknown length: auto-start never guesses, so the button stays.
+            'duration_min': None,
             'podcast_name': 'Show',
             'language': 'en',
             'rss_url': None,
@@ -16898,3 +16899,234 @@ def test_buy_modal_has_slider_with_flag(stripe_on, monkeypatch):
     assert 'id="buyModalMore"' in body
     assert 'name="price_source" id="buyModalPriceSource"' in body
     assert 'data-volume-form="buyModalForm"' in body
+
+
+
+# --------------------------------------------------------------------------
+# Post-payment auto-start (/billing/success)
+# --------------------------------------------------------------------------
+def _autostart_setup(volume_on, monkeypatch, email, session_id, minutes=75,
+                     amount=119, duration=8.0, paid=True, credit_via_webhook=False):
+    uid = _make_user(email, limit=0, used=0)
+    _set_paid(uid, 0)
+    sess_dict = _volume_session(uid, minutes, amount, session_id=session_id,
+                                price_source='episode')
+    if not paid:
+        sess_dict['payment_status'] = 'unpaid'
+    volume_on['sessions'][session_id] = sess_dict
+    if credit_via_webhook:
+        _register_and_post(volume_on, sess_dict)
+        assert _paid(uid) == minutes * 60
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    calls = []
+
+    def fake_enqueue(user, meta, rss_url=None, language='', source='web'):
+        calls.append(meta)
+        return {'task_id': f'task-{session_id}'}, 200
+
+    monkeypatch.setattr(A, 'enqueue_transcription', fake_enqueue)
+    client = _login(uid)
+    with client.session_transaction() as s_:
+        s_[A.PENDING_TRANSCRIPTION_KEY] = {
+            'title': 'Short Ep', 'audio_url': 'https://cdn.example.com/short.mp3',
+            'duration_min': duration, 'podcast_name': 'Show', 'language': 'en',
+            'rss_url': None, 'episode_index': None, 'artwork': None, 'published': None,
+        }
+    return uid, client, calls
+
+
+def _purchase(session_id):
+    from models import CreditPurchase
+    with A.app.app_context():
+        row = CreditPurchase.query.filter_by(stripe_session_id=session_id).one()
+        return row.autostart_claimed_at, row.autostart_task_id
+
+
+def test_paid_episode_purchase_autostarts_once_and_refresh_returns_to_it(volume_on, monkeypatch):
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-1@test.com', 'cs_auto_1')
+    resp = client.get('/billing/success?session_id=cs_auto_1')
+    assert resp.status_code == 302
+    assert resp.headers['Location'].endswith('/transcription/task-cs_auto_1')
+    assert len(calls) == 1 and calls[0]['audio_url'] == 'https://cdn.example.com/short.mp3'
+    claimed, task_id = _purchase('cs_auto_1')
+    assert claimed is not None and task_id == 'task-cs_auto_1'
+    with client.session_transaction() as s_:
+        assert A.PENDING_TRANSCRIPTION_KEY not in s_
+    # Refresh: straight back to the same job, nothing new enqueued.
+    again = client.get('/billing/success?session_id=cs_auto_1')
+    assert again.status_code == 302
+    assert again.headers['Location'].endswith('/transcription/task-cs_auto_1')
+    assert len(calls) == 1
+    assert _paid(uid) == 75 * 60
+
+
+def test_autostart_when_the_webhook_credited_first(volume_on, monkeypatch):
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-2@test.com', 'cs_auto_2', credit_via_webhook=True)
+    resp = client.get('/billing/success?session_id=cs_auto_2')
+    assert resp.status_code == 302 and len(calls) == 1
+    assert _paid(uid) == 75 * 60  # success page did not credit a second time
+
+
+def test_autostart_claim_is_single_use_even_with_a_stale_session(volume_on, monkeypatch):
+    """A second tab (or worker) still holding the stash in its cookie must not
+    start the episode again once the purchase is claimed."""
+    from models import CreditPurchase
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-3@test.com', 'cs_auto_3', credit_via_webhook=True)
+    with A.app.app_context():
+        row = CreditPurchase.query.filter_by(stripe_session_id='cs_auto_3').one()
+        row.autostart_claimed_at = A.datetime.now(A.timezone.utc)  # other request won
+        A.db.session.commit()
+    resp = client.get('/billing/success?session_id=cs_auto_3')
+    assert resp.status_code == 200
+    assert calls == []
+    assert 'Start transcript: Short Ep' in resp.data.decode()
+
+
+def test_no_autostart_when_balance_does_not_cover_the_episode(volume_on, monkeypatch):
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-4@test.com', 'cs_auto_4', duration=80.0)
+    resp = client.get('/billing/success?session_id=cs_auto_4')
+    assert resp.status_code == 200 and calls == []
+    assert 'Start transcript: Short Ep' in resp.data.decode()
+    assert _purchase('cs_auto_4') == (None, None)
+
+
+def test_no_autostart_while_payment_is_not_confirmed(volume_on, monkeypatch):
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-5@test.com', 'cs_auto_5', paid=False)
+    resp = client.get('/billing/success?session_id=cs_auto_5')
+    assert resp.status_code == 200 and calls == []
+    assert _paid(uid) == 0
+
+
+def test_no_autostart_for_someone_elses_session(volume_on, monkeypatch):
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-6@test.com', 'cs_auto_6')
+    other = _make_user('auto-6-other@test.com', limit=0, used=0)
+    other_client = _login(other)
+    with client.session_transaction() as src:
+        pending = src[A.PENDING_TRANSCRIPTION_KEY]
+    with other_client.session_transaction() as s_:
+        s_[A.PENDING_TRANSCRIPTION_KEY] = pending
+    resp = other_client.get('/billing/success?session_id=cs_auto_6')
+    assert resp.status_code == 200 and calls == []
+
+
+def test_refused_autostart_gives_the_button_and_the_claim_back(volume_on, monkeypatch):
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-7@test.com', 'cs_auto_7')
+    monkeypatch.setattr(A, 'enqueue_transcription',
+                        lambda *a, **k: ({'error': 'busy'}, 503))
+    resp = client.get('/billing/success?session_id=cs_auto_7')
+    assert resp.status_code == 200
+    assert 'Start transcript: Short Ep' in resp.data.decode()
+    assert _purchase('cs_auto_7') == (None, None)
+    with client.session_transaction() as s_:
+        assert s_[A.PENDING_TRANSCRIPTION_KEY]['title'] == 'Short Ep'
+
+
+def test_pack_purchase_with_a_stashed_episode_autostarts(volume_on, monkeypatch):
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-8@test.com', 'cs_auto_8', minutes=300, amount=400)
+    resp = client.get('/billing/success?session_id=cs_auto_8')
+    assert resp.status_code == 302 and len(calls) == 1
+
+
+# --------------------------------------------------------------------------
+# No "free" promise to accounts with 0 free minutes and no own key
+# --------------------------------------------------------------------------
+def _trial_off(monkeypatch):
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
+    assert A.trial_available() is False
+
+
+def test_paid_only_first_run_is_not_told_it_has_free_minutes(volume_on, monkeypatch):
+    _trial_off(monkeypatch)
+    uid = _make_user('copy-paid@test.com', limit=0, used=0)
+    _set_paid(uid, 75 * 60)
+    body = _login(uid).get('/').data.decode()
+    assert 'free minutes</strong> are ready' not in body
+    assert 'no card needed' not in body
+    assert '0 free minutes' not in body
+    assert 'Free trial: <strong>0' not in body
+    assert '<strong>75 minutes</strong> are ready' in body
+    assert 'How your free minutes work' not in body
+
+
+def test_used_up_trial_with_paid_minutes_is_not_quoted_zero_free(volume_on):
+    uid = _make_user('copy-paid2@test.com', limit=600, used=600)
+    _set_paid(uid, 75 * 60)
+    with A.app.app_context():
+        from models import TranscriptionTask
+        A.db.session.add(TranscriptionTask(id='copy-paid2-task', user_id=uid, status='completed', episode_title='Done'))
+        A.db.session.commit()
+    body = _login(uid).get('/').data.decode()
+    assert 'Free trial: <strong>0 minutes' not in body
+    assert '0 free minutes' not in body
+
+
+def test_no_minutes_no_trial_home_leads_with_the_price(volume_on, monkeypatch):
+    from bs4 import BeautifulSoup
+    _trial_off(monkeypatch)
+    uid = _make_user('copy-zero@test.com', limit=0, used=0)
+    page = BeautifulSoup(_login(uid).get('/').data, 'html.parser')
+    banner = page.select_one('[data-testid="home-no-minutes"]')
+    assert banner is not None and '$1' in banner.get_text()
+    text = page.get_text(' ')
+    assert 'free minutes are ready' not in text and 'no card needed' not in text
+
+
+def _render_picker(uid=None, monkeypatch=None):
+    from flask import render_template
+    from bs4 import BeautifulSoup
+    episodes = [{'index': 0, 'title': 'Short', 'published': '2024-01-01',
+                 'duration_min': 8, 'estimated_cost': 0.05, 'description': '',
+                 'needs_own_key': False}]
+    with A.app.test_request_context('/'):
+        if uid is not None:
+            from flask_login import login_user
+            from models import User
+            login_user(A.db.session.get(User, uid))
+        html = render_template(
+            'episode_selection.html', episodes=episodes, all_episodes=episodes,
+            rss_url='https://example.com/feed.xml', feed_name='Show', has_more=False,
+            needs_api_key=False, podcast_name='Show', artwork='', languages=[('en', 'English')],
+            show_openai_cost=False)
+    return html, BeautifulSoup(html, 'html.parser')
+
+
+def test_zero_minute_account_picker_quotes_a_price_not_free(volume_on, monkeypatch):
+    _trial_off(monkeypatch)
+    uid = _make_user('copy-picker@test.com', limit=0, used=0)
+    html, page = _render_picker(uid)
+    btn = ' '.join(page.select_one('#stickyTranscribeBtn').get_text().split())
+    assert btn == 'Transcribe from $1 →'
+    # Not mistaken for an own-key user (that showed an OpenAI cost estimate).
+    assert 'var ON_OWN_KEY = false;' in html
+    assert 'var VOLUME_ON = true;' in html
+
+
+def test_anonymous_visitor_without_a_trial_is_not_offered_free(volume_on, monkeypatch):
+    _trial_off(monkeypatch)
+    html, page = _render_picker()
+    btn = ' '.join(page.select_one('#stickyTranscribeBtn').get_text().split())
+    assert 'free' not in btn.lower()
+    assert 'var ON_OWN_KEY = false;' in html
+
+
+def test_trial_user_still_sees_transcribe_free(volume_on):
+    uid = _make_user('copy-trial@test.com', limit=600, used=0)
+    html, page = _render_picker(uid)
+    btn = ' '.join(page.select_one('#stickyTranscribeBtn').get_text().split())
+    assert btn == 'Transcribe free →'
+
+
+def test_own_key_user_is_flagged_as_own_key(volume_on):
+    uid = _make_user('copy-key@test.com', key='sk-user-own', limit=600, used=0)
+    html, page = _render_picker(uid)
+    assert 'var ON_OWN_KEY = true;' in html
+    btn = ' '.join(page.select_one('#stickyTranscribeBtn').get_text().split())
+    assert btn == 'Transcribe →'

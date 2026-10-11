@@ -65,8 +65,15 @@
 {% if first_run and not trial.exhausted and not trial.low_balance %}
 <div class="alert alert-info">
     <span>
+        {# Never "0 free minutes … no card needed": a paid-only account (no
+           trial left, or the trial switched off) is told what it actually has. #}
+        {% if trial.remaining_minutes > 0 %}
         Your <strong>{{ trial.remaining_minutes }} free minutes</strong> are ready.
         Start your first transcript below — no card needed.
+        {% else %}
+        Your <strong>{{ trial.paid_minutes }} minutes</strong> are ready.
+        Start your first transcript below.
+        {% endif %}
     </span>
 </div>
 {% else %}
@@ -113,9 +120,13 @@
         {% endif %}
         <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_low_balance">Add your own OpenAI key</a>
         {% else %}
+        {% if trial.remaining_minutes > 0 %}
         Free trial: <strong>{{ trial.remaining_minutes }} minutes</strong> left on our key.
         {% if trial.paid_minutes %}
         · <strong>{{ trial.paid_minutes }} paid</strong> left.
+        {% endif %}
+        {% else %}
+        <strong>{{ trial.paid_minutes }} minutes</strong> left.
         {% endif %}
         {% if trial.stripe_buy %}
         <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;">
@@ -133,6 +144,15 @@
     </span>
 </div>
 {% endif %}
+{% elif current_user.is_authenticated and not current_user.openai_api_key and stripe_buy_enabled and volume_pricing_enabled %}
+{# No trial and no minutes (trial off or not granted): lead with the price,
+   not a "free" promise the app would refuse at /start_transcription. #}
+<div class="alert alert-info" data-testid="home-no-minutes">
+    <span>
+        Transcribe any episode from <strong>{{ volume_price_table[0].price if volume_price_table else '$1' }}</strong>, priced by its length.
+        <a href="{{ url_for('pricing') }}" data-open-buy-modal data-buy-source="buy_modal_home_no_minutes">Buy minutes<span class="ds-arrow" aria-hidden="true">→</span></a>
+    </span>
+</div>
 {% endif %}
 
 {# Hero (DESIGN.md, Hero). Visitors get the pitch over the signal wave;
@@ -195,7 +215,7 @@
                 {# Anonymous: advertised new-signup grant. Logged-in trial users: their
                    own limit (+ remaining) so a 180-min legacy account is never told
                    "60 in total" next to a correct balance banner. Own-key users: hide. #}
-                {% if current_user.is_authenticated and trial and not trial.on_own_key %}
+                {% if current_user.is_authenticated and trial and not trial.on_own_key and trial.limit_minutes %}
                 <details class="hp-trial">
                 <summary>How your free minutes work</summary>
                 <p class="form-hint hp-fine">

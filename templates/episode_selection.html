@@ -193,10 +193,12 @@
             <div class="ep-sticky-meter" id="stickyMeter"></div>
         </div>
         <button type="submit" class="btn btn-accent" id="stickyTranscribeBtn" disabled>
-            {% if current_user.is_authenticated and trial_badge_paid_min and not trial_badge_remaining_min %}
-            Transcribe →
-            {% elif not current_user.is_authenticated or trial_badge_remaining_min %}
+            {# "free" only when free minutes really exist: a 0-minute account
+               (trial off, used up, or today's pool empty) is quoted a price. #}
+            {% if trial_badge_remaining_min and not (current_user.is_authenticated and current_user.openai_api_key) %}
             Transcribe free →
+            {% elif volume_pricing_enabled and stripe_buy_enabled and not trial_badge_paid_min and not (current_user.is_authenticated and current_user.openai_api_key) %}
+            Transcribe from {{ volume_price_table[0].price if volume_price_table else '$1' }} →
             {% else %}
             Transcribe →
             {% endif %}
@@ -251,7 +253,30 @@ document.addEventListener('DOMContentLoaded', function() {
     var SHOW_OPENAI_COST = {{ (show_openai_cost|default(false))|tojson }};
     var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
     var FEED_ARTWORK = {{ artwork|tojson }};
-    var ON_OWN_KEY = TRIAL_REMAINING_MIN === null;
+    // Explicit, not inferred from TRIAL_REMAINING_MIN === null: that is also
+    // null for an account with no trial and no minutes, which then saw
+    // "Transcribe free" and an own-key cost estimate.
+    var ON_OWN_KEY = {{ 'true' if (current_user.is_authenticated and current_user.openai_api_key) else 'false' }};
+    var FREE_MIN = ON_OWN_KEY ? 0 : Math.max(0, Number(TRIAL_REMAINING_MIN) || 0);
+    var VOLUME_ON = {{ (volume_pricing_enabled and stripe_buy_enabled)|tojson }};
+    var VOLUME_TABLE = {{ (volume_price_table if (volume_pricing_enabled and stripe_buy_enabled) else [])|tojson }};
+    var VOLUME_GRID = {{ volume_step_minutes|int }};
+    /* Price to transcribe an episode of `durationMin` with `left` minutes on
+       the balance: the shortfall on the 15-minute grid, at least the first
+       row (same rule as pricing_volume.episode_quantity). Display only: the
+       server prices whatever quantity is posted. */
+    function episodePrice(durationMin, left) {
+        if (!VOLUME_ON || !VOLUME_TABLE.length || durationMin == null) return '';
+        var shortfall = Math.ceil(Number(durationMin) - Math.max(0, left || 0));
+        if (!(shortfall > 0)) return '';
+        var first = VOLUME_TABLE[0], last = VOLUME_TABLE[VOLUME_TABLE.length - 1];
+        var qty = Math.max(first.minutes, Math.min(last.minutes,
+            Math.ceil(shortfall / VOLUME_GRID) * VOLUME_GRID));
+        for (var i = 0; i < VOLUME_TABLE.length; i++) {
+            if (VOLUME_TABLE[i].minutes === qty) return VOLUME_TABLE[i].price;
+        }
+        return '';
+    }
     var WHISPER_RATE = {{ whisper_cost_per_minute|tojson }};
     var startError = document.getElementById('startError');
     var selectedDuration = null;
@@ -262,14 +287,17 @@ document.addEventListener('DOMContentLoaded', function() {
         return Math.max(0, (Number(TRIAL_REMAINING_MIN) || 0) + (Number(PAID_REMAINING_MIN) || 0));
     }
 
-    function isPaidOnly() {
-        return IS_AUTHENTICATED && !ON_OWN_KEY
-            && (Number(TRIAL_REMAINING_MIN) || 0) <= 0
-            && (Number(PAID_REMAINING_MIN) || 0) > 0;
-    }
-
-    function defaultStickyLabel() {
-        return isPaidOnly() ? 'Transcribe →' : 'Transcribe free →';
+    function defaultStickyLabel(durationMin) {
+        if (ON_OWN_KEY) return 'Transcribe →';
+        if (FREE_MIN > 0) return 'Transcribe free →';
+        var paid = IS_AUTHENTICATED ? Math.max(0, Number(PAID_REMAINING_MIN) || 0) : 0;
+        if (durationMin != null) {
+            var price = episodePrice(durationMin, paid);
+            if (price) return 'Transcribe for ' + price + ' →';
+        } else if (paid <= 0 && VOLUME_ON && VOLUME_TABLE.length) {
+            return 'Transcribe from ' + VOLUME_TABLE[0].price + ' →';
+        }
+        return 'Transcribe →';
     }
 
     function meterText(durationMin) {
@@ -282,10 +310,17 @@ document.addEventListener('DOMContentLoaded', function() {
         var n = Math.max(1, Math.round(Number(durationMin)));
         var left = minutesLeft();
         if (!IS_AUTHENTICATED) {
-            var grant = Number(TRIAL_REMAINING_MIN) || 0;
-            return 'This episode uses ~' + n + ' min · ' + grant + ' free after signup';
+            if (FREE_MIN > 0) {
+                return 'This episode uses ~' + n + ' min · ' + FREE_MIN + ' free after signup';
+            }
+            var anonPrice = episodePrice(durationMin, 0);
+            return 'This episode uses ~' + n + ' min' + (anonPrice ? ' · ' + anonPrice + ' after signup' : '');
         }
         if (left == null) return '';
+        var shortPrice = episodePrice(durationMin, left);
+        if (left <= 0 && shortPrice) {
+            return 'This episode uses ~' + n + ' min · ' + shortPrice + ' to transcribe';
+        }
         return 'This episode uses ~' + n + ' min · you have ' + left + ' left';
     }
 
@@ -386,7 +421,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     var TRIAL_PARTIAL_MIN = 5;
     function episodeNeedsOwnKey(durationMin) {
-        if (TRIAL_REMAINING_MIN === null || durationMin == null) return false;
+        if (ON_OWN_KEY || durationMin == null) return false;
         var estimateSec = Math.max(60, Math.floor(Number(durationMin) * 60));
         if (!(estimateSec > 0)) return false;
         var paidSec = Math.max(0, Number(PAID_REMAINING_MIN) || 0) * 60;
@@ -411,7 +446,7 @@ document.addEventListener('DOMContentLoaded', function() {
             desktopMeter.textContent = '';
             desktopMeter.classList.add('hidden');
             stickyBtn.disabled = true;
-            stickyBtn.textContent = defaultStickyLabel();
+            stickyBtn.textContent = defaultStickyLabel(null);
             transcribeBtn.disabled = true;
             return;
         }
@@ -429,7 +464,7 @@ document.addEventListener('DOMContentLoaded', function() {
             desktopMeter.classList.add('hidden');
         }
         stickyBtn.disabled = false;
-        stickyBtn.textContent = defaultStickyLabel();
+        stickyBtn.textContent = defaultStickyLabel(duration);
         if (FEED_ARTWORK && stickyArt) {
             stickyArt.src = FEED_ARTWORK;
             stickyArt.classList.remove('hidden');
@@ -618,7 +653,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     transcribeBtn.disabled = false;
                     stickyBtn.disabled = false;
                     transcribeBtn.textContent = 'Start Transcription';
-                    stickyBtn.textContent = defaultStickyLabel();
+                    stickyBtn.textContent = defaultStickyLabel(selectedDuration);
                 }
             })
             .catch(function() {
@@ -626,7 +661,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 transcribeBtn.disabled = false;
                 stickyBtn.disabled = false;
                 transcribeBtn.textContent = 'Start Transcription';
-                stickyBtn.textContent = defaultStickyLabel();
+                stickyBtn.textContent = defaultStickyLabel(selectedDuration);
             });
     });
 
