@@ -149,7 +149,7 @@
    not a "free" promise the app would refuse at /start_transcription. #}
 <div class="alert alert-info" data-testid="home-no-minutes">
     <span>
-        Transcribe any episode from <strong>{{ volume_price_table[0].price if volume_price_table else '$1' }}</strong>, priced by its length.
+        Transcribe any episode from <strong>{{ volume_price_table[0].price if volume_price_table else '' }}</strong>, priced by its length.
         <a href="{{ url_for('pricing') }}" data-open-buy-modal data-buy-source="buy_modal_home_no_minutes">Buy minutes<span class="ds-arrow" aria-hidden="true">→</span></a>
     </span>
 </div>

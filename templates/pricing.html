@@ -49,7 +49,7 @@
             {% if volume_pricing_enabled %}
             <h2 id="planPack">Buy minutes</h2>
             <div class="pr-figure">
-                From $1
+                From {{ volume_price_table[0].price if volume_price_table else '' }}
                 <small>Pick any amount. The more you buy, the less each minute costs.</small>
             </div>
             {{ volume_slider('pricingMinutes', volume_price_table, default=volume_default_minutes,

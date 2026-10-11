@@ -499,7 +499,7 @@ def trial_badge_remaining_minutes():
             return trial_status(current_user)[2] // 60
         return 0
     if trial_available():
-        return NEW_USER_TRIAL_SECONDS // 60
+        return advertised_trial_minutes() or 0
     return None
 
 
@@ -906,7 +906,8 @@ CREDIT_PACK_SUBLINE = (
     else 'One-time · 300 min · VAT incl.')
 #: Secondary result-page offer (not a second green primary when Copy is shown).
 RESULT_OFFER_LABEL = (
-    'Your next episode from $1. Pick the minutes you need, launch price.'
+    f'Your next episode from {pricing_volume.format_usd(pricing_volume.VOLUME_MIN_AMOUNT_CENTS)}. '
+    'Pick the minutes you need, launch price.'
     if VOLUME_PRICING_ENABLED
     else f'Transcribe your next episode: {CREDIT_PACK_MINUTES} min for {DEFAULT_PACK_PRICE}')
 #: Result-offer button when volume pricing is on (opens the minutes picker).
@@ -1149,6 +1150,11 @@ def advertised_trial_minutes():
     """
     if not trial_available() or NEW_USER_TRIAL_SECONDS <= 0:
         return None
+    if TRIAL_SPLIT_ENABLED and TRIAL_SPLIT_VARIANTS:
+        # A/B on: a visitor cannot know which arm they will land in, so only
+        # promise what every arm gets. Quoting NEW_USER_TRIAL_MINUTES (120)
+        # told the 60-minute arm it would get twice what it got.
+        return min(int(v) for v in TRIAL_SPLIT_VARIANTS)
     return NEW_USER_TRIAL_SECONDS // 60
 
 
@@ -4480,7 +4486,7 @@ def volume_session_terms(d):
     edit Checkout metadata). The amount is the one quoted then, so a price
     change between checkout and payment still credits what was paid for.
     Sanity: the minutes must be on the purchase grid and the amount at or
-    above the cost floor and the $1 minimum.
+    above the cost floor and the minimum of the session's pricing_version.
     """
     meta = d.get('metadata') or {}
     if meta.get('pack') != pricing_volume.VOLUME_PACK_SKU:
@@ -4492,8 +4498,12 @@ def volume_session_terms(d):
         return None
     if minutes is None:
         return None
-    if amount < max(pricing_volume.VOLUME_MIN_AMOUNT_CENTS,
-                    pricing_volume.floor_cents(minutes)):
+    # Validate against the curve version the session was priced with, so a
+    # later price change never strands an open Checkout.
+    min_amount = pricing_volume.min_amount_cents_for(meta.get('pricing_version'))
+    if min_amount is None:
+        return None
+    if amount < max(min_amount, pricing_volume.floor_cents(minutes)):
         return None
     return minutes, amount
 
@@ -4920,6 +4930,7 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
         'pricing': (
             'volume_v1' if metadata.get('pack') == pricing_volume.VOLUME_PACK_SKU
             else 'fixed_pack'),
+        'pricing_version': metadata.get('pricing_version') or None,
         'is_first_purchase': prior_credited == 0,
         'revenue': (amount_total_cents or amount_for_legacy or 0) / 100.0,
         '$set': person_set,
@@ -5343,6 +5354,8 @@ def billing_checkout():
         'location': source,
         'source': source,
     }
+    if pack_sku == pricing_volume.VOLUME_PACK_SKU:
+        meta['pricing_version'] = pricing_volume.CURRENT_PRICING_VERSION
     if ph_sid:
         meta['ph_sid'] = ph_sid
     if return_to:
@@ -5428,6 +5441,7 @@ def billing_checkout():
         'pack_sku': pack_sku,
         'price_source': price_source,
         'pricing': 'volume_v1' if VOLUME_PRICING_ENABLED else 'fixed_pack',
+        'pricing_version': meta.get('pricing_version'),
         'managed_payments': bool(STRIPE_MANAGED_PAYMENTS),
         'trial_remaining_min': trial_remaining_min,
         'paid_remaining_min': paid_remaining_min,
@@ -10529,6 +10543,13 @@ def load_customer_api_markdown():
     """Source for /docs/api. Public HTML must never ship AGENT_API_KEY copy."""
     with open(CUSTOMER_API_DOC_PATH, encoding='utf-8') as f:
         text = f.read()
+    # The trial length is configuration (and an A/B), never a number in the
+    # markdown: quote what every new account actually gets.
+    granted = advertised_trial_minutes()
+    text = text.replace(
+        'New accounts get {trial_minutes} free trial minutes on our OpenAI key; after that, add your own.',
+        (f'New accounts get {granted} free trial minutes on our OpenAI key; after that, add your own.'
+         if granted else 'Use your own OpenAI key, or buy minutes in Settings.'))
     # MCP connect docs are gated on MCP_ENABLED (default off).
     text = mcp_server_mod.filter_mcp_docs_section(
         text, enabled=mcp_server_mod.mcp_enabled())

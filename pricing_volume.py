@@ -7,7 +7,8 @@ price: the client sends a minute count, never an amount.
 Curve: piecewise-linear in *total* price between the anchor points below,
 rounded up to the cent. Every segment has a positive intercept, so the price
 per minute falls monotonically as the quantity rises (tested on the full
-purchase grid). Below the first anchor the price is the $1 minimum.
+purchase grid). Below the first anchor the price is the first anchor's
+(the minimum purchase).
 """
 import math
 import os
@@ -16,8 +17,6 @@ import os
 VOLUME_STEP_MINUTES = 15
 VOLUME_MIN_MINUTES = 60
 VOLUME_MAX_MINUTES = 1200
-#: Stripe takes a fixed fee per charge, so nothing sells for less than this.
-VOLUME_MIN_AMOUNT_CENTS = 100
 VOLUME_CURRENCY = 'usd'
 #: Metadata marker on Checkout Sessions created by the volume path.
 VOLUME_PACK_SKU = 'volume_v1'
@@ -26,14 +25,40 @@ VOLUME_DEFAULT_MINUTES = 300
 #: Allowed price_source values on checkout / purchase analytics.
 PRICE_SOURCES = ('slider', 'episode', 'default')
 
-#: (minutes, total price in cents). Approved by Sindre 2026-10-11; 1200 min
-#: is $11 (not $10) so the top pack stays positive after 25% VAT + Stripe fees.
-VOLUME_ANCHORS = (
-    (60, 100),
-    (300, 400),
-    (600, 600),
-    (1200, 1100),
-)
+#: Versioned price curves. A Checkout Session records the version it was
+#: priced with (metadata pricing_version), so changing the curve later never
+#: invalidates a session that is already open: validation uses the version
+#: the session names. Add a new key for a new curve; never edit a released one.
+#:
+#: vol_v1 (locked by Sindre 2026-10-11): 60 min $1.50, 300 min $5 (the
+#: default, same as the legacy fixed pack), 600 min $6, 1200 min $11.
+#: $1.50 is also the floor of any purchase, per-episode included.
+PRICING_VERSIONS = {
+    'vol_v1': {
+        'anchors': ((60, 150), (300, 500), (600, 600), (1200, 1100)),
+        'min_amount_cents': 150,
+    },
+}
+#: Version new Checkout Sessions are priced with.
+CURRENT_PRICING_VERSION = 'vol_v1'
+#: Minimum for sessions created before pricing_version existed (staging-only
+#: drafts of this PR; the flag was never on in production).
+UNVERSIONED_MIN_AMOUNT_CENTS = 100
+
+#: (minutes, total price in cents) of the current version.
+VOLUME_ANCHORS = PRICING_VERSIONS[CURRENT_PRICING_VERSION]['anchors']
+#: Stripe takes a fixed fee per charge, so nothing sells for less than this.
+VOLUME_MIN_AMOUNT_CENTS = PRICING_VERSIONS[CURRENT_PRICING_VERSION]['min_amount_cents']
+
+
+def min_amount_cents_for(version):
+    """Lowest valid amount for a session priced with *version*, or None if
+    the version is unknown (reject it)."""
+    if version in (None, ''):
+        return UNVERSIONED_MIN_AMOUNT_CENTS
+    spec = PRICING_VERSIONS.get(str(version))
+    return None if spec is None else spec['min_amount_cents']
+
 
 #: Our marginal cost: OpenAI whisper-1 is $0.006 per audio minute.
 COST_CENTS_PER_MINUTE = 0.6
@@ -91,7 +116,8 @@ def parse_quantity(raw):
 
 
 def price_cents(minutes):
-    """Total price in cents for *minutes* on the curve (min $1, never < floor)."""
+    """Total price in cents for *minutes* on the curve (never below the
+    minimum purchase or the cost floor)."""
     minutes = int(minutes)
     return max(VOLUME_MIN_AMOUNT_CENTS, _curve_cents(minutes), floor_cents(minutes))
 
@@ -110,7 +136,7 @@ def savings_percent(minutes):
 def episode_quantity(episode_minutes, balance_minutes=0):
     """Minutes to buy so an episode fits: the shortfall, rounded up to the grid.
 
-    At least the minimum purchase ($1 buys 60 minutes, so never sell fewer),
+    At least the minimum purchase (60 minutes, so never sell fewer),
     at most the top of the slider. Returns None when the balance already
     covers the episode or the duration is unknown.
     """

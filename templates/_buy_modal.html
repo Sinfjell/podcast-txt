@@ -109,6 +109,7 @@
     var VOLUME_MIN = {{ volume_min_minutes|int }};
     var VOLUME_MAX = {{ volume_max_minutes|int }};
     var VOLUME_STEP = {{ volume_step_minutes|int }};
+    var VOLUME_FROM_PRICE = {{ (volume_price_table[0].price if volume_price_table else '')|tojson }};
     var PRICE = {{ credit_pack_price_usd|tojson }};
     var scrim = document.getElementById('buyModalScrim');
     var titleEl = document.getElementById('buyModalTitle');
@@ -139,7 +140,7 @@
     }
 
     /* Same rule as pricing_volume.episode_quantity: the shortfall, rounded up
-       to the 15-minute grid, at least 60 minutes ($1), at most the slider top.
+       to the 15-minute grid, at least the minimum purchase, at most the slider top.
        The server re-prices whatever quantity is posted. */
     function episodeQuantity(needed, left) {
         if (needed == null || !(needed > 0)) return null;
@@ -178,7 +179,7 @@
             root.removeAttribute('data-volume-passive');
             api.set(VOLUME_DEFAULT, true);
             titleEl.textContent = 'Buy transcription minutes';
-            subEl.textContent = 'Pick any amount from $1. Launch price, one-time, minutes never expire.';
+            subEl.textContent = 'Pick any amount from ' + VOLUME_FROM_PRICE + '. Launch price, one-time, minutes never expire.';
             more.open = true;
             document.getElementById('buyModalMoreLabel').textContent = 'Choose your amount';
         }

@@ -198,7 +198,7 @@
             {% if trial_badge_remaining_min and not (current_user.is_authenticated and current_user.openai_api_key) %}
             Transcribe free →
             {% elif volume_pricing_enabled and stripe_buy_enabled and not trial_badge_paid_min and not (current_user.is_authenticated and current_user.openai_api_key) %}
-            Transcribe from {{ volume_price_table[0].price if volume_price_table else '$1' }} →
+            Transcribe from {{ volume_price_table[0].price if volume_price_table else '' }} →
             {% else %}
             Transcribe →
             {% endif %}
