@@ -2605,7 +2605,7 @@ def trim_audio_file(audio_file, max_seconds):
 
     copy = _run([
         'nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y',
-        '-i', audio_file, '-t', str(max_seconds),
+        '-i', audio_file, '-map_metadata', '-1', '-t', str(max_seconds),
         '-c', 'copy', '-vn', tmp_path,
     ])
     if copy.returncode != 0 or not os.path.exists(tmp_path) or os.path.getsize(tmp_path) < MIN_PART_BYTES:
@@ -2616,7 +2616,7 @@ def trim_audio_file(audio_file, max_seconds):
                 pass
         encoded = _run([
             'nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y',
-            '-i', audio_file, '-t', str(max_seconds),
+            '-i', audio_file, '-map_metadata', '-1', '-t', str(max_seconds),
             '-vn', '-ac', '1', '-ar', str(WHISPER_SAMPLE_RATE),
             '-b:a', f'{WHISPER_AUDIO_BITRATE_KBPS}k', '-threads', '1',
             tmp_path,
@@ -2686,6 +2686,10 @@ def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
     try:
         result = subprocess.run(
             ['nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y', '-i', audio_file,
+             # Every part would otherwise carry a copy of the episode's ID3
+             # tags (show notes, chapters): Whisper ignores them, we pay
+             # for the bytes on disk and on upload.
+             '-map_metadata', '-1',
              '-vn', '-ac', '1', '-ar', str(WHISPER_SAMPLE_RATE),
              '-b:a', f'{bitrate}k', '-threads', '1',
              '-f', 'segment', '-segment_time', str(SEGMENT_SECONDS),
