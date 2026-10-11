@@ -16536,7 +16536,7 @@ def test_anchor_points_are_the_approved_prices():
     assert pv.price_cents(60) == 100
     assert pv.price_cents(300) == 400
     assert pv.price_cents(600) == 600
-    assert pv.price_cents(1200) == 1000
+    assert pv.price_cents(1200) == 1100
 
 
 def test_total_price_never_falls_as_quantity_rises():
@@ -16595,7 +16595,7 @@ def test_savings_percent():
     assert pv.savings_percent(60) == 0
     assert pv.savings_percent(300) == 20
     assert pv.savings_percent(600) == 40
-    assert pv.savings_percent(1200) == 50
+    assert pv.savings_percent(1200) == 45
     savings = [pv.savings_percent(m) for m in GRID]
     assert savings == sorted(savings)
 
@@ -16820,7 +16820,7 @@ def test_volume_webhook_rejects_amount_that_does_not_match_metadata(volume_on):
     uid = _make_user('vol-tamper@test.com', limit=600, used=600)
     _set_paid(uid, 0)
     _register_and_post(volume_on, _volume_session(
-        uid, 1200, 1000, unit=100, session_id='cs_vol_tamper'))
+        uid, 1200, 1100, unit=100, session_id='cs_vol_tamper'))
     assert _paid(uid) == 0
     with A.app.app_context():
         row = CreditPurchase.query.filter_by(stripe_session_id='cs_vol_tamper').one()

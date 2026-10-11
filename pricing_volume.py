@@ -26,12 +26,13 @@ VOLUME_DEFAULT_MINUTES = 300
 #: Allowed price_source values on checkout / purchase analytics.
 PRICE_SOURCES = ('slider', 'episode', 'default')
 
-#: (minutes, total price in cents). Approved by Sindre 2026-10-11.
+#: (minutes, total price in cents). Approved by Sindre 2026-10-11; 1200 min
+#: is $11 (not $10) so the top pack stays positive after 25% VAT + Stripe fees.
 VOLUME_ANCHORS = (
     (60, 100),
     (300, 400),
     (600, 600),
-    (1200, 1000),
+    (1200, 1100),
 )
 
 #: Our marginal cost: OpenAI whisper-1 is $0.006 per audio minute.
