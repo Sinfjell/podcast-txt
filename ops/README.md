@@ -86,6 +86,36 @@ ops/drain-in-flight.sh
 
 `/internal/in-flight` answers only on loopback (`127.0.0.1` / `::1`).
 
+## Staging (staging.podskrift.com)
+
+A fully separate copy on the same host. It never shares data, money or users
+with production:
+
+| | Production | Staging |
+| --- | --- | --- |
+| Branch | `main` → [deploy.yml](../.github/workflows/deploy.yml) | `staging` → [deploy-staging.yml](../.github/workflows/deploy-staging.yml) |
+| App dir | `/var/www/vhosts/podskrift.nettsmed.dev/app` | `/opt/podskrift-staging/app` |
+| Unix user | `podskrift` | `podskrift-staging` (cannot read prod; unit sets `InaccessiblePaths`) |
+| systemd / port | `podskrift` / 5002 | `podskrift-staging` / 5003 ([example](podskrift-staging.service.example)) |
+| DB | `data/podcast.db` (real users) | own `data/podcast.db`, started empty |
+| `.env` | live keys | `PODSKRIFT_ENV=staging`, no PostHog/Sentry/Mailgun, Stripe **test** keys only, `EMAIL_ENABLED=0` |
+
+Deploy a branch to staging: `git push --force origin <branch>:staging`. The
+branch must contain `deploy-staging.yml` (i.e. be based on a `main` that has
+it), because a push runs the workflow file from the pushed commit.
+Staging is reset to the pushed SHA on every deploy (ignored files such as
+`.env` and `data/` survive).
+
+Apache: [staging-apache.conf.example](staging-apache.conf.example). Every
+response carries `X-Robots-Tag: noindex, nofollow`, `/robots.txt` is
+`Disallow: /`, and the site is behind HTTP basic auth (credentials in
+`/opt/podskrift-staging/CREDENTIALS`, root-only; htpasswd in
+`/etc/apache2/podskrift-staging.htpasswd`) except the Stripe webhook,
+`/health`, `/mcp`, `/oauth/token`, `/oauth/register` and `/.well-known/`.
+
+Never copy `.env`, the prod DB or a backup into staging: it holds password
+hashes, OAuth tokens and users' OpenAI keys.
+
 ## Transactional email (Mailgun EU)
 
 Feature-flagged. Off until `EMAIL_ENABLED=1` and `MAILGUN_API_KEY` is set.

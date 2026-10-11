@@ -1,0 +1,80 @@
+name: Deploy staging
+
+# staging.podskrift.com: a separate app on the same Hetzner/Plesk host.
+# Only the `staging` branch deploys here, and this job only ever touches
+# /opt/podskrift-staging/app and the podskrift-staging unit (port 5003).
+# Production (/var/www/vhosts/podskrift.nettsmed.dev/app, unit `podskrift`,
+# port 5002) is deployed by deploy.yml from `main` and is never referenced here.
+#
+# To test a feature branch on staging:
+#   git push --force origin <feature-branch>:staging
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy to staging
+    # Belt and braces: a manual dispatch from any other ref is a no-op.
+    if: github.ref == 'refs/heads/staging'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Configure SSH
+        env:
+          PODSKRIFT_SSH_KEY: ${{ secrets.PODSKRIFT_SSH_KEY }}
+          PODSKRIFT_SSH_KNOWN_HOSTS: ${{ secrets.PODSKRIFT_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "${PODSKRIFT_SSH_KEY:-}" || { echo "Missing secret PODSKRIFT_SSH_KEY"; exit 1; }
+          test -n "${PODSKRIFT_SSH_KNOWN_HOSTS:-}" || { echo "Missing secret PODSKRIFT_SSH_KNOWN_HOSTS"; exit 1; }
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$PODSKRIFT_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$PODSKRIFT_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Reset staging checkout, install deps, restart podskrift-staging
+        env:
+          PODSKRIFT_SSH_HOST: ${{ secrets.PODSKRIFT_SSH_HOST }}
+          PODSKRIFT_SSH_USER: ${{ secrets.PODSKRIFT_SSH_USER }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test -n "${PODSKRIFT_SSH_HOST:-}" || { echo "Missing secret PODSKRIFT_SSH_HOST"; exit 1; }
+          test -n "${PODSKRIFT_SSH_USER:-}" || { echo "Missing secret PODSKRIFT_SSH_USER"; exit 1; }
+          ssh -i ~/.ssh/id_deploy \
+              -o IdentitiesOnly=yes \
+              -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes \
+              "${PODSKRIFT_SSH_USER}@${PODSKRIFT_SSH_HOST}" \
+              "TARGET_SHA=${TARGET_SHA} bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP=/opt/podskrift-staging/app
+          case "$(readlink -f "$APP")" in
+            /var/www/vhosts/*) echo "refusing: staging path resolves into a Plesk vhost"; exit 1;;
+          esac
+          cd "$APP"
+          as_staging() { runuser -u podskrift-staging -- "$@"; }
+          as_staging git fetch --prune origin
+          # staging is a moving target (feature branches get force-pushed to
+          # it), so check out the exact pushed SHA instead of pulling.
+          # Ignored files (.env, data/) are left alone.
+          as_staging git checkout -q -f -B staging "$TARGET_SHA"
+          as_staging .venv/bin/pip install -q -r requirements.txt
+          systemctl restart podskrift-staging
+          for i in $(seq 1 20); do
+            curl -fsS -o /dev/null http://127.0.0.1:5003/health && break
+            sleep 1
+          done
+          systemctl is-active --quiet podskrift-staging
+          curl -fsS -o /dev/null -w 'staging /health %{http_code}\n' http://127.0.0.1:5003/health
+          echo "HEAD $(git rev-parse --short HEAD)"
+          REMOTE

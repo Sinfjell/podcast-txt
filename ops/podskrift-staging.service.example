@@ -1,0 +1,31 @@
+# /etc/systemd/system/podskrift-staging.service
+# staging.podskrift.com: separate user, checkout, venv, DB, .env and port
+# from production. Deployed by .github/workflows/deploy-staging.yml.
+[Unit]
+Description=Podskrift STAGING (staging.podskrift.com)
+After=network.target
+
+[Service]
+Type=simple
+User=podskrift-staging
+Group=podskrift-staging
+WorkingDirectory=/opt/podskrift-staging/app
+ExecStart=/opt/podskrift-staging/app/.venv/bin/gunicorn -c gunicorn.conf.py --bind 127.0.0.1:5003 --workers 1 --threads 4 --timeout 300 app:app
+KillMode=mixed
+TimeoutStopSec=130
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/podskrift-staging/app/.env
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=podskrift-staging
+# Staging must not be able to read or write production.
+InaccessiblePaths=/var/www/vhosts/podskrift.nettsmed.dev
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target
