@@ -1,0 +1,23 @@
+# Plesk → staging.podskrift.com → Apache & nginx → Additional directives
+# (lands in /var/www/vhosts/system/staging.podskrift.com/conf/vhost_ssl.conf).
+# Docroot holds only robots.txt ("Disallow: /").
+Header always set X-Robots-Tag "noindex, nofollow"
+
+ProxyPreserveHost On
+ProxyPass /robots.txt !
+ProxyPass /.well-known/acme-challenge !
+ProxyPass / http://127.0.0.1:5003/
+ProxyPassReverse / http://127.0.0.1:5003/
+RequestHeader set X-Forwarded-Proto expr=%{REQUEST_SCHEME}
+
+# Basic auth on everything except machine callers that cannot log in:
+# Stripe webhook, OAuth/MCP discovery + token endpoints, /mcp and /health.
+<Location />
+    AuthType Basic
+    AuthName "Podskrift staging"
+    AuthUserFile /opt/podskrift-staging/htpasswd
+    <RequireAny>
+        Require expr "%{REQUEST_URI} =~ m#^/(stripe/webhook|health|robots\.txt|mcp|oauth/(token|register)|\.well-known/)#"
+        Require valid-user
+    </RequireAny>
+</Location>

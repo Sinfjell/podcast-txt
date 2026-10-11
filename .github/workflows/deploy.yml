@@ -90,7 +90,9 @@ jobs:
   deploy:
     name: Deploy to Hetzner
     needs: test
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # Only main deploys to production; a manual dispatch from another ref
+    # (e.g. staging) must never restart prod.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # Drain can wait up to 20 minutes for in-flight transcriptions before restart.
     timeout-minutes: 30
