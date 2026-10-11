@@ -17130,3 +17130,20 @@ def test_own_key_user_is_flagged_as_own_key(volume_on):
     assert 'var ON_OWN_KEY = true;' in html
     btn = ' '.join(page.select_one('#stickyTranscribeBtn').get_text().split())
     assert btn == 'Transcribe →'
+
+
+def test_trial_switched_off_bills_paid_minutes_not_the_stamped_trial(trial_on, monkeypatch):
+    """Kill switch: with TRIAL_ENABLED=0 a paying account's stamped trial
+    limit must not be spent; the job is charged to paid minutes."""
+    from models import db, User
+    uid = _make_user('trialoff-paid@test.com', limit=7200, used=0)
+    _set_paid(uid, 600)
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
+    with A.app.app_context():
+        assert A.platform_reserve(uid, 300) == (0, 300)
+        u = db.session.get(User, uid)
+        assert (u.trial_seconds_used or 0) == 0
+        assert u.paid_seconds_balance == 300
+        # More than the paid balance: refused, nothing taken from the trial.
+        assert A.platform_reserve(uid, 400) is None
+        assert (db.session.get(User, uid).trial_seconds_used or 0) == 0

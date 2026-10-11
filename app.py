@@ -1471,7 +1471,10 @@ def platform_reserve(user_id, seconds, *, paid_only=False, budget_day=None):
     if seconds <= 0:
         return (0, 0)
 
-    if paid_only:
+    # Trial switched off (TRIAL_ENABLED=0): paid minutes only. Without this a
+    # paying account with a stamped trial_seconds_limit was billed "free"
+    # minutes the UI said it did not have, and paid minutes stayed untouched.
+    if paid_only or not trial_available():
         return (0, seconds) if paid_reserve(user_id, seconds) else None
 
     if trial_reserve(user_id, seconds, budget_day=budget_day):
