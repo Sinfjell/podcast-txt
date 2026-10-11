@@ -16522,3 +16522,379 @@ def test_signed_in_home_offers_buying_minutes_in_header_and_hero(stripe_on):
     assert hero is not None and 'Buy more minutes' in hero.get_text()
     assert page.select_one('form[data-paywall-buy="home_banner"] button[type="submit"]')
     assert page.select_one('#buyModal, .buy-modal, [id^="buyModal"]') is not None
+
+
+# --------------------------------------------------------------------------
+# Launch volume pricing (pricing_volume.py + VOLUME_PRICING_ENABLED)
+# --------------------------------------------------------------------------
+import pricing_volume as pv  # noqa: E402
+
+GRID = list(range(pv.VOLUME_MIN_MINUTES, pv.VOLUME_MAX_MINUTES + 1, pv.VOLUME_STEP_MINUTES))
+
+
+def test_anchor_points_are_the_approved_prices():
+    assert pv.price_cents(60) == 100
+    assert pv.price_cents(300) == 400
+    assert pv.price_cents(600) == 600
+    assert pv.price_cents(1200) == 1000
+
+
+def test_total_price_never_falls_as_quantity_rises():
+    prices = [pv.price_cents(m) for m in GRID]
+    assert prices == sorted(prices)
+
+
+def test_per_minute_price_is_monotone_decreasing_on_the_purchase_grid():
+    rates = [pv.price_cents(m) / m for m in GRID]
+    for (m0, r0), (m1, r1) in zip(zip(GRID, rates), zip(GRID[1:], rates[1:])):
+        assert r1 < r0, f'{m1} min costs {r1:.4f}¢/min, not less than {m0} min ({r0:.4f})'
+
+
+@pytest.mark.parametrize('minutes', GRID)
+def test_never_below_cost_floor(minutes):
+    cents = pv.price_cents(minutes)
+    # OpenAI whisper $0.006/min plus Stripe 30¢ + 6.4% must be covered.
+    assert cents >= pv.floor_cents(minutes)
+    net = cents * (1 - pv.STRIPE_FEE_PCT) - pv.STRIPE_FEE_FIXED_CENTS
+    assert net >= minutes * pv.COST_CENTS_PER_MINUTE
+
+
+def test_floor_matches_whisper_cost():
+    assert pv.COST_CENTS_PER_MINUTE == pytest.approx(0.6)
+    # Floor alone at 1200 minutes: (720 + 30) / 0.936 ≈ 802¢.
+    assert pv.floor_cents(1200) == 802
+
+
+def test_dollar_minimum():
+    assert min(pv.price_cents(m) for m in GRID) == 100
+    assert pv.price_cents(15) == 100
+    assert pv.price_cents(1) == 100
+
+
+def test_floor_wins_if_a_curve_point_would_lose_money(monkeypatch):
+    monkeypatch.setattr(pv, 'VOLUME_ANCHORS', ((60, 100), (1200, 300)))
+    assert pv.price_cents(1200) == pv.floor_cents(1200)
+
+
+@pytest.mark.parametrize('raw,expected', [
+    ('60', 60), ('75', 75), ('1200', 1200), (' 300 ', 300),
+    ('59', None), ('61', None), ('1215', None), ('0', None), ('-60', None),
+    ('abc', None), ('', None), (None, None), ('300.0', None), ('1e3', None),
+])
+def test_parse_quantity_rejects_off_grid(raw, expected):
+    assert pv.parse_quantity(raw) == expected
+
+
+def test_is_valid_quantity_rejects_bools_and_floats():
+    assert pv.is_valid_quantity(True) is False
+    assert pv.is_valid_quantity(300.0) is False
+    assert pv.is_valid_quantity(300) is True
+
+
+def test_savings_percent():
+    assert pv.savings_percent(60) == 0
+    assert pv.savings_percent(300) == 20
+    assert pv.savings_percent(600) == 40
+    assert pv.savings_percent(1200) == 50
+    savings = [pv.savings_percent(m) for m in GRID]
+    assert savings == sorted(savings)
+
+
+@pytest.mark.parametrize('episode,balance,qty', [
+    (75, 0, 75),      # exactly on the grid
+    (76, 0, 90),      # rounds up to the next 15
+    (30, 0, 60),      # $1 buys 60 min; never sell fewer
+    (75, 20, 60),     # shortfall 55 → minimum purchase
+    (200, 20, 180),
+    (74.2, 0, 75),
+    (3000, 0, 1200),  # capped at the slider top
+])
+def test_episode_quantity(episode, balance, qty):
+    assert pv.episode_quantity(episode, balance) == qty
+    assert pv.is_valid_quantity(qty)
+
+
+@pytest.mark.parametrize('episode,balance', [(30, 40), (0, 0), (None, 0), ('x', 0), (-5, 0)])
+def test_episode_quantity_none_when_covered_or_unknown(episode, balance):
+    assert pv.episode_quantity(episode, balance) is None
+
+
+def test_episode_price_uses_the_same_curve():
+    q = pv.quote(pv.episode_quantity(75))
+    assert q['minutes'] == 75
+    assert q['amount_cents'] == pv.price_cents(75) == 119
+    assert q['price'] == '$1.19'
+
+
+def test_format_usd():
+    assert pv.format_usd(100) == '$1'
+    assert pv.format_usd(119) == '$1.19'
+    assert pv.format_usd(250) == '$2.50'
+    assert pv.format_usd(1000) == '$10'
+
+
+def test_price_table_covers_grid_with_buckets():
+    table = pv.price_table()
+    assert [r['minutes'] for r in table] == GRID
+    assert {r['bucket'] for r in table} == {'60', '61-150', '151-300', '301-600', '601-1200'}
+    assert all(set(r) >= {'minutes', 'amount_cents', 'price', 'cents_per_minute',
+                          'savings_percent', 'bucket'} for r in table)
+
+
+def test_flag_defaults_off():
+    assert pv.volume_pricing_enabled({}) is False
+    assert pv.volume_pricing_enabled({'VOLUME_PRICING_ENABLED': '0'}) is False
+    assert pv.volume_pricing_enabled({'VOLUME_PRICING_ENABLED': '1'}) is True
+    assert pv.volume_pricing_enabled({'VOLUME_PRICING_ENABLED': 'on'}) is True
+
+
+@pytest.fixture
+def volume_on(monkeypatch, stripe_on):
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    return stripe_on
+
+
+def _vol_csrf_client(uid):
+    client = _login(uid)
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    assert token
+    return client, token
+
+
+def _volume_session(uid, minutes, amount, session_id='cs_vol_1', unit=None,
+                    price_source='slider', **overrides):
+    meta = {
+        'user_id': str(uid),
+        'minutes': str(minutes),
+        'pack': pv.VOLUME_PACK_SKU,
+        'amount_cents': str(amount),
+        'price_source': price_source,
+        'location': 'pricing',
+    }
+    unit = amount if unit is None else unit
+    d = _pack_session(
+        uid, session_id=session_id, metadata=meta,
+        amount_subtotal=unit, amount_total=unit,
+        line_items={'data': [{'quantity': 1, 'price': {
+            'id': 'price_inline', 'unit_amount': unit, 'tax_behavior': 'inclusive'}}]},
+    )
+    d.update(overrides)
+    return d
+
+
+def test_volume_checkout_prices_on_the_server(volume_on, ph_events, monkeypatch):
+    # A Dashboard price id must not leak into a volume purchase.
+    monkeypatch.setattr(A, 'STRIPE_PRICE_ID', 'price_dashboard_500')
+    uid = _make_user('vol-slider@test.com', limit=600, used=600)
+    client, token = _vol_csrf_client(uid)
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'pricing',
+        'minutes': '600', 'price_source': 'slider',
+        'amount_cents': '1', 'unit_amount': '1',  # ignored: never trust the client
+    })
+    assert resp.status_code == 303
+    kw = volume_on['last_create_params']
+    li = kw['line_items'][0]
+    assert 'price' not in li
+    assert li['price_data']['unit_amount'] == 600
+    assert li['price_data']['currency'] == 'usd'
+    assert li['price_data']['product_data']['name'] == 'Podskrift — 600 minutes'
+    assert kw['metadata']['pack'] == pv.VOLUME_PACK_SKU
+    assert kw['metadata']['minutes'] == '600'
+    assert kw['metadata']['amount_cents'] == '600'
+    assert kw['metadata']['price_source'] == 'slider'
+    assert kw['payment_intent_data']['metadata']['minutes'] == '600'
+    # PR #119: both break Checkout for Norwegian accounts.
+    assert 'consent_collection' not in kw
+    assert 'allow_promotion_codes' not in kw
+    started = [e for e in ph_events.events if e['event'] == 'checkout_started'][-1]
+    props = started['properties']
+    assert props['minutes'] == 600
+    assert props['amount_cents'] == 600
+    assert props['price_source'] == 'slider'
+    assert props['pricing'] == 'volume_v1'
+    assert props['pack_sku'] == pv.VOLUME_PACK_SKU
+
+
+def test_volume_checkout_episode_price(volume_on, ph_events):
+    uid = _make_user('vol-episode@test.com', limit=600, used=600)
+    client, token = _vol_csrf_client(uid)
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'buy_modal_episode',
+        'minutes': '75', 'price_source': 'episode',
+        'episode_title': 'Ep', 'audio_url': 'https://example.com/a.mp3',
+        'duration_min': '75',
+    })
+    assert resp.status_code == 303
+    kw = volume_on['last_create_params']
+    assert kw['line_items'][0]['price_data']['unit_amount'] == 119
+    assert kw['metadata']['price_source'] == 'episode'
+    props = [e for e in ph_events.events if e['event'] == 'checkout_started'][-1]['properties']
+    assert props['price_source'] == 'episode'
+    assert props['minutes'] == 75 and props['amount_cents'] == 119
+
+
+def test_volume_checkout_unknown_price_source_counts_as_slider(volume_on):
+    uid = _make_user('vol-src@test.com', limit=600, used=600)
+    client, token = _vol_csrf_client(uid)
+    client.post('/billing/checkout', data={
+        'csrf_token': token, 'minutes': '300', 'price_source': 'free'})
+    assert volume_on['last_create_params']['metadata']['price_source'] == 'slider'
+
+
+@pytest.mark.parametrize('bad', ['61', '30', '1215', '0', 'abc', '-60'])
+def test_volume_checkout_rejects_off_grid_quantity(volume_on, ph_events, bad):
+    uid = _make_user('vol-bad@test.com', limit=600, used=600)
+    client, token = _vol_csrf_client(uid)
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'minutes': bad, 'price_source': 'slider'})
+    assert resp.status_code in (302, 303)
+    assert volume_on['last_create_params'] is None
+    failed = [e for e in ph_events.events if e['event'] == 'purchase_failed']
+    assert failed and failed[-1]['properties']['reason'] == 'invalid_quantity'
+
+
+def test_volume_checkout_default_buy_button_uses_the_curve(volume_on):
+    """Legacy one-click Buy forms send no minutes: 300 min at the launch price."""
+    uid = _make_user('vol-default@test.com', limit=600, used=600)
+    client, token = _vol_csrf_client(uid)
+    client.post('/billing/checkout', data={'csrf_token': token, 'source': 'settings'})
+    kw = volume_on['last_create_params']
+    assert kw['metadata']['minutes'] == '300'
+    assert kw['metadata']['price_source'] == 'default'
+    assert kw['line_items'][0]['price_data']['unit_amount'] == pv.price_cents(300) == 400
+
+
+def test_flag_off_checkout_is_unchanged(stripe_on):
+    assert A.VOLUME_PRICING_ENABLED is False
+    uid = _make_user('vol-off@test.com', limit=600, used=600)
+    client, token = _vol_csrf_client(uid)
+    client.post('/billing/checkout', data={
+        'csrf_token': token, 'minutes': '1200', 'price_source': 'slider'})
+    kw = stripe_on['last_create_params']
+    assert kw['metadata']['pack'] == A.CREDIT_PACK_SKU
+    assert kw['metadata']['minutes'] == '300'
+    assert kw['line_items'][0]['price_data']['unit_amount'] == 500
+
+
+def test_volume_webhook_credits_purchased_minutes_once(volume_on, ph_events):
+    from models import CreditPurchase, db
+    uid = _make_user('vol-webhook@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    sess = _volume_session(uid, 600, 600, session_id='cs_vol_once')
+    resp = _register_and_post(volume_on, sess)
+    assert resp.status_code == 200
+    assert _paid(uid) == 600 * 60
+    # Redelivery and a second event for the same session credit nothing more.
+    _register_and_post(volume_on, sess)
+    _register_and_post(volume_on, sess, eid='evt_other_id')
+    assert _paid(uid) == 600 * 60
+    with A.app.app_context():
+        rows = CreditPurchase.query.filter_by(stripe_session_id='cs_vol_once').all()
+        assert len(rows) == 1
+        assert rows[0].minutes == 600 and rows[0].status == 'credited'
+        assert rows[0].amount_total_cents == 600
+    done = [e for e in ph_events.events if e['event'] == 'purchase_completed']
+    assert len({e['uuid'] for e in done}) == 1
+    props = done[-1]['properties']
+    assert props['minutes'] == 600
+    assert props['amount_cents'] == 600
+    assert props['price_source'] == 'slider'
+    assert props['pricing'] == 'volume_v1'
+
+
+def test_volume_webhook_episode_purchase(volume_on, ph_events):
+    uid = _make_user('vol-webhook-ep@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    _register_and_post(volume_on, _volume_session(
+        uid, 75, 119, session_id='cs_vol_ep', price_source='episode'))
+    assert _paid(uid) == 75 * 60
+    props = [e for e in ph_events.events if e['event'] == 'purchase_completed'][-1]['properties']
+    assert props['price_source'] == 'episode' and props['minutes'] == 75
+
+
+def test_volume_webhook_rejects_amount_that_does_not_match_metadata(volume_on):
+    from models import CreditPurchase
+    uid = _make_user('vol-tamper@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    _register_and_post(volume_on, _volume_session(
+        uid, 1200, 1000, unit=100, session_id='cs_vol_tamper'))
+    assert _paid(uid) == 0
+    with A.app.app_context():
+        row = CreditPurchase.query.filter_by(stripe_session_id='cs_vol_tamper').one()
+        assert row.status == 'needs_review'
+
+
+@pytest.mark.parametrize('minutes,amount', [('1200', '100'), ('61', '119'), ('', '600'), ('600', 'x')])
+def test_volume_webhook_rejects_bad_terms(volume_on, minutes, amount):
+    uid = _make_user('vol-terms@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    sess = _volume_session(uid, 600, 600, session_id='cs_vol_terms')
+    sess['metadata']['minutes'] = minutes
+    sess['metadata']['amount_cents'] = amount
+    _register_and_post(volume_on, sess)
+    assert _paid(uid) == 0
+
+
+def test_volume_session_still_credits_after_flag_is_turned_off(stripe_on):
+    """A session opened while the flag was on must credit after a flip."""
+    assert A.VOLUME_PRICING_ENABLED is False
+    uid = _make_user('vol-flip@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    _register_and_post(stripe_on, _volume_session(uid, 300, 400, session_id='cs_vol_flip'))
+    assert _paid(uid) == 300 * 60
+
+
+def test_volume_session_credits_quoted_price_after_curve_change(volume_on, monkeypatch):
+    """Price raised between checkout and payment: credit what was quoted and paid."""
+    monkeypatch.setattr(pv, 'VOLUME_ANCHORS', ((60, 200), (1200, 2000)))
+    uid = _make_user('vol-curve@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    _register_and_post(volume_on, _volume_session(uid, 600, 600, session_id='cs_vol_curve'))
+    assert _paid(uid) == 600 * 60
+
+
+def test_legacy_pack_still_credits_with_volume_on(volume_on):
+    uid = _make_user('vol-legacy@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    _register_and_post(volume_on, _pack_session(uid, session_id='cs_vol_legacy'))
+    assert _paid(uid) == A.CREDIT_PACK_MINUTES * 60
+
+
+def test_episode_offer(monkeypatch):
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', False)
+    assert A.episode_offer(75, 0) is None
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    offer = A.episode_offer(75, 0)
+    assert offer['label'] == 'Transcribe this episode (75 min) for $1.19'
+    assert offer['minutes'] == 75 and offer['amount_cents'] == 119
+    # 20 min left: the shortfall is 55 → the $1 minimum (60 min).
+    assert A.episode_offer(75, 20)['label'] == 'Transcribe this episode (75 min) for $1'
+    assert A.episode_offer(30, 40) is None
+    assert 'for $1' in A.pack_covers_episode_line(45)
+
+
+def test_pricing_page_shows_slider_only_with_flag(stripe_on, monkeypatch):
+    uid = _make_user('vol-page@test.com', limit=600, used=600)
+    client = _login(uid)
+    off = client.get('/pricing').data.decode()
+    assert 'id="pricingMinutes"' not in off
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    on = client.get('/pricing').data.decode()
+    assert 'id="pricingMinutes"' in on and 'data-volume-slider' in on
+    assert 'Launch price' in on
+    assert 'name="minutes"' in on and 'name="price_source"' in on
+    assert 'data-volume-form="pricingBuyForm"' in on
+    assert 'You save 20% per minute' in on  # 300-minute default
+    assert on.count('btn-primary') - off.count('btn-primary') == 0
+
+
+def test_buy_modal_has_slider_with_flag(stripe_on, monkeypatch):
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    uid = _make_user('vol-modal@test.com', limit=600, used=600)
+    body = _login(uid).get('/').data.decode()
+    assert 'id="buyModalMore"' in body
+    assert 'name="price_source" id="buyModalPriceSource"' in body
+    assert 'data-volume-form="buyModalForm"' in body

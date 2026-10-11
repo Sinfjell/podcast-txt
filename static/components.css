@@ -1226,3 +1226,94 @@ body:has(.ds-signal) { overflow-x: clip; }
   .nav-brand:hover svg g:first-child rect, .ds-window, .ds-window__status i, .ds-chat-example__status i { animation: none; }
   .ds-arrow, .ds-window__line, .ds-window__line p, .ds-window__playhead, .nav-cta svg, .ds-chat-example__conversation > * { transition: none; }
 }
+
+/* ------------------------------------------------------------------------ */
+/* volume_slider — launch volume pricing (macro: volume_slider)              */
+/* ------------------------------------------------------------------------ */
+.ds-volume {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+}
+.ds-volume__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.ds-volume__figure,
+.ds-volume__price {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+  color: var(--ink);
+}
+.ds-volume__range {
+  width: 100%;
+  min-height: 2.75rem;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.ds-volume__range:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+.ds-volume__scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+.ds-volume__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+.ds-volume__meta [data-volume-save] {
+  color: var(--ink);
+  font-weight: 700;
+}
+.ds-volume__meta [data-volume-save]:empty {
+  display: none;
+}
+/* Buy modal (volume mode): the per-episode line and the picker disclosure. */
+.ds-volume-episode {
+  margin: 0 0 var(--space-3);
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+.ds-volume-more {
+  margin-top: var(--space-4);
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-3);
+}
+.ds-volume-more > summary {
+  min-height: 2.75rem;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--accent);
+}
+.ds-volume-more > summary:hover {
+  color: var(--accent-hover);
+}
+.ds-volume-more[open] > summary {
+  margin-bottom: var(--space-3);
+}
+.ds-volume-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  width: 100%;
+}

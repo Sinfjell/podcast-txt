@@ -2,6 +2,13 @@
   "version": 1,
   "entries": [
     {
+      "id": "pay-per-minute-launch-pricing",
+      "date": "2026-10-11",
+      "title": "Buy exactly the minutes you need",
+      "summary": "Pick any amount from 60 minutes for $1. The more you buy, the less each minute costs, and an episode you are about to transcribe shows its own price.",
+      "hidden": true
+    },
+    {
       "id": "new-home-and-header",
       "date": "2026-10-10",
       "title": "A new home page and header",
