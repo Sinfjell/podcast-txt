@@ -15,7 +15,7 @@ RequestHeader set X-Forwarded-Proto expr=%{REQUEST_SCHEME}
 <Location />
     AuthType Basic
     AuthName "Podskrift staging"
-    AuthUserFile /opt/podskrift-staging/htpasswd
+    AuthUserFile /etc/apache2/podskrift-staging.htpasswd
     <RequireAny>
         Require expr "%{REQUEST_URI} =~ m#^/(stripe/webhook|health|robots\.txt|mcp|oauth/(token|register)|\.well-known/)#"
         Require valid-user

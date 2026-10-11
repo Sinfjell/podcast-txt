@@ -100,14 +100,17 @@ with production:
 | DB | `data/podcast.db` (real users) | own `data/podcast.db`, started empty |
 | `.env` | live keys | `PODSKRIFT_ENV=staging`, no PostHog/Sentry/Mailgun, Stripe **test** keys only, `EMAIL_ENABLED=0` |
 
-Deploy a branch to staging: `git push --force origin <branch>:staging`.
+Deploy a branch to staging: `git push --force origin <branch>:staging`. The
+branch must contain `deploy-staging.yml` (i.e. be based on a `main` that has
+it), because a push runs the workflow file from the pushed commit.
 Staging is reset to the pushed SHA on every deploy (ignored files such as
 `.env` and `data/` survive).
 
 Apache: [staging-apache.conf.example](staging-apache.conf.example). Every
 response carries `X-Robots-Tag: noindex, nofollow`, `/robots.txt` is
 `Disallow: /`, and the site is behind HTTP basic auth (credentials in
-`/opt/podskrift-staging/CREDENTIALS`, root-only) except the Stripe webhook,
+`/opt/podskrift-staging/CREDENTIALS`, root-only; htpasswd in
+`/etc/apache2/podskrift-staging.htpasswd`) except the Stripe webhook,
 `/health`, `/mcp`, `/oauth/token`, `/oauth/register` and `/.well-known/`.
 
 Never copy `.env`, the prod DB or a backup into staging: it holds password
