@@ -9,7 +9,7 @@ Detection order:
 
 1. ``PODSKRIFT_ENV`` — ``production`` | ``staging`` | ``test`` | ``dev`` wins
    when set (explicit override; not required on the production server).
-2. Non-production signals — pytest, CI, Cursor/cloud-agent, throwaway
+2. Non-production signals — pytest, CI, Claude Code / Cursor cloud agents, throwaway
    ``DATABASE_URL`` (``/tmp``, in-memory), Flask ``testing``.
 3. Positive production markers from what prod already has (no new .env keys):
    app/DB under ``/var/www/vhosts/podskrift.nettsmed.dev``, or
@@ -48,6 +48,9 @@ def _non_production_signals():
     if os.environ.get('PYTEST_CURRENT_TEST'):
         return True
     if os.environ.get('CI') or os.environ.get('GITHUB_ACTIONS'):
+        return True
+    # Claude Code on the web / cloud agent sessions.
+    if os.environ.get('CLAUDE_CODE_REMOTE', '').strip().lower() == 'true':
         return True
     # Cursor Cloud Agent / local agent sandboxes.
     if os.environ.get('CURSOR_AGENT') or os.environ.get('CURSOR_CLOUD_AGENT'):
