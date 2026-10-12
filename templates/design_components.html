@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "components/macros.html" import button, link_button, section, page_header, tabs, tab_panel, checklist, checklist_row, snippet, secret_field, notice, empty_state, form_field, chip, proof_list, announce, command_bar, works_with, signal_wave, transcript_window %}
+{% from "components/macros.html" import button, link_button, section, page_header, tabs, tab_panel, checklist, checklist_row, snippet, secret_field, notice, empty_state, form_field, chip, proof_list, announce, command_bar, inline_select, works_with, signal_wave, transcript_window %}
 
 {% block title %}Component gallery — Podskrift{% endblock %}
 {% block robots_meta %}<meta name="robots" content="noindex, nofollow">{% endblock %}
@@ -139,7 +139,7 @@
   </section>
 
   <section class="ds-gallery-section" aria-labelledby="g-hero">
-    <h2 id="g-hero" class="ds-gallery-label">HERO: ANNOUNCE, COMMAND BAR, WORKS WITH, SIGNAL WAVE, TRANSCRIPT WINDOW</h2>
+    <h2 id="g-hero" class="ds-gallery-label">HERO: ANNOUNCE, COMMAND BAR, INLINE SELECT, WORKS WITH, SIGNAL WAVE, TRANSCRIPT WINDOW</h2>
     <div class="ds-hero ds-gallery-hero" data-ds-signal-root>
       {{ signal_wave() }}
       <div class="ds-hero__inner">
@@ -153,6 +153,7 @@
             <button type="button" class="tab" aria-pressed="false">Episodes</button>
           </div>
           {% endcall %}
+          {{ inline_select("Spoken language", "galleryCmdLang", [("", "Auto-detect"), ("en", "English"), ("no", "Norwegian")]) }}
         </div>
         {{ works_with([("Spotify", None), ("Apple Podcasts", None), ("RSS", None), ("ChatGPT", "#g-hero")]) }}
       </div>
