@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import page_header, notice, card, button %}
+{% block title %}Payment cancelled — Podskrift{% endblock %}
+{% block robots_meta %}<meta name="robots" content="noindex">{% endblock %}
+
+{% block content %}
+{# Codex UX review #2: Stripe returns with a GET, and the episode list is a POST
+   response, so a cancelled episode checkout lands here instead of a 405. #}
+<div class="ds-stack ds-stack-4 ds-cancelled">
+    {{ notice(message, variant='info', attrs='data-testid="checkout-cancelled"') }}
+    {% if pending %}
+    {{ page_header('Your episode is still selected') }}
+    {% call card(variant='bordered', attrs='data-testid="cancelled-episode"') %}
+    <div class="ds-stack ds-stack-2">
+        <p class="ds-cancelled__title">{{ pending.title or 'Episode' }}</p>
+        <p class="form-hint">
+            {% if pending.podcast_name %}{{ pending.podcast_name }}{% endif %}
+            {% if pending.duration_min %}{% if pending.podcast_name %} · {% endif %}about {{ pending.duration_min|round|int }} min (estimate){% endif %}
+            {% if language_label %} · {{ language_label }}{% endif %}
+        </p>
+    </div>
+    {% endcall %}
+    {% else %}
+    {{ page_header('Nothing was bought', "You can pick up where you left off whenever you're ready.") }}
+    {% endif %}
+
+    <div class="ds-cancelled__actions">
+        {% if can_retry %}
+        <form method="POST" action="{{ url_for('billing_checkout') }}" data-testid="cancelled-retry">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="source" value="checkout_cancel_retry">
+            <input type="hidden" name="ph_sid" value="">
+            <input type="hidden" name="return_to" value="{{ url_for('billing_cancelled') if pending else url_for('pricing') }}">
+            {% if volume_pricing_enabled %}
+            <input type="hidden" name="minutes" value="{{ retry_minutes }}">
+            <input type="hidden" name="price_source" value="{{ retry_price_source }}">
+            {% endif %}
+            {{ button('Try payment again · ' ~ retry_minutes ~ ' minutes for ' ~ retry_price, variant='primary', type='submit') }}
+        </form>
+        {% endif %}
+        {% if pending and pending.rss_url and pending.episode_index is not none %}
+        <form method="POST" action="{{ url_for('parse_rss') }}" data-testid="cancelled-back">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="rss_url" value="{{ pending.rss_url }}">
+            <input type="hidden" name="episode_index" value="{{ pending.episode_index }}">
+            {% if pending.audio_url %}<input type="hidden" name="episode_audio_url" value="{{ pending.audio_url }}">{% endif %}
+            {{ button('Back to episode', type='submit') }}
+        </form>
+        {% else %}
+        {{ button('Find an episode', href=url_for('index')) }}
+        {% endif %}
+    </div>
+    {% if can_retry %}
+    <p class="form-hint">Unused minutes stay in your account. Transcription starts automatically after payment.</p>
+    {% endif %}
+</div>
+{% endblock %}

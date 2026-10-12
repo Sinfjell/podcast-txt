@@ -2,6 +2,13 @@
   "version": 1,
   "entries": [
     {
+      "id": "clearer-buying-and-cancel-return",
+      "date": "2026-10-12",
+      "title": "Clearer buying, and a safe way back if you cancel",
+      "summary": "Quick picks for 60, 300, 600 and 1,200 minutes show the per-minute saving at a glance. If you cancel a payment, you land back on your episode with nothing charged and one tap to try again. Transcripts and History now show the minutes you used instead of cost estimates.",
+      "hidden": true
+    },
+    {
       "id": "pay-per-minute-launch-pricing",
       "date": "2026-10-11",
       "title": "Buy exactly the minutes you need",

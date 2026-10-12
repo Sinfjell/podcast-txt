@@ -259,7 +259,22 @@
       setText('[data-volume-price]', row.price);
       setText('[data-volume-rate]', row.cents_per_minute.toFixed(2) + '\u00a2 per minute');
       setText('[data-volume-save]', row.savings_percent > 0
-        ? 'You save ' + row.savings_percent + '% per minute' : '');
+        ? row.savings_percent + '% less per minute than ' + table[0].minutes + ' min' : '');
+      /* Point at the next quick pick when it is a better deal per minute. */
+      var picks = root.querySelectorAll('[data-volume-pick]');
+      var nudge = '';
+      for (var i = 0; i < picks.length; i++) {
+        var pm = Number(picks[i].getAttribute('data-volume-pick'));
+        picks[i].setAttribute('aria-pressed', pm === row.minutes ? 'true' : 'false');
+        if (!nudge && pm > row.minutes && byMin[pm] && pm >= row.minutes * 2) {
+          var extra = byMin[pm].amount_cents - row.amount_cents;
+          if (extra > 0 && extra <= row.amount_cents / 4) {
+            nudge = 'Double your minutes for ' + (extra % 100 ? '$' + (extra / 100).toFixed(2) : '$' + extra / 100)
+              + ' more: ' + pm + ' minutes for ' + byMin[pm].price + '.';
+          }
+        }
+      }
+      setText('[data-volume-nudge]', nudge);
       if (range) range.setAttribute('aria-valuetext', row.minutes + ' minutes for ' + row.price);
       var f = form();
       if (f && touchForm && !root.hasAttribute('data-volume-passive')) {
@@ -295,6 +310,14 @@
         } catch (e) { /* ignore */ }
       });
     }
+    root.querySelectorAll('[data-volume-pick]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        if (!range) return;
+        range.value = btn.getAttribute('data-volume-pick');
+        range.dispatchEvent(new Event('input', { bubbles: true }));
+        range.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    });
     var api = {
       quote: q,
       table: table,
