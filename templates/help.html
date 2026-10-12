@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import button, link_button, page_header, section %}
+
+{% block title %}Help — Podskrift{% endblock %}
+{% block meta_description %}Help for Podskrift: how to transcribe a podcast, find an RSS feed, use transcripts in ChatGPT and Claude, pricing and refunds, and how to contact us.{% endblock %}
+{% block og_title %}Help — Podskrift{% endblock %}
+{% block og_description %}Guides and answers for transcribing podcasts with Podskrift.{% endblock %}
+
+{% block content %}
+<div class="ds-guide">
+  {{ page_header(
+    "Help",
+    "Paste a Spotify, Apple Podcasts or RSS link on the home page, pick an episode, and you get a timestamped transcript. Start here if something is unclear."
+  ) }}
+
+  <div class="ds-stack ds-stack-4">
+    {% call section(title="Transcribe your first episode", variant="bordered") %}
+      <p class="ds-guide__muted">Search by podcast name or paste a link. Common questions are answered on the home page.</p>
+      {{ button("Go to search", variant="primary", href=url_for('index')) }}
+      {{ link_button("Read the FAQ", href=url_for('index') ~ '#faq') }}
+    {% endcall %}
+
+    {% call section(title="Can't find a podcast?", variant="bordered") %}
+      <p class="ds-guide__muted">How to find the RSS feed for shows outside the search, and what to do with Spotify links.</p>
+      {{ link_button("Finding RSS feeds", href=url_for('rss_help')) }}
+    {% endcall %}
+
+    {% call section(title="Use transcripts in ChatGPT and Claude", variant="bordered") %}
+      <p class="ds-guide__muted">Connect Podskrift as an MCP connector and ask about any episode.</p>
+      {{ link_button("Setup guides", href=url_for('guides_index')) }}
+      {{ link_button("About the MCP connector", href=url_for('ai_landing')) }}
+    {% endcall %}
+
+    {% call section(title="Minutes, payment and refunds", variant="bordered") %}
+      <p class="ds-guide__muted">Prices, volume discounts and what happens to unused minutes.</p>
+      {{ link_button("Pricing", href=url_for('pricing')) }}
+      {{ link_button("Terms and refunds", href=url_for('terms')) }}
+    {% endcall %}
+
+    {% call section(title="Still stuck?", variant="bordered") %}
+      <p class="ds-guide__muted">Write to us and a person will answer.</p>
+      {{ link_button("Contact us", href=url_for('contact')) }}
+    {% endcall %}
+  </div>
+</div>
+{% endblock %}
