@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "components/macros.html" import snippet, button, proof_list, announce, command_bar, works_with, signal_wave, transcript_window %}
+{% from "components/macros.html" import snippet, button, proof_list, announce, command_bar, inline_select, works_with, signal_wave, transcript_window %}
 
 {% block title %}Spotify & podcast transcripts — Podskrift{% endblock %}
 {% block meta_description %}Paste a Spotify episode link or search any podcast, and get the full transcript as text and .srt. {{ language_count }} languages, powered by OpenAI Whisper.{% if trial_minutes %} First {{ trial_minutes }} minutes free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.{% endif %}{% endblock %}
@@ -19,8 +19,6 @@
     .hp-trial summary { cursor: pointer; display: inline-flex; align-items: center; min-height: 44px; font-size: 14px; color: var(--muted); }
     .hp-trial summary:hover { color: var(--ink); }
     .hp-trial .hp-fine { margin-top: 8px; }
-    .hp-lang-row { margin-top: 12px; }
-    .hp-lang-select { max-width: 220px; }
     .hp-window { margin-top: 160px; }
     .hp-fine { max-width: 44rem; margin: 24px auto 0; text-align: left; }
     .hp-hero .ds-hero__left .form-hint { margin-top: 0; }
@@ -183,6 +181,9 @@
                 <button type="button" class="tab" data-type="episode" aria-pressed="false">Episodes</button>
             </div>
             {% endcall %}
+            {# Episode search only: the spoken language sits right under the bar,
+               left-aligned with it. Hidden/shown by the page script. #}
+            {{ inline_select('Spoken language', 'searchLanguage', languages, attrs='id="episodeLangRow"', class='hidden') }}
             {# Signed in on our key: the balance and the way to top it up sit right
                under the box, so nobody has to hunt for where to buy minutes. #}
             {% if app_hero and nav_minutes_left is not none %}
@@ -202,14 +203,6 @@
             {{ proof_list(assure, class='ds-proof--inline', attrs='aria-label="Why Podskrift"') }}
             {% endif %}
             <div class="ds-hero__left">
-                <div id="episodeLangRow" class="hidden hp-lang-row">
-                    <label class="form-label" for="searchLanguage">Spoken language</label>
-                    <select class="form-input hp-lang-select" id="searchLanguage">
-                        {% for code, label in languages %}
-                        <option value="{{ code }}">{{ label }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
                 <div id="searchResults"></div>
                 {# Anonymous: advertised new-signup grant. Logged-in trial users: their
                    own limit (+ remaining) so a 180-min legacy account is never told

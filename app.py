@@ -4559,9 +4559,15 @@ def volume_session_terms(d):
         return None
     # Validate against the curve version the session was priced with, so a
     # later price change never strands an open Checkout.
-    min_amount = pricing_volume.min_amount_cents_for(meta.get('pricing_version'))
-    if min_amount is None:
-        return None
+    version = meta.get('pricing_version')
+    if version:
+        # A released curve never changes, so a versioned session must carry
+        # exactly that curve's price for its minutes: anything else was not
+        # quoted by us.
+        if amount != pricing_volume.price_cents_for(minutes, version):
+            return None
+        return minutes, amount
+    min_amount = pricing_volume.min_amount_cents_for(version)
     if amount < max(min_amount, pricing_volume.floor_cents(minutes)):
         return None
     return minutes, amount
@@ -4931,6 +4937,10 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
         currency=currency,
         customer_country=customer_country,
         minutes=minutes,
+        price_source=price_source,
+        pricing_version=(
+            (metadata.get('pricing_version') or '')[:16] or (
+                'legacy_v0' if metadata.get('pack') == CREDIT_PACK_SKU else None)),
         status='credited',
     )
     db.session.add(purchase)
@@ -6113,6 +6123,9 @@ def _is_minutes_limit_error(message):
         'out of free minutes',
         'buy more minutes',
         CREDIT_PACK_LABEL.lower(),
+        # Errors stored before a price change keep the label they were
+        # written with.
+        'buy 300 min for $5',
         'not enough minutes',
         'trial is used up',
         "today's free minutes are used up",
@@ -6229,13 +6242,44 @@ def index():
                            structured_data=_structured_data())
 
 
-def _annotate_episodes_for_trial(episodes):
-    """Attach needs_own_key on each episode dict for the selection UI badge."""
+def _annotate_episodes_for_trial(episodes, rss_url=None):
+    """Attach needs_own_key on each episode dict for the selection UI badge.
+
+    With volume pricing on, a signed-in metered account also gets one
+    ``buy_label`` per episode: "In your history" when it already has a
+    finished transcript of that audio, "Covered" when the balance pays for
+    it, otherwise the episode's price. Display only: checkout re-prices.
+    """
     remaining = trial_badge_remaining_minutes()
     paid = trial_badge_paid_minutes()
     for ep in episodes:
         ep['needs_own_key'] = episode_needs_own_key(
             ep.get('duration_min'), remaining, paid_minutes=paid)
+    if not (VOLUME_PRICING_ENABLED and stripe_checkout_enabled()
+            and current_user.is_authenticated
+            and not getattr(current_user, 'openai_api_key', None)):
+        return episodes
+    balance = (remaining or 0) + (paid or 0)
+    done = set()
+    if rss_url:
+        done = {
+            url for (url,) in db.session.query(TranscriptionTask.source_audio_url)
+            .filter(TranscriptionTask.user_id == current_user.id,
+                    TranscriptionTask.rss_url == rss_url,
+                    TranscriptionTask.status == 'completed',
+                    TranscriptionTask.source_audio_url.isnot(None))
+            .all()
+        }
+    for ep in episodes:
+        duration = ep.get('duration_min')
+        if ep.get('audio_url') and ep['audio_url'] in done:
+            ep['buy_label'], ep['buy_variant'] = 'In your history', 'muted'
+        elif duration and math.ceil(float(duration)) <= balance:
+            ep['buy_label'], ep['buy_variant'] = 'Covered', 'muted'
+        else:
+            offer = episode_offer(duration, balance) if duration else None
+            if offer:
+                ep['buy_label'], ep['buy_variant'] = offer['price'], 'accent'
     return episodes
 
 
@@ -6251,7 +6295,7 @@ def parse_rss():
         flash(error, 'error')
         return redirect(url_for('index'))
 
-    _annotate_episodes_for_trial(episodes)
+    _annotate_episodes_for_trial(episodes, rss_url=rss_url)
     episodes_to_show = episodes[:10]
     has_more = len(episodes) > 10
     preselected_index = None

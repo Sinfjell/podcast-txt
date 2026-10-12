@@ -83,15 +83,17 @@ def floor_cents(minutes):
     return int(math.ceil(gross - 1e-9))
 
 
-def _curve_cents(minutes):
-    if minutes <= VOLUME_ANCHORS[0][0]:
-        return VOLUME_ANCHORS[0][1]
-    for (m0, c0), (m1, c1) in zip(VOLUME_ANCHORS, VOLUME_ANCHORS[1:]):
+def _curve_cents(minutes, anchors=None):
+    if anchors is None:
+        anchors = VOLUME_ANCHORS
+    if minutes <= anchors[0][0]:
+        return anchors[0][1]
+    for (m0, c0), (m1, c1) in zip(anchors, anchors[1:]):
         if minutes <= m1:
             exact = c0 + (c1 - c0) * (minutes - m0) / (m1 - m0)
             return int(math.ceil(exact - 1e-9))
     # Past the last anchor: continue at the last segment's marginal rate.
-    (m0, c0), (m1, c1) = VOLUME_ANCHORS[-2], VOLUME_ANCHORS[-1]
+    (m0, c0), (m1, c1) = anchors[-2], anchors[-1]
     exact = c1 + (c1 - c0) * (minutes - m1) / (m1 - m0)
     return int(math.ceil(exact - 1e-9))
 
@@ -120,6 +122,18 @@ def price_cents(minutes):
     minimum purchase or the cost floor)."""
     minutes = int(minutes)
     return max(VOLUME_MIN_AMOUNT_CENTS, _curve_cents(minutes), floor_cents(minutes))
+
+
+def price_cents_for(minutes, version):
+    """Price of *minutes* on the curve of *version*, or None if the version
+    is unknown. The webhook uses this to check a paid session against the
+    curve it was quoted on, not against today's curve."""
+    spec = PRICING_VERSIONS.get(str(version)) if version else None
+    if spec is None:
+        return None
+    minutes = int(minutes)
+    return max(spec['min_amount_cents'], _curve_cents(minutes, spec['anchors']),
+               floor_cents(minutes))
 
 
 def cents_per_minute(minutes):
