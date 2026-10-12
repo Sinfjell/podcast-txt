@@ -1104,6 +1104,35 @@ body.nav-menu-open .nav-bar::before { background: var(--paper); }
 .ds-seg .tab:hover { color: var(--ink); }
 .ds-seg .tab.active, .ds-seg .tab[aria-pressed="true"] { background: var(--paper); color: var(--ink); border: 0; }
 
+/* Inline select: one compact bordered control (label inside, native select
+   beside it) that sits under the command bar, left-aligned with it. */
+.ds-inline-select {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+  min-height: 2.75rem;
+  padding: 0 var(--space-1) 0 var(--space-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--paper);
+}
+.ds-inline-select.hidden { display: none; }
+.ds-inline-select:focus-within { outline: 4px solid var(--accent-tint); outline-offset: 0; }
+.ds-inline-select__label { flex: none; font-size: 0.875rem; font-weight: 700; color: var(--muted); white-space: nowrap; }
+.ds-inline-select__field {
+  min-width: 0;
+  height: 2.5rem;
+  padding: 0 var(--space-2);
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: 700 1rem var(--font-sans);
+  cursor: pointer;
+}
+.ds-inline-select__field:focus { outline: none; }
+
 .ds-proof--inline { flex-direction: row; flex-wrap: wrap; justify-content: center; gap: var(--space-2) var(--space-6); color: var(--ink); }
 
 /* "Works with" strip: names, not logos; links where a guide exists. */
@@ -1212,6 +1241,8 @@ body:has(.ds-signal) { overflow-x: clip; }
   .ds-cmd__box::before { inset: -2rem 0; }
   .ds-seg .tab { padding: 0 var(--space-2); }
   .ds-cmd__go { min-width: 0; padding: 0 var(--space-4); }
+  .ds-inline-select { align-self: stretch; }
+  .ds-inline-select__field { flex: 1; }
   .ds-cmd__icon { display: none; }
   .ds-cmd__input { flex: 1 1 100%; padding: 0 var(--space-2); }
   .ds-cmd__go { flex: 1; justify-content: center; }

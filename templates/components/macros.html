@@ -345,6 +345,24 @@
 {%- endmacro %}
 
 {# ------------------------------------------------------------------------- #}
+{# inline_select — a compact labelled native select for under the command    #}
+{# bar: one bordered control with the label inside it. `options` is a list   #}
+{# of (value, label) pairs. `class` and `attrs` go on the wrapper (so an     #}
+{# id/hidden toggle hides label and select together). The select takes the  #}
+{# id `select_id`.                                                            #}
+{# ------------------------------------------------------------------------- #}
+{% macro inline_select(label, select_id, options, attrs='', class='') -%}
+<div class="ds-inline-select{% if class %} {{ class }}{% endif %}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+  <label class="ds-inline-select__label" for="{{ select_id }}">{{ label }}</label>
+  <select class="ds-inline-select__field" id="{{ select_id }}">
+    {%- for value, text in options %}
+    <option value="{{ value }}">{{ text }}</option>
+    {%- endfor %}
+  </select>
+</div>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
 {# works_with — names of the places Podskrift works, as text, not logos.      #}
 {# items: list of (name, href or None).                                       #}
 {# ------------------------------------------------------------------------- #}
