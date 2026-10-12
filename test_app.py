@@ -17472,3 +17472,30 @@ def test_split_trial_advertises_only_what_every_arm_gets(trial_on, monkeypatch):
     assert '120 min free' not in body and '120 minutes free' not in body
     monkeypatch.setattr(A, 'TRIAL_SPLIT_ENABLED', False)
     assert A.advertised_trial_minutes() == 120
+
+
+def _nav_and_footer_hrefs(body):
+    import re
+    chunks = re.findall(r'<nav class="nav-bar".*?</nav>', body, re.S)
+    chunks += re.findall(r'<footer class="footer".*?</footer>', body, re.S)
+    assert chunks, 'nav/footer not found'
+    return [h for c in chunks for h in re.findall(r'href="([^"]*)"', c)]
+
+
+def test_nav_has_no_dead_links_and_help_is_a_real_page():
+    """Help used to land on the RSS-only page; nav links must all resolve."""
+    client = A.app.test_client()
+    uid = _make_user('navlinks@test.com')
+    for c in (client, _login(uid)):
+        hrefs = _nav_and_footer_hrefs(c.get('/').data.decode())
+        assert '/help' in hrefs
+        for h in hrefs:
+            assert h not in ('#', ''), f'dead nav link {h!r}'
+            assert not h.startswith('javascript:')
+            if h.startswith('/') and not h.startswith('/logout'):
+                path = h.split('#')[0]
+                r = c.get(path)
+                assert r.status_code in (200, 302), f'{path} -> {r.status_code}'
+    body = client.get('/help').data.decode()
+    for link in ('/guides', '/rss-help', '/ai', '/contact', '/pricing', '#faq'):
+        assert link in body, f'help page missing {link}'

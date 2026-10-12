@@ -10013,6 +10013,7 @@ def sitemap_xml():
              public_url('contact'),
              public_url('whats_new'),
              public_url('api_docs'),
+             public_url('help_page'),
              public_url('rss_help'),
              public_url('register')]
     # Curated show pages only — community slugs can churn with the DB.
@@ -10551,6 +10552,12 @@ def whats_new():
         'whats_new.html',
         entries=load_changelog_entries(),
     )
+
+
+@app.route('/help')
+def help_page():
+    """Help hub: the nav's Help link lands here and fans out to the guides."""
+    return render_template('help.html')
 
 
 @app.route('/rss-help')
