@@ -933,8 +933,11 @@
                 color: var(--ink);
                 font-weight: 700;
             }
+            /* Log in + Start free sit right under the links. They used to be
+               pushed to the panel's bottom edge (margin-top:auto), where the
+               fixed cookie banner (z-index 200) covered both on first visit. */
             .nav-links a.nav-login {
-                margin-top: auto;
+                margin-top: 24px;
                 justify-content: center;
                 min-height: 52px;
                 font-size: 17px;
@@ -967,8 +970,10 @@
             .nav-links .nav-sep {
                 display: block;
                 height: 0;
-                margin-top: auto;
+                margin-top: 16px;
             }
+            /* Keep the panel's last item scrollable clear of the cookie banner. */
+            body.cookie-banner-open .nav-links { padding-bottom: 180px; }
         }
 
         @media (prefers-reduced-motion: reduce) {

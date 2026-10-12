@@ -11796,6 +11796,20 @@ def test_anon_nav_has_ai_link(trial_on):
     assert 'Use in ChatGPT' not in nav
 
 
+def test_anon_mobile_nav_has_register_and_login(trial_on):
+    """The mobile panel is the same #navLinks markup; logged out it must carry
+    Start free (/register) and Log in (/login), and the mobile CSS must not
+    pin them to the bottom edge where the cookie banner covers them."""
+    body = A.app.test_client().get('/').data.decode()
+    nav = body[body.index('id="navLinks"'):body.index('</nav>')]
+    assert 'href="/register"' in nav and 'class="nav-cta"' in nav
+    assert 'href="/login"' in nav and 'class="nav-login"' in nav
+    mobile = body[body.index('/* Mobile nav */'):]
+    login_rule = mobile[mobile.index('.nav-links a.nav-login {'):]
+    login_rule = login_rule[:login_rule.index('}')]
+    assert 'margin-top: auto' not in login_rule
+
+
 def test_pricing_page_renders_without_stripe(trial_on):
     resp = A.app.test_client().get('/pricing')
     assert resp.status_code == 200
