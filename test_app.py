@@ -9175,6 +9175,8 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
+    assert entries[0]['id'] == 'pay-per-minute-launch-pricing'
+    entries = entries[1:]
     assert entries[0]['id'] == 'new-home-and-header'
     assert entries[1]['id'] == 'ai-what-you-can-ask'
     assert entries[2]['id'] == 'mcp-list-my-transcripts'
@@ -14066,6 +14068,8 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
+    assert entries[0]['id'] == 'pay-per-minute-launch-pricing'
+    entries = entries[1:]
     assert entries[0]['id'] == 'new-home-and-header'
     assert entries[1]['id'] == 'ai-what-you-can-ask'
     assert entries[2]['id'] == 'mcp-list-my-transcripts'
