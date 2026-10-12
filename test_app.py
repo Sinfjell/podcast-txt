@@ -9623,9 +9623,10 @@ def test_homepage_copy_leads_with_spotify(trial_on):
     assert 'Paste a Spotify link or search a podcast' in body
     assert 'badge-needs-key' in body
     assert f'Your first {A.advertised_trial_minutes()} minutes' in body
-    assert 'run on our key' in body
+    assert 'No card or API key required' in body
     assert 'Download .txt or .srt transcript' not in body
-    assert f'${A.openai_whisper_cost_usd(90):.2f}' in body
+    # Codex UX review #1/#3: no own-key dollar comparison on the home page.
+    assert f'${A.openai_whisper_cost_usd(90):.2f}' not in body
     assert f'${A.openai_whisper_cost_usd(60):.2f}' in body
 
 
@@ -12070,7 +12071,7 @@ def test_episode_selection_uses_inline_error_not_confirm(stripe_on):
     assert 'confirm(' not in src
     assert 'setStartError' in src
     assert 'startError' in src
-    assert 'Add OpenAI key' in src
+    assert 'Have your own OpenAI API key?' in src
 
 
 def test_episode_selection_buy_form_not_nested_in_episode_form(stripe_on):
@@ -12123,7 +12124,7 @@ def test_episode_selection_buy_form_not_nested_in_episode_form(stripe_on):
     # Sticky bar + meter hooks ship with the conversion top-3 work.
     assert soup.find(id='epSticky') is not None
     assert soup.find(id='stickyTranscribeBtn') is not None
-    assert 'This episode uses' in html or 'Transcribe free' in html
+    assert 'min (estimate)' in html or 'Transcribe free' in html
     # Start Transcription must remain a submit control of episodeForm.
     transcribe = soup.find(id='transcribeBtn')
     assert transcribe is not None
@@ -12173,7 +12174,7 @@ def test_episode_selection_logged_out_hides_paywall_and_dollar_cost(
     soup = BeautifulSoup(body, 'html5lib')
     assert soup.find('form', id='buyFormEpisodeSelection') is None
     meta = _episode_card_meta(body)
-    assert 'Uses ~30 min' in meta
+    assert 'About 30 min' in meta
     assert '$' not in meta
     assert 'Start Transcription' in body
 
@@ -12187,7 +12188,7 @@ def test_episode_selection_trial_with_minutes_hides_paywall(
     body = resp.data.decode()
     assert 'Out of free minutes' not in body
     meta = _episode_card_meta(body)
-    assert 'Uses ~30 min' in meta
+    assert 'About 30 min' in meta
     assert '$' not in meta
 
 
@@ -12202,7 +12203,7 @@ def test_episode_selection_trial_exhausted_shows_paywall(
     assert 'buyFormEpisodeSelection' in body
     assert A.CREDIT_PACK_PAYMENT_HINT in body
     meta = _episode_card_meta(body)
-    assert 'Uses ~30 min' in meta
+    assert 'About 30 min' in meta
     assert '$' not in meta
 
 
@@ -12215,7 +12216,7 @@ def test_episode_selection_own_key_shows_dollar_cost_not_paywall(
     body = resp.data.decode()
     assert 'Out of free minutes' not in body
     meta = _episode_card_meta(body)
-    assert 'Uses ~' not in meta
+    assert 'About ' not in meta
     assert '~$' in meta
     assert '30.0 min' in meta or '30 min' in meta
 
@@ -12344,13 +12345,13 @@ def test_episode_picker_meter_text_for_trial_user(stripe_on):
             languages=[('en', 'English')],
             show_openai_cost=False,
         )
-    assert 'This episode uses' in html
+    assert 'min (estimate)' in html
     assert 'you have' in html and 'left' in html
     assert 'TRIAL_REMAINING_MIN' in html
     assert 'epSticky' in html
     assert 'Transcribe free' in html
     # Trial users should not see OpenAI $ on cards — "Uses ~N min" instead
-    assert 'Uses ~45 min' in html
+    assert 'About 45 min' in html
     assert '~$0.270' not in html and '~$0.27' not in html
 
 
@@ -12379,8 +12380,8 @@ def test_episode_picker_meter_for_paid_user(stripe_on):
             show_openai_cost=False,
         )
     assert 'Transcribe →' in html
-    assert 'This episode uses' in html
-    assert 'Uses ~30 min' in html
+    assert 'min (estimate)' in html
+    assert 'About 30 min' in html
 
 
 def test_episode_picker_own_key_keeps_cost_no_meter(stripe_on):
@@ -17077,7 +17078,7 @@ def test_pricing_page_shows_slider_only_with_flag(stripe_on, monkeypatch):
     assert 'Launch price' in on
     assert 'name="minutes"' in on and 'name="price_source"' in on
     assert 'data-volume-form="pricingBuyForm"' in on
-    assert 'You save 33% per minute' in on  # 300-minute default
+    assert '33% less per minute than 60 min' in on  # 300-minute default
     assert on.count('btn-primary') - off.count('btn-primary') == 0
 
 
@@ -17468,3 +17469,173 @@ def test_split_trial_advertises_only_what_every_arm_gets(trial_on, monkeypatch):
     assert '120 min free' not in body and '120 minutes free' not in body
     monkeypatch.setattr(A, 'TRIAL_SPLIT_ENABLED', False)
     assert A.advertised_trial_minutes() == 120
+
+
+# ---------------------------------------------------------------------------
+# Codex UX review fixes (batch 1)
+from bs4 import BeautifulSoup  # noqa: E402
+# ---------------------------------------------------------------------------
+
+def _stash_episode(client, **over):
+    pending = {
+        'language': 'no', 'rss_url': 'https://feeds.example.com/show.xml',
+        'episode_index': 3, 'title': 'Episode Three', 'audio_url': '',
+        'podcast_name': 'Show', 'duration_min': 75.0,
+    }
+    pending.update(over)
+    with client.session_transaction() as sess:
+        sess[A.PENDING_TRANSCRIPTION_KEY] = pending
+
+
+def test_ux2_cancelled_episode_checkout_lands_on_a_get_page(volume_on, ph_events):
+    # Stripe returns with a GET; /parse_rss is POST-only and used to 405.
+    uid = _make_user('ux2-cancel@test.com', limit=600, used=600)
+    client, token = _vol_csrf_client(uid)
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'buy_modal_episode',
+        'minutes': '75', 'price_source': 'episode', 'return_to': '/parse_rss',
+    })
+    assert resp.status_code == 303
+    # The buy modal stashes the pick on checkout (fetchability needs DNS here).
+    _stash_episode(client)
+    assert 'parse_rss' in volume_on['last_create_params']['cancel_url']
+    back = client.get('/billing/cancel?next=/parse_rss', follow_redirects=False)
+    assert back.status_code in (302, 303)
+    assert back.headers['Location'].endswith('/billing/cancelled')
+    page = client.get('/billing/cancelled')
+    assert page.status_code == 200
+    body = page.data.decode()
+    assert "Payment cancelled. You haven&#39;t been charged." in body
+    assert 'Episode Three' in body and 'Show' in body
+    assert 'Norwegian' in body
+    soup = BeautifulSoup(body, 'html.parser')
+    retry = soup.find('form', attrs={'data-testid': 'cancelled-retry'})
+    assert retry is not None and retry['action'].endswith('/billing/checkout')
+    assert retry.find('input', attrs={'name': 'minutes'})['value'] == '75'
+    assert retry.find('input', attrs={'name': 'price_source'})['value'] == 'episode'
+    assert '$1.72' in retry.get_text()
+    back_form = soup.find('form', attrs={'data-testid': 'cancelled-back'})
+    assert back_form['action'].endswith('/parse_rss')
+    assert back_form.find('input', attrs={'name': 'episode_index'})['value'] == '3'
+    # The pick survives the cancel, so a retried payment still auto-starts it.
+    with client.session_transaction() as sess:
+        assert sess[A.PENDING_TRANSCRIPTION_KEY]['title'] == 'Episode Three'
+    returned = [e for e in ph_events.events if e['event'] == 'checkout_returned']
+    assert returned and returned[-1]['properties']['status'] == 'cancelled'
+
+
+def test_ux2_cancel_to_a_get_page_flashes_the_notice(volume_on):
+    uid = _make_user('ux2-pricing@test.com', limit=600, used=600)
+    client = _login(uid)
+    _stash_episode(client)  # a stale pick must not hijack a pricing cancel
+    resp = client.get('/billing/cancel?next=/pricing', follow_redirects=True)
+    assert resp.status_code == 200
+    assert resp.request.path == '/pricing'
+    assert "Payment cancelled. You haven&#39;t been charged." in resp.data.decode()
+
+
+def test_ux2_cancelled_page_without_a_pick_offers_a_way_on(volume_on):
+    uid = _make_user('ux2-nopick@test.com', limit=600, used=600)
+    client = _login(uid)
+    resp = client.get('/billing/cancel?next=/parse_rss', follow_redirects=True)
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "haven&#39;t been charged" in body
+    soup = BeautifulSoup(body, 'html.parser')
+    retry = soup.find('form', attrs={'data-testid': 'cancelled-retry'})
+    assert retry.find('input', attrs={'name': 'minutes'})['value'] == str(pv.VOLUME_DEFAULT_MINUTES)
+    assert 'Find an episode' in body
+
+
+def test_ux4_buy_modal_says_what_the_money_buys(volume_on):
+    uid = _make_user('ux4-modal@test.com', limit=600, used=600)
+    body = _login(uid).get('/pricing').data.decode()
+    assert "' minutes for ' + row.price + ' and transcribe this episode'" in body
+    assert 'Unused minutes stay in your account. Transcription starts automatically after payment.' in body
+    assert '(estimate)' in body
+    assert 'Transcribe this episode (' not in body
+    assert 'Have your own OpenAI API key?' in body
+    assert 'Use my own OpenAI key instead' not in body
+
+
+def test_ux3_pricing_has_no_peer_own_key_plan(volume_on):
+    uid = _make_user('ux3@test.com', limit=600, used=600)
+    body = _login(uid).get('/pricing').data.decode()
+    soup = BeautifulSoup(body, 'html.parser')
+    assert soup.find(id='planKey') is None
+    assert 'Free forever' not in body
+    byok = soup.find(attrs={'data-testid': 'pricing-byok'})
+    assert byok is not None and 'Have your own OpenAI API key?' in byok.get_text()
+    # 13: the refund line matches terms (14 days, unused minutes).
+    assert 'Unused minutes are refundable within 14 days' in body
+    terms = A.app.test_client().get('/terms').data.decode()
+    assert 'within 14 days for unused' in ' '.join(terms.split())
+
+
+def test_ux8_slider_has_quick_picks(volume_on):
+    uid = _make_user('ux8@test.com', limit=600, used=600)
+    soup = BeautifulSoup(_login(uid).get('/pricing').data.decode(), 'html.parser')
+    root = soup.find(id='pricingMinutes').find_parent(attrs={'data-volume-slider': True})
+    picks = [b['data-volume-pick'] for b in root.find_all(attrs={'data-volume-pick': True})]
+    assert picks == ['60', '300', '600', '1200']
+    pressed = root.find(attrs={'data-volume-pick': '300', 'aria-pressed': 'true'})
+    assert pressed is not None and '$5' in pressed.get_text()
+
+
+def test_ux1_faq_never_says_a_key_is_required_when_minutes_can_be_bought(
+        stripe_on, monkeypatch):
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
+    faq = dict(A.faq_entries())
+    assert not faq['Do I need an OpenAI API key?'].startswith('Yes')
+    assert 'optional' in faq['Do I need an OpenAI API key?']
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', True)
+    faq = dict(A.faq_entries())
+    assert faq['Do I need an OpenAI API key?'].startswith('No.')
+
+
+def test_ux1_home_and_help_do_not_require_a_key(stripe_on, monkeypatch):
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
+    client = A.app.test_client()
+    home = client.get('/').data.decode()
+    assert 'add your OpenAI key, and press Transcribe' not in home
+    assert 'Your own OpenAI key</div>' not in home
+    rss = client.get('/rss-help').data.decode()
+    assert 'no API key is needed' in rss
+
+
+def test_ux5_status_hides_openai_cost_unless_own_key(trial_on):
+    from datetime import datetime, timedelta, timezone as tz
+    uid = _make_user('ux5@test.com', limit=600, used=120)
+    start = datetime.now(tz.utc) - timedelta(minutes=30)
+    _completed_task(uid, 'ux5-task', audio_duration=116.0,
+                    started_at=start, completed_at=start + timedelta(seconds=8),
+                    trial_seconds_charged=116, paid_seconds_charged=0)
+    d = _login(uid).get('/status/ux5-task').get_json()
+    assert d['estimated_cost'] is None
+    assert d['minutes_used'] == 2
+    # 14: the clock stopped at completion, not 30 minutes later.
+    assert d['elapsed_seconds'] == 8
+    own = _make_user('ux5-own@test.com', key='sk-own-key-123456789')
+    _completed_task(own, 'ux5-own', audio_duration=600.0)
+    d2 = _login(own).get('/status/ux5-own').get_json()
+    assert d2['estimated_cost'] is not None
+    assert d2['minutes_used'] is None
+
+
+def test_ux11_empty_history_has_a_way_forward(trial_on):
+    uid = _make_user('ux11@test.com', limit=600)
+    soup = BeautifulSoup(_login(uid).get('/history').data.decode(), 'html.parser')
+    empty = soup.find(attrs={'data-testid': 'history-empty'})
+    assert empty is not None
+    link = empty.find('a', string=lambda s: s and 'Find an episode' in s)
+    assert link is not None and link['href'] == '/'
+    assert 'Total estimated cost' not in soup.get_text()
+
+
+def test_ux16_episode_description_is_plain_text_with_breaks():
+    raw = ('Line one<br />Line two &amp; more<p>Para</p>'
+           '<script>alert(1)</script>&lt;img src=x onerror=alert(1)&gt;')
+    out = A.episode_description_text(raw)
+    assert '<' not in out and '>' not in out
+    assert out.startswith('Line one\nLine two & more\nPara')
+    assert A.episode_description_text('') == ''

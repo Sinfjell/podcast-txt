@@ -14,7 +14,7 @@
 
         <div class="stat-row">
             <div>
-                <div class="stat-label">Elapsed</div>
+                <div class="stat-label" id="statElapsedLabel">Elapsed</div>
                 <div class="stat-value" id="statElapsed">—</div>
             </div>
             <div>
@@ -26,7 +26,7 @@
                 <div class="stat-value" id="statDuration">—</div>
             </div>
             <div>
-                <div class="stat-label">Est. cost</div>
+                <div class="stat-label" id="statCostLabel">Minutes used</div>
                 <div class="stat-value" id="statCost">—</div>
             </div>
         </div>
@@ -664,8 +664,19 @@
         el('episodeTitle').textContent = d.episode_title || 'Episode';
         el('episodeMeta').textContent = d.episode_published || '';
         el('statElapsed').textContent = fmtDuration(d.elapsed_seconds);
+        if (isTerminal(d.status)) el('statElapsedLabel').textContent = 'Took';
         el('statDuration').textContent = d.audio_duration ? fmtDuration(d.audio_duration) : '—';
-        el('statCost').textContent = d.estimated_cost ? '$' + d.estimated_cost.toFixed(3) : '—';
+        /* Codex UX review #5: OpenAI dollars only on the user's own key (the
+           server sends estimated_cost only then); otherwise minutes used. */
+        if (d.estimated_cost) {
+            el('statCostLabel').textContent = 'Est. OpenAI charge';
+            el('statCost').textContent = '$' + d.estimated_cost.toFixed(3);
+        } else {
+            el('statCostLabel').textContent = 'Minutes used';
+            el('statCost').textContent = d.minutes_used
+                ? d.minutes_used + ' min'
+                : (d.status === 'completed' ? '—' : 'Counted at the end');
+        }
         el('statEta').textContent =
             (d.status === 'completed') ? 'Done'
             : (d.eta_seconds !== null && d.eta_seconds !== undefined) ? fmtDuration(d.eta_seconds)
@@ -811,12 +822,28 @@
             el('transcriptPane').textContent = transcriptText;
             var bits = [];
             if (d.language) bits.push('Language: ' + d.language);
-            if (d.actual_transcription_time) bits.push('Took ' + d.actual_transcription_time);
+            if (d.actual_transcription_time) bits.push('Completed in ' + d.actual_transcription_time);
             el('completionInfo').textContent = bits.join(' · ');
             var balLine = el('balanceFactLine');
             if (balLine) {
-                if (d.balance_fact && d.balance_fact.line) {
-                    balLine.textContent = d.balance_fact.line;
+                if (d.balance_fact && d.balance_fact.minutes_left != null) {
+                    /* Codex UX review #10: balance in minutes, no guessed
+                       "about N more episodes", and a link instead of a raw URL. */
+                    while (balLine.firstChild) balLine.removeChild(balLine.firstChild);
+                    var left = d.balance_fact.minutes_left;
+                    var txt = left + ' minute' + (left === 1 ? '' : 's') + ' available';
+                    if (d.minutes_used) txt = 'Paid from your minute balance, no extra charge. ' + txt;
+                    balLine.appendChild(document.createTextNode(txt + '. '));
+                    var buyLink = document.createElement('a');
+                    buyLink.href = {{ url_for('pricing')|tojson }};
+                    buyLink.textContent = 'Buy more minutes';
+                    buyLink.addEventListener('click', function (e) {
+                        if (typeof window.openBuyModal === 'function') {
+                            e.preventDefault();
+                            window.openBuyModal({source: 'buy_modal_result_balance'});
+                        }
+                    });
+                    balLine.appendChild(buyLink);
                     show(balLine, true);
                 } else {
                     balLine.textContent = '';
