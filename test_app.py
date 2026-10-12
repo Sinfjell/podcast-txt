@@ -8816,6 +8816,73 @@ def test_transcript_completed_includes_key_source(ph_events, monkeypatch, trial_
     assert 'trial_remaining_min' not in props
 
 
+
+def _run_inline_job(monkeypatch, uid, duration_min=1):
+    import types
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: target and target()))
+    monkeypatch.setattr(A, 'download_audio', lambda *a, **kw: None)
+    monkeypatch.setattr(A, 'transcribe_audio', lambda *a, **kw: None)
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+    # Sandboxed DNS can map example.com to a reserved range; not under test.
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda *a, **kw: True)
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user,
+            {'title': 'Ep', 'audio_url': 'https://example.com/ep.mp3',
+             'duration_min': duration_min},
+        )
+    assert status == 200 and 'task_id' in payload
+
+
+def _funding_of(ph_events, event):
+    evs = [e for e in ph_events.events if e['event'] == event]
+    assert len(evs) == 1
+    p = evs[0]['properties']
+    return p['funding'], p['charged_trial_seconds'], p['charged_paid_seconds']
+
+
+def test_funding_props_paid_after_trial_exhausted(ph_events, monkeypatch, trial_on):
+    """Trial used up + bought pack: key_source stays 'trial' (platform key) but
+    funding must say the job ran on PAID seconds (user 166 bug)."""
+    uid = _make_user('fundpaid@test.com', limit=60 * 60, used=60 * 60)
+    _set_paid(uid, 300 * 60)
+    _run_inline_job(monkeypatch, uid, duration_min=1)
+    for ev in ('transcript_started', 'transcript_completed'):
+        funding, trial_s, paid_s = _funding_of(ph_events, ev)
+        assert funding == 'paid'
+        assert trial_s == 0
+        assert paid_s > 0
+
+
+def test_funding_props_trial_user(ph_events, monkeypatch, trial_on):
+    uid = _make_user('fundtrial@test.com', limit=60 * 60, used=0)
+    _run_inline_job(monkeypatch, uid, duration_min=1)
+    for ev in ('transcript_started', 'transcript_completed'):
+        funding, trial_s, paid_s = _funding_of(ph_events, ev)
+        assert funding == 'trial'
+        assert trial_s > 0 and paid_s == 0
+
+
+def test_funding_props_mixed(ph_events, monkeypatch, trial_on):
+    uid = _make_user('fundmixed@test.com', limit=60 * 60, used=59 * 60)
+    _set_paid(uid, 300 * 60)
+    _run_inline_job(monkeypatch, uid, duration_min=5)
+    funding, trial_s, paid_s = _funding_of(ph_events, 'transcript_started')
+    assert funding == 'mixed'
+    assert trial_s > 0 and paid_s > 0
+
+
+def test_funding_props_own_key(ph_events, monkeypatch, trial_on):
+    uid = _make_user('fundown@test.com', key='sk-' + 'q' * 40)
+    _run_inline_job(monkeypatch, uid, duration_min=1)
+    for ev in ('transcript_started', 'transcript_completed'):
+        assert _funding_of(ph_events, ev) == ('own_key', 0, 0)
+
+
 def test_balance_analytics_props_trial_user(trial_on):
     uid = _make_user('balprops@test.com', limit=120 * 60, used=45 * 60)
     with A.app.app_context():

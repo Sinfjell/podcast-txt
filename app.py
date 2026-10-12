@@ -1350,6 +1350,33 @@ def _balance_analytics_props(user_id):
         return {}
 
 
+def _funding_analytics_props(key_source, trial_seconds, paid_seconds):
+    """What actually funded a job, for analytics.
+
+    ``key_source`` says which OpenAI key runs the job ('trial' = platform key,
+    used for BOTH free-trial and paid credit-pack minutes), so it cannot tell a
+    paying customer from a trial user. These props come from the seconds
+    really reserved/charged on the task row.
+    """
+    trial_s = int(trial_seconds or 0)
+    paid_s = int(paid_seconds or 0)
+    if key_source == 'user':
+        funding = 'own_key'
+    elif trial_s and paid_s:
+        funding = 'mixed'
+    elif paid_s:
+        funding = 'paid'
+    elif trial_s:
+        funding = 'trial'
+    else:
+        funding = 'none'
+    return {
+        'funding': funding,
+        'charged_trial_seconds': trial_s,
+        'charged_paid_seconds': paid_s,
+    }
+
+
 def trial_reserve(user_id, seconds, *, budget_day=None):
     """Atomically reserve `seconds` of allowance. True only if granted.
 
@@ -6584,6 +6611,9 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
                 platform_release(user_id, trial_charge or 0, paid_charge or 0)
             raise
 
+        ph_props.update(_funding_analytics_props(
+            key_source, trial_charge, paid_charge))
+
         parsed_url = urlparse(meta['audio_url'])
         audio_filename = f"temp_audio_{task_id}" + (os.path.splitext(parsed_url.path)[1] or '.mp3')
         source_url = meta['audio_url']
@@ -6712,6 +6742,9 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
                                 done_props['nth_transcript'] = (
                                     _completed_transcript_count(user_id))
                                 done_props.update(_balance_analytics_props(user_id))
+                                done_props.update(_funding_analytics_props(
+                                    key_source, finished.trial_seconds_charged,
+                                    finished.paid_seconds_charged))
                                 meta = task_partial_meta(finished)
                                 if meta:
                                     n_min, m_min = partial_minutes_pair(meta)
@@ -7109,6 +7142,8 @@ def _ph_props_for_task(task, key_source, source='resume'):
         'podcast_name': task.podcast_name or None,
         'nth_transcript': _completed_transcript_count(task.user_id) + 1,
         'resumed': True,
+        **_funding_analytics_props(
+            key_source, task.trial_seconds_charged, task.paid_seconds_charged),
     }
 
 
@@ -7242,6 +7277,9 @@ def _spawn_worker_for_existing_task(task):
                             done_props['nth_transcript'] = (
                                 _completed_transcript_count(user_id))
                             done_props.update(_balance_analytics_props(user_id))
+                            done_props.update(_funding_analytics_props(
+                                key_source, finished.trial_seconds_charged,
+                                finished.paid_seconds_charged))
                         product_analytics.capture(
                             'transcript_completed', user_id, done_props)
                         if finished is not None:
