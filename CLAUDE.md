@@ -119,3 +119,20 @@ runs Python 3.12.
 
 Money-path changes are expected to come with a mutation check: revert the fix,
 confirm the suite goes red. A test that stays green without the fix is not a test.
+
+### Cloud agent sessions
+
+`ops/cloud-setup.sh` builds `.venv` (requirements + dev) and checks ffmpeg. The
+SessionStart hook in `.claude/settings.json` runs it in Claude Code cloud
+sessions and puts `.venv` on PATH, so `python -m pytest` works straight away.
+`conftest.py` lets the suite pass in sandboxes without DNS; it is a no-op
+where DNS works. Run the app with
+`PODSKRIFT_ENV=dev DATABASE_URL=sqlite:////tmp/podskrift-dev.db python -m flask --app app run --port 5002`.
+
+Reading what happened on the servers (read-only, use freely):
+- **Errors and app logs:** Sentry org `nettsmed` (region de.sentry.io), issues
+  prefixed `PODSKRIFT-`. Filter `environment:production` or
+  `environment:staging`. Log records go to Sentry Logs at `SENTRY_LOGS_LEVEL`.
+  `print()` output does not; it stays in journald on the host.
+- **Product analytics, replays, frontend exceptions:** PostHog EU project
+  283916 (production only; filter out the internal cohort 251446).

@@ -5365,7 +5365,11 @@ def sentry_events():
                 self.events.append(event)
 
     transport = Capture()
-    assert observability.init_sentry(dsn='https://public@sentry.invalid/1', transport=transport)
+    # Events only. Sentry Logs batch on a background thread, and several tests
+    # replace threading.Thread with a synchronous stand-in, which would spin
+    # the batcher's flush loop forever. Logs have their own fixture below.
+    assert observability.init_sentry(dsn='https://public@sentry.invalid/1',
+                                     transport=transport, enable_logs=False)
     yield transport.events
     sentry_sdk.get_client().close()
     sentry_sdk.init()  # back to a disabled client for the rest of the suite
@@ -5405,6 +5409,89 @@ def test_sentry_stays_uninitialised_outside_production_even_with_dsn(monkeypatch
     monkeypatch.setenv('SENTRY_DSN', 'https://public@sentry.invalid/99')
     assert runtime_env.is_production() is False
     assert observability.init_sentry() is False
+
+
+def test_sentry_reports_from_staging_tagged_as_staging(monkeypatch):
+    """Staging reports too, so an agent can read its errors -- under its own
+    environment, never mixed into production's issues."""
+    import sentry_sdk
+    import observability
+
+    monkeypatch.setenv('PODSKRIFT_ENV', 'staging')
+    monkeypatch.setenv('SENTRY_DSN', 'https://public@sentry.invalid/99')
+    monkeypatch.delenv('SENTRY_ENVIRONMENT', raising=False)
+    try:
+        assert observability.init_sentry(transport=lambda envelope: None) is True
+        assert sentry_sdk.get_client().options['environment'] == 'staging'
+    finally:
+        sentry_sdk.get_client().close()
+        sentry_sdk.init()
+
+
+@pytest.fixture
+def sentry_logs(monkeypatch):
+    """Reporting on, keeping Sentry Logs instead of sending them."""
+    import logging
+    import sentry_sdk
+    from sentry_sdk.transport import Transport
+    import observability
+
+    class Capture(Transport):
+        def __init__(self):
+            super().__init__()
+            self.logs = []
+
+        def capture_envelope(self, envelope):
+            for item in envelope.items:
+                if item.type == 'log':
+                    self.logs.extend(item.payload.json['items'])
+
+    monkeypatch.setenv('SENTRY_LOGS_LEVEL', 'INFO')
+    transport = Capture()
+    assert observability.init_sentry(dsn='https://public@sentry.invalid/1', transport=transport)
+    logger = logging.getLogger('podskrift.test-logs')
+    logger.setLevel(logging.INFO)
+
+    def flush():
+        sentry_sdk.get_client().flush()
+        return transport.logs
+
+    yield logger, flush
+    sentry_sdk.get_client().close()
+    sentry_sdk.init()
+
+
+def test_app_logs_reach_sentry_logs_scrubbed(sentry_logs):
+    import logging
+
+    logger, flush = sentry_logs
+    logger.info('fetching https://feeds.example.com/ep.mp3?token=s3cret for a@b.no '
+                'with sk-proj-abcdefghijklmnop')
+    logging.getLogger('openai._base_client').info('Incorrect wording hunter2-password')
+    logger.warning('transcription failed: %s',
+                   "Error code: 401 - Incorrect API key: correct-horse-battery")
+    logs = flush()
+    text = repr(logs)
+    assert any('fetching' in str(log.get('body')) for log in logs)
+    assert 's3cret' not in text
+    assert 'a@b.no' not in text
+    assert 'sk-proj-abcdefghijklmnop' not in text
+    assert 'hunter2' not in text
+    assert 'correct-horse' not in text
+
+
+def test_sentry_logs_can_be_turned_off(monkeypatch):
+    import sentry_sdk
+    import observability
+
+    monkeypatch.setenv('SENTRY_LOGS_LEVEL', 'off')
+    try:
+        assert observability.init_sentry(dsn='https://public@sentry.invalid/1',
+                                          transport=lambda envelope: None)
+        assert not sentry_sdk.get_client().options.get('enable_logs')
+    finally:
+        sentry_sdk.get_client().close()
+        sentry_sdk.init()
 
 
 def test_an_openai_error_never_ships_the_key_it_echoed(sentry_events):
@@ -8438,7 +8525,7 @@ def test_production_markers_match_live_host_layout(monkeypatch):
 
     monkeypatch.delenv('PODSKRIFT_ENV', raising=False)
     for key in ('CI', 'GITHUB_ACTIONS', 'CURSOR_AGENT', 'CURSOR_CLOUD_AGENT',
-                'PYTEST_CURRENT_TEST', 'AGENT_TRANSCRIPTS',
+                'CLAUDE_CODE_REMOTE', 'PYTEST_CURRENT_TEST', 'AGENT_TRANSCRIPTS',
                 'CURSOR_CONVERSATION_ID', 'CURSOR_TRACE_ID', 'CURSOR_REQUEST_ID'):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv(
@@ -8449,6 +8536,25 @@ def test_production_markers_match_live_host_layout(monkeypatch):
     assert runtime_env._production_markers() is True
     assert runtime_env.is_production() is True
     assert runtime_env.resolve_environment() == 'production'
+
+
+def test_a_claude_cloud_session_is_never_production(monkeypatch):
+    """A cloud agent session with a copied prod .env must not report to the
+    live Sentry/PostHog projects."""
+    import runtime_env
+
+    monkeypatch.delenv('PODSKRIFT_ENV', raising=False)
+    monkeypatch.delenv('PYTEST_CURRENT_TEST', raising=False)
+    monkeypatch.delenv('CI', raising=False)
+    monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
+    monkeypatch.setenv(
+        'DATABASE_URL',
+        'sqlite:////var/www/vhosts/podskrift.nettsmed.dev/app/data/podcast.db',
+    )
+    monkeypatch.setenv('PUBLIC_BASE_URL', 'https://podskrift.com')
+    monkeypatch.setenv('CLAUDE_CODE_REMOTE', 'true')
+    assert runtime_env.resolve_environment() == 'dev'
+    assert runtime_env.is_production() is False
 
 
 def test_podskrift_env_override_wins(monkeypatch):
