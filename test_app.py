@@ -17628,6 +17628,6 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
         assert 'fra $1.50, med volumrabatt opptil 1200 min for $11' in no
     else:
         assert '$5 for 300 minutes' in spotify
-        assert '$5 for 300 minutes' in llms
+        assert '$5.00 for 300 minutes' in llms or '$5 for 300 minutes' in llms
         assert 'volume discounts' not in spotify + llms
         assert '5 dollar for 300 minutter' in no

@@ -9513,8 +9513,7 @@ def faq_entries():
     if trial_available() and minutes > 0:
         hours_bit = (f' (about {minutes // 60} hours)' if minutes >= 120 else '')
         pack_bit = (
-            f' Or buy a one-time pack: {DEFAULT_PACK_PRICE} for '
-            f'{CREDIT_PACK_MINUTES} minutes ({CREDIT_PACK_MINUTES // 60} hours), '
+            f' Or buy minutes once: {_faq_pack_phrase()}, '
             f'VAT included, paid via Stripe — no subscription.'
             if stripe_checkout_enabled() else ''
         )
@@ -9530,8 +9529,7 @@ def faq_entries():
                     'you spend at OpenAI.')
     else:
         pack_bit = (
-            f' Or buy a one-time pack: {DEFAULT_PACK_PRICE} for '
-            f'{CREDIT_PACK_MINUTES} minutes ({CREDIT_PACK_MINUTES // 60} hours), '
+            f' Or buy minutes once: {_faq_pack_phrase()}, '
             f'VAT included — no subscription.'
             if stripe_checkout_enabled() else ''
         )
@@ -9865,6 +9863,14 @@ def inject_landing_footer_links():
     return {'landing_footer_links': [
         (endpoint, landing_pages_mod.SHORT_LABELS[endpoint])
         for endpoint, _ in landing_pages_mod.PAGES]}
+
+
+def _faq_pack_phrase():
+    """Pack price for FAQ / llms.txt copy, following VOLUME_PRICING_ENABLED."""
+    if VOLUME_PRICING_ENABLED:
+        return landing_pages_mod.pack_phrase(_landing_pack())
+    return (f'{DEFAULT_PACK_PRICE} for {CREDIT_PACK_MINUTES} minutes '
+            f'({CREDIT_PACK_MINUTES // 60} hours)')
 
 
 def _landing_pack():
