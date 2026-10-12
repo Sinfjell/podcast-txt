@@ -125,11 +125,11 @@
                   {% if show_openai_cost %}
                   · {{ episode.duration_min }} min{% if episode.estimated_cost %} · ~${{ "%.3f"|format(episode.estimated_cost) }}{% endif %}
                   {% else %}
-                  · Uses ~{{ episode.duration_min|round|int }} min
+                  · About {{ episode.duration_min|round|int }} min
                   {% endif %}
                 {% endif %}
                 {% if episode.needs_own_key %}
-                · <span class="badge badge-needs-key">{% if stripe_buy_enabled %}Needs key or pack{% else %}Needs own key{% endif %} · {{ episode.duration_min|round|int }} min</span>
+                · <span class="badge badge-needs-key">{% if stripe_buy_enabled %}Needs minutes{% else %}Needs own key{% endif %} · {{ episode.duration_min|round|int }} min</span>
                 {% endif %}
             </div>
             {% if episode.description %}
@@ -158,7 +158,7 @@
                 <span class="form-hint" style="display: block; margin: 4px 0 2px;">{{ credit_pack_payment_hint }}</span>
                 <span style="display: block; margin: 0 0 8px;">{{ credit_pack_subline }}</span>
                 {% endif %}
-                <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="episode_selection">Add your own OpenAI key</a>
+                <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="episode_selection">Have your own OpenAI API key?</a>
             </p>
         </div>
     </div>
@@ -249,7 +249,7 @@ document.addEventListener('DOMContentLoaded', function() {
     var BUY_LABEL = {{ credit_pack_label|tojson }};
     var BUY_URL = {{ url_for('billing_checkout')|tojson }};
     var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
-    var BADGE_PREFIX = STRIPE_BUY ? 'Needs key or pack' : 'Needs own key';
+    var BADGE_PREFIX = STRIPE_BUY ? 'Needs minutes' : 'Needs own key';
     var SHOW_OPENAI_COST = {{ (show_openai_cost|default(false))|tojson }};
     var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
     var FEED_ARTWORK = {{ artwork|tojson }};
@@ -311,13 +311,13 @@ document.addEventListener('DOMContentLoaded', function() {
         var left = minutesLeft();
         if (!IS_AUTHENTICATED) {
             if (FREE_MIN > 0) {
-                return 'This episode uses ~' + n + ' min · ' + FREE_MIN + ' free after signup';
+                return 'About ' + n + ' min (estimate) · ' + FREE_MIN + ' free after signup';
             }
             // The price is on the button ("Transcribe for $X"); not twice.
-            return 'This episode uses ~' + n + ' min';
+            return 'About ' + n + ' min (estimate)';
         }
         if (left == null) return '';
-        return 'This episode uses ~' + n + ' min · you have ' + left + ' left';
+        return 'About ' + n + ' min (estimate) · you have ' + left + ' left';
     }
 
     function returnToForCheckout() {
@@ -402,7 +402,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         var keyLink = document.createElement('a');
         keyLink.href = SETTINGS_OPENAI;
-        keyLink.textContent = 'Add OpenAI key →';
+        keyLink.textContent = 'Have your own OpenAI API key?';
         keyLink.className = 'ds-link-button';
         keyLink.setAttribute('data-paywall-byok', 'episode_selection_error');
         actions.appendChild(keyLink);
@@ -541,7 +541,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 metaText += ' \u00B7 ' + ep.duration_min + ' min';
                 if (ep.estimated_cost) metaText += ' \u00B7 ~$' + ep.estimated_cost.toFixed(3);
             } else {
-                metaText += ' \u00B7 Uses ~' + Math.round(ep.duration_min) + ' min';
+                metaText += ' \u00B7 About ' + Math.round(ep.duration_min) + ' min';
             }
         }
         meta.textContent = metaText;

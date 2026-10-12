@@ -401,7 +401,8 @@
    table: pricing_volume.price_table() — the server stays the price authority. #}
 {# ------------------------------------------------------------------------- #}
 {% macro volume_slider(id, table, default=300, form_id='', surface='pricing',
-                       min=60, max=1200, step=15, passive=false, attrs='', class='') -%}
+                       min=60, max=1200, step=15, passive=false, picks=(60, 300, 600, 1200),
+                       attrs='', class='') -%}
 {%- set q = namespace(row=table[0] if table else none) -%}
 {%- for row in table if row.minutes == default %}{% set q.row = row %}{% endfor -%}
 <div class="ds-volume{% if class %} {{ class }}{% endif %}" data-volume-slider
@@ -417,10 +418,25 @@
          min="{{ min }}" max="{{ max }}" step="{{ step }}" value="{{ default }}"
          aria-valuetext="{{ default }} minutes for {{ q.row.price if q.row else '' }}">
   <div class="ds-volume__scale" aria-hidden="true"><span>{{ min }} min</span><span>{{ max }} min</span></div>
+  {#- Quick picks (Codex UX review #8): the anchors as one-tap choices, so the
+      discount is visible without dragging. Same table, same server pricing. -#}
+  {%- set pick_rows = table|selectattr('minutes', 'in', picks)|list -%}
+  {%- if pick_rows %}
+  <div class="ds-volume__picks" role="group" aria-label="Quick picks">
+    {%- for row in pick_rows %}
+    <button type="button" class="ds-volume__pick" data-volume-pick="{{ row.minutes }}"
+            aria-pressed="{{ 'true' if q.row and row.minutes == q.row.minutes else 'false' }}">
+      <span class="ds-volume__pick-min">{{ row.minutes }} min</span>
+      <span class="ds-volume__pick-price">{{ row.price }}</span>
+    </button>
+    {%- endfor %}
+  </div>
+  {%- endif %}
   <div class="ds-volume__meta" aria-live="polite">
     {{ chip('Launch price') }}
     <span data-volume-rate>{% if q.row %}{{ '%.2f'|format(q.row.cents_per_minute) }}¢ per minute{% endif %}</span>
-    <span data-volume-save>{% if q.row and q.row.savings_percent %}You save {{ q.row.savings_percent }}% per minute{% endif %}</span>
+    <span data-volume-save>{% if q.row and q.row.savings_percent %}{{ q.row.savings_percent }}% less per minute than {{ min }} min{% endif %}</span>
   </div>
+  <p class="ds-volume__nudge" data-volume-nudge></p>
 </div>
 {%- endmacro %}

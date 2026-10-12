@@ -94,7 +94,7 @@
             <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
         </form>
         {% endif %}
-        <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_banner">Add your own OpenAI key</a>
+        <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_banner">Have your own OpenAI API key?</a>
         {% elif trial.exhausted %}
         Your free trial is used up.
         {% if trial.stripe_buy %}
@@ -106,7 +106,7 @@
         </form>
         <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
         {% endif %}
-        <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_banner">Add your own OpenAI key</a>
+        <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_banner">Have your own OpenAI API key?</a>
         {% elif trial.low_balance %}
         Running low — <strong>{{ trial.total_minutes }} minutes</strong> left.
         {% if trial.stripe_buy %}
@@ -118,7 +118,7 @@
         </form>
         <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
         {% endif %}
-        <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_low_balance">Add your own OpenAI key</a>
+        <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_low_balance">Have your own OpenAI API key?</a>
         {% else %}
         {% if trial.remaining_minutes > 0 %}
         Free trial: <strong>{{ trial.remaining_minutes }} minutes</strong> left on our key.
@@ -138,8 +138,7 @@
         <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
         or
         {% endif %}
-        <a href="{{ url_for('settings') }}#openai">add your own key</a>
-        — Podskrift stays free; OpenAI bills you for Whisper.
+        <a href="{{ url_for('settings') }}#openai">use your own OpenAI API key</a> (optional).
         {% endif %}
     </span>
 </div>
@@ -220,12 +219,9 @@
                 <summary>How your free minutes work</summary>
                 <p class="form-hint hp-fine">
                     The free trial covers {{ trial.limit_minutes }} minutes of audio in total{% if trial.limit_minutes >= 120 %} (about {{ trial.limit_minutes // 60 }} hours){% endif %}{% if not trial.exhausted %} — {{ trial.remaining_minutes }} left{% endif %}.
-                    Longer episodes get a free preview of your remaining minutes; buy a pack or add your own key to finish.
+                    Longer episodes get a free preview of your remaining minutes; buy minutes to finish.
                     {% if stripe_buy_enabled %}
                     One-time pack: ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (VAT included).
-                    A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
-                    {% else %}
-                    A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
                     {% endif %}
                     <a href="{{ url_for('pricing') }}">See pricing</a>.
                 </p>
@@ -254,12 +250,10 @@
     <p class="form-hint hp-fine">
         First {{ trial_minutes }} minutes of audio free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}, with no card.
         The free trial covers {{ trial_minutes }} minutes of audio in total{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.
-        Longer episodes still start free — you get the first {{ trial_minutes }} minutes, then buy minutes or add your own key to finish.
+        Longer episodes still start free — you get the first {{ trial_minutes }} minutes, then buy minutes to finish.
+        No card or API key needed.
         {% if stripe_buy_enabled %}
         One-time pack: ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (VAT included).
-        A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
-        {% else %}
-        A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
         {% endif %}
         <a href="{{ url_for('pricing') }}">See pricing</a>.
     </p>
@@ -279,7 +273,9 @@
             <h3>Transcribe</h3>
             <p>
                 {% if trial_minutes %}
-                Create a free account and press Transcribe. Your first {{ trial_minutes }} minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} run on our key — including a free preview of longer episodes.
+                Create your free account and start transcribing. Your first {{ trial_minutes }} minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} are free, including a preview of longer episodes. No card or API key required.
+                {% elif stripe_buy_enabled %}
+                Create your free account, pick an episode and buy minutes{% if volume_pricing_enabled and volume_price_table %} from {{ volume_price_table[0].price }}{% endif %}. No API key required.
                 {% else %}
                 Create a free account, add your OpenAI key, and press Transcribe.
                 {% endif %}
@@ -327,7 +323,8 @@
    used: anonymous visitors see the advertised grant; logged-in users only see it
    while their own trial is neither used up nor replaced by their own key. #}
 {% set show_trial_card = (trial_minutes and not current_user.is_authenticated)
-    or (current_user.is_authenticated and trial and not trial.on_own_key and not trial.exhausted) %}
+    or (current_user.is_authenticated and trial and not trial.on_own_key and not trial.exhausted
+        and (trial.limit_minutes or 0) > 0 and (trial.remaining_minutes or 0) > 0) %}
 <section class="hp-section" id="pricing" aria-labelledby="pricingHeading">
     <div>
         <h2 id="pricingHeading">Pay for minutes, not months</h2>
@@ -336,11 +333,11 @@
     <div class="hp-plans">
         {% if show_trial_card %}
         <div class="hp-plan">
-            <div class="hp-plan-label">Free trial</div>
+            <div class="hp-plan-label">{% if current_user.is_authenticated %}Your free minutes{% else %}Free to start{% endif %}</div>
             <div class="hp-plan-figure">
-                {% if current_user.is_authenticated %}{{ trial.limit_minutes }}{% else %}{{ trial_minutes }}{% endif %} minutes
+                {% if current_user.is_authenticated %}{{ trial.remaining_minutes }} minutes left{% else %}{{ trial_minutes }} free minutes{% endif %}
             </div>
-            <p>No card, no OpenAI key needed to start. Longer episodes get the free minutes as a preview.</p>
+            <p>{% if current_user.is_authenticated %}Longer episodes get your free minutes as a preview.{% else %}Start with {{ trial_minutes }} free minutes. No card or API key needed.{% endif %}</p>
         </div>
         {% endif %}
         {% if stripe_buy_enabled %}
@@ -359,20 +356,17 @@
             {% endif %}
         </div>
         {% endif %}
-        <div class="hp-plan">
-            <div class="hp-plan-label">Your own OpenAI key</div>
-            <div class="hp-plan-figure">About ${{ openai_hourly_cost }} per hour</div>
-            <p>Paid to OpenAI directly at their rate. Nothing is metered by us.</p>
-        </div>
     </div>
+    <p class="form-hint ds-mt-3" data-testid="home-byok-link">
+        Have your own OpenAI API key? <a href="{{ url_for('settings') if current_user.is_authenticated else url_for('register') }}{% if current_user.is_authenticated %}#openai{% endif %}">Use it in Settings</a>. OpenAI bills you directly.
+    </p>
     {% if not current_user.is_authenticated %}
     <div class="hp-cta">
         <p>
             {% if trial_minutes %}
-            Free account, {{ trial_minutes }} free minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.
+            Start with {{ trial_minutes }} free minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}. No card or API key needed.
             {% if stripe_buy_enabled %}
-            After that, buy ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (one-time, VAT included),
-            or add your own OpenAI key (~${{ openai_hourly_cost }}/h billed by OpenAI). No subscription.
+            After that, buy ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (one-time, VAT included). No subscription.
             {% else %}
             After that, add your own OpenAI key
             and pay OpenAI directly — about ${{ openai_hourly_cost }} per hour of audio. No subscription.
@@ -380,8 +374,7 @@
             {% else %}
             Free account — no Podskrift subscription.
             {% if stripe_buy_enabled %}
-            Buy ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (one-time, VAT included),
-            or add your own OpenAI API key and pay OpenAI for Whisper.
+            Buy ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (one-time, VAT included). No API key required.
             {% else %}
             Add your own OpenAI API key and you only pay OpenAI for Whisper.
             {% endif %}

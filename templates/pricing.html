@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Pricing — Podskrift{% endblock %}
-{% block meta_description %}Free trial{% if trial_minutes %} ({{ trial_minutes }} min){% endif %}, then a one-time ${{ credit_pack_price_usd }} pack for {{ credit_pack_minutes }} minutes — or bring your own OpenAI key. No subscription.{% endblock %}
+{% block meta_description %}Free trial{% if trial_minutes %} ({{ trial_minutes }} min){% endif %}, then a one-time ${{ credit_pack_price_usd }} pack for {{ credit_pack_minutes }} minutes — optional own OpenAI key. No subscription.{% endblock %}
 {% block og_title %}Pricing — Podskrift{% endblock %}
 {% block og_description %}Free trial, one-time credit pack, or your own OpenAI key. No subscription.{% endblock %}
 
@@ -29,7 +29,7 @@
 <div class="pr-wrap">
     <h1 class="pr-title">Pay for minutes, not months</h1>
     <p class="pr-lead">
-        Transcribe podcasts without a subscription. Start free, buy minutes once, or use your own OpenAI key forever.
+        {% if trial_minutes %}Start with {{ trial_minutes }} free minutes. Buy more when you need them — no subscription.{% else %}Buy minutes once, when you need them. No subscription, and minutes never expire.{% endif %}
     </p>
 
     <div class="pr-plans">
@@ -38,8 +38,8 @@
             <h2 id="planTrial">Free trial</h2>
             <div class="pr-figure">{{ trial_minutes }} minutes <small>free</small></div>
             <p>
-                No card required. Runs on our OpenAI key until the trial is used up.
-                Longer episodes get the first {{ trial_minutes }} minutes free as a preview — buy a pack or add your own key to finish the rest.
+                No card or API key required.
+                Longer episodes get the first {{ trial_minutes }} minutes free as a preview — buy minutes to finish the rest.
             </p>
         </section>
         {% endif %}
@@ -86,6 +86,7 @@
                 </form>
                 <p class="form-hint">{{ credit_pack_payment_hint }}</p>
                 <p class="form-hint">{{ credit_pack_subline }}</p>
+                <p class="form-hint" data-testid="refund-line">Unused minutes are refundable within 14 days. <a href="{{ url_for('terms') }}#refunds">See terms</a>.</p>
                 {% elif stripe_configured %}
                 <a href="{{ url_for('register') }}" class="btn btn-primary">Create free account</a>
                 <p class="form-hint">
@@ -102,23 +103,14 @@
                 </p>
             </div>
         </section>
-
-        <section class="pr-plan" aria-labelledby="planKey">
-            <h2 id="planKey">Your own OpenAI key</h2>
-            <div class="pr-figure">Free forever <small>on Podskrift</small></div>
-            <p>
-                Add your key in Settings. OpenAI bills you directly — about
-                ${{ openai_hourly_cost }}/h of audio. Nothing is metered against the trial or a pack.
-            </p>
-            <div class="pr-action">
-                {% if current_user.is_authenticated %}
-                <a href="{{ url_for('settings') }}#openai" class="btn btn-secondary">Add OpenAI key</a>
-                {% else %}
-                <a href="{{ url_for('register') }}" class="btn btn-secondary">Create free account</a>
-                {% endif %}
-            </div>
-        </section>
     </div>
+
+    {# Codex UX review #3: own key is an option for those who want it, not a
+       peer plan competing with buying minutes. #}
+    <details class="form-hint ds-mt-6 ds-max-ch-40" data-testid="pricing-byok">
+        <summary>Have your own OpenAI API key? <a href="{{ url_for('settings') ~ '#openai' if current_user.is_authenticated else url_for('register') }}">Use it in Settings</a>.</summary>
+        <p class="ds-mt-2">OpenAI bills you directly, about ${{ openai_hourly_cost }} per hour of audio. Your Podskrift minute balance is not used while your key is active.</p>
+    </details>
 
     <p class="form-hint" style="margin-top: 36px; max-width: 36em;">
         Prefer to ask ChatGPT or Claude instead of opening the website?

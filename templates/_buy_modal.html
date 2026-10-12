@@ -96,8 +96,9 @@
         {% endif %}
         <p class="buy-modal-foot">{{ credit_pack_payment_hint }}</p>
         <p class="buy-modal-foot">One-time · VAT included · minutes never expire · Stripe</p>
+        <p class="buy-modal-foot" data-testid="buy-modal-refund">Unused minutes are refundable within 14 days. <a href="{{ url_for('terms') }}#refunds">See terms</a></p>
         <p class="buy-modal-alt">
-            <a href="{{ url_for('settings') }}#openai">Use my own OpenAI key instead</a>
+            <a href="{{ url_for('settings') }}#openai">Have your own OpenAI API key?</a>
         </p>
     </div>
 </div>
@@ -167,10 +168,12 @@
             api.set(qty, false);
             minutesIn.value = String(qty);
             sourceIn.value = 'episode';
-            submit.textContent = 'Transcribe this episode (' + needed + ' min) for ' + row.price;
-            titleEl.textContent = 'This episode needs ' + needed + ' min, you have ' + (left || 0) + ' left';
-            var line = 'Adds ' + qty + ' min to your balance. Launch price, one-time, minutes never expire.';
-            if (epTitle) line = '"' + epTitle.replace(/"/g, '') + '" — ' + line;
+            /* Codex UX review #4: say what the money buys (minutes) and that
+               the episode starts by itself, not "$1.50 for this episode". */
+            submit.textContent = 'Buy ' + qty + ' minutes for ' + row.price + ' and transcribe this episode';
+            titleEl.textContent = 'This episode needs about ' + needed + ' min (estimate), you have ' + (left || 0) + ' left';
+            var line = 'Unused minutes stay in your account. Transcription starts automatically after payment.';
+            if (epTitle) line = '"' + epTitle.replace(/"/g, '') + '". ' + line;
             subEl.textContent = line;
             more.open = false;
             document.getElementById('buyModalMoreLabel').textContent = 'Choose a different amount';

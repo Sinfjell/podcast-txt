@@ -366,6 +366,38 @@ def safe_next_url(candidate, default=None):
     return safe
 
 
+_DESC_BREAK_RE = re.compile(r'<\s*/?\s*(?:br|p|div|li|h[1-6])\b[^>]*>', re.I)
+_DESC_TAG_RE = re.compile(r'<[^>]*>')
+
+
+def episode_description_text(raw):
+    """Feed HTML to plain text with line breaks (Codex UX review #16).
+
+    Feeds put ``<br />`` and ``<p>`` in descriptions; autoescaping showed them
+    literally. Breaks become newlines, every other tag is dropped, entities are
+    decoded once, and the result is still escaped by Jinja/textContent, so no
+    feed markup ever reaches the page as HTML. The episode list renders it
+    with ``white-space: pre-line``.
+    """
+    if not raw:
+        return ''
+    text = _DESC_BREAK_RE.sub('\n', str(raw))
+    text = _DESC_TAG_RE.sub('', text)
+    text = html_lib.unescape(text)
+    # A decoded "&lt;b&gt;" is text now; strip any tag it spelled out too.
+    text = _DESC_TAG_RE.sub('', text)
+    lines = [' '.join(line.split()) for line in text.splitlines()]
+    out, blank = [], False
+    for line in lines:
+        if line:
+            out.append(line)
+            blank = False
+        elif out and not blank:
+            out.append('')
+            blank = True
+    return '\n'.join(out).strip()
+
+
 def safe_return_to(candidate):
     """Relative same-origin path for post-checkout return, or None if unsafe.
 
@@ -3584,7 +3616,7 @@ def get_episodes_from_rss(rss_url, *, timeout=None):
             if not audio_url:
                 continue
 
-            desc = entry.get('description', '')
+            desc = episode_description_text(entry.get('description', ''))
             duration_secs = _parse_duration(entry.get('itunes_duration', ''))
             duration_min = duration_secs / 60 if duration_secs else None
             artwork = feed_image
@@ -5372,6 +5404,9 @@ def billing_checkout():
                 },
             }
 
+    session[BILLING_LAST_CHECKOUT_KEY] = {
+        'minutes': int(buy_minutes), 'price_source': price_source}
+    session.modified = True
     meta = {
         'user_id': str(current_user.id),
         'minutes': str(buy_minutes),
@@ -5488,14 +5523,73 @@ def billing_checkout():
     return redirect(checkout_session.url, code=303)
 
 
+#: Shown wherever a cancelled Checkout lands. Stripe only hits cancel_url when
+#: the buyer leaves Checkout, so nothing was charged.
+CHECKOUT_CANCELLED_MESSAGE = "Payment cancelled. You haven't been charged."
+
+#: Pages that only answer POST. Stripe sends the buyer back with a GET, so a
+#: cancel that would land on one of these goes to /billing/cancelled instead
+#: of a 405 (Codex UX review #2: episode checkout -> /parse_rss).
+_POST_ONLY_RETURN_PATHS = frozenset({'/parse_rss', '/start_transcription'})
+
+#: What the last Checkout was for, so "Try payment again" offers the same buy.
+BILLING_LAST_CHECKOUT_KEY = 'billing_last_checkout'
+
+
 @app.route('/billing/cancel')
 @login_required
 def billing_cancel():
-    """Stripe cancel_url target: record checkout_returned then redirect."""
+    """Stripe cancel_url target: record checkout_returned then redirect.
+
+    A GET page gets the cancel notice as a flash. A POST-only page (the episode
+    list is a POST response) cannot be re-requested, so the buyer goes to
+    /billing/cancelled, which shows the stashed episode and a retry.
+    """
     next_url = safe_next_url(
         request.args.get('next'), url_for('settings') + '#credits')
     _capture_checkout_returned('cancelled', user_id=current_user.id)
+    next_path = urlparse(next_url).path
+    if next_path in _POST_ONLY_RETURN_PATHS:
+        return redirect(url_for('billing_cancelled'))
+    flash(CHECKOUT_CANCELLED_MESSAGE, 'info')
     return redirect(next_url)
+
+
+@app.route('/billing/cancelled')
+@login_required
+def billing_cancelled():
+    """Stable GET landing after a cancelled episode Checkout.
+
+    Restores podcast, episode and language from the session stash (kept until
+    a paid return or a start consumes it) and offers the same buy again.
+    """
+    pending = session.get(PENDING_TRANSCRIPTION_KEY) or None
+    last = session.get(BILLING_LAST_CHECKOUT_KEY) or {}
+    retry_minutes = None
+    retry_price = None
+    retry_source = last.get('price_source') or 'slider'
+    if VOLUME_PRICING_ENABLED:
+        retry_minutes = pricing_volume.parse_quantity(str(last.get('minutes') or ''))
+        if retry_minutes is None:
+            retry_minutes = pricing_volume.VOLUME_DEFAULT_MINUTES
+            retry_source = 'slider'
+        retry_price = pricing_volume.format_usd(pricing_volume.price_cents(retry_minutes))
+    else:
+        retry_minutes = CREDIT_PACK_MINUTES
+        retry_price = pricing_volume.format_usd(CREDIT_PACK_AMOUNT_CENTS)
+    language_label = None
+    if pending and pending.get('language'):
+        language_label = dict(language_choices()).get(pending['language'])
+    return render_template(
+        'billing_cancelled.html',
+        message=CHECKOUT_CANCELLED_MESSAGE,
+        pending=pending,
+        language_label=language_label,
+        retry_minutes=retry_minutes,
+        retry_price=retry_price,
+        retry_price_source=retry_source if retry_source in ('slider', 'episode') else 'slider',
+        can_retry=stripe_checkout_enabled() and not current_user.openai_api_key,
+    )
 
 
 @app.route('/billing/success')
@@ -7406,6 +7500,16 @@ def get_status(task_id):
         db.session.rollback()
     percent, eta = compute_live_progress(task)
     elapsed = _seconds_since(task.started_at)
+    if task.status in ('completed', 'error', 'cancelled') and task.completed_at and task.started_at:
+        # Codex UX review #14: a finished job's clock stops at completion.
+        start, end = task.started_at, task.completed_at
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        elapsed = max(0.0, (end - start).total_seconds())
+    own_key_cost = _show_openai_cost_estimates()
+    charged_seconds = (task.trial_seconds_charged or 0) + (task.paid_seconds_charged or 0)
 
     result = {
         'status': task.status,
@@ -7422,9 +7526,15 @@ def get_status(task_id):
         'bytes_total': task.bytes_total,
         'elapsed_seconds': int(elapsed),
         'eta_seconds': int(eta) if eta is not None else None,
+        # Codex UX review #5: an OpenAI dollar figure means something only on
+        # the user's own key. Minute-balance users get minutes used instead.
         'estimated_cost': (
             round((task.audio_duration / 60) * WHISPER_COST_PER_MINUTE, 3)
-            if task.audio_duration else None
+            if task.audio_duration and own_key_cost else None
+        ),
+        'minutes_used': (
+            int(math.ceil(charged_seconds / 60)) if charged_seconds and not own_key_cost
+            else None
         ),
         # Boolean only — the result page uses this when the async
         # related-episodes fetch times out or fails.
@@ -8463,6 +8573,7 @@ def history():
                                matches=search_transcripts(current_user.id, query),
                                transcriptions=[], total_cost=0,
                                cost_per_minute=WHISPER_COST_PER_MINUTE,
+                               show_openai_cost=_show_openai_cost_estimates(),
                                has_active=False)
     # In-progress first (so MCP/ChatGPT jobs are visible while Whisper runs),
     # then recent failures, then completed — same page Sindre already checks.
@@ -8515,6 +8626,7 @@ def history():
         'history.html', transcriptions=rows, query='',
         total_cost=total_cost,
         cost_per_minute=WHISPER_COST_PER_MINUTE,
+        show_openai_cost=_show_openai_cost_estimates(),
         has_active=bool(active),
     )
 
@@ -9460,7 +9572,6 @@ def faq_entries():
     """
     minutes = advertised_trial_minutes() or 0
     hourly = f'${openai_whisper_cost_usd(60):.2f}'
-    cost_90 = f'${openai_whisper_cost_usd(90):.2f}'
     # trial_available() is the predicate the code actually enforces. Copy that
     # promises free minutes while the kill switch is on is a promise the app
     # then refuses at /start_transcription.
@@ -9473,15 +9584,11 @@ def faq_entries():
             if stripe_checkout_enabled() else ''
         )
         free = (f'New accounts get {minutes} minutes of audio free'
-                f'{hours_bit}. Longer episodes still start free — you get the '
-                f'first {minutes} minutes as a preview, then buy minutes or add '
-                f'your own OpenAI API key to finish (a 90-minute episode costs '
-                f'about {cost_90} at OpenAI\'s rate). Once the trial is used up, '
-                f'the same options apply.{pack_bit}')
-        need_key = ('Not to start. The free trial runs on ours, including a free '
-                    'preview of the first stretch of a longer episode. Add your own '
-                    'key when the trial runs out and there is no limit beyond what '
-                    'you spend at OpenAI.')
+                f'{hours_bit}, with no card or API key. Longer episodes still start '
+                f'free: you get the first {minutes} minutes as a preview, then buy '
+                f'minutes to finish.{pack_bit}')
+        need_key = ('No. Your free minutes and purchased minutes include '
+                    'transcription. Using your own OpenAI API key is optional.')
     else:
         pack_bit = (
             f' Or buy a one-time pack: {DEFAULT_PACK_PRICE} for '
@@ -9489,11 +9596,27 @@ def faq_entries():
             f'VAT included — no subscription.'
             if stripe_checkout_enabled() else ''
         )
-        free = ('Podskrift itself is free. You add your own OpenAI API key and pay OpenAI '
-                f'directly at their rate -- about {hourly} per hour of audio. There is no '
-                f'subscription.{pack_bit}')
-        need_key = ('Yes. Add it in Settings; it is stored on your account and used only '
-                    'for your own transcriptions.')
+        if stripe_checkout_enabled():
+            if VOLUME_PRICING_ENABLED:
+                from_price = pricing_volume.format_usd(
+                    pricing_volume.price_cents(pricing_volume.VOLUME_MIN_MINUTES))
+                free = (f'The account is free. You buy minutes once, from {from_price} '
+                        f'for {pricing_volume.VOLUME_MIN_MINUTES} minutes, and the more you '
+                        'buy the less each minute costs. VAT included, paid via Stripe, '
+                        'no subscription, and minutes never expire.')
+            else:
+                free = ('The account is free. You buy minutes once: '
+                        f'{DEFAULT_PACK_PRICE} for {CREDIT_PACK_MINUTES} minutes, VAT '
+                        'included, paid via Stripe. No subscription.')
+            need_key = ('No. Purchased minutes include transcription. Using your own '
+                        'OpenAI API key is optional: add it in Settings and OpenAI '
+                        'bills you directly.')
+        else:
+            free = ('Podskrift itself is free. You add your own OpenAI API key and pay OpenAI '
+                    f'directly at their rate -- about {hourly} per hour of audio. There is no '
+                    f'subscription.{pack_bit}')
+            need_key = ('Yes. Add it in Settings; it is stored on your account and used only '
+                        'for your own transcriptions.')
     return [
         ('How do I transcribe a podcast episode to text?',
          'Paste a Spotify episode link, or search for the podcast or episode by name. '
