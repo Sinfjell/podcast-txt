@@ -1104,6 +1104,35 @@ body.nav-menu-open .nav-bar::before { background: var(--paper); }
 .ds-seg .tab:hover { color: var(--ink); }
 .ds-seg .tab.active, .ds-seg .tab[aria-pressed="true"] { background: var(--paper); color: var(--ink); border: 0; }
 
+/* Inline select: one compact bordered control (label inside, native select
+   beside it) that sits under the command bar, left-aligned with it. */
+.ds-inline-select {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+  min-height: 2.75rem;
+  padding: 0 var(--space-1) 0 var(--space-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--paper);
+}
+.ds-inline-select.hidden { display: none; }
+.ds-inline-select:focus-within { outline: 4px solid var(--accent-tint); outline-offset: 0; }
+.ds-inline-select__label { flex: none; font-size: 0.875rem; font-weight: 700; color: var(--muted); white-space: nowrap; }
+.ds-inline-select__field {
+  min-width: 0;
+  height: 2.5rem;
+  padding: 0 var(--space-2);
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: 700 1rem var(--font-sans);
+  cursor: pointer;
+}
+.ds-inline-select__field:focus { outline: none; }
+
 .ds-proof--inline { flex-direction: row; flex-wrap: wrap; justify-content: center; gap: var(--space-2) var(--space-6); color: var(--ink); }
 
 /* "Works with" strip: names, not logos; links where a guide exists. */
@@ -1212,6 +1241,8 @@ body:has(.ds-signal) { overflow-x: clip; }
   .ds-cmd__box::before { inset: -2rem 0; }
   .ds-seg .tab { padding: 0 var(--space-2); }
   .ds-cmd__go { min-width: 0; padding: 0 var(--space-4); }
+  .ds-inline-select { align-self: stretch; }
+  .ds-inline-select__field { flex: 1; }
   .ds-cmd__icon { display: none; }
   .ds-cmd__input { flex: 1 1 100%; padding: 0 var(--space-2); }
   .ds-cmd__go { flex: 1; justify-content: center; }
@@ -1225,4 +1256,95 @@ body:has(.ds-signal) { overflow-x: clip; }
 @media (prefers-reduced-motion: reduce) {
   .nav-brand:hover svg g:first-child rect, .ds-window, .ds-window__status i, .ds-chat-example__status i { animation: none; }
   .ds-arrow, .ds-window__line, .ds-window__line p, .ds-window__playhead, .nav-cta svg, .ds-chat-example__conversation > * { transition: none; }
+}
+
+/* ------------------------------------------------------------------------ */
+/* volume_slider — launch volume pricing (macro: volume_slider)              */
+/* ------------------------------------------------------------------------ */
+.ds-volume {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+}
+.ds-volume__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.ds-volume__figure,
+.ds-volume__price {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+  color: var(--ink);
+}
+.ds-volume__range {
+  width: 100%;
+  min-height: 2.75rem;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.ds-volume__range:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+.ds-volume__scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+.ds-volume__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+.ds-volume__meta [data-volume-save] {
+  color: var(--ink);
+  font-weight: 700;
+}
+.ds-volume__meta [data-volume-save]:empty {
+  display: none;
+}
+/* Buy modal (volume mode): the per-episode line and the picker disclosure. */
+.ds-volume-episode {
+  margin: 0 0 var(--space-3);
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+.ds-volume-more {
+  margin-top: var(--space-4);
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-3);
+}
+.ds-volume-more > summary {
+  min-height: 2.75rem;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--accent);
+}
+.ds-volume-more > summary:hover {
+  color: var(--accent-hover);
+}
+.ds-volume-more[open] > summary {
+  margin-bottom: var(--space-3);
+}
+.ds-volume-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  width: 100%;
 }

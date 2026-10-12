@@ -25,10 +25,11 @@
 {% endblock %}
 
 {% block content %}
+{% from "components/macros.html" import volume_slider %}
 <div class="pr-wrap">
     <h1 class="pr-title">Pay for minutes, not months</h1>
     <p class="pr-lead">
-        Transcribe podcasts without a subscription. Start free, buy minutes once, or use your own OpenAI key forever.
+        Transcribe podcasts without a subscription. Start free, buy minutes once, or use your own OpenAI key.
     </p>
 
     <div class="pr-plans">
@@ -43,7 +44,22 @@
         </section>
         {% endif %}
 
+        {% set can_buy = stripe_configured and current_user.is_authenticated and not current_user.openai_api_key %}
         <section class="pr-plan pr-plan-pack" aria-labelledby="planPack">
+            {% if volume_pricing_enabled %}
+            <h2 id="planPack">Buy minutes</h2>
+            <div class="pr-figure">
+                From {{ volume_price_table[0].price if volume_price_table else '' }}
+                <small>Pick any amount. The more you buy, the less each minute costs.</small>
+            </div>
+            {{ volume_slider('pricingMinutes', volume_price_table, default=volume_default_minutes,
+                             form_id='pricingBuyForm' if can_buy else '', surface='pricing',
+                             min=volume_min_minutes, max=volume_max_minutes, step=volume_step_minutes) }}
+            <p>
+                One-time purchase via Stripe (merchant of record). Minutes do not expire.
+                Used after free trial minutes, on audio we actually send for transcription.
+            </p>
+            {% else %}
             <h2 id="planPack">Credit pack</h2>
             <div class="pr-figure">
                 ${{ credit_pack_price_usd }}
@@ -54,14 +70,19 @@
                 One-time purchase via Stripe (merchant of record). Minutes do not expire.
                 Used after free trial minutes, on audio we actually send for transcription.
             </p>
+            {% endif %}
             <div class="pr-action">
-                {% if stripe_configured and current_user.is_authenticated and not current_user.openai_api_key %}
-                <form method="POST" action="{{ url_for('billing_checkout') }}">
+                {% if can_buy %}
+                <form method="POST" action="{{ url_for('billing_checkout') }}" id="pricingBuyForm">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="source" value="pricing">
                     <input type="hidden" name="ph_sid" value="">
                     <input type="hidden" name="cancel_url" value="{{ url_for('pricing') }}">
-                    <button type="submit" class="btn btn-primary">{{ credit_pack_label }}</button>
+                    {% if volume_pricing_enabled %}
+                    <input type="hidden" name="minutes" value="{{ volume_default_minutes }}">
+                    <input type="hidden" name="price_source" value="slider">
+                    {% endif %}
+                    <button type="submit" class="btn btn-primary" data-volume-buy>{{ credit_pack_label }}</button>
                 </form>
                 <p class="form-hint">{{ credit_pack_payment_hint }}</p>
                 <p class="form-hint">{{ credit_pack_subline }}</p>
@@ -84,7 +105,7 @@
 
         <section class="pr-plan" aria-labelledby="planKey">
             <h2 id="planKey">Your own OpenAI key</h2>
-            <div class="pr-figure">Free forever <small>on Podskrift</small></div>
+            <div class="pr-figure">Free <small>on Podskrift</small></div>
             <p>
                 Add your key in Settings. OpenAI bills you directly — about
                 ${{ openai_hourly_cost }}/h of audio. Nothing is metered against the trial or a pack.

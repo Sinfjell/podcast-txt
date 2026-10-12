@@ -106,11 +106,11 @@
     <div class="card-body">
         <p class="result-offer-title">Keep going</p>
         <p class="text-sm text-muted result-offer-note" id="resultOfferNote">
-            Transcribe your next episode: 300 min for $5
+            Transcribe your next episode: {{ credit_pack_minutes }} min for ${{ credit_pack_price_usd }}
         </p>
         <div class="result-offer-actions">
             <button type="button" class="btn btn-sm btn-secondary" id="resultOfferBuyBtn">
-                Buy 300 min for $5
+                {{ credit_pack_label }}
             </button>
             <a href="{{ url_for('settings') }}#openai" class="ds-link-button" id="resultOfferByokLink"
                data-paywall-byok="result_offer">Add your own OpenAI key</a>
@@ -310,7 +310,7 @@
     var STRIPE_BUY = {{ stripe_buy_enabled|tojson }};
     var BUY_LABEL = {{ credit_pack_label|tojson }};
     var UNLOCK_LABEL = {{ ('Unlock the full episode')|tojson }};
-    var RESULT_OFFER_LABEL = {{ ('Transcribe your next episode: 300 min for $5')|tojson }};
+    var RESULT_OFFER_LABEL = {{ ('Transcribe your next episode: ' ~ credit_pack_minutes ~ ' min for $' ~ credit_pack_price_usd)|tojson }};
     var BUY_URL = {{ url_for('billing_checkout')|tojson }};
     var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
     var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
@@ -356,7 +356,7 @@
         node.style.display = visible ? '' : 'none';
     }
 
-    function postBuyForm(source, returnTo) {
+    function postBuyForm(source, returnTo, extra) {
         var form = document.createElement('form');
         form.method = 'POST';
         form.action = BUY_URL;
@@ -373,6 +373,11 @@
         try { if (window.posthog) sid = posthog.get_session_id() || ''; } catch (e) { sid = ''; }
         hidden('ph_sid', sid);
         if (returnTo) hidden('return_to', returnTo);
+        if (extra) {
+            Object.keys(extra).forEach(function(k) {
+                if (extra[k] != null) hidden(k, String(extra[k]));
+            });
+        }
         document.body.appendChild(form);
         form.submit();
     }
@@ -393,7 +398,10 @@
             'Free preview: first ' + d.partial_minutes + ' minutes of '
             + d.episode_minutes + ' minutes';
         var cover = '';
-        if (d.episode_minutes && STRIPE_BUY) {
+        if (d.episode_offer && STRIPE_BUY) {
+            cover = 'Finish it for ' + d.episode_offer.price
+                + ' (adds ' + d.episode_offer.minutes + ' min, launch price).';
+        } else if (d.episode_minutes && STRIPE_BUY) {
             cover = 'This episode is ' + d.episode_minutes
                 + ' min — 300 min for $5 covers it and more.';
         }
@@ -435,7 +443,11 @@
                 if (typeof window.podskriftPaywallBuyClicked === 'function') {
                     window.podskriftPaywallBuyClicked('partial_preview', 'partial');
                 }
-                postBuyForm('partial_preview', window.location.pathname);
+                postBuyForm('partial_preview', window.location.pathname,
+                    d.episode_offer ? {
+                        minutes: d.episode_offer.minutes,
+                        price_source: 'episode'
+                    } : null);
             });
             actions.appendChild(buyBtn);
         }
@@ -459,6 +471,7 @@
         var note = el('resultOfferNote');
         if (note) note.textContent = d.result_offer_label || RESULT_OFFER_LABEL;
         var buyBtn = el('resultOfferBuyBtn');
+        if (buyBtn && d.buy_label) buyBtn.textContent = d.buy_label;
         if (buyBtn && !buyBtn._bound) {
             buyBtn._bound = true;
             buyBtn.addEventListener('click', function() {
@@ -468,6 +481,13 @@
                 });
                 if (typeof window.podskriftPaywallBuyClicked === 'function') {
                     window.podskriftPaywallBuyClicked('result_offer', 'result');
+                }
+                if (d.volume_pricing && typeof window.openBuyModal === 'function') {
+                    window.openBuyModal({
+                        source: 'result_offer',
+                        returnTo: window.location.pathname
+                    });
+                    return;
                 }
                 postBuyForm('result_offer', window.location.pathname);
             });

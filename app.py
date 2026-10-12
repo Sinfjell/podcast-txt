@@ -74,6 +74,7 @@ from site_standards import init_site_standards
 import email_notify
 import mail as mailer
 import summary as summary_mod
+import pricing_volume
 import mcp_server as mcp_server_mod
 import oauth_server as oauth_server_mod
 from admin_dashboard import admin_bp, ensure_admin_indexes, is_admin_user
@@ -498,7 +499,7 @@ def trial_badge_remaining_minutes():
             return trial_status(current_user)[2] // 60
         return 0
     if trial_available():
-        return NEW_USER_TRIAL_SECONDS // 60
+        return advertised_trial_minutes() or 0
     return None
 
 
@@ -885,17 +886,37 @@ STRIPE_MANAGED_PAYMENTS = os.getenv('STRIPE_MANAGED_PAYMENTS', '0').strip().lowe
 #: One-time pack: 300 minutes (5 hours) for $5.00 USD.
 CREDIT_PACK_MINUTES = 300
 CREDIT_PACK_SECONDS = CREDIT_PACK_MINUTES * 60
+#: Legacy fixed pack price. Sessions created with CREDIT_PACK_SKU are always
+#: validated against this, whatever VOLUME_PRICING_ENABLED says today.
 CREDIT_PACK_AMOUNT_CENTS = 500
 CREDIT_PACK_CURRENCY = 'usd'
-CREDIT_PACK_LABEL = 'Buy 300 min for $5'
+#: Launch volume pricing (slider + per-episode price). Off unless
+#: VOLUME_PRICING_ENABLED=1. When on, every Buy button sells through the
+#: volume curve (300 min default) so no page charges more than the slider.
+VOLUME_PRICING_ENABLED = pricing_volume.volume_pricing_enabled()
+#: What the default 300-minute Buy costs right now (display + checkout).
+DEFAULT_PACK_CENTS = (
+    pricing_volume.price_cents(CREDIT_PACK_MINUTES)
+    if VOLUME_PRICING_ENABLED else CREDIT_PACK_AMOUNT_CENTS)
+DEFAULT_PACK_PRICE = pricing_volume.format_usd(DEFAULT_PACK_CENTS)
+CREDIT_PACK_LABEL = f'Buy {CREDIT_PACK_MINUTES} min for {DEFAULT_PACK_PRICE}'
 #: Shown under Buy buttons — do not fold into CREDIT_PACK_LABEL (SKU/analytics).
-CREDIT_PACK_SUBLINE = 'One-time · 300 min · VAT incl.'
+CREDIT_PACK_SUBLINE = (
+    'Launch price · one-time · VAT incl.' if VOLUME_PRICING_ENABLED
+    else 'One-time · 300 min · VAT incl.')
 #: Secondary result-page offer (not a second green primary when Copy is shown).
-RESULT_OFFER_LABEL = 'Transcribe your next episode: 300 min for $5'
+RESULT_OFFER_LABEL = (
+    f'Your next episode from {pricing_volume.format_usd(pricing_volume.VOLUME_MIN_AMOUNT_CENTS)}. '
+    'Pick the minutes you need, launch price.'
+    if VOLUME_PRICING_ENABLED
+    else f'Transcribe your next episode: {CREDIT_PACK_MINUTES} min for {DEFAULT_PACK_PRICE}')
+#: Result-offer button when volume pricing is on (opens the minutes picker).
+RESULT_OFFER_VOLUME_BUTTON = 'Choose minutes'
 #: Partial-preview checkout CTA.
 UNLOCK_EPISODE_LABEL = 'Unlock the full episode'
 #: BYOK failure → pack offer (plain sentence; button uses CREDIT_PACK_LABEL).
-OWN_KEY_PACK_OFFER = 'Use Podskrift minutes instead: 300 min for $5'
+OWN_KEY_PACK_OFFER = (
+    f'Use Podskrift minutes instead: {CREDIT_PACK_MINUTES} min for {DEFAULT_PACK_PRICE}')
 #: Trust line near Buy CTAs. Methods match Managed Payments dynamic PMs
 #: (cards + wallets); we never pass payment_method_types on the session.
 CREDIT_PACK_PAYMENT_HINT = (
@@ -1129,6 +1150,11 @@ def advertised_trial_minutes():
     """
     if not trial_available() or NEW_USER_TRIAL_SECONDS <= 0:
         return None
+    if TRIAL_SPLIT_ENABLED and TRIAL_SPLIT_VARIANTS:
+        # A/B on: a visitor cannot know which arm they will land in, so only
+        # promise what every arm gets. Quoting NEW_USER_TRIAL_MINUTES (120)
+        # told the 60-minute arm it would get twice what it got.
+        return min(int(v) for v in TRIAL_SPLIT_VARIANTS)
     return NEW_USER_TRIAL_SECONDS // 60
 
 
@@ -1478,7 +1504,10 @@ def platform_reserve(user_id, seconds, *, paid_only=False, budget_day=None):
     if seconds <= 0:
         return (0, 0)
 
-    if paid_only:
+    # Trial switched off (TRIAL_ENABLED=0): paid minutes only. Without this a
+    # paying account with a stamped trial_seconds_limit was billed "free"
+    # minutes the UI said it did not have, and paid minutes stayed untouched.
+    if paid_only or not trial_available():
         return (0, seconds) if paid_reserve(user_id, seconds) else None
 
     if trial_reserve(user_id, seconds, budget_day=budget_day):
@@ -2079,11 +2108,37 @@ def pack_covers_episode_line(estimate_min):
     if not estimate_min or estimate_min <= 0:
         return ''
     minutes = int(estimate_min)
-    price = f'{CREDIT_PACK_AMOUNT_CENTS / 100:.0f}'
+    if VOLUME_PRICING_ENABLED:
+        offer = episode_offer(minutes)
+        if offer:
+            return f'This episode is {minutes} min. {offer["label"]}.'
     return (
         f'This episode is {minutes} min — {CREDIT_PACK_MINUTES} min for '
-        f'${price} covers it and more.'
+        f'{DEFAULT_PACK_PRICE} covers it and more.'
     )
+
+
+def episode_offer(episode_minutes, balance_minutes=0):
+    """Per-episode price on the volume curve, or None when not applicable.
+
+    Buys the shortfall (rounded up to the 15-minute grid, at least 60 min for
+    the $1 minimum). The label names the episode length, not the quantity, so
+    the buyer sees the price of *this* episode.
+    """
+    if not VOLUME_PRICING_ENABLED:
+        return None
+    qty = pricing_volume.episode_quantity(episode_minutes, balance_minutes)
+    if qty is None:
+        return None
+    q = pricing_volume.quote(qty)
+    ep_min = int(math.ceil(float(episode_minutes)))
+    return {
+        'episode_minutes': ep_min,
+        'minutes': qty,
+        'amount_cents': q['amount_cents'],
+        'price': q['price'],
+        'label': f'Transcribe this episode ({ep_min} min) for {q["price"]}',
+    }
 
 
 def _own_key_pack_offer_suffix():
@@ -4235,15 +4290,13 @@ def pending_transcription():
     return redirect(url_for('register', next=url_for('resume_transcription')))
 
 
-@app.route('/resume-transcription', methods=['GET', 'POST'])
-@login_required
-def resume_transcription():
-    """Start the episode stashed before signup/login, if any."""
-    pending = session.pop(PENDING_TRANSCRIPTION_KEY, None)
-    if not pending:
-        flash('Nothing to resume — search for an episode to transcribe.', 'info')
-        return redirect(url_for('index'))
+def _pending_transcription_meta(pending):
+    """Build enqueue_transcription() input from a stashed pick.
 
+    Returns ``(meta, rss_url, language, error)``. The RSS path re-reads the
+    feed, so title, audio URL and duration come from the feed, not from
+    whatever the browser stashed.
+    """
     language = normalize_language_code(pending.get('language') or '')
     rss_url = pending.get('rss_url')
     episode_index = pending.get('episode_index')
@@ -4252,8 +4305,7 @@ def resume_transcription():
     if rss_url is not None and episode_index is not None:
         episodes, error = get_episodes_from_rss(rss_url)
         if error or episode_index < 0 or episode_index >= len(episodes):
-            flash(error or 'Invalid episode selection', 'error')
-            return redirect(url_for('index'))
+            return None, rss_url, language, (error or 'Invalid episode selection')
         episode = episodes[episode_index]
         meta = {
             'title': episode['title'],
@@ -4271,8 +4323,7 @@ def resume_transcription():
     else:
         audio_url = (pending.get('audio_url') or '').strip()
         if not audio_url or not _is_fetchable_url(audio_url):
-            flash('That audio URL cannot be fetched.', 'error')
-            return redirect(url_for('index'))
+            return None, rss_url, language, 'That audio URL cannot be fetched.'
         meta = {
             'title': pending.get('title') or 'Episode',
             'audio_url': audio_url,
@@ -4287,6 +4338,26 @@ def resume_transcription():
             'website_url': pending.get('website_url') or '',
             'show_link': pending.get('show_link') or '',
         }
+    return meta, rss_url, language, None
+
+
+TRANSCRIPT_STARTED_FLASH = (
+    "Your transcript has started. You can close this page; it'll be in History.")
+
+
+@app.route('/resume-transcription', methods=['GET', 'POST'])
+@login_required
+def resume_transcription():
+    """Start the episode stashed before signup/login, if any."""
+    pending = session.pop(PENDING_TRANSCRIPTION_KEY, None)
+    if not pending:
+        flash('Nothing to resume — search for an episode to transcribe.', 'info')
+        return redirect(url_for('index'))
+
+    meta, rss_url, language, error = _pending_transcription_meta(pending)
+    if error:
+        flash(error, 'error')
+        return redirect(url_for('index'))
 
     payload, status = enqueue_transcription(
         current_user, meta, rss_url=rss_url, language=language)
@@ -4295,11 +4366,75 @@ def resume_transcription():
         # start would via flash, since this is a browser redirect not XHR.
         flash(payload.get('error') or 'Could not start transcription.', 'error')
         return redirect(url_for('index'))
-    flash(
-        "Your transcript has started. You can close this page; it'll be in History.",
-        'success',
-    )
+    flash(TRANSCRIPT_STARTED_FLASH, 'success')
     return redirect(url_for('transcription_page', task_id=payload['task_id']))
+
+
+def _autostart_after_payment(session_id, balance_minutes):
+    """Start the stashed episode once its purchase is confirmed paid.
+
+    Called only from /billing/success after Stripe has said ``paid`` for a
+    session owned by this user. Returns a task id to redirect to, or None to
+    show the success page with its "Start transcript" button as before.
+
+    At most one start per Checkout Session: the purchase row must exist
+    (fulfilled by the success page or the webhook, whichever came first) and
+    is claimed with one conditional UPDATE, so a refresh, a second tab or two
+    gunicorn workers cannot start it twice. enqueue_transcription()'s
+    duplicate guard backs that up for a job that is already live.
+    """
+    pending = session.get(PENDING_TRANSCRIPTION_KEY)
+    if not pending:
+        return None
+    purchase = CreditPurchase.query.filter_by(
+        stripe_session_id=session_id, user_id=current_user.id).first()
+    if purchase is None or purchase.status != 'credited':
+        return None
+    meta, rss_url, language, error = _pending_transcription_meta(pending)
+    if error:
+        return None
+    duration = meta.get('duration_min')
+    # Balance must cover the whole episode: an unknown length or a shortfall
+    # leaves the decision (and the button) with the user.
+    if duration is None or math.ceil(float(duration)) > int(balance_minutes):
+        return None
+
+    claimed = db.session.execute(
+        db.update(CreditPurchase)
+        .where(CreditPurchase.id == purchase.id,
+               CreditPurchase.autostart_claimed_at.is_(None))
+        .values(autostart_claimed_at=datetime.now(timezone.utc))
+    ).rowcount
+    db.session.commit()
+    if claimed != 1:
+        return None
+
+    session.pop(PENDING_TRANSCRIPTION_KEY, None)
+    session.modified = True
+    payload, status = enqueue_transcription(
+        current_user, meta, rss_url=rss_url, language=language)
+    if status != 200 or not payload.get('task_id'):
+        # Refused (capacity, disk …): give the pick and the claim back so the
+        # button on the success page still works.
+        session[PENDING_TRANSCRIPTION_KEY] = pending
+        db.session.execute(
+            db.update(CreditPurchase)
+            .where(CreditPurchase.id == purchase.id)
+            .values(autostart_claimed_at=None))
+        db.session.commit()
+        return None
+    task_id = payload['task_id']
+    db.session.execute(
+        db.update(CreditPurchase)
+        .where(CreditPurchase.id == purchase.id)
+        .values(autostart_task_id=str(task_id)))
+    db.session.commit()
+    product_analytics.capture('checkout_autostarted', current_user.id, {
+        'checkout_session_id': session_id,
+        'task_id': task_id,
+        'existing': bool(payload.get('existing')),
+    })
+    return task_id
 
 
 @app.route('/logout')
@@ -4371,16 +4506,69 @@ def _session_customer_country(session_dict):
     return country[:2] or None
 
 
+def volume_session_terms(d):
+    """(minutes, amount_cents) a volume-priced session was created for, or None.
+
+    Both come from metadata we wrote server-side at checkout (customers cannot
+    edit Checkout metadata). The amount is the one quoted then, so a price
+    change between checkout and payment still credits what was paid for.
+    Sanity: the minutes must be on the purchase grid and the amount at or
+    above the cost floor and the minimum of the session's pricing_version.
+    """
+    meta = d.get('metadata') or {}
+    if meta.get('pack') != pricing_volume.VOLUME_PACK_SKU:
+        return None
+    minutes = pricing_volume.parse_quantity(meta.get('minutes'))
+    try:
+        amount = int(str(meta.get('amount_cents')).strip())
+    except (TypeError, ValueError):
+        return None
+    if minutes is None:
+        return None
+    # Validate against the curve version the session was priced with, so a
+    # later price change never strands an open Checkout.
+    version = meta.get('pricing_version')
+    if version:
+        # A released curve never changes, so a versioned session must carry
+        # exactly that curve's price for its minutes: anything else was not
+        # quoted by us.
+        if amount != pricing_volume.price_cents_for(minutes, version):
+            return None
+        return minutes, amount
+    min_amount = pricing_volume.min_amount_cents_for(version)
+    if amount < max(min_amount, pricing_volume.floor_cents(minutes)):
+        return None
+    return minutes, amount
+
+
+def session_credit_minutes(d):
+    """Minutes a validated session credits: metadata for volume, else 300."""
+    terms = volume_session_terms(d)
+    if terms is not None:
+        return terms[0]
+    return CREDIT_PACK_MINUTES
+
+
 def pack_session_matches(d):
     """Validate a retrieved Checkout Session bought our credit pack.
 
     Checks what was bought (line item / unit amount / pack marker), not only
     amount_total — so inclusive Stripe Tax (total stays 500) and exclusive
     tax (subtotal 500, total = subtotal + tax) both credit correctly.
+    Accepts the legacy fixed pack and the volume-priced pack (any quantity),
+    independent of VOLUME_PRICING_ENABLED so in-flight sessions survive a flip.
     """
     if (d.get('currency') or '').lower() != CREDIT_PACK_CURRENCY:
         return False, 'currency'
-    if (d.get('metadata') or {}).get('pack') != CREDIT_PACK_SKU:
+    pack = (d.get('metadata') or {}).get('pack')
+    if pack == pricing_volume.VOLUME_PACK_SKU:
+        terms = volume_session_terms(d)
+        if terms is None:
+            return False, 'volume_terms'
+        expected_cents = terms[1]
+    elif pack == CREDIT_PACK_SKU:
+        expected_cents = CREDIT_PACK_AMOUNT_CENTS
+    else:
         return False, 'pack_marker'
     items = ((d.get('line_items') or {}).get('data') or [])
     if len(items) != 1 or items[0].get('quantity') != 1:
@@ -4388,9 +4576,10 @@ def pack_session_matches(d):
     price = items[0].get('price') or {}
     if isinstance(price, str):
         return False, 'price_unexpanded'
-    if STRIPE_PRICE_ID and price.get('id') != STRIPE_PRICE_ID:
+    if (pack == CREDIT_PACK_SKU and STRIPE_PRICE_ID
+            and price.get('id') != STRIPE_PRICE_ID):
         return False, 'price_id'
-    if price.get('unit_amount') != CREDIT_PACK_AMOUNT_CENTS:
+    if price.get('unit_amount') != expected_cents:
         return False, 'unit_amount'
     td = d.get('total_details') or {}
     if (td.get('amount_discount') or 0) != 0:
@@ -4399,10 +4588,10 @@ def pack_session_matches(d):
     total, subtotal = d.get('amount_total'), d.get('amount_subtotal')
     behavior = (price.get('tax_behavior') or CREDIT_PACK_TAX_BEHAVIOR or '').lower()
     if behavior == 'inclusive':
-        ok = total == CREDIT_PACK_AMOUNT_CENTS
+        ok = total == expected_cents
     else:
         ok = (
-            subtotal == CREDIT_PACK_AMOUNT_CENTS
+            subtotal == expected_cents
             and total is not None
             and total == (subtotal or 0) + tax
         )
@@ -4694,7 +4883,8 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
     except (TypeError, ValueError):
         amount_for_legacy = CREDIT_PACK_AMOUNT_CENTS
     currency = (d.get('currency') or CREDIT_PACK_CURRENCY).lower()
-    minutes = CREDIT_PACK_MINUTES
+    minutes = session_credit_minutes(d)
+    price_source = (metadata.get('price_source') or '')[:16] or None
     customer_country = _session_customer_country(d)
     payment_intent = _session_payment_intent_id(d)
     location = (metadata.get('location') or metadata.get('source') or '')[:64] or None
@@ -4715,6 +4905,10 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
         currency=currency,
         customer_country=customer_country,
         minutes=minutes,
+        price_source=price_source,
+        pricing_version=(
+            (metadata.get('pricing_version') or '')[:16] or (
+                'legacy_v0' if metadata.get('pack') == CREDIT_PACK_SKU else None)),
         status='credited',
     )
     db.session.add(purchase)
@@ -4768,6 +4962,12 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
         'payment_intent': payment_intent,
         'fulfilled_via': fulfilled_via,
         'location': location,
+        'pack_sku': metadata.get('pack') or None,
+        'price_source': price_source,
+        'pricing': (
+            'volume_v1' if metadata.get('pack') == pricing_volume.VOLUME_PACK_SKU
+            else 'fixed_pack'),
+        'pricing_version': metadata.get('pricing_version') or None,
         'is_first_purchase': prior_credited == 0,
         'revenue': (amount_total_cents or amount_for_legacy or 0) / 100.0,
         '$set': person_set,
@@ -5132,28 +5332,67 @@ def billing_checkout():
         cancel_abs = url_for('billing_cancel', next=next_path, _external=True)
 
     line_item = {'quantity': 1}
-    if STRIPE_PRICE_ID:
-        line_item['price'] = STRIPE_PRICE_ID
-    else:
+    if VOLUME_PRICING_ENABLED:
+        # The browser sends a quantity, never an amount; the price is ours.
+        raw_minutes = (request.form.get('minutes') or '').strip()
+        price_source = (request.form.get('price_source') or '').strip()
+        if raw_minutes:
+            buy_minutes = pricing_volume.parse_quantity(raw_minutes)
+            if buy_minutes is None:
+                _capture_purchase_failed(
+                    'invalid_quantity', stage='checkout_create',
+                    user_id=current_user.id)
+                flash('Pick between 60 and 1200 minutes.', 'error')
+                return redirect(next_path)
+            if price_source not in ('slider', 'episode'):
+                price_source = 'slider'
+        else:
+            buy_minutes = pricing_volume.VOLUME_DEFAULT_MINUTES
+            price_source = 'default'
+        buy_cents = pricing_volume.price_cents(buy_minutes)
+        pack_sku = pricing_volume.VOLUME_PACK_SKU
         line_item['price_data'] = {
             'currency': CREDIT_PACK_CURRENCY,
-            'unit_amount': CREDIT_PACK_AMOUNT_CENTS,
+            'unit_amount': buy_cents,
             'tax_behavior': CREDIT_PACK_TAX_BEHAVIOR,
             'product_data': {
-                'name': f'Podskrift — {CREDIT_PACK_MINUTES} minutes',
-                'description': f'{CREDIT_PACK_MINUTES} minutes of transcription '
-                               f'({CREDIT_PACK_MINUTES // 60} hours)',
+                'name': f'Podskrift — {buy_minutes} minutes',
+                'description': f'{buy_minutes} minutes of transcription '
+                               '(launch price)',
                 'tax_code': STRIPE_TAX_CODE,
             },
         }
+    else:
+        buy_minutes = CREDIT_PACK_MINUTES
+        buy_cents = CREDIT_PACK_AMOUNT_CENTS
+        pack_sku = CREDIT_PACK_SKU
+        price_source = 'default'
+        if STRIPE_PRICE_ID:
+            line_item['price'] = STRIPE_PRICE_ID
+        else:
+            line_item['price_data'] = {
+                'currency': CREDIT_PACK_CURRENCY,
+                'unit_amount': CREDIT_PACK_AMOUNT_CENTS,
+                'tax_behavior': CREDIT_PACK_TAX_BEHAVIOR,
+                'product_data': {
+                    'name': f'Podskrift — {CREDIT_PACK_MINUTES} minutes',
+                    'description': f'{CREDIT_PACK_MINUTES} minutes of transcription '
+                                   f'({CREDIT_PACK_MINUTES // 60} hours)',
+                    'tax_code': STRIPE_TAX_CODE,
+                },
+            }
 
     meta = {
         'user_id': str(current_user.id),
-        'minutes': str(CREDIT_PACK_MINUTES),
-        'pack': CREDIT_PACK_SKU,
+        'minutes': str(buy_minutes),
+        'pack': pack_sku,
+        'amount_cents': str(buy_cents),
+        'price_source': price_source,
         'location': source,
         'source': source,
     }
+    if pack_sku == pricing_volume.VOLUME_PACK_SKU:
+        meta['pricing_version'] = pricing_volume.CURRENT_PRICING_VERSION
     if ph_sid:
         meta['ph_sid'] = ph_sid
     if return_to:
@@ -5161,7 +5400,8 @@ def billing_checkout():
         meta['return_to'] = return_to[:500]
     pi_meta = {
         'user_id': str(current_user.id),
-        'pack': CREDIT_PACK_SKU,
+        'pack': pack_sku,
+        'minutes': str(buy_minutes),
         'location': source,
     }
     if ph_sid:
@@ -5232,10 +5472,13 @@ def billing_checkout():
         'location': source,
         'source': source,
         'checkout_session_id': cs_id,
-        'amount_cents': CREDIT_PACK_AMOUNT_CENTS,
+        'amount_cents': buy_cents,
         'currency': CREDIT_PACK_CURRENCY,
-        'minutes': CREDIT_PACK_MINUTES,
-        'pack_sku': CREDIT_PACK_SKU,
+        'minutes': buy_minutes,
+        'pack_sku': pack_sku,
+        'price_source': price_source,
+        'pricing': 'volume_v1' if VOLUME_PRICING_ENABLED else 'fixed_pack',
+        'pricing_version': meta.get('pricing_version'),
         'managed_payments': bool(STRIPE_MANAGED_PAYMENTS),
         'trial_remaining_min': trial_remaining_min,
         'paid_remaining_min': paid_remaining_min,
@@ -5274,6 +5517,7 @@ def billing_success():
     pending = False
     returned_status = 'error'
     location = None
+    purchased_minutes = CREDIT_PACK_MINUTES
     if session_id.startswith('cs_') and stripe_checkout_enabled():
         try:
             fulfill_checkout(session_id, fulfilled_via='success_page')
@@ -5289,6 +5533,7 @@ def billing_success():
                 d = s.to_dict() if hasattr(s, 'to_dict') else dict(s)
                 meta = d.get('metadata') or {}
                 location = (meta.get('location') or meta.get('source') or None)
+                purchased_minutes = session_credit_minutes(d)
                 ref = str(d.get('client_reference_id') or '')
                 if ref != str(current_user.id):
                     returned_status = 'not_owner'
@@ -5332,6 +5577,23 @@ def billing_success():
         trial_left = trial_status(current_user)[2] // 60
     balance_minutes = paid_minutes + trial_left
 
+    if paid_ready and session_id.startswith('cs_'):
+        # Refresh of an already auto-started purchase: back to its progress page.
+        done = CreditPurchase.query.filter_by(
+            stripe_session_id=session_id, user_id=current_user.id).first()
+        if done is not None and done.autostart_task_id:
+            return redirect(url_for('transcription_page', task_id=done.autostart_task_id))
+        try:
+            task_id = _autostart_after_payment(session_id, balance_minutes)
+        except Exception:  # noqa: BLE001 - the purchase is done; the button remains
+            db.session.rollback()
+            app.logger.exception('post-payment autostart failed for %s', session_id)
+            task_id = None
+        if task_id:
+            session.pop(BILLING_RETURN_TO_KEY, None)
+            flash(TRANSCRIPT_STARTED_FLASH, 'success')
+            return redirect(url_for('transcription_page', task_id=task_id))
+
     pending_episode = session.get(PENDING_TRANSCRIPTION_KEY)
     return_to = safe_return_to(session.get(BILLING_RETURN_TO_KEY) or '')
 
@@ -5341,7 +5603,7 @@ def billing_success():
         pending=pending,
         paid_minutes=paid_minutes,
         balance_minutes=balance_minutes,
-        credit_pack_minutes=CREDIT_PACK_MINUTES,
+        credit_pack_minutes=purchased_minutes,
         pending_episode=pending_episode,
         return_to=return_to,
     )
@@ -5767,6 +6029,9 @@ def _is_minutes_limit_error(message):
         'out of free minutes',
         'buy more minutes',
         CREDIT_PACK_LABEL.lower(),
+        # Errors stored before a price change keep the label they were
+        # written with.
+        'buy 300 min for $5',
         'not enough minutes',
         'trial is used up',
         "today's free minutes are used up",
@@ -5883,13 +6148,44 @@ def index():
                            structured_data=_structured_data())
 
 
-def _annotate_episodes_for_trial(episodes):
-    """Attach needs_own_key on each episode dict for the selection UI badge."""
+def _annotate_episodes_for_trial(episodes, rss_url=None):
+    """Attach needs_own_key on each episode dict for the selection UI badge.
+
+    With volume pricing on, a signed-in metered account also gets one
+    ``buy_label`` per episode: "In your history" when it already has a
+    finished transcript of that audio, "Covered" when the balance pays for
+    it, otherwise the episode's price. Display only: checkout re-prices.
+    """
     remaining = trial_badge_remaining_minutes()
     paid = trial_badge_paid_minutes()
     for ep in episodes:
         ep['needs_own_key'] = episode_needs_own_key(
             ep.get('duration_min'), remaining, paid_minutes=paid)
+    if not (VOLUME_PRICING_ENABLED and stripe_checkout_enabled()
+            and current_user.is_authenticated
+            and not getattr(current_user, 'openai_api_key', None)):
+        return episodes
+    balance = (remaining or 0) + (paid or 0)
+    done = set()
+    if rss_url:
+        done = {
+            url for (url,) in db.session.query(TranscriptionTask.source_audio_url)
+            .filter(TranscriptionTask.user_id == current_user.id,
+                    TranscriptionTask.rss_url == rss_url,
+                    TranscriptionTask.status == 'completed',
+                    TranscriptionTask.source_audio_url.isnot(None))
+            .all()
+        }
+    for ep in episodes:
+        duration = ep.get('duration_min')
+        if ep.get('audio_url') and ep['audio_url'] in done:
+            ep['buy_label'], ep['buy_variant'] = 'In your history', 'muted'
+        elif duration and math.ceil(float(duration)) <= balance:
+            ep['buy_label'], ep['buy_variant'] = 'Covered', 'muted'
+        else:
+            offer = episode_offer(duration, balance) if duration else None
+            if offer:
+                ep['buy_label'], ep['buy_variant'] = offer['price'], 'accent'
     return episodes
 
 
@@ -5905,7 +6201,7 @@ def parse_rss():
         flash(error, 'error')
         return redirect(url_for('index'))
 
-    _annotate_episodes_for_trial(episodes)
+    _annotate_episodes_for_trial(episodes, rss_url=rss_url)
     episodes_to_show = episodes[:10]
     has_more = len(episodes) > 10
     preselected_index = None
@@ -5979,7 +6275,7 @@ def _capture_trial_daily_budget_exhausted(user_id, source='web'):
 def trial_daily_exhausted_message():
     """User-facing copy when today's shared free-trial budget is gone."""
     buy = (
-        f'Buy {CREDIT_PACK_MINUTES} min for $5 to continue now.'
+        f'Buy {CREDIT_PACK_MINUTES} min for {DEFAULT_PACK_PRICE} to continue now.'
         if stripe_checkout_enabled()
         else 'Add your own OpenAI API key in Settings to keep transcribing.'
     )
@@ -7299,6 +7595,13 @@ def get_status(task_id):
                 result['buy_available'] = True
                 result['buy_label'] = UNLOCK_EPISODE_LABEL
                 result['unlock_label'] = UNLOCK_EPISODE_LABEL
+                # Finishing re-runs the whole episode, so price the full
+                # length against what is left (paid + free).
+                offer = episode_offer(
+                    m_min, (trial_left + paid_left) // 60)
+                if offer:
+                    result['episode_offer'] = offer
+                    result['unlock_label'] = offer['label']
         elif (
             stripe_checkout_enabled()
             and not bool(getattr(current_user, 'openai_api_key', None))
@@ -7307,7 +7610,10 @@ def get_status(task_id):
             result['result_offer'] = True
             result['result_offer_label'] = RESULT_OFFER_LABEL
             result['buy_available'] = True
-            result['buy_label'] = CREDIT_PACK_LABEL
+            result['buy_label'] = (
+                RESULT_OFFER_VOLUME_BUTTON if VOLUME_PRICING_ENABLED
+                else CREDIT_PACK_LABEL)
+            result['volume_pricing'] = bool(VOLUME_PRICING_ENABLED)
         # One-line balance fact under the completed transcript (metered only).
         fact = balance_fact_for_user(current_user)
         if fact:
@@ -9205,7 +9511,7 @@ def faq_entries():
     if trial_available() and minutes > 0:
         hours_bit = (f' (about {minutes // 60} hours)' if minutes >= 120 else '')
         pack_bit = (
-            f' Or buy a one-time pack: ${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for '
+            f' Or buy a one-time pack: {DEFAULT_PACK_PRICE} for '
             f'{CREDIT_PACK_MINUTES} minutes ({CREDIT_PACK_MINUTES // 60} hours), '
             f'VAT included, paid via Stripe — no subscription.'
             if stripe_checkout_enabled() else ''
@@ -9222,7 +9528,7 @@ def faq_entries():
                     'you spend at OpenAI.')
     else:
         pack_bit = (
-            f' Or buy a one-time pack: ${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for '
+            f' Or buy a one-time pack: {DEFAULT_PACK_PRICE} for '
             f'{CREDIT_PACK_MINUTES} minutes ({CREDIT_PACK_MINUTES // 60} hours), '
             f'VAT included — no subscription.'
             if stripe_checkout_enabled() else ''
@@ -9292,7 +9598,14 @@ def inject_trial_badge():
         'credit_pack_subline': CREDIT_PACK_SUBLINE,
         'credit_pack_payment_hint': CREDIT_PACK_PAYMENT_HINT,
         'credit_pack_minutes': CREDIT_PACK_MINUTES,
-        'credit_pack_price_usd': f'{CREDIT_PACK_AMOUNT_CENTS / 100:.0f}',
+        'credit_pack_price_usd': DEFAULT_PACK_PRICE.lstrip('$'),
+        'volume_pricing_enabled': bool(VOLUME_PRICING_ENABLED),
+        'volume_price_table': (
+            pricing_volume.price_table() if VOLUME_PRICING_ENABLED else []),
+        'volume_default_minutes': pricing_volume.VOLUME_DEFAULT_MINUTES,
+        'volume_min_minutes': pricing_volume.VOLUME_MIN_MINUTES,
+        'volume_max_minutes': pricing_volume.VOLUME_MAX_MINUTES,
+        'volume_step_minutes': pricing_volume.VOLUME_STEP_MINUTES,
         'nav_minutes_left': nav['nav_minutes_left'],
         'nav_daily_exhausted': nav['nav_daily_exhausted'],
         'nav_show_buy': nav['nav_show_buy'],
@@ -9387,7 +9700,7 @@ def _structured_data():
                         (f'{advertised_trial_minutes()} minutes of audio free on signup. '
                          'After that, ' if advertised_trial_minutes() else '')
                         + (
-                            f'buy a one-time pack (${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for '
+                            f'buy a one-time pack ({DEFAULT_PACK_PRICE} for '
                             f'{CREDIT_PACK_MINUTES} minutes, VAT included) via Stripe, or '
                             if stripe_checkout_enabled() else ''
                         )
@@ -9509,7 +9822,7 @@ def podcast_show(slug):
     faq = show_pages_mod.show_faq_entries(
         show['name'],
         trial_minutes=trial_minutes,
-        credit_pack_price=f'{CREDIT_PACK_AMOUNT_CENTS / 100:.0f}',
+        credit_pack_price=DEFAULT_PACK_PRICE.lstrip('$'),
         credit_pack_minutes=CREDIT_PACK_MINUTES,
         language_count=len(LANGUAGE_ENGLISH_NAMES),
     )
@@ -9610,7 +9923,7 @@ def llms_txt():
             "Podskrift's own OpenAI key.\nAfter that you"
             if grant else 'You')
     pack = (
-        f'\nOr buy a one-time pack: ${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for '
+        f'\nOr buy a one-time pack: {DEFAULT_PACK_PRICE} for '
         f'{CREDIT_PACK_MINUTES} minutes ({CREDIT_PACK_MINUTES // 60} hours), VAT '
         f'included, paid via Stripe — no subscription.'
         if stripe_checkout_enabled() else ''
@@ -9805,7 +10118,7 @@ def ai_faq_entries():
 def guide_ai_faq_entries():
     """Exactly the five FAQ pairs on the ChatGPT/Claude guide (and its JSON-LD)."""
     pack = (
-        f'buy a ${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} pack of '
+        f'buy a {DEFAULT_PACK_PRICE} pack of '
         f'{CREDIT_PACK_MINUTES} minutes'
         if stripe_checkout_enabled()
         else 'buy more minutes'
@@ -10312,6 +10625,13 @@ def load_customer_api_markdown():
     """Source for /docs/api. Public HTML must never ship AGENT_API_KEY copy."""
     with open(CUSTOMER_API_DOC_PATH, encoding='utf-8') as f:
         text = f.read()
+    # The trial length is configuration (and an A/B), never a number in the
+    # markdown: quote what every new account actually gets.
+    granted = advertised_trial_minutes()
+    text = text.replace(
+        'New accounts get {trial_minutes} free trial minutes on our OpenAI key; after that, add your own.',
+        (f'New accounts get {granted} free trial minutes on our OpenAI key; after that, add your own.'
+         if granted else 'Use your own OpenAI key, or buy minutes in Settings.'))
     # MCP connect docs are gated on MCP_ENABLED (default off).
     text = mcp_server_mod.filter_mcp_docs_section(
         text, enabled=mcp_server_mod.mcp_enabled())
