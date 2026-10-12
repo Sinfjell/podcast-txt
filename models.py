@@ -274,6 +274,16 @@ class CreditPurchase(db.Model):
     amount_refunded_cents = db.Column(db.Integer, nullable=False, default=0,
                                       server_default='0')
     refunded_at = db.Column(db.DateTime, nullable=True)
+    #: Post-payment auto-start of the stashed episode (/billing/success).
+    #: Claimed with one conditional UPDATE so a refresh, a second tab or two
+    #: workers can start the job at most once per Checkout Session.
+    autostart_claimed_at = db.Column(db.DateTime, nullable=True)
+    autostart_task_id = db.Column(db.String(64), nullable=True)
+    #: Where the quantity came from (slider / episode / default) and the curve
+    #: it was priced on (vol_v1 …, legacy_v0 for the fixed 300-for-$5 pack).
+    #: NULL on rows written before these columns existed.
+    price_source = db.Column(db.String(16), nullable=True)
+    pricing_version = db.Column(db.String(16), nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -425,6 +435,10 @@ CREDIT_PURCHASE_COLUMN_MIGRATIONS = {
     'seconds_clawed_back': 'INTEGER NOT NULL DEFAULT 0',
     'amount_refunded_cents': 'INTEGER NOT NULL DEFAULT 0',
     'refunded_at': 'DATETIME',
+    'autostart_claimed_at': 'DATETIME',
+    'autostart_task_id': 'VARCHAR(64)',
+    'price_source': 'VARCHAR(16)',
+    'pricing_version': 'VARCHAR(16)',
 }
 
 #: Additive columns for transcript_shares. Applied by

@@ -122,7 +122,7 @@ def test_eta_shrinks_as_work_progresses():
 def test_stale_task_is_failed_when_its_status_is_polled():
     """A task orphaned by a restart has a fresh heartbeat, so the boot sweep skips
     it. The poll the waiting page makes is what must notice."""
-    from models import TranscriptionTask
+    from models import db, TranscriptionTask
 
     with A.app.app_context():
         from models import db
@@ -3713,7 +3713,7 @@ def test_llms_txt_states_what_the_tool_is_for(trial_on):
     # in this file too, so a hardcoded figure in the prose above hid behind the
     # generated one in the FAQ. Every figure in the file has to agree.
     import re as _re
-    granted = A.NEW_USER_TRIAL_SECONDS // 60
+    granted = A.advertised_trial_minutes()
     figures = {int(n) for n in _re.findall(r'(\d+) minutes of audio free', body)}
     assert figures == {granted}, (
         f'llms.txt quotes {sorted(figures)} free minutes; the configured grant is '
@@ -4135,7 +4135,7 @@ def test_no_page_quotes_a_trial_length_the_code_does_not_grant(trial_on):
     hardcoded "First 60 minutes free" in the hero."""
     import re as _re
     client = A.app.test_client()
-    granted = A.NEW_USER_TRIAL_SECONDS // 60
+    granted = A.advertised_trial_minutes()
     for path in ('/', '/llms.txt', '/docs/api'):
         text = client.get(path).data.decode()
         figures = {int(n) for n in _re.findall(r'(\d+)\s+(?:trial\s+)?minutes', text)}
@@ -4164,7 +4164,7 @@ def test_the_copy_does_not_promise_a_trial_that_is_switched_off(trial_on, monkey
     assert 'free trial' not in answers['Is there an HTTP API?'].lower()
     docs = client.get('/docs/api').data.decode()
     # Changelog toast may mention historical grant lengths; marketing must not.
-    grant = A.NEW_USER_TRIAL_SECONDS // 60
+    grant = A.advertised_trial_minutes()
     assert f'Free {grant}-minute trial' not in docs
     assert f'<strong>{grant} minutes</strong>' not in docs
     assert 'of audio on signup' not in docs
@@ -6486,7 +6486,7 @@ def test_public_api_docs_page_renders_customer_markdown(trial_on):
     assert body.index('<h2>POST /api/v1/transcriptions</h2>') < body.index(
         '<h2>GET /api/v1/episodes</h2>')
     # Same trial length new signups get — not a hardcoded figure that can drift.
-    assert f'{A.NEW_USER_TRIAL_SECONDS // 60} minutes' in body
+    assert f'{A.advertised_trial_minutes()} minutes' in body
     # Host CoS secret must never appear on the public page.
     assert 'AGENT_API_KEY' not in body
     # MCP connector docs stay gated; the nav label "MCP" is always present.
@@ -6499,7 +6499,7 @@ def test_public_api_docs_page_renders_customer_markdown(trial_on):
 def test_public_api_docs_seo_metadata_and_intro(trial_on):
     """Growth-approved title/meta/OG/intro so transcript-API searches find /docs/api."""
     body = A.app.test_client().get('/docs/api').data.decode()
-    grant = A.NEW_USER_TRIAL_SECONDS // 60
+    grant = A.advertised_trial_minutes()
     assert '<title>Podcast Transcript API — Get Transcript via HTTP | Podskrift</title>' in body
     assert (
         'content="Podcast transcription API for agents and scripts. '
@@ -9175,6 +9175,8 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
+    assert entries[0]['id'] == 'pay-per-minute-launch-pricing'
+    entries = entries[1:]
     assert entries[0]['id'] == 'new-home-and-header'
     assert entries[1]['id'] == 'ai-what-you-can-ask'
     assert entries[2]['id'] == 'mcp-list-my-transcripts'
@@ -9622,7 +9624,7 @@ def test_homepage_copy_leads_with_spotify(trial_on):
     assert 'even on Spotify' in body
     assert 'Paste a Spotify link or search a podcast' in body
     assert 'badge-needs-key' in body
-    assert f'Your first {A.NEW_USER_TRIAL_SECONDS // 60} minutes' in body
+    assert f'Your first {A.advertised_trial_minutes()} minutes' in body
     assert 'run on our key' in body
     assert 'Download .txt or .srt transcript' not in body
     assert f'${A.openai_whisper_cost_usd(90):.2f}' in body
@@ -9631,7 +9633,7 @@ def test_homepage_copy_leads_with_spotify(trial_on):
 
 def test_homepage_anon_sees_new_signup_trial_copy(trial_on):
     """Logged-out visitors get the advertised new-account grant (60)."""
-    grant = A.NEW_USER_TRIAL_SECONDS // 60
+    grant = A.advertised_trial_minutes()
     body = A.app.test_client().get('/').data.decode()
     assert f'First {grant} minutes of audio free' in body
     assert f'covers {grant} minutes of audio in total' in body
@@ -9663,7 +9665,7 @@ def test_homepage_logged_in_legacy_180_min_user_sees_own_trial_copy(trial_on):
 
 def test_register_helper_text_mentions_free_minutes(trial_on):
     body = A.app.test_client().get('/register').data.decode()
-    assert f'{A.NEW_USER_TRIAL_SECONDS // 60} free minutes' in body
+    assert f'{A.advertised_trial_minutes()} free minutes' in body
     assert 'No card, no OpenAI key' in body
     assert 'password2' not in body
     assert 'Confirm password' not in body
@@ -9691,7 +9693,7 @@ def test_register_with_pending_episode_shows_episode_card(monkeypatch, trial_on)
     assert 'Hard Fork Special' in body
     assert 'Hard Fork' in body
     assert '48 min' in body
-    assert f'of your {A.NEW_USER_TRIAL_SECONDS // 60} free' in body
+    assert f'of your {A.advertised_trial_minutes()} free' in body
     assert 'Create account &amp; start transcript' in body or 'Create account & start transcript' in body
     assert 'Confirm password' not in body
 
@@ -10202,7 +10204,7 @@ def test_own_key_user_gets_null_trial_badge(trial_on):
 
 def test_anon_homepage_exposes_new_account_trial_badge(trial_on):
     body = A.app.test_client().get('/').data.decode()
-    assert f'var TRIAL_REMAINING_MIN = {A.NEW_USER_TRIAL_SECONDS // 60};' in body
+    assert f'var TRIAL_REMAINING_MIN = {A.advertised_trial_minutes()};' in body
 
 
 def test_default_trial_grants_and_daily_budget():
@@ -12288,7 +12290,8 @@ def test_billing_success_shows_episode_start_button(stripe_on):
         sess[A.PENDING_TRANSCRIPTION_KEY] = {
             'title': 'Return To Task Ep',
             'audio_url': 'https://cdn.example.com/r.mp3',
-            'duration_min': 40.0,
+            # Unknown length: auto-start never guesses, so the button stays.
+            'duration_min': None,
             'podcast_name': 'Show',
             'language': 'en',
             'rss_url': None,
@@ -14065,6 +14068,8 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
+    assert entries[0]['id'] == 'pay-per-minute-launch-pricing'
+    entries = entries[1:]
     assert entries[0]['id'] == 'new-home-and-header'
     assert entries[1]['id'] == 'ai-what-you-can-ask'
     assert entries[2]['id'] == 'mcp-list-my-transcripts'
@@ -16833,3 +16838,796 @@ def test_staging_is_noindex_and_disallowed(monkeypatch):
 def test_home_prefills_from_landing_query():
     html = A.app.test_client().get('/').data.decode()
     assert 'prefillFromLanding' in html
+# --------------------------------------------------------------------------
+# Launch volume pricing (pricing_volume.py + VOLUME_PRICING_ENABLED)
+# --------------------------------------------------------------------------
+import pricing_volume as pv  # noqa: E402
+
+GRID = list(range(pv.VOLUME_MIN_MINUTES, pv.VOLUME_MAX_MINUTES + 1, pv.VOLUME_STEP_MINUTES))
+
+
+def test_anchor_points_are_the_approved_prices():
+    assert pv.price_cents(60) == 150
+    assert pv.price_cents(300) == 500
+    assert pv.price_cents(600) == 600
+    assert pv.price_cents(1200) == 1100
+
+
+def test_total_price_never_falls_as_quantity_rises():
+    prices = [pv.price_cents(m) for m in GRID]
+    assert prices == sorted(prices)
+
+
+def test_per_minute_price_is_monotone_decreasing_on_the_purchase_grid():
+    rates = [pv.price_cents(m) / m for m in GRID]
+    for (m0, r0), (m1, r1) in zip(zip(GRID, rates), zip(GRID[1:], rates[1:])):
+        assert r1 < r0, f'{m1} min costs {r1:.4f}¢/min, not less than {m0} min ({r0:.4f})'
+
+
+@pytest.mark.parametrize('minutes', GRID)
+def test_never_below_cost_floor(minutes):
+    cents = pv.price_cents(minutes)
+    # OpenAI whisper $0.006/min plus Stripe 30¢ + 6.4% must be covered.
+    assert cents >= pv.floor_cents(minutes)
+    net = cents * (1 - pv.STRIPE_FEE_PCT) - pv.STRIPE_FEE_FIXED_CENTS
+    assert net >= minutes * pv.COST_CENTS_PER_MINUTE
+
+
+def test_floor_matches_whisper_cost():
+    assert pv.COST_CENTS_PER_MINUTE == pytest.approx(0.6)
+    # Floor alone at 1200 minutes: (720 + 30) / 0.936 ≈ 802¢.
+    assert pv.floor_cents(1200) == 802
+
+
+def test_minimum_purchase_is_150_cents():
+    assert pv.VOLUME_MIN_AMOUNT_CENTS == 150
+    assert min(pv.price_cents(m) for m in GRID) == 150
+    assert pv.price_cents(15) == 150
+    assert pv.price_cents(1) == 150
+
+
+def test_pricing_versions_registry():
+    assert pv.CURRENT_PRICING_VERSION == 'vol_v1'
+    v1 = pv.PRICING_VERSIONS['vol_v1']
+    assert v1['anchors'] == ((60, 150), (300, 500), (600, 600), (1200, 1100))
+    assert pv.VOLUME_ANCHORS == v1['anchors']
+    assert pv.min_amount_cents_for('vol_v1') == 150
+    assert pv.min_amount_cents_for(None) == pv.UNVERSIONED_MIN_AMOUNT_CENTS
+    assert pv.min_amount_cents_for('vol_v0_unknown') is None
+    # 300 min on the curve is the legacy pack price, so the default buy is unchanged.
+    assert pv.price_cents(pv.VOLUME_DEFAULT_MINUTES) == A.CREDIT_PACK_AMOUNT_CENTS == 500
+
+
+def test_floor_wins_if_a_curve_point_would_lose_money(monkeypatch):
+    monkeypatch.setattr(pv, 'VOLUME_ANCHORS', ((60, 100), (1200, 300)))
+    assert pv.price_cents(1200) == pv.floor_cents(1200)
+
+
+@pytest.mark.parametrize('raw,expected', [
+    ('60', 60), ('75', 75), ('1200', 1200), (' 300 ', 300),
+    ('59', None), ('61', None), ('1215', None), ('0', None), ('-60', None),
+    ('abc', None), ('', None), (None, None), ('300.0', None), ('1e3', None),
+])
+def test_parse_quantity_rejects_off_grid(raw, expected):
+    assert pv.parse_quantity(raw) == expected
+
+
+def test_is_valid_quantity_rejects_bools_and_floats():
+    assert pv.is_valid_quantity(True) is False
+    assert pv.is_valid_quantity(300.0) is False
+    assert pv.is_valid_quantity(300) is True
+
+
+def test_savings_percent():
+    assert pv.savings_percent(60) == 0
+    assert pv.savings_percent(300) == 33
+    assert pv.savings_percent(600) == 60
+    assert pv.savings_percent(1200) == 63
+    savings = [pv.savings_percent(m) for m in GRID]
+    assert savings == sorted(savings)
+
+
+@pytest.mark.parametrize('episode,balance,qty', [
+    (75, 0, 75),      # exactly on the grid
+    (76, 0, 90),      # rounds up to the next 15
+    (30, 0, 60),      # the minimum purchase is 60 min; never sell fewer
+    (75, 20, 60),     # shortfall 55 → minimum purchase
+    (200, 20, 180),
+    (74.2, 0, 75),
+    (3000, 0, 1200),  # capped at the slider top
+])
+def test_episode_quantity(episode, balance, qty):
+    assert pv.episode_quantity(episode, balance) == qty
+    assert pv.is_valid_quantity(qty)
+
+
+@pytest.mark.parametrize('episode,balance', [(30, 40), (0, 0), (None, 0), ('x', 0), (-5, 0)])
+def test_episode_quantity_none_when_covered_or_unknown(episode, balance):
+    assert pv.episode_quantity(episode, balance) is None
+
+
+def test_episode_price_uses_the_same_curve():
+    q = pv.quote(pv.episode_quantity(75))
+    assert q['minutes'] == 75
+    assert q['amount_cents'] == pv.price_cents(75) == 172
+    assert q['price'] == '$1.72'
+
+
+def test_format_usd():
+    assert pv.format_usd(100) == '$1'
+    assert pv.format_usd(119) == '$1.19'
+    assert pv.format_usd(150) == '$1.50'
+    assert pv.format_usd(250) == '$2.50'
+    assert pv.format_usd(1000) == '$10'
+
+
+def test_price_table_covers_grid_with_buckets():
+    table = pv.price_table()
+    assert [r['minutes'] for r in table] == GRID
+    assert {r['bucket'] for r in table} == {'60', '61-150', '151-300', '301-600', '601-1200'}
+    assert all(set(r) >= {'minutes', 'amount_cents', 'price', 'cents_per_minute',
+                          'savings_percent', 'bucket'} for r in table)
+
+
+def test_flag_defaults_off():
+    assert pv.volume_pricing_enabled({}) is False
+    assert pv.volume_pricing_enabled({'VOLUME_PRICING_ENABLED': '0'}) is False
+    assert pv.volume_pricing_enabled({'VOLUME_PRICING_ENABLED': '1'}) is True
+    assert pv.volume_pricing_enabled({'VOLUME_PRICING_ENABLED': 'on'}) is True
+
+
+@pytest.fixture
+def volume_on(monkeypatch, stripe_on):
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    return stripe_on
+
+
+def _vol_csrf_client(uid):
+    client = _login(uid)
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    assert token
+    return client, token
+
+
+def _volume_session(uid, minutes, amount, session_id='cs_vol_1', unit=None,
+                    price_source='slider', pricing_version='vol_v1', **overrides):
+    meta = {
+        'user_id': str(uid),
+        'minutes': str(minutes),
+        'pack': pv.VOLUME_PACK_SKU,
+        'amount_cents': str(amount),
+        'price_source': price_source,
+        'location': 'pricing',
+    }
+    if pricing_version is not None:
+        meta['pricing_version'] = pricing_version
+    unit = amount if unit is None else unit
+    d = _pack_session(
+        uid, session_id=session_id, metadata=meta,
+        amount_subtotal=unit, amount_total=unit,
+        line_items={'data': [{'quantity': 1, 'price': {
+            'id': 'price_inline', 'unit_amount': unit, 'tax_behavior': 'inclusive'}}]},
+    )
+    d.update(overrides)
+    return d
+
+
+def test_volume_checkout_prices_on_the_server(volume_on, ph_events, monkeypatch):
+    # A Dashboard price id must not leak into a volume purchase.
+    monkeypatch.setattr(A, 'STRIPE_PRICE_ID', 'price_dashboard_500')
+    uid = _make_user('vol-slider@test.com', limit=600, used=600)
+    client, token = _vol_csrf_client(uid)
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'pricing',
+        'minutes': '600', 'price_source': 'slider',
+        'amount_cents': '1', 'unit_amount': '1',  # ignored: never trust the client
+    })
+    assert resp.status_code == 303
+    kw = volume_on['last_create_params']
+    li = kw['line_items'][0]
+    assert 'price' not in li
+    assert li['price_data']['unit_amount'] == 600
+    assert li['price_data']['currency'] == 'usd'
+    assert li['price_data']['product_data']['name'] == 'Podskrift — 600 minutes'
+    assert kw['metadata']['pack'] == pv.VOLUME_PACK_SKU
+    assert kw['metadata']['minutes'] == '600'
+    assert kw['metadata']['amount_cents'] == '600'
+    assert kw['metadata']['price_source'] == 'slider'
+    assert kw['payment_intent_data']['metadata']['minutes'] == '600'
+    # PR #119: both break Checkout for Norwegian accounts.
+    assert 'consent_collection' not in kw
+    assert 'allow_promotion_codes' not in kw
+    started = [e for e in ph_events.events if e['event'] == 'checkout_started'][-1]
+    props = started['properties']
+    assert props['minutes'] == 600
+    assert props['amount_cents'] == 600
+    assert props['price_source'] == 'slider'
+    assert props['pricing'] == 'volume_v1'
+    assert props['pack_sku'] == pv.VOLUME_PACK_SKU
+
+
+def test_volume_checkout_episode_price(volume_on, ph_events):
+    uid = _make_user('vol-episode@test.com', limit=600, used=600)
+    client, token = _vol_csrf_client(uid)
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'buy_modal_episode',
+        'minutes': '75', 'price_source': 'episode',
+        'episode_title': 'Ep', 'audio_url': 'https://example.com/a.mp3',
+        'duration_min': '75',
+    })
+    assert resp.status_code == 303
+    kw = volume_on['last_create_params']
+    assert kw['line_items'][0]['price_data']['unit_amount'] == 172
+    assert kw['metadata']['price_source'] == 'episode'
+    props = [e for e in ph_events.events if e['event'] == 'checkout_started'][-1]['properties']
+    assert props['price_source'] == 'episode'
+    assert props['minutes'] == 75 and props['amount_cents'] == 172
+
+
+def test_volume_checkout_unknown_price_source_counts_as_slider(volume_on):
+    uid = _make_user('vol-src@test.com', limit=600, used=600)
+    client, token = _vol_csrf_client(uid)
+    client.post('/billing/checkout', data={
+        'csrf_token': token, 'minutes': '300', 'price_source': 'free'})
+    assert volume_on['last_create_params']['metadata']['price_source'] == 'slider'
+
+
+@pytest.mark.parametrize('bad', ['61', '30', '1215', '0', 'abc', '-60'])
+def test_volume_checkout_rejects_off_grid_quantity(volume_on, ph_events, bad):
+    uid = _make_user('vol-bad@test.com', limit=600, used=600)
+    client, token = _vol_csrf_client(uid)
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'minutes': bad, 'price_source': 'slider'})
+    assert resp.status_code in (302, 303)
+    assert volume_on['last_create_params'] is None
+    failed = [e for e in ph_events.events if e['event'] == 'purchase_failed']
+    assert failed and failed[-1]['properties']['reason'] == 'invalid_quantity'
+
+
+def test_volume_checkout_default_buy_button_uses_the_curve(volume_on):
+    """Legacy one-click Buy forms send no minutes: 300 min at the launch price."""
+    uid = _make_user('vol-default@test.com', limit=600, used=600)
+    client, token = _vol_csrf_client(uid)
+    client.post('/billing/checkout', data={'csrf_token': token, 'source': 'settings'})
+    kw = volume_on['last_create_params']
+    assert kw['metadata']['minutes'] == '300'
+    assert kw['metadata']['price_source'] == 'default'
+    assert kw['line_items'][0]['price_data']['unit_amount'] == pv.price_cents(300) == 500
+
+
+def test_flag_off_checkout_is_unchanged(stripe_on):
+    assert A.VOLUME_PRICING_ENABLED is False
+    uid = _make_user('vol-off@test.com', limit=600, used=600)
+    client, token = _vol_csrf_client(uid)
+    client.post('/billing/checkout', data={
+        'csrf_token': token, 'minutes': '1200', 'price_source': 'slider'})
+    kw = stripe_on['last_create_params']
+    assert kw['metadata']['pack'] == A.CREDIT_PACK_SKU
+    assert kw['metadata']['minutes'] == '300'
+    assert kw['line_items'][0]['price_data']['unit_amount'] == 500
+
+
+def test_volume_webhook_credits_purchased_minutes_once(volume_on, ph_events):
+    from models import CreditPurchase, db
+    uid = _make_user('vol-webhook@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    sess = _volume_session(uid, 600, 600, session_id='cs_vol_once')
+    resp = _register_and_post(volume_on, sess)
+    assert resp.status_code == 200
+    assert _paid(uid) == 600 * 60
+    # Redelivery and a second event for the same session credit nothing more.
+    _register_and_post(volume_on, sess)
+    _register_and_post(volume_on, sess, eid='evt_other_id')
+    assert _paid(uid) == 600 * 60
+    with A.app.app_context():
+        rows = CreditPurchase.query.filter_by(stripe_session_id='cs_vol_once').all()
+        assert len(rows) == 1
+        assert rows[0].minutes == 600 and rows[0].status == 'credited'
+        assert rows[0].amount_total_cents == 600
+    done = [e for e in ph_events.events if e['event'] == 'purchase_completed']
+    assert len({e['uuid'] for e in done}) == 1
+    props = done[-1]['properties']
+    assert props['minutes'] == 600
+    assert props['amount_cents'] == 600
+    assert props['price_source'] == 'slider'
+    assert props['pricing'] == 'volume_v1'
+
+
+def test_volume_webhook_episode_purchase(volume_on, ph_events):
+    uid = _make_user('vol-webhook-ep@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    _register_and_post(volume_on, _volume_session(
+        uid, 75, 172, session_id='cs_vol_ep', price_source='episode'))
+    assert _paid(uid) == 75 * 60
+    props = [e for e in ph_events.events if e['event'] == 'purchase_completed'][-1]['properties']
+    assert props['price_source'] == 'episode' and props['minutes'] == 75
+
+
+def test_volume_webhook_rejects_amount_that_does_not_match_metadata(volume_on):
+    from models import CreditPurchase
+    uid = _make_user('vol-tamper@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    _register_and_post(volume_on, _volume_session(
+        uid, 1200, 1100, unit=100, session_id='cs_vol_tamper'))
+    assert _paid(uid) == 0
+    with A.app.app_context():
+        row = CreditPurchase.query.filter_by(stripe_session_id='cs_vol_tamper').one()
+        assert row.status == 'needs_review'
+
+
+@pytest.mark.parametrize('minutes,amount', [('1200', '100'), ('61', '119'), ('', '600'), ('600', 'x')])
+def test_volume_webhook_rejects_bad_terms(volume_on, minutes, amount):
+    uid = _make_user('vol-terms@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    sess = _volume_session(uid, 600, 600, session_id='cs_vol_terms')
+    sess['metadata']['minutes'] = minutes
+    sess['metadata']['amount_cents'] = amount
+    _register_and_post(volume_on, sess)
+    assert _paid(uid) == 0
+
+
+def test_volume_session_still_credits_after_flag_is_turned_off(stripe_on):
+    """A session opened while the flag was on must credit after a flip."""
+    assert A.VOLUME_PRICING_ENABLED is False
+    uid = _make_user('vol-flip@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    _register_and_post(stripe_on, _volume_session(uid, 300, 500, session_id='cs_vol_flip'))
+    assert _paid(uid) == 300 * 60
+
+
+def test_volume_session_credits_quoted_price_after_curve_change(volume_on, monkeypatch):
+    """Price raised between checkout and payment: credit what was quoted and paid."""
+    monkeypatch.setattr(pv, 'VOLUME_ANCHORS', ((60, 200), (1200, 2000)))
+    uid = _make_user('vol-curve@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    _register_and_post(volume_on, _volume_session(uid, 600, 600, session_id='cs_vol_curve'))
+    assert _paid(uid) == 600 * 60
+
+
+def test_legacy_pack_still_credits_with_volume_on(volume_on):
+    uid = _make_user('vol-legacy@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    _register_and_post(volume_on, _pack_session(uid, session_id='cs_vol_legacy'))
+    assert _paid(uid) == A.CREDIT_PACK_MINUTES * 60
+
+
+def test_episode_offer(monkeypatch):
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', False)
+    assert A.episode_offer(75, 0) is None
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    offer = A.episode_offer(75, 0)
+    assert offer['label'] == 'Transcribe this episode (75 min) for $1.72'
+    assert offer['minutes'] == 75 and offer['amount_cents'] == 172
+    # 20 min left: the shortfall is 55 → the $1 minimum (60 min).
+    assert A.episode_offer(75, 20)['label'] == 'Transcribe this episode (75 min) for $1.50'
+    assert A.episode_offer(30, 40) is None
+    assert 'for $1.50' in A.pack_covers_episode_line(45)
+
+
+def test_pricing_page_shows_slider_only_with_flag(stripe_on, monkeypatch):
+    uid = _make_user('vol-page@test.com', limit=600, used=600)
+    client = _login(uid)
+    off = client.get('/pricing').data.decode()
+    assert 'id="pricingMinutes"' not in off
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    on = client.get('/pricing').data.decode()
+    assert 'id="pricingMinutes"' in on and 'data-volume-slider' in on
+    assert 'Launch price' in on
+    assert 'name="minutes"' in on and 'name="price_source"' in on
+    assert 'data-volume-form="pricingBuyForm"' in on
+    assert 'You save 33% per minute' in on  # 300-minute default
+    assert on.count('btn-primary') - off.count('btn-primary') == 0
+
+
+def test_buy_modal_has_slider_with_flag(stripe_on, monkeypatch):
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    uid = _make_user('vol-modal@test.com', limit=600, used=600)
+    body = _login(uid).get('/').data.decode()
+    assert 'id="buyModalMore"' in body
+    assert 'name="price_source" id="buyModalPriceSource"' in body
+    assert 'data-volume-form="buyModalForm"' in body
+
+
+
+# --------------------------------------------------------------------------
+# Post-payment auto-start (/billing/success)
+# --------------------------------------------------------------------------
+def _autostart_setup(volume_on, monkeypatch, email, session_id, minutes=75,
+                     amount=172, duration=8.0, paid=True, credit_via_webhook=False):
+    uid = _make_user(email, limit=0, used=0)
+    _set_paid(uid, 0)
+    sess_dict = _volume_session(uid, minutes, amount, session_id=session_id,
+                                price_source='episode')
+    if not paid:
+        sess_dict['payment_status'] = 'unpaid'
+    volume_on['sessions'][session_id] = sess_dict
+    if credit_via_webhook:
+        _register_and_post(volume_on, sess_dict)
+        assert _paid(uid) == minutes * 60
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    calls = []
+
+    def fake_enqueue(user, meta, rss_url=None, language='', source='web'):
+        calls.append(meta)
+        return {'task_id': f'task-{session_id}'}, 200
+
+    monkeypatch.setattr(A, 'enqueue_transcription', fake_enqueue)
+    client = _login(uid)
+    with client.session_transaction() as s_:
+        s_[A.PENDING_TRANSCRIPTION_KEY] = {
+            'title': 'Short Ep', 'audio_url': 'https://cdn.example.com/short.mp3',
+            'duration_min': duration, 'podcast_name': 'Show', 'language': 'en',
+            'rss_url': None, 'episode_index': None, 'artwork': None, 'published': None,
+        }
+    return uid, client, calls
+
+
+def _purchase(session_id):
+    from models import CreditPurchase
+    with A.app.app_context():
+        row = CreditPurchase.query.filter_by(stripe_session_id=session_id).one()
+        return row.autostart_claimed_at, row.autostart_task_id
+
+
+def test_paid_episode_purchase_autostarts_once_and_refresh_returns_to_it(volume_on, monkeypatch):
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-1@test.com', 'cs_auto_1')
+    resp = client.get('/billing/success?session_id=cs_auto_1')
+    assert resp.status_code == 302
+    assert resp.headers['Location'].endswith('/transcription/task-cs_auto_1')
+    assert len(calls) == 1 and calls[0]['audio_url'] == 'https://cdn.example.com/short.mp3'
+    claimed, task_id = _purchase('cs_auto_1')
+    assert claimed is not None and task_id == 'task-cs_auto_1'
+    with client.session_transaction() as s_:
+        assert A.PENDING_TRANSCRIPTION_KEY not in s_
+    # Refresh: straight back to the same job, nothing new enqueued.
+    again = client.get('/billing/success?session_id=cs_auto_1')
+    assert again.status_code == 302
+    assert again.headers['Location'].endswith('/transcription/task-cs_auto_1')
+    assert len(calls) == 1
+    assert _paid(uid) == 75 * 60
+
+
+def test_autostart_when_the_webhook_credited_first(volume_on, monkeypatch):
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-2@test.com', 'cs_auto_2', credit_via_webhook=True)
+    resp = client.get('/billing/success?session_id=cs_auto_2')
+    assert resp.status_code == 302 and len(calls) == 1
+    assert _paid(uid) == 75 * 60  # success page did not credit a second time
+
+
+def test_autostart_claim_is_single_use_even_with_a_stale_session(volume_on, monkeypatch):
+    """A second tab (or worker) still holding the stash in its cookie must not
+    start the episode again once the purchase is claimed."""
+    from models import CreditPurchase
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-3@test.com', 'cs_auto_3', credit_via_webhook=True)
+    with A.app.app_context():
+        row = CreditPurchase.query.filter_by(stripe_session_id='cs_auto_3').one()
+        row.autostart_claimed_at = A.datetime.now(A.timezone.utc)  # other request won
+        A.db.session.commit()
+    resp = client.get('/billing/success?session_id=cs_auto_3')
+    assert resp.status_code == 200
+    assert calls == []
+    assert 'Start transcript: Short Ep' in resp.data.decode()
+
+
+def test_no_autostart_when_balance_does_not_cover_the_episode(volume_on, monkeypatch):
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-4@test.com', 'cs_auto_4', duration=80.0)
+    resp = client.get('/billing/success?session_id=cs_auto_4')
+    assert resp.status_code == 200 and calls == []
+    assert 'Start transcript: Short Ep' in resp.data.decode()
+    assert _purchase('cs_auto_4') == (None, None)
+
+
+def test_no_autostart_while_payment_is_not_confirmed(volume_on, monkeypatch):
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-5@test.com', 'cs_auto_5', paid=False)
+    resp = client.get('/billing/success?session_id=cs_auto_5')
+    assert resp.status_code == 200 and calls == []
+    assert _paid(uid) == 0
+
+
+def test_no_autostart_for_someone_elses_session(volume_on, monkeypatch):
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-6@test.com', 'cs_auto_6')
+    other = _make_user('auto-6-other@test.com', limit=0, used=0)
+    other_client = _login(other)
+    with client.session_transaction() as src:
+        pending = src[A.PENDING_TRANSCRIPTION_KEY]
+    with other_client.session_transaction() as s_:
+        s_[A.PENDING_TRANSCRIPTION_KEY] = pending
+    resp = other_client.get('/billing/success?session_id=cs_auto_6')
+    assert resp.status_code == 200 and calls == []
+
+
+def test_refused_autostart_gives_the_button_and_the_claim_back(volume_on, monkeypatch):
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-7@test.com', 'cs_auto_7')
+    monkeypatch.setattr(A, 'enqueue_transcription',
+                        lambda *a, **k: ({'error': 'busy'}, 503))
+    resp = client.get('/billing/success?session_id=cs_auto_7')
+    assert resp.status_code == 200
+    assert 'Start transcript: Short Ep' in resp.data.decode()
+    assert _purchase('cs_auto_7') == (None, None)
+    with client.session_transaction() as s_:
+        assert s_[A.PENDING_TRANSCRIPTION_KEY]['title'] == 'Short Ep'
+
+
+def test_pack_purchase_with_a_stashed_episode_autostarts(volume_on, monkeypatch):
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'auto-8@test.com', 'cs_auto_8', minutes=300, amount=500)
+    resp = client.get('/billing/success?session_id=cs_auto_8')
+    assert resp.status_code == 302 and len(calls) == 1
+
+
+# --------------------------------------------------------------------------
+# No "free" promise to accounts with 0 free minutes and no own key
+# --------------------------------------------------------------------------
+def _trial_off(monkeypatch):
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
+    assert A.trial_available() is False
+
+
+def test_paid_only_first_run_is_not_told_it_has_free_minutes(volume_on, monkeypatch):
+    _trial_off(monkeypatch)
+    uid = _make_user('copy-paid@test.com', limit=0, used=0)
+    _set_paid(uid, 75 * 60)
+    body = _login(uid).get('/').data.decode()
+    assert 'free minutes</strong> are ready' not in body
+    assert 'no card needed' not in body
+    assert '0 free minutes' not in body
+    assert 'Free trial: <strong>0' not in body
+    assert '<strong>75 minutes</strong> are ready' in body
+    assert 'How your free minutes work' not in body
+
+
+def test_used_up_trial_with_paid_minutes_is_not_quoted_zero_free(volume_on):
+    uid = _make_user('copy-paid2@test.com', limit=600, used=600)
+    _set_paid(uid, 75 * 60)
+    with A.app.app_context():
+        from models import TranscriptionTask
+        A.db.session.add(TranscriptionTask(id='copy-paid2-task', user_id=uid, status='completed', episode_title='Done'))
+        A.db.session.commit()
+    body = _login(uid).get('/').data.decode()
+    assert 'Free trial: <strong>0 minutes' not in body
+    assert '0 free minutes' not in body
+
+
+def test_no_minutes_no_trial_home_leads_with_the_price(volume_on, monkeypatch):
+    from bs4 import BeautifulSoup
+    _trial_off(monkeypatch)
+    uid = _make_user('copy-zero@test.com', limit=0, used=0)
+    page = BeautifulSoup(_login(uid).get('/').data, 'html.parser')
+    banner = page.select_one('[data-testid="home-no-minutes"]')
+    assert banner is not None and '$1.50' in banner.get_text()
+    text = page.get_text(' ')
+    assert 'free minutes are ready' not in text and 'no card needed' not in text
+
+
+def _render_picker(uid=None, monkeypatch=None):
+    from flask import render_template
+    from bs4 import BeautifulSoup
+    episodes = [{'index': 0, 'title': 'Short', 'published': '2024-01-01',
+                 'duration_min': 8, 'estimated_cost': 0.05, 'description': '',
+                 'needs_own_key': False}]
+    with A.app.test_request_context('/'):
+        if uid is not None:
+            from flask_login import login_user
+            from models import User
+            login_user(A.db.session.get(User, uid))
+        html = render_template(
+            'episode_selection.html', episodes=episodes, all_episodes=episodes,
+            rss_url='https://example.com/feed.xml', feed_name='Show', has_more=False,
+            needs_api_key=False, podcast_name='Show', artwork='', languages=[('en', 'English')],
+            show_openai_cost=False)
+    return html, BeautifulSoup(html, 'html.parser')
+
+
+def test_zero_minute_account_picker_quotes_a_price_not_free(volume_on, monkeypatch):
+    _trial_off(monkeypatch)
+    uid = _make_user('copy-picker@test.com', limit=0, used=0)
+    html, page = _render_picker(uid)
+    btn = ' '.join(page.select_one('#stickyTranscribeBtn').get_text().split())
+    assert btn == 'Transcribe from $1.50 →'
+    # Not mistaken for an own-key user (that showed an OpenAI cost estimate).
+    assert 'var ON_OWN_KEY = false;' in html
+    assert 'var VOLUME_ON = true;' in html
+
+
+def test_anonymous_visitor_without_a_trial_is_not_offered_free(volume_on, monkeypatch):
+    _trial_off(monkeypatch)
+    html, page = _render_picker()
+    btn = ' '.join(page.select_one('#stickyTranscribeBtn').get_text().split())
+    assert 'free' not in btn.lower()
+    assert 'var ON_OWN_KEY = false;' in html
+
+
+def test_trial_user_still_sees_transcribe_free(volume_on):
+    uid = _make_user('copy-trial@test.com', limit=600, used=0)
+    html, page = _render_picker(uid)
+    btn = ' '.join(page.select_one('#stickyTranscribeBtn').get_text().split())
+    assert btn == 'Transcribe free →'
+
+
+def test_own_key_user_is_flagged_as_own_key(volume_on):
+    uid = _make_user('copy-key@test.com', key='sk-user-own', limit=600, used=0)
+    html, page = _render_picker(uid)
+    assert 'var ON_OWN_KEY = true;' in html
+    btn = ' '.join(page.select_one('#stickyTranscribeBtn').get_text().split())
+    assert btn == 'Transcribe →'
+
+
+def test_trial_switched_off_bills_paid_minutes_not_the_stamped_trial(trial_on, monkeypatch):
+    """Kill switch: with TRIAL_ENABLED=0 a paying account's stamped trial
+    limit must not be spent; the job is charged to paid minutes."""
+    from models import db, User
+    uid = _make_user('trialoff-paid@test.com', limit=7200, used=0)
+    _set_paid(uid, 600)
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
+    with A.app.app_context():
+        assert A.platform_reserve(uid, 300) == (0, 300)
+        u = db.session.get(User, uid)
+        assert (u.trial_seconds_used or 0) == 0
+        assert u.paid_seconds_balance == 300
+        # More than the paid balance: refused, nothing taken from the trial.
+        assert A.platform_reserve(uid, 400) is None
+        assert (db.session.get(User, uid).trial_seconds_used or 0) == 0
+
+
+def test_checkout_records_the_pricing_version(volume_on):
+    uid = _make_user('pv-meta@test.com', limit=600, used=600)
+    client, token = _vol_csrf_client(uid)
+    client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'pricing', 'minutes': '60', 'price_source': 'slider'})
+    params = volume_on['last_create_params']
+    assert params['metadata']['pricing_version'] == 'vol_v1'
+    assert params['metadata']['amount_cents'] == '150'
+    assert params['line_items'][0]['price_data']['unit_amount'] == 150
+
+
+@pytest.mark.parametrize('version,amount,credited', [
+    ('vol_v1', 150, True),
+    ('vol_v1', 100, False),     # below the vol_v1 minimum
+    (None, 100, True),          # opened before pricing_version existed
+    ('vol_v9', 150, False),     # a version this build does not know
+])
+def test_webhook_validates_against_the_sessions_pricing_version(volume_on, version, amount, credited):
+    uid = _make_user(f'pv-wh-{version}-{amount}@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    sid = f'cs_pv_{version}_{amount}'
+    _register_and_post(volume_on, _volume_session(
+        uid, 60, amount, session_id=sid, pricing_version=version))
+    assert _paid(uid) == (3600 if credited else 0)
+
+
+@pytest.mark.parametrize('minutes,amount', [
+    (300, 300),   # above the minimum and the cost floor, below the curve ($5)
+    (600, 450),   # likewise, against $6
+    (60, 151),    # a cent over: still not a price we quoted
+])
+def test_webhook_refuses_a_versioned_session_off_its_curve(volume_on, minutes, amount):
+    """Metadata is ours, but a session is only honoured at the exact price its
+    curve gives: a floor check alone credited 600 min for $4.50."""
+    uid = _make_user(f'pv-off-{minutes}-{amount}@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    _register_and_post(volume_on, _volume_session(
+        uid, minutes, amount, session_id=f'cs_pv_off_{minutes}_{amount}'))
+    assert _paid(uid) == 0
+
+
+def test_price_cents_for_follows_the_named_version():
+    assert pv.price_cents_for(300, 'vol_v1') == 500
+    assert pv.price_cents_for(1200, 'vol_v1') == 1100
+    assert pv.price_cents_for(300, 'vol_v9') is None
+    assert pv.price_cents_for(300, None) is None
+
+
+def test_purchase_row_records_price_source_and_version(volume_on):
+    uid = _make_user('pv-row@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    _register_and_post(volume_on, _volume_session(
+        uid, 75, 172, session_id='cs_pv_row', price_source='episode'))
+    _register_and_post(volume_on, _pack_session(uid, 'cs_pv_row_legacy'))
+    from models import CreditPurchase
+    with A.app.app_context():
+        vol = CreditPurchase.query.filter_by(stripe_session_id='cs_pv_row').one()
+        legacy = CreditPurchase.query.filter_by(stripe_session_id='cs_pv_row_legacy').one()
+        assert (vol.price_source, vol.pricing_version) == ('episode', 'vol_v1')
+        assert legacy.pricing_version == 'legacy_v0'
+
+
+def test_transcript_ready_mail_quotes_the_live_price(monkeypatch):
+    import email_notify as en
+    kw = dict(podcast_name='Show', episode_title='Ep', transcript_url='https://x/t',
+              unsub_url='https://x/u', pack_url='https://x/pricing')
+    monkeypatch.delenv('VOLUME_PRICING_ENABLED', raising=False)
+    _, text_off, html_off = en.build_transcript_ready_bodies(**kw)
+    assert '300 min for $5' in text_off and '300 min for $5' in html_off
+    monkeypatch.setenv('VOLUME_PRICING_ENABLED', '1')
+    _, text_on, html_on = en.build_transcript_ready_bodies(**kw)
+    assert '300 min for $5' not in text_on + html_on
+    assert 'Buy any amount from $1.50' in text_on and 'Buy any amount from $1.50' in html_on
+
+
+def test_episode_list_marks_price_covered_and_history(volume_on, monkeypatch):
+    """Signed in with volume pricing: each episode says what it costs this
+    account. Trial gone, 40 paid minutes: a 30-min episode is covered, a
+    90-min one costs the 60-minute shortfall ($1.50), one already done is
+    in the history."""
+    from bs4 import BeautifulSoup
+    from models import db, TranscriptionTask
+    uid = _make_user('vol-eplist@test.com', limit=600, used=600)
+    _set_paid(uid, 40 * 60)
+    feed = 'https://example.com/vol-feed.xml'
+    def ep(i, minutes):
+        return {'index': i, 'title': f'Ep {i}', 'published': '2024-01-01',
+                'audio_url': f'https://example.com/{i}.mp3', 'description': '',
+                'duration_min': minutes, 'estimated_cost': 0.1, 'artwork': '',
+                'podcast_name': 'Feed'}
+    episodes = [ep(0, 30), ep(1, 90), ep(2, 90)]
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='vol-eplist-done', user_id=uid, episode_title='Ep 2',
+            rss_url=feed, status='completed',
+            source_audio_url='https://example.com/2.mp3'))
+        db.session.commit()
+    monkeypatch.setattr(A, 'get_episodes_from_rss', lambda url: (episodes, None))
+    body = _login(uid).post('/parse_rss', data={'rss_url': feed}).data.decode()
+    metas = [m.get_text(' ', strip=True) for m in
+             BeautifulSoup(body, 'html5lib').select('.episode-card .episode-meta')]
+    assert 'Covered' in metas[0]
+    assert '$1.50' in metas[1]
+    assert 'In your history' in metas[2]
+
+
+def test_episode_list_has_no_buy_labels_with_volume_off(stripe_on, monkeypatch):
+    uid = _make_user('vol-eplist-off@test.com', limit=600, used=600)
+    _set_paid(uid, 40 * 60)
+    resp = _render_episode_selection_via_parse_rss(monkeypatch, _login(uid))
+    meta = _episode_card_meta(resp.data.decode())
+    assert 'Covered' not in meta and '$' not in meta
+
+
+def test_legacy_fixed_pack_still_credits_with_volume_on(volume_on):
+    uid = _make_user('pv-legacy@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    _register_and_post(volume_on, _pack_session(uid, 'cs_pv_legacy'))
+    assert _paid(uid) == A.CREDIT_PACK_MINUTES * 60
+
+
+def test_split_trial_advertises_only_what_every_arm_gets(trial_on, monkeypatch):
+    monkeypatch.setattr(A, 'TRIAL_SPLIT_ENABLED', True)
+    monkeypatch.setattr(A, 'TRIAL_SPLIT_VARIANTS', ['60', '120'])
+    monkeypatch.setattr(A, 'NEW_USER_TRIAL_SECONDS', 120 * 60)
+    assert A.advertised_trial_minutes() == 60
+    body = A.app.test_client().get('/').data.decode()
+    assert '120 min free' not in body and '120 minutes free' not in body
+    monkeypatch.setattr(A, 'TRIAL_SPLIT_ENABLED', False)
+    assert A.advertised_trial_minutes() == 120
+
+
+@pytest.mark.parametrize('volume', [True, False])
+def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volume):
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', volume)
+    c = A.app.test_client()
+    spotify = c.get(LANDING_PATHS[0]).data.decode()
+    no = c.get('/no/podcast-til-tekst').data.decode()
+    llms = c.get('/llms.txt').data.decode()
+    trial = A.advertised_trial_minutes()
+    assert f'{trial} minutes free' in spotify
+    assert f'{trial} gratisminutter' in no
+    if volume:
+        for body in (spotify, llms):
+            assert 'from $1.50, volume discounts up to 1200 min for $11, or per episode' in body
+            assert '$5 for 300' not in body
+        assert 'fra $1.50, med volumrabatt opptil 1200 min for $11' in no
+    else:
+        assert '$5 for 300 minutes' in spotify
+        assert '$5 for 300 minutes' in llms
+        assert 'volume discounts' not in spotify + llms
+        assert '5 dollar for 300 minutter' in no

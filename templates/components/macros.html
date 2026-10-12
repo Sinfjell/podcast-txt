@@ -345,6 +345,24 @@
 {%- endmacro %}
 
 {# ------------------------------------------------------------------------- #}
+{# inline_select — a compact labelled native select for under the command    #}
+{# bar: one bordered control with the label inside it. `options` is a list   #}
+{# of (value, label) pairs. `class` and `attrs` go on the wrapper (so an     #}
+{# id/hidden toggle hides label and select together). The select takes the  #}
+{# id `select_id`.                                                            #}
+{# ------------------------------------------------------------------------- #}
+{% macro inline_select(label, select_id, options, attrs='', class='') -%}
+<div class="ds-inline-select{% if class %} {{ class }}{% endif %}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+  <label class="ds-inline-select__label" for="{{ select_id }}">{{ label }}</label>
+  <select class="ds-inline-select__field" id="{{ select_id }}">
+    {%- for value, text in options %}
+    <option value="{{ value }}">{{ text }}</option>
+    {%- endfor %}
+  </select>
+</div>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
 {# works_with — names of the places Podskrift works, as text, not logos.      #}
 {# items: list of (name, href or None).                                       #}
 {# ------------------------------------------------------------------------- #}
@@ -389,4 +407,38 @@
   </div>
   {% if caption %}<figcaption class="ds-window__caption">{{ caption }}</figcaption>{% endif %}
 </figure>
+{%- endmacro %}
+
+{# ------------------------------------------------------------------------- #}
+{# volume_slider — launch volume pricing: pick minutes, see the price.
+   Renders the readout and the range only; the page owns the form and its
+   one Buy button. form_id points at that form: the slider keeps its hidden
+   `minutes` / `price_source` inputs and its [data-volume-buy] label in sync
+   (static/components.js). `passive` waits for the first user move before it
+   touches the form (the buy modal uses it when an episode price is shown).
+   table: pricing_volume.price_table() — the server stays the price authority. #}
+{# ------------------------------------------------------------------------- #}
+{% macro volume_slider(id, table, default=300, form_id='', surface='pricing',
+                       min=60, max=1200, step=15, passive=false, attrs='', class='') -%}
+{%- set q = namespace(row=table[0] if table else none) -%}
+{%- for row in table if row.minutes == default %}{% set q.row = row %}{% endfor -%}
+<div class="ds-volume{% if class %} {{ class }}{% endif %}" data-volume-slider
+     data-volume-surface="{{ surface }}"{% if form_id %} data-volume-form="{{ form_id }}"{% endif %}
+     {% if passive %}data-volume-passive{% endif %}
+     data-volume-table="{{ table|tojson|forceescape }}"{% if attrs %} {{ attrs|safe }}{% endif %}>
+  <div class="ds-volume__head">
+    <div class="ds-volume__figure"><span data-volume-minutes>{{ q.row.minutes if q.row else default }}</span> minutes</div>
+    <div class="ds-volume__price" data-volume-price>{{ q.row.price if q.row else '' }}</div>
+  </div>
+  <label class="ds-field__label" for="{{ id }}">How many minutes</label>
+  <input type="range" class="ds-volume__range" id="{{ id }}" data-volume-range
+         min="{{ min }}" max="{{ max }}" step="{{ step }}" value="{{ default }}"
+         aria-valuetext="{{ default }} minutes for {{ q.row.price if q.row else '' }}">
+  <div class="ds-volume__scale" aria-hidden="true"><span>{{ min }} min</span><span>{{ max }} min</span></div>
+  <div class="ds-volume__meta" aria-live="polite">
+    {{ chip('Launch price') }}
+    <span data-volume-rate>{% if q.row %}{{ '%.2f'|format(q.row.cents_per_minute) }}¢ per minute{% endif %}</span>
+    <span data-volume-save>{% if q.row and q.row.savings_percent %}You save {{ q.row.savings_percent }}% per minute{% endif %}</span>
+  </div>
+</div>
 {%- endmacro %}

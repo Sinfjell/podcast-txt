@@ -231,4 +231,91 @@
     step();
     if (!reduceMotion) window.setInterval(function () { if (!document.hidden) step(); }, 2600);
   });
+  /* Volume slider (macro volume_slider): launch pricing. The price table comes
+     from the server (pricing_volume.price_table); the browser only looks a
+     quantity up and posts the minute count. The server re-prices it.
+     slider_changed is bucketed and sent once per bucket change. */
+  function volumeInit(root) {
+    if (root._volume) return root._volume;
+    var table = [];
+    try { table = JSON.parse(root.getAttribute('data-volume-table') || '[]'); } catch (e) { table = []; }
+    var byMin = {};
+    table.forEach(function (row) { byMin[row.minutes] = row; });
+    var range = root.querySelector('[data-volume-range]');
+    var lastBucket = null;
+    function q(m) { return byMin[m] || null; }
+    function form() {
+      var id = root.getAttribute('data-volume-form');
+      return id ? document.getElementById(id) : null;
+    }
+    function setText(sel, text) {
+      var n = root.querySelector(sel);
+      if (n) n.textContent = text;
+    }
+    function render(m, touchForm) {
+      var row = q(m);
+      if (!row) return null;
+      setText('[data-volume-minutes]', String(row.minutes));
+      setText('[data-volume-price]', row.price);
+      setText('[data-volume-rate]', row.cents_per_minute.toFixed(2) + '\u00a2 per minute');
+      setText('[data-volume-save]', row.savings_percent > 0
+        ? 'You save ' + row.savings_percent + '% per minute' : '');
+      if (range) range.setAttribute('aria-valuetext', row.minutes + ' minutes for ' + row.price);
+      var f = form();
+      if (f && touchForm && !root.hasAttribute('data-volume-passive')) {
+        var mi = f.querySelector('input[name="minutes"]');
+        var ps = f.querySelector('input[name="price_source"]');
+        var buy = f.querySelector('[data-volume-buy]');
+        if (mi) mi.value = String(row.minutes);
+        if (ps) ps.value = 'slider';
+        if (buy) buy.textContent = 'Buy ' + row.minutes + ' min for ' + row.price;
+      }
+      return row;
+    }
+    function current() { return range ? Number(range.value) : null; }
+    if (range) {
+      range.addEventListener('input', function () {
+        root.removeAttribute('data-volume-passive');
+        var row = render(current(), true);
+        if (row) root.dispatchEvent(new CustomEvent('volume:change', { detail: row }));
+      });
+      range.addEventListener('change', function () {
+        var row = q(current());
+        if (!row || row.bucket === lastBucket) return;
+        lastBucket = row.bucket;
+        try {
+          if (window.posthog) {
+            window.posthog.capture('slider_changed', {
+              surface: root.getAttribute('data-volume-surface') || '',
+              minutes_bucket: row.bucket,
+              savings_percent: row.savings_percent,
+              pricing: 'volume_v1'
+            });
+          }
+        } catch (e) { /* ignore */ }
+      });
+    }
+    var api = {
+      quote: q,
+      table: table,
+      set: function (m, touchForm) {
+        if (range) range.value = String(m);
+        return render(Number(m), touchForm !== false);
+      },
+      value: current
+    };
+    render(current(), true);
+    root._volume = api;
+    return api;
+  }
+  window.PodskriftVolume = { init: volumeInit };
+  document.querySelectorAll('[data-volume-slider]').forEach(volumeInit);
+  /* Fill PostHog session id on volume forms at submit (consented sessions only). */
+  document.addEventListener('submit', function (e) {
+    var f = e.target;
+    if (!f || !f.querySelector) return;
+    var sid = f.querySelector('input[name="ph_sid"]');
+    if (!sid || sid.value || !f.querySelector('input[name="minutes"]')) return;
+    try { if (window.posthog) sid.value = window.posthog.get_session_id() || ''; } catch (err) { /* ignore */ }
+  }, true);
 })();

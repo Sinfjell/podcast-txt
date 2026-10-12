@@ -1,6 +1,7 @@
 {# Episode-aware Buy minutes modal. Opened via openBuyModal({needed, left, title, returnTo, source}).
    Included from base.html when Stripe is on and the user is metered (not own-key). #}
 {% if stripe_buy_enabled and current_user.is_authenticated and nav_show_buy %}
+{% from "components/macros.html" import volume_slider %}
 <style>
     .buy-modal-scrim {
         position: fixed; inset: 0; z-index: 400;
@@ -58,10 +59,12 @@
         <p class="buy-modal-sub" id="buyModalSub">
             {{ credit_pack_minutes }} minutes for ${{ credit_pack_price_usd }} — one-time, never expires.
         </p>
+        {% if not volume_pricing_enabled %}
         <div class="buy-modal-pack">
             <strong>{{ credit_pack_minutes }} min</strong>
             <strong>${{ credit_pack_price_usd }}</strong>
         </div>
+        {% endif %}
         <form method="POST" action="{{ url_for('billing_checkout') }}" id="buyModalForm">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="source" id="buyModalSource" value="buy_modal_header">
@@ -75,10 +78,22 @@
             <input type="hidden" name="artwork" id="buyModalArtwork" value="">
             <input type="hidden" name="audio_url" id="buyModalAudioUrl" value="">
             <input type="hidden" name="language" id="buyModalLanguage" value="">
-            <button type="submit" class="btn btn-primary w-full" style="justify-content: center; margin-top: 8px;">
-                Buy {{ credit_pack_minutes }} min, ${{ credit_pack_price_usd }}
+            {% if volume_pricing_enabled %}
+            <input type="hidden" name="minutes" id="buyModalMinutesInput" value="{{ volume_default_minutes }}">
+            <input type="hidden" name="price_source" id="buyModalPriceSource" value="slider">
+            {% endif %}
+            <button type="submit" class="btn btn-primary w-full" id="buyModalSubmit" data-volume-buy style="justify-content: center; margin-top: 8px;">
+                {% if volume_pricing_enabled %}{{ credit_pack_label }}{% else %}Buy {{ credit_pack_minutes }} min, ${{ credit_pack_price_usd }}{% endif %}
             </button>
         </form>
+        {% if volume_pricing_enabled %}
+        <details class="ds-volume-more" id="buyModalMore" open>
+            <summary id="buyModalMoreLabel">Choose a different amount</summary>
+            {{ volume_slider('buyModalMinutes', volume_price_table, default=volume_default_minutes,
+                             form_id='buyModalForm', surface='buy_modal',
+                             min=volume_min_minutes, max=volume_max_minutes, step=volume_step_minutes) }}
+        </details>
+        {% endif %}
         <p class="buy-modal-foot">{{ credit_pack_payment_hint }}</p>
         <p class="buy-modal-foot">One-time · VAT included · minutes never expire · Stripe</p>
         <p class="buy-modal-alt">
@@ -89,6 +104,12 @@
 <script>
 (function() {
     var PACK = {{ credit_pack_minutes|int }};
+    var VOLUME = {{ volume_pricing_enabled|tojson }};
+    var VOLUME_DEFAULT = {{ volume_default_minutes|int }};
+    var VOLUME_MIN = {{ volume_min_minutes|int }};
+    var VOLUME_MAX = {{ volume_max_minutes|int }};
+    var VOLUME_STEP = {{ volume_step_minutes|int }};
+    var VOLUME_FROM_PRICE = {{ (volume_price_table[0].price if volume_price_table else '')|tojson }};
     var PRICE = {{ credit_pack_price_usd|tojson }};
     var scrim = document.getElementById('buyModalScrim');
     var titleEl = document.getElementById('buyModalTitle');
@@ -116,6 +137,53 @@
         scrim.classList.remove('is-open');
         scrim.hidden = true;
         document.body.style.overflow = '';
+    }
+
+    /* Same rule as pricing_volume.episode_quantity: the shortfall, rounded up
+       to the 15-minute grid, at least the minimum purchase, at most the slider top.
+       The server re-prices whatever quantity is posted. */
+    function episodeQuantity(needed, left) {
+        if (needed == null || !(needed > 0)) return null;
+        var shortfall = Math.ceil(needed - Math.max(0, left || 0));
+        if (shortfall <= 0) return null;
+        var qty = Math.ceil(shortfall / VOLUME_STEP) * VOLUME_STEP;
+        return Math.max(VOLUME_MIN, Math.min(VOLUME_MAX, qty));
+    }
+
+    var episodeMode = false;
+    function renderVolume(needed, left, epTitle) {
+        var root = document.querySelector('#buyModalMore [data-volume-slider]');
+        if (!root || !window.PodskriftVolume) return false;
+        var api = window.PodskriftVolume.init(root);
+        var more = document.getElementById('buyModalMore');
+        var submit = document.getElementById('buyModalSubmit');
+        var minutesIn = document.getElementById('buyModalMinutesInput');
+        var sourceIn = document.getElementById('buyModalPriceSource');
+        var qty = episodeQuantity(needed, left);
+        var row = qty ? api.quote(qty) : null;
+        if (row) {
+            episodeMode = true;
+            root.setAttribute('data-volume-passive', '');
+            api.set(qty, false);
+            minutesIn.value = String(qty);
+            sourceIn.value = 'episode';
+            submit.textContent = 'Transcribe this episode (' + needed + ' min) for ' + row.price;
+            titleEl.textContent = 'This episode needs ' + needed + ' min, you have ' + (left || 0) + ' left';
+            var line = 'Adds ' + qty + ' min to your balance. Launch price, one-time, minutes never expire.';
+            if (epTitle) line = '"' + epTitle.replace(/"/g, '') + '" — ' + line;
+            subEl.textContent = line;
+            more.open = false;
+            document.getElementById('buyModalMoreLabel').textContent = 'Choose a different amount';
+        } else {
+            episodeMode = false;
+            root.removeAttribute('data-volume-passive');
+            api.set(VOLUME_DEFAULT, true);
+            titleEl.textContent = 'Buy transcription minutes';
+            subEl.textContent = 'Pick any amount from ' + VOLUME_FROM_PRICE + '. Launch price, one-time, minutes never expire.';
+            more.open = true;
+            document.getElementById('buyModalMoreLabel').textContent = 'Choose your amount';
+        }
+        return true;
     }
 
     function openBuyModal(opts) {
@@ -151,7 +219,9 @@
         setHidden('buyModalAudioUrl', opts.audioUrl);
         setHidden('buyModalLanguage', opts.language);
 
-        if (needed != null && left != null) {
+        if (VOLUME && renderVolume(needed, left, epTitle)) {
+            /* volume pricing rendered title, subline and the Buy button */
+        } else if (needed != null && left != null) {
             titleEl.textContent = 'This episode needs ' + needed + ' min, you have ' + left + ' left';
             var cover = PACK + left - needed;
             var more = needed > 0 ? Math.floor(cover / needed) : 0;
@@ -176,7 +246,9 @@
                 posthog.capture('buy_modal_opened', {
                     source: source,
                     needed: needed,
-                    left: left
+                    left: left,
+                    pricing: VOLUME ? 'volume_v1' : 'fixed_pack',
+                    episode_offer: VOLUME ? episodeMode : false
                 });
             }
             if (typeof window.podskriftPaywallShown === 'function') {
