@@ -9175,6 +9175,8 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
+    assert entries[0]['id'] == 'pay-per-minute-launch-pricing'
+    entries = entries[1:]
     assert entries[0]['id'] == 'new-home-and-header'
     assert entries[1]['id'] == 'ai-what-you-can-ask'
     assert entries[2]['id'] == 'mcp-list-my-transcripts'
@@ -14067,6 +14069,8 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
+    assert entries[0]['id'] == 'pay-per-minute-launch-pricing'
+    entries = entries[1:]
     assert entries[0]['id'] == 'new-home-and-header'
     assert entries[1]['id'] == 'ai-what-you-can-ask'
     assert entries[2]['id'] == 'mcp-list-my-transcripts'
@@ -17775,3 +17779,26 @@ def test_staging_is_noindex_and_disallowed(monkeypatch):
 def test_home_prefills_from_landing_query():
     html = A.app.test_client().get('/').data.decode()
     assert 'prefillFromLanding' in html
+
+
+@pytest.mark.parametrize('volume', [True, False])
+def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volume):
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', volume)
+    c = A.app.test_client()
+    spotify = c.get(LANDING_PATHS[0]).data.decode()
+    no = c.get('/no/podcast-til-tekst').data.decode()
+    llms = c.get('/llms.txt').data.decode()
+    trial = A.advertised_trial_minutes()
+    assert f'{trial} minutes free' in spotify
+    assert f'{trial} gratisminutter' in no
+    if volume:
+        for body in (spotify, llms):
+            assert 'from $1.50, volume discounts up to 1200 min for $11, or per episode' in body
+            assert '$5 for 300' not in body
+        assert 'fra $1.50, med volumrabatt opptil 1200 min for $11' in no
+    else:
+        assert '$5 for 300 minutes' in spotify
+        assert '$5.00 for 300 minutes' in llms or '$5 for 300 minutes' in llms
+        assert 'volume discounts' not in spotify + llms
+        assert '5 dollar for 300 minutter' in no

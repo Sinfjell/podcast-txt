@@ -9624,8 +9624,7 @@ def faq_entries():
     if trial_available() and minutes > 0:
         hours_bit = (f' (about {minutes // 60} hours)' if minutes >= 120 else '')
         pack_bit = (
-            f' Or buy a one-time pack: {DEFAULT_PACK_PRICE} for '
-            f'{CREDIT_PACK_MINUTES} minutes ({CREDIT_PACK_MINUTES // 60} hours), '
+            f' Or buy minutes once: {_faq_pack_phrase()}, '
             f'VAT included, paid via Stripe — no subscription.'
             if stripe_checkout_enabled() else ''
         )
@@ -9637,8 +9636,7 @@ def faq_entries():
                     'transcription. Using your own OpenAI API key is optional.')
     else:
         pack_bit = (
-            f' Or buy a one-time pack: {DEFAULT_PACK_PRICE} for '
-            f'{CREDIT_PACK_MINUTES} minutes ({CREDIT_PACK_MINUTES // 60} hours), '
+            f' Or buy minutes once: {_faq_pack_phrase()}, '
             f'VAT included — no subscription.'
             if stripe_checkout_enabled() else ''
         )
@@ -9990,10 +9988,24 @@ def inject_landing_footer_links():
         for endpoint, _ in landing_pages_mod.PAGES]}
 
 
+def _faq_pack_phrase():
+    """Pack price for FAQ / llms.txt copy, following VOLUME_PRICING_ENABLED."""
+    if VOLUME_PRICING_ENABLED:
+        return landing_pages_mod.pack_phrase(_landing_pack())
+    return (f'{DEFAULT_PACK_PRICE} for {CREDIT_PACK_MINUTES} minutes '
+            f'({CREDIT_PACK_MINUTES // 60} hours)')
+
+
 def _landing_pack():
     if not stripe_checkout_enabled():
         return None
-    return {'minutes': CREDIT_PACK_MINUTES, 'price': CREDIT_PACK_AMOUNT_CENTS / 100}
+    if VOLUME_PRICING_ENABLED:
+        top_min, top_cents = pricing_volume.VOLUME_ANCHORS[-1]
+        return {'volume': True, 'min_cents': pricing_volume.VOLUME_MIN_AMOUNT_CENTS,
+                'max_minutes': top_min, 'max_cents': top_cents,
+                'minutes': CREDIT_PACK_MINUTES, 'price': CREDIT_PACK_AMOUNT_CENTS / 100}
+    return {'volume': False, 'minutes': CREDIT_PACK_MINUTES,
+            'price': CREDIT_PACK_AMOUNT_CENTS / 100}
 
 
 def landing_page_data(endpoint):
@@ -10011,11 +10023,12 @@ def _render_landing(endpoint):
     if page['lang'] == 'no':
         bits = [f'{trial} gratisminutter.'] if trial else []
         if pack:
-            bits.append(f'Deretter {pack["price"]:g} dollar for {pack["minutes"]} min.')
+            bits.append('Deretter ' + landing_pages_mod.pack_phrase(pack, 'no') + '.')
     else:
         bits = [f'{trial} minutes free.'] if trial else []
         if pack:
-            bits.append(f'Then ${pack["price"]:g} for {pack["minutes"]} min, no subscription.')
+            p = landing_pages_mod.pack_phrase(pack)
+            bits.append(f'Then {p}, no subscription.')
     hreflang = []
     if endpoint in ('landing_podcast_to_text', 'landing_no'):
         hreflang = [('en', public_url('landing_podcast_to_text')),
@@ -10127,9 +10140,13 @@ def llms_txt():
             f'minutes are a free preview.')
     if stripe_checkout_enabled():
         cost_lines.append(
-            f'- Buy minutes{" after the trial" if grant else ""}: {DEFAULT_PACK_PRICE} '
-            f'for {CREDIT_PACK_MINUTES} minutes ({CREDIT_PACK_MINUTES // 60} hours), one-time, VAT '
-            f'included, paid via Stripe. No subscription, no per-seat pricing.')
+            f'- Buy minutes{" after the trial" if grant else ""}: '
+            + (f'{landing_pages_mod.pack_phrase(_landing_pack())} (choose 60 to '
+               f'{pricing_volume.VOLUME_MAX_MINUTES} minutes; the price per minute falls '
+               f'the more you buy)' if VOLUME_PRICING_ENABLED else
+               f'${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for {CREDIT_PACK_MINUTES} minutes '
+               f'({CREDIT_PACK_MINUTES // 60} hours)')
+            + ', one-time, VAT included, paid via Stripe. No subscription, no per-seat pricing.')
     cost_lines.append(
         f'- Optional: add your own OpenAI API key in Settings and pay OpenAI directly, '
         f'roughly USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. An API key '

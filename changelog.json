@@ -10,10 +10,9 @@
     },
     {
       "id": "pay-per-minute-launch-pricing",
-      "date": "2026-10-11",
+      "date": "2026-10-12",
       "title": "Buy exactly the minutes you need",
-      "summary": "Pick any amount from 60 minutes for $1.50; 300 minutes are $5 and 1,200 are $11, so the more you buy, the less each minute costs. An episode you are about to transcribe shows its own price, and it starts by itself as soon as the payment goes through.",
-      "hidden": true
+      "summary": "Choose exactly how much you need, starting at $1.50 — the more you buy, the less each minute costs. An episode you are about to transcribe shows its own price, and it starts by itself as soon as the payment goes through."
     },
     {
       "id": "new-home-and-header",

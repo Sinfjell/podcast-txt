@@ -29,6 +29,23 @@ SHORT_LABELS = {
 }
 
 
+def _usd(cents):
+    return f'${cents // 100}' if cents % 100 == 0 else f'${cents / 100:.2f}'
+
+
+def pack_phrase(pack, lang='en'):
+    """Price phrase for *pack* (see app._landing_pack)."""
+    if pack.get('volume'):
+        lo, top_min, top = _usd(pack['min_cents']), pack['max_minutes'], _usd(pack['max_cents'])
+        if lang == 'no':
+            return (f'fra {lo}, med volumrabatt opptil {top_min} min for {top}, '
+                    f'eller per episode')
+        return f'from {lo}, volume discounts up to {top_min} min for {top}, or per episode'
+    if lang == 'no':
+        return f'{pack["price"]:g} dollar for {pack["minutes"]} minutter'
+    return f'${pack["price"]:g} for {pack["minutes"]} minutes'
+
+
 def _price_en(trial, pack):
     """One honest sentence on cost, in English."""
     parts = []
@@ -36,7 +53,7 @@ def _price_en(trial, pack):
         parts.append(f'New accounts get {trial} minutes free, no card needed.')
     if pack:
         parts.append(f'After that, minutes are a one-time purchase: '
-                     f'${pack["price"]:g} for {pack["minutes"]} minutes, no subscription.')
+                     f'{pack_phrase(pack)}. No subscription.')
     parts.append('You can also add your own OpenAI API key and pay OpenAI directly '
                  'instead; that is optional.')
     return ' '.join(parts)
@@ -48,7 +65,7 @@ def _price_no(trial, pack):
         parts.append(f'Nye kontoer får {trial} gratisminutter, uten kort.')
     if pack:
         parts.append(f'Deretter kjøper du minutter én gang: '
-                     f'{pack["price"]:g} dollar for {pack["minutes"]} minutter, uten abonnement.')
+                     f'{pack_phrase(pack, "no")}. Uten abonnement.')
     parts.append('Du kan også legge inn din egen OpenAI API-nøkkel og betale OpenAI '
                  'direkte. Det er valgfritt.')
     return ' '.join(parts)
@@ -71,7 +88,7 @@ def build(endpoint, *, trial, pack, lang_count):
     """Return the page dict for one landing endpoint.
 
     trial: advertised new-account free minutes, or None when the trial is off.
-    pack: {'minutes': int, 'price': float} when checkout is on, else None.
+    pack: app._landing_pack() dict (volume or legacy) when checkout is on, else None.
     """
     free_en = f'{trial} minutes free' if trial else 'a free account'
     common = _common_en(trial, pack, lang_count)
