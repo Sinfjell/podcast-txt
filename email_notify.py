@@ -19,6 +19,7 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 import analytics as product_analytics
 import mail as mailer
+import pricing_volume
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +300,14 @@ def metered_email_balance(user) -> dict[str, Any] | None:
         return None
 
 
+def _pack_offer_phrase() -> str:
+    """The pack offer in transcript-ready mail, following the live price."""
+    if pricing_volume.volume_pricing_enabled():
+        return ('Buy any amount from '
+                + pricing_volume.format_usd(pricing_volume.VOLUME_MIN_AMOUNT_CENTS))
+    return '300 min for $5'
+
+
 def build_transcript_ready_bodies(
     *,
     podcast_name: str,
@@ -348,7 +357,7 @@ def build_transcript_ready_bodies(
         tip = 'Search for another episode whenever you are ready.'
     balance_block = f'{balance_line}\n\n' if balance_line else ''
     pack_line = (
-        f'Need more minutes? 300 min for $5: {pack_link}\n\n'
+        f'Need more minutes? {_pack_offer_phrase()}: {pack_link}\n\n'
         if pack_link else ''
     )
     text = (
@@ -382,7 +391,7 @@ def build_transcript_ready_bodies(
         safe_pack = html_lib.escape(pack_link, quote=True)
         html_pack = (
             f'<p>Need more minutes? '
-            f'<a href="{safe_pack}">300 min for $5</a>.</p>'
+            f'<a href="{safe_pack}">{html_lib.escape(_pack_offer_phrase())}</a>.</p>'
         )
     html = (
         f'{html_lead}'

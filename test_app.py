@@ -122,7 +122,7 @@ def test_eta_shrinks_as_work_progresses():
 def test_stale_task_is_failed_when_its_status_is_polled():
     """A task orphaned by a restart has a fresh heartbeat, so the boot sweep skips
     it. The poll the waiting page makes is what must notice."""
-    from models import TranscriptionTask
+    from models import db, TranscriptionTask
 
     with A.app.app_context():
         from models import db
@@ -17256,6 +17256,94 @@ def test_webhook_validates_against_the_sessions_pricing_version(volume_on, versi
     _register_and_post(volume_on, _volume_session(
         uid, 60, amount, session_id=sid, pricing_version=version))
     assert _paid(uid) == (3600 if credited else 0)
+
+
+@pytest.mark.parametrize('minutes,amount', [
+    (300, 300),   # above the minimum and the cost floor, below the curve ($5)
+    (600, 450),   # likewise, against $6
+    (60, 151),    # a cent over: still not a price we quoted
+])
+def test_webhook_refuses_a_versioned_session_off_its_curve(volume_on, minutes, amount):
+    """Metadata is ours, but a session is only honoured at the exact price its
+    curve gives: a floor check alone credited 600 min for $4.50."""
+    uid = _make_user(f'pv-off-{minutes}-{amount}@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    _register_and_post(volume_on, _volume_session(
+        uid, minutes, amount, session_id=f'cs_pv_off_{minutes}_{amount}'))
+    assert _paid(uid) == 0
+
+
+def test_price_cents_for_follows_the_named_version():
+    assert pv.price_cents_for(300, 'vol_v1') == 500
+    assert pv.price_cents_for(1200, 'vol_v1') == 1100
+    assert pv.price_cents_for(300, 'vol_v9') is None
+    assert pv.price_cents_for(300, None) is None
+
+
+def test_purchase_row_records_price_source_and_version(volume_on):
+    uid = _make_user('pv-row@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    _register_and_post(volume_on, _volume_session(
+        uid, 75, 172, session_id='cs_pv_row', price_source='episode'))
+    _register_and_post(volume_on, _pack_session(uid, 'cs_pv_row_legacy'))
+    from models import CreditPurchase
+    with A.app.app_context():
+        vol = CreditPurchase.query.filter_by(stripe_session_id='cs_pv_row').one()
+        legacy = CreditPurchase.query.filter_by(stripe_session_id='cs_pv_row_legacy').one()
+        assert (vol.price_source, vol.pricing_version) == ('episode', 'vol_v1')
+        assert legacy.pricing_version == 'legacy_v0'
+
+
+def test_transcript_ready_mail_quotes_the_live_price(monkeypatch):
+    import email_notify as en
+    kw = dict(podcast_name='Show', episode_title='Ep', transcript_url='https://x/t',
+              unsub_url='https://x/u', pack_url='https://x/pricing')
+    monkeypatch.delenv('VOLUME_PRICING_ENABLED', raising=False)
+    _, text_off, html_off = en.build_transcript_ready_bodies(**kw)
+    assert '300 min for $5' in text_off and '300 min for $5' in html_off
+    monkeypatch.setenv('VOLUME_PRICING_ENABLED', '1')
+    _, text_on, html_on = en.build_transcript_ready_bodies(**kw)
+    assert '300 min for $5' not in text_on + html_on
+    assert 'Buy any amount from $1.50' in text_on and 'Buy any amount from $1.50' in html_on
+
+
+def test_episode_list_marks_price_covered_and_history(volume_on, monkeypatch):
+    """Signed in with volume pricing: each episode says what it costs this
+    account. Trial gone, 40 paid minutes: a 30-min episode is covered, a
+    90-min one costs the 60-minute shortfall ($1.50), one already done is
+    in the history."""
+    from bs4 import BeautifulSoup
+    from models import db, TranscriptionTask
+    uid = _make_user('vol-eplist@test.com', limit=600, used=600)
+    _set_paid(uid, 40 * 60)
+    feed = 'https://example.com/vol-feed.xml'
+    def ep(i, minutes):
+        return {'index': i, 'title': f'Ep {i}', 'published': '2024-01-01',
+                'audio_url': f'https://example.com/{i}.mp3', 'description': '',
+                'duration_min': minutes, 'estimated_cost': 0.1, 'artwork': '',
+                'podcast_name': 'Feed'}
+    episodes = [ep(0, 30), ep(1, 90), ep(2, 90)]
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='vol-eplist-done', user_id=uid, episode_title='Ep 2',
+            rss_url=feed, status='completed',
+            source_audio_url='https://example.com/2.mp3'))
+        db.session.commit()
+    monkeypatch.setattr(A, 'get_episodes_from_rss', lambda url: (episodes, None))
+    body = _login(uid).post('/parse_rss', data={'rss_url': feed}).data.decode()
+    metas = [m.get_text(' ', strip=True) for m in
+             BeautifulSoup(body, 'html5lib').select('.episode-card .episode-meta')]
+    assert 'Covered' in metas[0]
+    assert '$1.50' in metas[1]
+    assert 'In your history' in metas[2]
+
+
+def test_episode_list_has_no_buy_labels_with_volume_off(stripe_on, monkeypatch):
+    uid = _make_user('vol-eplist-off@test.com', limit=600, used=600)
+    _set_paid(uid, 40 * 60)
+    resp = _render_episode_selection_via_parse_rss(monkeypatch, _login(uid))
+    meta = _episode_card_meta(resp.data.decode())
+    assert 'Covered' not in meta and '$' not in meta
 
 
 def test_legacy_fixed_pack_still_credits_with_volume_on(volume_on):

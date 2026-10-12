@@ -5,6 +5,7 @@
 {% block robots_meta %}<meta name="robots" content="noindex">{% endblock %}
 
 {% block content %}
+{% from "components/macros.html" import chip %}
 <style>
     .ep-back { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; font-size: 15px; font-weight: 700; }
     .ep-head { display: flex; flex-wrap: wrap; gap: 16px 20px; align-items: center; margin-bottom: 20px; }
@@ -128,7 +129,9 @@
                   · Uses ~{{ episode.duration_min|round|int }} min
                   {% endif %}
                 {% endif %}
-                {% if episode.needs_own_key %}
+                {% if episode.buy_label %}
+                · {{ chip(episode.buy_label, variant=episode.buy_variant) }}
+                {% elif episode.needs_own_key %}
                 · <span class="badge badge-needs-key">{% if stripe_buy_enabled %}Needs key or pack{% else %}Needs own key{% endif %} · {{ episode.duration_min|round|int }} min</span>
                 {% endif %}
             </div>
@@ -545,7 +548,13 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         }
         meta.textContent = metaText;
-        if (ep.needs_own_key || episodeNeedsOwnKey(ep.duration_min)) {
+        if (ep.buy_label) {
+            meta.appendChild(document.createTextNode(' \u00B7 '));
+            var chipEl = document.createElement('span');
+            chipEl.className = 'ds-chip' + (ep.buy_variant === 'muted' ? ' ds-chip--muted' : '');
+            chipEl.textContent = ep.buy_label;
+            meta.appendChild(chipEl);
+        } else if (ep.needs_own_key || episodeNeedsOwnKey(ep.duration_min)) {
             meta.appendChild(document.createTextNode(' \u00B7 '));
             var warn = document.createElement('span');
             warn.className = 'badge badge-needs-key';
