@@ -146,6 +146,9 @@
     <div class="alert alert-warning mt-2" style="flex-direction: column; align-items: flex-start;">
         <div>
             <p style="font-weight: 700; font-size: 17px;">Out of free minutes</p>
+            {% if current_user.is_authenticated and current_user.trial_denied_reason %}
+            <p class="form-hint" data-trial-denied-note>Free minutes aren't available for this account.</p>
+            {% endif %}
             <p style="margin-top: 8px;">
                 {% if stripe_buy_enabled %}
                 {# Buy submits via form= — must not nest a <form> inside episodeForm

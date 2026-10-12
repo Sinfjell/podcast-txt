@@ -61,6 +61,14 @@ class User(UserMixin, db.Model):
     # Dedupes the once-per-day PostHog event across workers and sessions.
     last_active_day = db.Column(db.String(10), nullable=True)
 
+    # Trial-abuse signals, stamped at signup (see trial_abuse.py). The IP is an
+    # HMAC, never stored raw. trial_denied_reason is set when the signup got
+    # 0 free minutes because a check matched; NULL means a normal grant.
+    email_normalized = db.Column(db.String(255), nullable=True)
+    signup_ip_hash = db.Column(db.String(64), nullable=True)
+    signup_device_id = db.Column(db.String(64), nullable=True)
+    trial_denied_reason = db.Column(db.String(32), nullable=True)
+
     feeds = db.relationship('SavedFeed', backref='user', lazy=True, cascade='all, delete-orphan')
     tasks = db.relationship('TranscriptionTask', backref='user', lazy=True, cascade='all, delete-orphan')
     credit_purchases = db.relationship('CreditPurchase', backref='user', lazy=True,
@@ -398,6 +406,10 @@ USER_COLUMN_MIGRATIONS = {
     'api_key_prefix': 'VARCHAR(16)',
     'api_key_created_at': 'DATETIME',
     'email_transcript_ready': 'BOOLEAN NOT NULL DEFAULT 1',
+    'email_normalized': 'VARCHAR(255)',
+    'signup_ip_hash': 'VARCHAR(64)',
+    'signup_device_id': 'VARCHAR(64)',
+    'trial_denied_reason': 'VARCHAR(32)',
     'email_unsubscribed_at': 'DATETIME',
     'session_version': 'INTEGER NOT NULL DEFAULT 0',
     'last_active_day': 'VARCHAR(10)',

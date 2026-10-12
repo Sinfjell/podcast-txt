@@ -17540,3 +17540,245 @@ def test_nav_has_no_dead_links_and_help_is_a_real_page():
     body = client.get('/help').data.decode()
     for link in ('/guides', '/rss-help', '/ai', '/contact', '/pricing', '#faq'):
         assert link in body, f'help page missing {link}'
+
+
+# ---------------------------------------------------------------------------
+# Trial-abuse checks (TRIAL_ABUSE_CHECKS_ENABLED)
+# ---------------------------------------------------------------------------
+
+import trial_abuse as TA  # noqa: E402
+
+
+def test_normalize_email_gmail_dots_and_tags():
+    assert TA.normalize_email('A.Iden.Jonkman+x@GoogleMail.com') == 'aidenjonkman@gmail.com'
+    assert TA.normalize_email('a.b+news@example.com') == 'a.b@example.com'
+    assert TA.normalize_email('plain@example.com') == 'plain@example.com'
+
+
+def test_email_base_strips_only_trailing_digits():
+    assert TA.email_base('aidenjonkman6@gmail.com') == 'aidenjonkman@gmail.com'
+    assert TA.email_base('a1b2@x.com') == 'a1b@x.com'
+
+
+def test_disposable_list_is_bundled_and_matches_subdomains():
+    domains = TA.load_disposable_domains()
+    assert 'mailinator.com' in domains
+    assert 'gmail.com' not in domains
+    assert TA.is_disposable('x@mailinator.com', domains)
+    assert TA.is_disposable('x@eu.mailinator.com', domains)
+    assert not TA.is_disposable('x@gmail.com', domains)
+
+
+def test_hash_ip_is_keyed_and_never_raw():
+    h = TA.hash_ip('1.2.3.4', 'k1')
+    assert h and '1.2.3.4' not in h
+    assert h != TA.hash_ip('1.2.3.4', 'k2')
+    assert TA.hash_ip('unknown', 'k') is None
+
+
+def test_device_id_only_accepts_our_format():
+    assert TA.valid_device_id('a' * 32) == 'a' * 32
+    assert TA.valid_device_id('<script>') is None
+    assert TA.valid_device_id(None) is None
+
+
+def _row(email, *, hours_ago=1, ip=None, dev=None, limit=3600, denied=None):
+    import types
+    return types.SimpleNamespace(
+        email=email, email_normalized=TA.normalize_email(email),
+        created_at=datetime.now(timezone.utc) - timedelta(hours=hours_ago),
+        signup_ip_hash=ip, signup_device_id=dev,
+        trial_seconds_limit=limit, trial_denied_reason=denied)
+
+
+def _verdict(email, rows, ip=None, dev=None):
+    return TA.denial_reason(email=email, ip_hash=ip, device_id=dev,
+                            existing=rows, disposable_domains={'mailinator.com'})
+
+
+def test_denial_reasons_each_signal():
+    assert _verdict('new@x.com', []) is None
+    assert _verdict('a@mailinator.com', []) == 'disposable_email'
+    assert _verdict('a.iden@gmail.com', [_row('aiden+1@gmail.com', hours_ago=5000)]) == 'duplicate_email'
+    assert _verdict('aidenjonkman7@gmail.com', [_row('aidenjonkman6@gmail.com')]) == 'similar_email'
+    assert _verdict('fresh@x.com', [_row('other@y.com', dev='d' * 32)], dev='d' * 32) == 'same_device'
+    assert _verdict('fresh@x.com', [_row('other@y.com', ip='h')], ip='h') == 'same_ip'
+
+
+def test_denial_windows_and_denied_rows_do_not_chain():
+    # similar only within 24h
+    assert _verdict('aidenjonkman7@gmail.com', [_row('aidenjonkman6@gmail.com', hours_ago=25)]) is None
+    # ip/device only within 7 days
+    assert _verdict('f@x.com', [_row('o@y.com', ip='h', hours_ago=24 * 8)], ip='h') is None
+    # an account that itself got no trial does not poison the IP
+    assert _verdict('f@x.com', [_row('o@y.com', ip='h', limit=0, denied='same_ip')], ip='h') is None
+    assert _verdict('f@x.com', [_row('o@y.com', ip='h', limit=0)], ip='h') is None
+    # short bases are not "similar"
+    assert _verdict('ab2@x.com', [_row('ab1@x.com')]) is None
+    # different ip/device: granted
+    assert _verdict('f@x.com', [_row('o@y.com', ip='h', dev='d' * 32)], ip='z', dev='e' * 32) is None
+
+
+def test_denial_priority_order():
+    rows = [_row('aidenjonkman6@gmail.com', ip='h'), _row('aidenjonkman7@gmail.com')]
+    assert _verdict('aiden.jonkman7@gmail.com', rows, ip='h') == 'duplicate_email'
+
+
+def _abuse_purge(prefix):
+    from models import db, User
+    with A.app.app_context():
+        db.session.query(User).filter(User.email.like(f'{prefix}%')).delete(
+            synchronize_session=False)
+        db.session.commit()
+
+
+def _abuse_client(ip):
+    A.app.config['TESTING'] = True
+    A._register_attempts.clear()
+    return A.app.test_client(), {'X-Real-IP': ip}
+
+
+def _abuse_signup(client, headers, email):
+    return client.post('/register', data={'email': email, 'password': 'abcdefgh1'},
+                       headers=headers, follow_redirects=True)
+
+
+def _user_row(email):
+    from models import db, User
+    with A.app.app_context():
+        u = User.query.filter_by(email=email).first()
+        return (u.trial_seconds_limit, u.trial_denied_reason, u.email_normalized,
+                u.signup_ip_hash, u.signup_device_id)
+
+
+@pytest.fixture
+def abuse_on(monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'TRIAL_ABUSE_CHECKS_ENABLED', True)
+    monkeypatch.setattr(A, 'NEW_USER_TRIAL_SECONDS', 3600)
+    monkeypatch.setattr(A, 'TRIAL_SPLIT_ENABLED', False)
+    events = []
+    monkeypatch.setattr(A.product_analytics, 'capture',
+                        lambda event, distinct_id=None, properties=None:
+                        events.append((event, properties or {})))
+    return events
+
+
+def test_route_flag_off_grants_and_stamps_signals(monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'TRIAL_ABUSE_CHECKS_ENABLED', False)
+    monkeypatch.setattr(A, 'NEW_USER_TRIAL_SECONDS', 3600)
+    monkeypatch.setattr(A, 'TRIAL_SPLIT_ENABLED', False)
+    _abuse_purge('abz')
+    c, h = _abuse_client('10.9.0.1')
+    _abuse_signup(c, h, 'abzoff1@gmail.com')
+    c2, _ = _abuse_client('10.9.0.1')
+    _abuse_signup(c2, h, 'abzoff2@gmail.com')
+    limit, reason, norm, iph, dev = _user_row('abzoff2@gmail.com')
+    assert (limit, reason) == (3600, None)
+    assert norm == 'abzoff2@gmail.com' and iph and '10.9.0.1' not in iph and dev
+    _abuse_purge('abz')
+
+
+def test_route_denies_similar_email_with_zero_minutes(abuse_on):
+    _abuse_purge('abzsim')
+    c, h = _abuse_client('10.9.1.1')
+    _abuse_signup(c, h, 'abzsimilar1@gmail.com')
+    c2, h2 = _abuse_client('10.9.1.2')
+    body = _abuse_signup(c2, h2, 'abzsimilar2@gmail.com').data.decode()
+    assert "Free minutes aren" in body
+    assert _user_row('abzsimilar1@gmail.com')[:2] == (3600, None)
+    assert _user_row('abzsimilar2@gmail.com')[:2] == (0, 'similar_email')
+    assert ('trial_denied', {'reason': 'similar_email'}) in abuse_on
+    signed = [p for e, p in abuse_on if e == 'user_signed_up']
+    assert signed[-1]['trial_granted_min'] == 0
+    assert signed[-1]['trial_denied_reason'] == 'similar_email'
+    with A.app.app_context():
+        from models import db, User
+        u = User.query.filter_by(email='abzsimilar2@gmail.com').first()
+        assert A.trial_status(u)[2] == 0
+    _abuse_purge('abzsim')
+
+
+def test_route_denies_gmail_dot_alias(abuse_on):
+    _abuse_purge('abz')
+    c, h = _abuse_client('10.9.2.1')
+    _abuse_signup(c, h, 'abzdotty@gmail.com')
+    c2, h2 = _abuse_client('10.9.2.2')
+    _abuse_signup(c2, h2, 'abz.dotty+x@gmail.com')
+    assert _user_row('abz.dotty+x@gmail.com')[:2] == (0, 'duplicate_email')
+    _abuse_purge('abz')
+
+
+def test_route_denies_same_ip(abuse_on):
+    _abuse_purge('abzip')
+    c, h = _abuse_client('10.9.3.1')
+    _abuse_signup(c, h, 'abzipone@example.org')
+    c2, _ = _abuse_client('10.9.3.1')
+    _abuse_signup(c2, h, 'abziptwo@example.net')
+    assert _user_row('abziptwo@example.net')[:2] == (0, 'same_ip')
+    _abuse_purge('abzip')
+
+
+def test_route_denies_same_device_cookie(abuse_on):
+    _abuse_purge('abzdev')
+    c, h = _abuse_client('10.9.4.1')
+    c.get('/register', headers=h)
+    _abuse_signup(c, h, 'abzdevone@example.org')
+    c.get('/logout')
+    _abuse_signup(c, {'X-Real-IP': '10.9.4.2'}, 'abzdevtwo@example.net')
+    assert _user_row('abzdevtwo@example.net')[:2] == (0, 'same_device')
+    _abuse_purge('abzdev')
+
+
+def test_route_denies_disposable_from_bundled_list(abuse_on):
+    _abuse_purge('abzdisp')
+    c, h = _abuse_client('10.9.5.1')
+    _abuse_signup(c, h, 'abzdisp@mailinator.com')
+    assert _user_row('abzdisp@mailinator.com')[:2] == (0, 'disposable_email')
+    _abuse_purge('abzdisp')
+
+
+def test_route_distinct_people_still_get_the_trial(abuse_on):
+    _abuse_purge('abzok')
+    c, h = _abuse_client('10.9.6.1')
+    _abuse_signup(c, h, 'abzokanna@example.org')
+    c2, h2 = _abuse_client('10.9.6.2')
+    _abuse_signup(c2, h2, 'abzokbjorn@example.net')
+    assert _user_row('abzokbjorn@example.net')[:2] == (3600, None)
+    assert not [e for e, _ in abuse_on if e == 'trial_denied']
+    _abuse_purge('abzok')
+
+
+def test_check_failure_never_blocks_signup(abuse_on, monkeypatch):
+    _abuse_purge('abzboom')
+    def boom(**kw):
+        raise RuntimeError('x')
+    monkeypatch.setattr(A.trial_abuse, 'denial_reason', boom)
+    c, h = _abuse_client('10.9.7.1')
+    _abuse_signup(c, h, 'abzboom@example.org')
+    assert _user_row('abzboom@example.org')[:2] == (3600, None)
+    _abuse_purge('abzboom')
+
+
+def test_backfill_email_normalized_is_idempotent():
+    from models import db, User
+    with A.app.app_context():
+        db.session.query(User).filter_by(email='a.bz.back+t@gmail.com').delete()
+        u = User(email='a.bz.back+t@gmail.com')
+        u.set_password('password123')
+        db.session.add(u)
+        db.session.commit()
+        assert A.backfill_email_normalized() >= 1
+        assert A.backfill_email_normalized() == 0
+        db.session.refresh(u)
+        assert u.email_normalized == 'abzback@gmail.com'
+        db.session.delete(u)
+        db.session.commit()
+
+
+def test_register_get_sets_device_cookie_once():
+    A.app.config['TESTING'] = True
+    c = A.app.test_client()
+    r = c.get('/register')
+    assert 'ps_did=' in r.headers.get('Set-Cookie', '')
+    r2 = c.get('/register')
+    assert 'ps_did=' not in r2.headers.get('Set-Cookie', '')
