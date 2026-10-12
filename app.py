@@ -9600,6 +9600,9 @@ def inject_trial_badge():
         'credit_pack_minutes': CREDIT_PACK_MINUTES,
         'credit_pack_price_usd': DEFAULT_PACK_PRICE.lstrip('$'),
         'volume_pricing_enabled': bool(VOLUME_PRICING_ENABLED),
+        'analytics_pricing_version': (
+            pricing_volume.CURRENT_PRICING_VERSION
+            if VOLUME_PRICING_ENABLED else 'pack'),
         'volume_price_table': (
             pricing_volume.price_table() if VOLUME_PRICING_ENABLED else []),
         'volume_default_minutes': pricing_volume.VOLUME_DEFAULT_MINUTES,

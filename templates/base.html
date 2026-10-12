@@ -1489,6 +1489,7 @@
     (function () {
         var POSTHOG_USER_ID = {{ posthog_user_id | tojson }};
         var TRIAL_VARIANT = {{ trial_variant | tojson }};
+        var PRICING_VERSION = {{ analytics_pricing_version | default('pack') | tojson }};
         var REPLAY = {
             maskAllInputs: true,
             maskInputOptions: { password: true, email: true },
@@ -1666,19 +1667,16 @@
             } catch (e) { /* ignore */ }
         };
 
+        // Paywall CTAs record which paywall surface the click came from.
+        // The paywall_buy_clicked event itself fires exactly once, on the
+        // checkout form submit below, so every buy entry point (paywall,
+        // buy modal, slider, episode button) is counted the same way.
         window.podskriftPaywallBuyClicked = function (location, reason) {
             try {
-                if (!window.posthog || !location) return;
-                var opts = {};
-                if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
-                    opts.transport = 'sendBeacon';
-                }
-                var buyPayload = {
-                    location: location,
+                window.__podskriftPaywallCta = {
+                    location: location || '',
                     reason: reason || ''
                 };
-                if (TRIAL_VARIANT) buyPayload.trial_variant = TRIAL_VARIANT;
-                posthog.capture('paywall_buy_clicked', buyPayload, opts);
             } catch (e) { /* ignore */ }
         };
 
@@ -1739,14 +1737,21 @@
                     opts.transport = 'sendBeacon';
                 }
                 posthog.capture('buy_clicked', {location: loc, transport: 'sendBeacon'}, opts);
-                if (form.getAttribute('data-paywall-buy')) {
-                    var formBuy = {
-                        location: form.getAttribute('data-paywall-buy') || loc,
-                        reason: ''
-                    };
-                    if (TRIAL_VARIANT) formBuy.trial_variant = TRIAL_VARIANT;
-                    posthog.capture('paywall_buy_clicked', formBuy, opts);
-                }
+                var minEl = form.querySelector('input[name="minutes"]');
+                var psEl = form.querySelector('input[name="price_source"]');
+                var cta = window.__podskriftPaywallCta || {};
+                var minutes = minEl && minEl.value ? parseInt(minEl.value, 10) : null;
+                var formBuy = {
+                    entry_point: loc || form.getAttribute('data-paywall-buy') || '',
+                    location: form.getAttribute('data-paywall-buy') || cta.location || loc,
+                    reason: cta.reason || '',
+                    minutes: isNaN(minutes) ? null : minutes,
+                    price_source: psEl ? psEl.value : '',
+                    pricing_version: PRICING_VERSION
+                };
+                if (TRIAL_VARIANT) formBuy.trial_variant = TRIAL_VARIANT;
+                posthog.capture('paywall_buy_clicked', formBuy, opts);
+                window.__podskriftPaywallCta = null;
             } catch (e) { /* ignore */ }
         }, true);
 

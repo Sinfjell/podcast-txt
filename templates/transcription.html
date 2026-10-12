@@ -379,7 +379,7 @@
             });
         }
         document.body.appendChild(form);
-        form.submit();
+        if (form.requestSubmit) form.requestSubmit(); else form.submit();
     }
 
     // One accent button per state: when the paid-upgrade CTA shows, Copy steps back.
