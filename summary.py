@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
+import time
 from typing import Any, Optional
 
 import analytics as product_analytics
@@ -208,9 +210,104 @@ _SYSTEM_PROMPT = (
 )
 
 
+# Transient-error retry for the summary path only (runs in the background
+# summary thread; never on the transcript path).
+RETRY_MAX_ATTEMPTS = 4
+RETRY_BASE_DELAY = 2.0
+RETRY_MAX_DELAY = 30.0
+RETRY_TOTAL_BUDGET = 60.0
+_sleep = time.sleep
+_monotonic = time.monotonic
+
+
+class SummaryQuotaError(Exception):
+    """OpenAI insufficient_quota: retrying will not help."""
+
+
+_QUOTA_CODES = ('insufficient_quota', 'credit_balance_exhausted', 'billing_hard_limit_reached')
+
+
+def _error_codes(exc: BaseException) -> set[str]:
+    """code/type from the OpenAI error (e.g. code=credit_balance_exhausted,
+    type=insufficient_quota)."""
+    out = set()
+    for attr in ('code', 'type'):
+        val = getattr(exc, attr, None)
+        if val:
+            out.add(str(val))
+    body = getattr(exc, 'body', None)
+    if isinstance(body, dict):
+        inner = body.get('error') if isinstance(body.get('error'), dict) else body
+        for k in ('code', 'type'):
+            if inner.get(k):
+                out.add(str(inner[k]))
+    return out
+
+
+def _is_quota_error(exc: BaseException) -> bool:
+    return bool(_error_codes(exc) & set(_QUOTA_CODES))
+
+
+def _is_transient(exc: BaseException) -> bool:
+    try:
+        import openai
+    except ImportError:  # pragma: no cover
+        return False
+    if isinstance(exc, openai.RateLimitError):
+        return not _is_quota_error(exc)
+    if isinstance(exc, (openai.APIConnectionError, openai.InternalServerError)):
+        return True
+    if isinstance(exc, openai.APIStatusError):
+        return int(getattr(exc, 'status_code', 0) or 0) >= 500
+    return False
+
+
+def _retry_after_seconds(exc: BaseException) -> Optional[float]:
+    resp = getattr(exc, 'response', None)
+    headers = getattr(resp, 'headers', None)
+    if not headers:
+        return None
+    for name in ('retry-after-ms', 'retry-after'):
+        raw = headers.get(name)
+        if raw is None:
+            continue
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            continue
+        return val / 1000.0 if name == 'retry-after-ms' else val
+    return None
+
+
+def _call_with_retry(fn):
+    """Run fn() with exponential backoff + full jitter on transient errors."""
+    start = _monotonic()
+    for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            if _is_quota_error(exc):
+                raise SummaryQuotaError('insufficient_quota') from exc
+            if not _is_transient(exc) or attempt >= RETRY_MAX_ATTEMPTS:
+                raise
+            delay = random.uniform(
+                0, min(RETRY_MAX_DELAY, RETRY_BASE_DELAY * (2 ** (attempt - 1))))
+            hinted = _retry_after_seconds(exc)
+            if hinted is not None:
+                delay = max(delay, hinted)
+            remaining = RETRY_TOTAL_BUDGET - (_monotonic() - start)
+            if delay > remaining:
+                raise
+            logger.warning(
+                'summary call transient %s (attempt %s/%s); retrying in %.1fs',
+                type(exc).__name__, attempt, RETRY_MAX_ATTEMPTS, delay)
+            _sleep(delay)
+    raise RuntimeError('unreachable')  # pragma: no cover
+
+
 def _chat_json(client, *, model: str, user_content: str) -> tuple[dict, int, int]:
     """Call chat.completions; return (parsed dict, prompt_tokens, completion_tokens)."""
-    resp = client.chat.completions.create(
+    resp = _call_with_retry(lambda: client.chat.completions.create(
         model=model,
         messages=[
             {'role': 'system', 'content': _SYSTEM_PROMPT},
@@ -218,7 +315,7 @@ def _chat_json(client, *, model: str, user_content: str) -> tuple[dict, int, int
         ],
         response_format={'type': 'json_object'},
         temperature=0.2,
-    )
+    ))
     content = ''
     if resp.choices:
         content = (resp.choices[0].message.content or '').strip()
@@ -373,9 +470,11 @@ def summarize_task(
 
         is_partial = task_is_partial_preview(task)
         language = getattr(task, 'language', None)
+        # Transient OpenAI errors are retried inside _chat_json (backoff +
+        # jitter, retry-after aware). Anything left marks the summary 'error'
+        # so a later run can retry it; the transcript is never affected.
         last_exc = None
-        attempts = 2 if retry else 1
-        for attempt in range(1, attempts + 1):
+        for _once in (1,):
             try:
                 summary, meta = generate_summary(
                     openai_client,
@@ -411,14 +510,18 @@ def summarize_task(
                     meta['cost_usd_est'],
                 )
                 return True
+            except SummaryQuotaError:
+                logger.error('summary failed for %s: OpenAI insufficient_quota',
+                             task_id)
+                task.summary_status = 'error'
+                db.session.commit()
+                _report_once('insufficient_quota',
+                             message='Summary failed: OpenAI insufficient_quota')
+                return False
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                logger.warning(
-                    'summary attempt %s/%s failed for %s: %s',
-                    attempt, attempts, task_id, type(exc).__name__,
-                )
-                if attempt < attempts:
-                    continue
+                logger.warning('summary failed for %s: %s',
+                               task_id, type(exc).__name__)
         task.summary_status = 'error'
         db.session.commit()
         _report_once('generate_failed', last_exc)
