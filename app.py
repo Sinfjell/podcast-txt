@@ -74,6 +74,7 @@ from site_standards import init_site_standards
 import email_notify
 import mail as mailer
 import summary as summary_mod
+import trial_abuse
 import pricing_volume
 import mcp_server as mcp_server_mod
 import oauth_server as oauth_server_mod
@@ -2094,6 +2095,66 @@ def is_disposable_email(email):
     return email.rsplit('@', 1)[-1].lower() in DISPOSABLE_EMAIL_DOMAINS
 
 
+#: Off by default. On: signups matching a trial-abuse signal (trial_abuse.py)
+#: still get an account, but with 0 free minutes, and trial_denied fires.
+TRIAL_ABUSE_CHECKS_ENABLED = (os.getenv('TRIAL_ABUSE_CHECKS_ENABLED') or '').strip().lower() in (
+    '1', 'true', 'yes', 'on')
+TRIAL_ABUSE_DISPOSABLE_DOMAINS = trial_abuse.load_disposable_domains() | frozenset(
+    DISPOSABLE_EMAIL_DOMAINS)
+TRIAL_DENIED_NOTE = ("Free minutes aren't available for this account. "
+                     "You can buy minutes or use your own OpenAI key.")
+
+
+def _signup_device_id():
+    """(device_id, fresh): our own cookie's id, or a new one to set."""
+    existing = trial_abuse.valid_device_id(
+        request.cookies.get(trial_abuse.DEVICE_COOKIE))
+    return (existing, False) if existing else (uuid.uuid4().hex, True)
+
+
+def _set_device_cookie(response, device_id):
+    response.set_cookie(
+        trial_abuse.DEVICE_COOKIE, device_id, max_age=2 * 365 * 24 * 3600,
+        secure=request.is_secure, httponly=True, samesite='Lax')
+    return response
+
+
+def trial_abuse_verdict(email, ip_hash, device_id):
+    """Reason to deny the trial for this signup, or None. Never raises."""
+    if not TRIAL_ABUSE_CHECKS_ENABLED:
+        return None
+    try:
+        norm = trial_abuse.normalize_email(email)
+        since = datetime.now(timezone.utc) - trial_abuse.REUSE_WINDOW
+        rows = User.query.filter(db.or_(
+            User.email_normalized == norm,
+            User.created_at >= since.replace(tzinfo=None),
+        )).all()
+        return trial_abuse.denial_reason(
+            email=email, ip_hash=ip_hash, device_id=device_id,
+            existing=rows,
+            disposable_domains=TRIAL_ABUSE_DISPOSABLE_DOMAINS)
+    except Exception:  # noqa: BLE001 - a broken check must not block signup
+        db.session.rollback()
+        app.logger.exception('trial abuse check failed')
+        return None
+
+
+def backfill_email_normalized():
+    """Fill users.email_normalized for rows created before the column. Idempotent."""
+    if 'email_normalized' not in _live_columns('users'):
+        return 0
+    rows = db.session.execute(text(
+        'SELECT id, email FROM users WHERE email_normalized IS NULL')).fetchall()
+    for uid, email in rows:
+        db.session.execute(text(
+            'UPDATE users SET email_normalized = :n '
+            'WHERE id = :id AND email_normalized IS NULL'),
+            {'n': trial_abuse.normalize_email(email), 'id': uid})
+    db.session.commit()
+    return len(rows)
+
+
 # ---------------------------------------------------------------------------
 # API key handling
 # ---------------------------------------------------------------------------
@@ -3925,10 +3986,13 @@ def register():
     _stash_utm_from_request()
 
     if request.method != 'POST':
-        return _register_template()
+        device_id, fresh = _signup_device_id()
+        response = make_response(_register_template())
+        return _set_device_cookie(response, device_id) if fresh else response
 
     email = request.form.get('email', '').strip().lower()
     password = request.form.get('password', '')
+    device_id, _fresh = _signup_device_id()
 
     if not email or not password:
         _capture_register_failed('missing_fields')
@@ -3971,17 +4035,29 @@ def register():
             ), 'error')
             return _register_template()
 
+        ip_hash = trial_abuse.hash_ip(ip, app.secret_key)
+        denied_reason = trial_abuse_verdict(email, ip_hash, device_id)
+
         # Flush first so we have a stable user id for deterministic split
         # assignment; then stamp limit + variant before commit.
         user = User(email=email)
         user.set_password(password)
+        user.email_normalized = trial_abuse.normalize_email(email)
+        user.signup_ip_hash = ip_hash
+        user.signup_device_id = device_id
         db.session.add(user)
         db.session.flush()
         variant, grant_seconds = assign_trial_variant(user.id)
+        if denied_reason:
+            grant_seconds = 0
+            user.trial_denied_reason = denied_reason
         user.trial_seconds_limit = grant_seconds
         user.trial_variant = variant
         db.session.commit()
         created = True
+        if denied_reason:
+            product_analytics.capture('trial_denied', user.id, {
+                'reason': denied_reason})
 
         _persist_login(user)
         granted_min = grant_seconds // 60
@@ -3992,6 +4068,8 @@ def register():
                 session.get(PENDING_TRANSCRIPTION_KEY)),
             'trial_granted_min': granted_min,
         }
+        if denied_reason:
+            signup_props['trial_denied_reason'] = denied_reason
         if variant:
             signup_props['trial_variant'] = variant
             signup_props['$set'] = {'trial_variant': variant}
@@ -4003,7 +4081,9 @@ def register():
             signup_props['country'] = country
         signup_props.update(_first_touch_analytics_props(utm=utm))
         product_analytics.capture('user_signed_up', user.id, signup_props)
-        if session.get(PENDING_TRANSCRIPTION_KEY):
+        if denied_reason:
+            flash(f'Account created. {TRIAL_DENIED_NOTE}', 'success')
+        elif session.get(PENDING_TRANSCRIPTION_KEY):
             flash('Account created — starting your transcript.', 'success')
         else:
             flash(
@@ -4011,7 +4091,7 @@ def register():
                 'Paste your link again to start.',
                 'success',
             )
-        return _redirect_after_auth()
+        return _set_device_cookie(_redirect_after_auth(), device_id)
     finally:
         if not created:
             register_release_slot(ip, slot)
@@ -12169,6 +12249,7 @@ with app.app_context():
     oauth_server_mod.ensure_oauth_tables()
 
     apply_column_migrations()
+    backfill_email_normalized()
     raise_60_minute_trial_cohort()
     # Admin dashboard indexes: only after columns exist (same rule as
     # credit_purchases payment_intent index). Additive IF NOT EXISTS.
