@@ -357,7 +357,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (ph) {
                 try { if (window.posthog) ph.value = posthog.get_session_id() || ''; } catch (e) { ph.value = ''; }
             }
-            form.submit();
+            if (form.requestSubmit) form.requestSubmit(); else form.submit();
         }
     }
 

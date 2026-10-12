@@ -12040,6 +12040,33 @@ def test_status_own_key_invalid_offers_pack(stripe_on):
     assert A.OWN_KEY_PACK_OFFER in (data.get('error') or '')
 
 
+def test_paywall_buy_clicked_fires_on_every_checkout_submit(stripe_on, monkeypatch):
+    """Buy modal / slider / episode buttons all count as paywall_buy_clicked.
+
+    The event fires from the shared checkout-form submit handler (not only
+    on forms tagged data-paywall-buy) and carries entry_point, minutes and
+    pricing_version. Programmatic buy forms use requestSubmit so the
+    handler runs.
+    """
+    monkeypatch.setenv('PODSKRIFT_ENV', 'production')
+    monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
+    body = A.app.test_client().get('/').data.decode()
+    handler = body[body.index("document.addEventListener('submit'"):]
+    handler = handler[:handler.index('}, true);')]
+    assert "posthog.capture('paywall_buy_clicked'" in handler
+    assert "if (form.getAttribute('data-paywall-buy'))" not in handler
+    for prop in ('entry_point:', 'minutes:', 'pricing_version:'):
+        assert prop in handler
+    assert 'var PRICING_VERSION =' in body
+    import pathlib
+    root = pathlib.Path(A.__file__).parent / 'templates'
+    for name in ('transcription.html', 'index.html', 'episode_selection.html'):
+        src = (root / name).read_text()
+        assert 'form.requestSubmit()' in src
+        assert '\n            form.submit();' not in src.replace(
+            'else form.submit();', '')
+
+
 def test_analytics_helpers_for_paywall_ctas_in_base(stripe_on, monkeypatch):
     monkeypatch.setenv('PODSKRIFT_ENV', 'production')
     monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
