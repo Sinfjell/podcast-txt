@@ -1394,3 +1394,6 @@ body:has(.ds-signal) { overflow-x: clip; }
 .ds-volume__pick-price { font-size: 0.875rem; color: inherit; font-variant-numeric: tabular-nums; }
 .ds-volume__nudge { margin: 0; font-size: 0.875rem; color: var(--muted); }
 .ds-volume__nudge:empty { display: none; }
+/* Keyword landing pages (templates/landing.html). */
+.ds-landing__form { margin: 0 auto var(--space-9); }
+.ds-landing__form .ds-guide__muted { margin: 0; }
