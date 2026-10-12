@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$CLAUDE_CODE_REMOTE\" = true ] || exit 0; \"$CLAUDE_PROJECT_DIR\"/ops/cloud-setup.sh",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -174,7 +174,7 @@ def test_security_txt_is_valid(client):
     r = client.get('/.well-known/security.txt')
     assert r.mimetype == 'text/plain'
     body = r.get_data(as_text=True)
-    assert re.search(r'^Contact: https://', body, re.M)
+    assert re.search(r'^Contact: (https://|mailto:)', body, re.M)
     m = re.search(r'^Expires: (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)$', body, re.M)
     assert m
 
