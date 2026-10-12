@@ -224,19 +224,28 @@ class SummaryQuotaError(Exception):
     """OpenAI insufficient_quota: retrying will not help."""
 
 
-def _error_code(exc: BaseException) -> str:
-    code = getattr(exc, 'code', None)
-    if code:
-        return str(code)
+_QUOTA_CODES = ('insufficient_quota', 'credit_balance_exhausted', 'billing_hard_limit_reached')
+
+
+def _error_codes(exc: BaseException) -> set[str]:
+    """code/type from the OpenAI error (e.g. code=credit_balance_exhausted,
+    type=insufficient_quota)."""
+    out = set()
+    for attr in ('code', 'type'):
+        val = getattr(exc, attr, None)
+        if val:
+            out.add(str(val))
     body = getattr(exc, 'body', None)
     if isinstance(body, dict):
         inner = body.get('error') if isinstance(body.get('error'), dict) else body
-        return str(inner.get('code') or inner.get('type') or '')
-    return ''
+        for k in ('code', 'type'):
+            if inner.get(k):
+                out.add(str(inner[k]))
+    return out
 
 
 def _is_quota_error(exc: BaseException) -> bool:
-    return 'insufficient_quota' in _error_code(exc)
+    return bool(_error_codes(exc) & set(_QUOTA_CODES))
 
 
 def _is_transient(exc: BaseException) -> bool:

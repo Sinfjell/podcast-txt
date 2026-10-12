@@ -638,6 +638,18 @@ def test_summary_insufficient_quota_no_retry_reported(monkeypatch, no_sleep):
     assert reported == ['insufficient_quota']
 
 
+def test_summary_credit_exhausted_is_quota(no_sleep):
+    # Real prod body: code=credit_balance_exhausted, type=insufficient_quota.
+    req = httpx.Request('POST', 'https://api.openai.com/v1/chat/completions')
+    e = openai.RateLimitError('err', response=httpx.Response(429, request=req),
+                              body={'code': 'credit_balance_exhausted',
+                                    'type': 'insufficient_quota', 'message': 'x'})
+    fn = mock.Mock(side_effect=e)
+    with pytest.raises(summary_mod.SummaryQuotaError):
+        summary_mod._call_with_retry(fn)
+    assert fn.call_count == 1 and no_sleep == []
+
+
 def test_summary_4xx_not_retried(no_sleep):
     fn = mock.Mock(side_effect=_status_err(openai.BadRequestError, 400))
     with pytest.raises(openai.BadRequestError):
