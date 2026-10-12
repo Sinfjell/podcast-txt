@@ -1,12 +1,16 @@
 """Error reporting to Sentry -- light coverage, not APM.
 
-On only in production when SENTRY_DSN is set (see runtime_env.is_production).
-What gets reported:
+On in production and staging when SENTRY_DSN is set (see runtime_env). Each
+host tags its events with its own environment, so staging never pollutes the
+production issue list. What gets reported:
 
 - uncaught exceptions in requests (the Flask integration),
 - ERROR log records (the default logging integration),
 - a transcription task that fails (report_task_failure),
-- a task whose worker went quiet and was failed by a sweep (report_stale_task).
+- a task whose worker went quiet and was failed by a sweep (report_stale_task),
+- log records at SENTRY_LOGS_LEVEL and above (default INFO) as Sentry Logs, so
+  an agent can read the app's logs through Sentry without shell access to the
+  host. SENTRY_LOGS_LEVEL=off turns this off.
 
 The scrubbing here is the point of this module. OpenAI echoes the submitted key
 back in a 401, users have pasted passwords into that field, and private podcast
@@ -19,7 +23,14 @@ import logging
 import os
 import re
 
-from runtime_env import is_production, release_sha, resolve_environment
+from runtime_env import release_sha, resolve_environment
+
+# Where a DSN turns reporting on. Dev, test and agent sandboxes stay silent even
+# with a copied .env (runtime_env decides which is which).
+REPORTING_ENVIRONMENTS = frozenset({'production', 'staging'})
+# Loggers whose records never become Sentry Logs. OpenAI's and httpx's own
+# records can quote a request or an error body that echoes the submitted key.
+_DROPPED_LOGGERS = ('openai', 'httpx', 'httpcore')
 
 # The documented deploy is `git pull && systemctl restart`, with no pip step.
 # A hard import would turn that deploy into an outage the first time, so a
@@ -27,6 +38,7 @@ from runtime_env import is_production, release_sha, resolve_environment
 try:
     import sentry_sdk
     from sentry_sdk.integrations.flask import FlaskIntegration
+    from sentry_sdk.integrations.logging import LoggingIntegration
 except ImportError:  # pragma: no cover - exercised only on a stale venv
     sentry_sdk = None
 
@@ -46,6 +58,8 @@ _SECRET_PATTERNS = (
 _URL_QUERY = re.compile(r'(/[^\s?#\'"]*)\?[^\s#\'"]*')
 # Account emails must not leave the box (password-reset paths, form posts).
 _EMAIL = re.compile(r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}')
+# Log text that mentions an API key is treated as a possible OpenAI echo.
+_API_KEY_ECHO = re.compile(r'api[ _-]?key', re.I)
 
 
 def _redact_text(value):
@@ -87,15 +101,42 @@ def scrub_breadcrumb(crumb, hint):
     return _redact(crumb)
 
 
+def scrub_log(log, hint):
+    """before_send_log: drop records from HTTP/OpenAI internals, redact the rest."""
+    attributes = log.get('attributes') or {}
+    logger_name = str(attributes.get('logger.name') or '')
+    if logger_name.split('.')[0] in _DROPPED_LOGGERS:
+        return None
+    # A record that quotes an OpenAI auth error may echo whatever was pasted
+    # as the key, in wording no pattern can predict. Keep only that it happened.
+    if _API_KEY_ECHO.search(repr(log.get('body'))) or _API_KEY_ECHO.search(repr(attributes)):
+        log['body'] = REDACTED_OPENAI
+        attributes = {k: v for k, v in attributes.items()
+                      if not k.startswith('sentry.message.')}
+    if isinstance(log.get('body'), str):
+        log['body'] = _redact_text(log['body'])
+    log['attributes'] = _redact(attributes)
+    return log
+
+
+def _logs_level():
+    """SENTRY_LOGS_LEVEL as a logging level, or None when off."""
+    raw = os.getenv('SENTRY_LOGS_LEVEL', '').strip().upper() or 'INFO'
+    if raw in ('OFF', 'NONE', '0', 'FALSE'):
+        return None
+    level = logging.getLevelName(raw)
+    return level if isinstance(level, int) else logging.INFO
+
+
 def init_sentry(**overrides):
-    """Start the SDK if production and SENTRY_DSN is set. Returns whether on.
+    """Start the SDK on production/staging when SENTRY_DSN is set. Returns whether on.
 
     `overrides` exists for the test suite, which swaps in a capturing transport.
     An explicit ``dsn`` in overrides still initialises (scrubbing tests) even
     outside production — those transports never hit the network.
     """
     explicit_dsn = overrides.pop('dsn', None)
-    if not is_production() and explicit_dsn is None:
+    if resolve_environment() not in REPORTING_ENVIRONMENTS and explicit_dsn is None:
         return False
     dsn = (explicit_dsn if explicit_dsn is not None
            else os.getenv('SENTRY_DSN', '').strip())
@@ -111,10 +152,16 @@ def init_sentry(**overrides):
         or resolve_environment()
     )
     release = os.getenv('SENTRY_RELEASE', '').strip() or release_sha() or None
+    logs_level = _logs_level()
     options = dict(
         dsn=dsn,
         environment=environment,
-        integrations=[FlaskIntegration()],
+        integrations=[
+            FlaskIntegration(),
+            LoggingIntegration(sentry_logs_level=logs_level),
+        ],
+        enable_logs=logs_level is not None,
+        before_send_log=scrub_log,
         # Errors only. Performance tracing is out of scope and costs quota.
         traces_sample_rate=0.0,
         # No cookies, headers, user IPs or form bodies: the settings form
