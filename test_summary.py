@@ -208,7 +208,7 @@ def test_summarize_task_writes_ready_and_analytics(monkeypatch, ph_events=None):
     assert 'tokens' in gen['props']
 
 
-def test_summarize_task_retries_once_then_errors(monkeypatch):
+def test_summarize_task_non_transient_error_no_retry(monkeypatch):
     monkeypatch.setenv('SUMMARY_ENABLED', '1')
     client = mock.Mock()
     client.chat.completions.create.side_effect = RuntimeError('boom')
@@ -224,7 +224,7 @@ def test_summarize_task_retries_once_then_errors(monkeypatch):
             db=A.db, task=task, openai_client=client, user_id=uid)
         assert ok is False
         assert task.summary_status == 'error'
-        assert client.chat.completions.create.call_count == 2
+        assert client.chat.completions.create.call_count == 1
 
 
 def test_summarize_partial_preview_labeled(monkeypatch):
@@ -532,3 +532,114 @@ def test_format_summary_for_txt_partial_label():
     assert 'TL;DR: Preview only' in text
 
 
+
+
+# --- transient retry (PODSKRIFT-10) -------------------------------------
+
+import httpx
+import openai
+
+
+def _status_err(cls, status, *, code=None, headers=None):
+    req = httpx.Request('POST', 'https://api.openai.com/v1/chat/completions')
+    resp = httpx.Response(status, request=req, headers=headers or {})
+    body = {'error': {'code': code, 'type': code, 'message': 'x'}} if code else None
+    return cls('err', response=resp, body=body)
+
+
+def _ok_resp():
+    return _fake_openai_client().chat.completions.create()
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(summary_mod, '_sleep', sleeps.append)
+    return sleeps
+
+
+def _task(uid, tid):
+    task = A.TranscriptionTask(id=tid, user_id=uid, episode_title='Ep',
+                               status='completed', transcript_text='text')
+    A.db.session.add(task)
+    A.db.session.commit()
+    return task
+
+
+@pytest.mark.parametrize('err', [
+    lambda: _status_err(openai.RateLimitError, 429, code='rate_limit_exceeded'),
+    lambda: _status_err(openai.InternalServerError, 503),
+    lambda: openai.APIConnectionError(request=httpx.Request('POST', 'https://x')),
+])
+def test_summary_retries_transient_then_ready(monkeypatch, no_sleep, err):
+    monkeypatch.setenv('SUMMARY_ENABLED', '1')
+    client = mock.Mock()
+    client.chat.completions.create.side_effect = [err(), err(), _ok_resp()]
+    uid = _make_user(f'sumretry{len(no_sleep)}{id(err)}@test.com')
+    with A.app.app_context():
+        task = _task(uid, f'sum-r-{id(err)}')
+        assert summary_mod.summarize_task(
+            db=A.db, task=task, openai_client=client, user_id=uid) is True
+        assert task.summary_status == 'ready'
+    assert client.chat.completions.create.call_count == 3
+    assert len(no_sleep) == 2
+
+
+def test_summary_retry_respects_retry_after(no_sleep):
+    e = _status_err(openai.RateLimitError, 429, code='rate_limit_exceeded',
+                    headers={'retry-after': '7'})
+    fn = mock.Mock(side_effect=[e, 'ok'])
+    assert summary_mod._call_with_retry(fn) == 'ok'
+    assert no_sleep[0] >= 7
+
+
+def test_summary_retry_gives_up_after_max_attempts(monkeypatch, no_sleep):
+    monkeypatch.setenv('SUMMARY_ENABLED', '1')
+    client = mock.Mock()
+    client.chat.completions.create.side_effect = _status_err(
+        openai.RateLimitError, 429, code='rate_limit_exceeded')
+    uid = _make_user('sumgiveup@test.com')
+    with A.app.app_context():
+        task = _task(uid, 'sum-giveup')
+        assert summary_mod.summarize_task(
+            db=A.db, task=task, openai_client=client, user_id=uid) is False
+        assert task.summary_status == 'error'  # later run may retry
+        assert task.status == 'completed'
+    assert client.chat.completions.create.call_count == summary_mod.RETRY_MAX_ATTEMPTS
+    assert sum(no_sleep) <= summary_mod.RETRY_TOTAL_BUDGET
+
+
+def test_summary_retry_budget_caps_total_wait(no_sleep):
+    e = _status_err(openai.RateLimitError, 429, code='rate_limit_exceeded',
+                    headers={'retry-after': '120'})
+    fn = mock.Mock(side_effect=e)
+    with pytest.raises(openai.RateLimitError):
+        summary_mod._call_with_retry(fn)
+    assert fn.call_count == 1 and no_sleep == []
+
+
+def test_summary_insufficient_quota_no_retry_reported(monkeypatch, no_sleep):
+    monkeypatch.setenv('SUMMARY_ENABLED', '1')
+    summary_mod.reset_sentry_kinds_for_tests()
+    reported = []
+    monkeypatch.setattr(summary_mod, '_report_once',
+                        lambda kind, exc=None, **kw: reported.append(kind))
+    client = mock.Mock()
+    client.chat.completions.create.side_effect = _status_err(
+        openai.RateLimitError, 429, code='insufficient_quota')
+    uid = _make_user('sumquota@test.com')
+    with A.app.app_context():
+        task = _task(uid, 'sum-quota')
+        assert summary_mod.summarize_task(
+            db=A.db, task=task, openai_client=client, user_id=uid) is False
+        assert task.summary_status == 'error'
+    assert client.chat.completions.create.call_count == 1
+    assert no_sleep == []
+    assert reported == ['insufficient_quota']
+
+
+def test_summary_4xx_not_retried(no_sleep):
+    fn = mock.Mock(side_effect=_status_err(openai.BadRequestError, 400))
+    with pytest.raises(openai.BadRequestError):
+        summary_mod._call_with_retry(fn)
+    assert fn.call_count == 1
