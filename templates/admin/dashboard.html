@@ -261,6 +261,7 @@
     .actual-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
     .actual-table th, .actual-table td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); }
     .actual-table th:first-child, .actual-table td:first-child { text-align: left; }
+    .actual-table tr.contrib-total td { font-weight: 700; border-top: 2px solid var(--line-strong); }
     .actual-table-wrap { max-height: 360px; overflow: auto; margin-top: 16px; }
     .admin-empty { color: var(--muted); }
 </style>
@@ -700,7 +701,7 @@
             <div class="cost-card"><h3>Income in period</h3><div class="actual-figure">${{ '%.2f'|format(mg.daily.total_income_usd) }}</div><div class="actual-sub">Stripe net</div></div>
             <div class="cost-card"><h3>Actual API cost</h3><div class="actual-figure">{% if mg.daily.total_cost_usd is not none %}${{ '%.2f'|format(mg.daily.total_cost_usd) }}{% else %}—{% endif %}</div><div class="actual-sub">OpenAI billing</div></div>
             <div class="cost-card"><h3>Margin</h3><div class="actual-figure">{% if mg.daily.total_margin_usd is not none %}{{ '−' if mg.daily.total_margin_usd < 0 else '' }}${{ '%.2f'|format(mg.daily.total_margin_usd|abs) }}{% else %}—{% endif %}</div><div class="actual-sub">income − actual cost</div></div>
-            <div class="cost-card"><h3>Cost per minute</h3><div class="actual-figure">${{ '%.4f'|format(mg.cost_per_min_usd) }}</div><div class="actual-sub">{{ 'actual cost' if mg.cost_per_min_source == 'actual' else 'list price' }} / {{ mg.transcribed_minutes }} min transcribed · list ${{ '%.3f'|format(mg.whisper_list_usd_per_min) }}</div></div>
+            <div class="cost-card"><h3>Cost per minute</h3><div class="actual-figure">${{ '%.4f'|format(mg.cost_per_min_usd) }}</div><div class="actual-sub">{% if mg.cost_per_min_source == 'actual' %}actual cost{% elif mg.cost_per_min_source == 'list_implausible' %}list price (actual ÷ minutes was implausible){% else %}list price{% endif %} / {{ mg.transcribed_minutes }} min transcribed · list ${{ '%.3f'|format(mg.whisper_list_usd_per_min) }}</div></div>
         </div>
         <div class="chart-card" data-costs="margin-chart">
             <h3>Income, actual cost and margin per UTC day</h3>
@@ -748,7 +749,7 @@
                 {% endfor %}
                 <tr data-plan="trial"><td>{{ c.trial.label }}</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>
                     <td>{{ '%.0f'|format(c.trial.minutes_used) }}</td><td>${{ '%.2f'|format(c.trial.cost_usd) }}</td><td>−${{ '%.2f'|format(c.trial.cost_usd) }}</td></tr>
-                <tr class="money-row net"><td><strong>Total</strong></td><td>{{ c.totals.count|int }}</td>
+                <tr class="contrib-total"><td><strong>Total</strong></td><td>{{ c.totals.count|int }}</td>
                     <td>${{ '%.2f'|format(c.totals.gross_usd) }}</td><td>${{ '%.2f'|format(c.totals.fees_usd + c.totals.tax_usd) }}</td>
                     <td>${{ '%.2f'|format(c.totals.net_usd) }}</td><td></td><td>${{ '%.2f'|format(c.totals.cost_all_used_usd) }}</td>
                     <td>{{ '%+.2f'|format(c.totals.db_all_used_usd) }}</td><td></td><td>${{ '%.2f'|format(c.totals.cost_used_so_far_usd) }}</td>

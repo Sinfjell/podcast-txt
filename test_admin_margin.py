@@ -133,3 +133,8 @@ def test_cost_per_minute_uses_all_transcribed_minutes():
     assert M.cost_per_minute(64.98, 9663.9, 795.6) == (pytest.approx(64.98 / 10459.5), 'actual')
     assert M.cost_per_minute(10, 0, 0) == (0.006, 'list')
     assert M.cost_per_minute(10, 100, 0, cost_ok=False) == (0.006, 'list')
+
+
+def test_cost_per_minute_implausible_falls_back_to_list():
+    assert M.cost_per_minute(64.68, 12.1, 0) == (0.006, 'list_implausible')
+    assert M.cost_per_minute(0.006 * 5 * 100, 100, 0)[1] == 'actual'

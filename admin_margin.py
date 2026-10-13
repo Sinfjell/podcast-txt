@@ -18,6 +18,8 @@ from sqlalchemy import text
 
 #: Whisper list price, shown next to the measured cost per minute.
 WHISPER_LIST_USD_PER_MIN = 0.006
+#: Above this multiple of list price the measured $/min is not trusted.
+MAX_PLAUSIBLE_FACTOR = 5
 PRESET_MINUTES = (60, 300, 600, 1200)
 PLAN_ORDER = ['vol_60', 'vol_300', 'vol_600', 'vol_1200', 'vol_custom',
               'episode', 'legacy']
@@ -267,7 +269,12 @@ def cost_per_minute(actual_cost_usd, trial_min, paid_min, cost_ok=True):
     """Actual $ per transcribed minute (trial + paid on our key), else list."""
     total = float(trial_min or 0) + float(paid_min or 0)
     if cost_ok and total > 0:
-        return actual_cost_usd / total, 'actual'
+        cpm = actual_cost_usd / total
+        # Org-wide cost over very few minutes (staging, BYOK-heavy periods)
+        # gives a meaningless rate; fall back to list and say so.
+        if cpm > MAX_PLAUSIBLE_FACTOR * WHISPER_LIST_USD_PER_MIN:
+            return WHISPER_LIST_USD_PER_MIN, 'list_implausible'
+        return cpm, 'actual'
     return WHISPER_LIST_USD_PER_MIN, 'list'
 
 
