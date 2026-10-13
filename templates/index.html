@@ -503,7 +503,7 @@
         hidden('ph_sid', sid);
         hidden('return_to', window.location.pathname + window.location.search);
         document.body.appendChild(form);
-        form.submit();
+        if (form.requestSubmit) form.requestSubmit(); else form.submit();
     }
 
     var lastEpisodeForBuy = { duration: null, title: '' };
@@ -578,7 +578,7 @@
             form.appendChild(input);
         });
         document.body.appendChild(form);
-        form.submit();
+        if (form.requestSubmit) form.requestSubmit(); else form.submit();
     }
 
     function buildRow(item) {

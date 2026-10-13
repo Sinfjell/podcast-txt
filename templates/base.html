@@ -933,8 +933,11 @@
                 color: var(--ink);
                 font-weight: 700;
             }
+            /* Log in + Start free sit right under the links. They used to be
+               pushed to the panel's bottom edge (margin-top:auto), where the
+               fixed cookie banner (z-index 200) covered both on first visit. */
             .nav-links a.nav-login {
-                margin-top: auto;
+                margin-top: 24px;
                 justify-content: center;
                 min-height: 52px;
                 font-size: 17px;
@@ -967,8 +970,10 @@
             .nav-links .nav-sep {
                 display: block;
                 height: 0;
-                margin-top: auto;
+                margin-top: 16px;
             }
+            /* Keep the panel's last item scrollable clear of the cookie banner. */
+            body.cookie-banner-open .nav-links { padding-bottom: 180px; }
         }
 
         @media (prefers-reduced-motion: reduce) {
@@ -1311,6 +1316,10 @@
                                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                                 Settings
                             </a>
+                            <a href="{{ url_for('help_page') }}">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                                Help
+                            </a>
                             <div class="nav-sep" aria-hidden="true"></div>
                             <a href="{{ url_for('logout') }}"
                                onclick="try{if(window.posthog){posthog.reset();}}catch(e){}">
@@ -1329,7 +1338,7 @@
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                     MCP
                 </a>
-                <a href="{{ url_for('rss_help') }}">
+                <a href="{{ url_for('help_page') }}">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                     Help
                 </a>
@@ -1416,6 +1425,7 @@
                     <div class="footer-col">
                         <h2 class="footer-heading">Support</h2>
                         <ul class="footer-list">
+                            <li><a href="{{ url_for('help_page') }}">Help</a></li>
                             <li><a href="{{ url_for('contact') }}">Contact</a></li>
                             <li><a href="{{ url_for('contact') }}">Feedback / feature ideas</a></li>
                         </ul>
@@ -1487,6 +1497,7 @@
     (function () {
         var POSTHOG_USER_ID = {{ posthog_user_id | tojson }};
         var TRIAL_VARIANT = {{ trial_variant | tojson }};
+        var PRICING_VERSION = {{ analytics_pricing_version | default('pack') | tojson }};
         var REPLAY = {
             maskAllInputs: true,
             maskInputOptions: { password: true, email: true },
@@ -1664,19 +1675,16 @@
             } catch (e) { /* ignore */ }
         };
 
+        // Paywall CTAs record which paywall surface the click came from.
+        // The paywall_buy_clicked event itself fires exactly once, on the
+        // checkout form submit below, so every buy entry point (paywall,
+        // buy modal, slider, episode button) is counted the same way.
         window.podskriftPaywallBuyClicked = function (location, reason) {
             try {
-                if (!window.posthog || !location) return;
-                var opts = {};
-                if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
-                    opts.transport = 'sendBeacon';
-                }
-                var buyPayload = {
-                    location: location,
+                window.__podskriftPaywallCta = {
+                    location: location || '',
                     reason: reason || ''
                 };
-                if (TRIAL_VARIANT) buyPayload.trial_variant = TRIAL_VARIANT;
-                posthog.capture('paywall_buy_clicked', buyPayload, opts);
             } catch (e) { /* ignore */ }
         };
 
@@ -1737,14 +1745,21 @@
                     opts.transport = 'sendBeacon';
                 }
                 posthog.capture('buy_clicked', {location: loc, transport: 'sendBeacon'}, opts);
-                if (form.getAttribute('data-paywall-buy')) {
-                    var formBuy = {
-                        location: form.getAttribute('data-paywall-buy') || loc,
-                        reason: ''
-                    };
-                    if (TRIAL_VARIANT) formBuy.trial_variant = TRIAL_VARIANT;
-                    posthog.capture('paywall_buy_clicked', formBuy, opts);
-                }
+                var minEl = form.querySelector('input[name="minutes"]');
+                var psEl = form.querySelector('input[name="price_source"]');
+                var cta = window.__podskriftPaywallCta || {};
+                var minutes = minEl && minEl.value ? parseInt(minEl.value, 10) : null;
+                var formBuy = {
+                    entry_point: loc || form.getAttribute('data-paywall-buy') || '',
+                    location: form.getAttribute('data-paywall-buy') || cta.location || loc,
+                    reason: cta.reason || '',
+                    minutes: isNaN(minutes) ? null : minutes,
+                    price_source: psEl ? psEl.value : '',
+                    pricing_version: PRICING_VERSION
+                };
+                if (TRIAL_VARIANT) formBuy.trial_variant = TRIAL_VARIANT;
+                posthog.capture('paywall_buy_clicked', formBuy, opts);
+                window.__podskriftPaywallCta = null;
             } catch (e) { /* ignore */ }
         }, true);
 
@@ -1785,7 +1800,7 @@
        (logout, cancel, downloads) and no page that logs a server-side event
        (/podcasts/<slug> captures show_page_viewed, so it is left out). #}
     <script type="speculationrules">
-    {"prefetch": [{"where": {"href_matches": ["/", "/pricing", "/whats-new", "/docs/api", "/rss-help", "/privacy", "/terms", "/podcasts"]}, "eagerness": "moderate"}]}
+    {"prefetch": [{"where": {"href_matches": ["/", "/pricing", "/whats-new", "/docs/api", "/help", "/rss-help", "/privacy", "/terms", "/podcasts"]}, "eagerness": "moderate"}]}
     </script>
     {# Tabs and copy buttons for templates/components macros. #}
     <script src="{{ asset_url('components.js') }}" defer></script>
