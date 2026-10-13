@@ -24,6 +24,7 @@ ADMIN_KEY_ENV = 'OPENAI_ADMIN_KEY'
 # Optional: limit actual spend to the Podskrift project when the org has others.
 PROJECT_ID_ENV = 'OPENAI_COST_PROJECT_ID'
 CACHE_TTL_SEC = 15 * 60
+ERROR_CACHE_TTL_SEC = 60  # errors (e.g. 429) retry soon
 MAX_RANGE_DAYS = 180
 RANGE_PRESETS = ('today', '7d', '30d', '90d', 'custom')
 COST_TYPES = ('all', 'transcription', 'summary')
@@ -103,16 +104,23 @@ def fetch_actual_costs_uncached(start, end, *, session=None):
     for _ in range(20):  # pagination guard
         if page:
             params['page'] = page
-        try:
-            resp = http.get(OPENAI_COSTS_URL, params=params, timeout=15,
-                            headers={'Authorization': f'Bearer {key}'})
-        except requests.RequestException as exc:
-            return {'ok': False, 'error': 'OpenAI Costs API unreachable ('
-                    + type(exc).__name__ + ')'}
+        resp = None
+        for attempt in range(3):  # back off briefly on 429 rate limits
+            try:
+                resp = http.get(OPENAI_COSTS_URL, params=params, timeout=15,
+                                headers={'Authorization': f'Bearer {key}'})
+            except requests.RequestException as exc:
+                return {'ok': False, 'error': 'OpenAI Costs API unreachable ('
+                        + type(exc).__name__ + ')'}
+            if resp.status_code != 429 or attempt == 2:
+                break
+            time.sleep(1.5 * (attempt + 1))
         if resp.status_code != 200:
             hint = ''
             if resp.status_code in (401, 403):
                 hint = ' Check that OPENAI_ADMIN_KEY is a valid Admin key.'
+            elif resp.status_code == 429:
+                hint = ' Rate limited; reload in a minute.'
             return {'ok': False,
                     'error': f'OpenAI Costs API returned {resp.status_code}.{hint}'}
         body = resp.json() or {}
@@ -157,7 +165,8 @@ def fetch_actual_costs(start, end, *, force_refresh=False, session=None):
     payload['fetched_at'] = datetime.now(timezone.utc)
     if not payload.get('missing_key'):
         with _lock:
-            _cache[ck] = (time.monotonic() + CACHE_TTL_SEC, payload)
+            ttl = CACHE_TTL_SEC if payload.get('ok') else ERROR_CACHE_TTL_SEC
+            _cache[ck] = (time.monotonic() + ttl, payload)
     out = dict(payload)
     out['cached'] = False
     return out

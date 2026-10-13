@@ -122,3 +122,21 @@ def test_collect_without_key_keeps_estimates(monkeypatch):
     assert out['missing_key'] and out['total_actual_usd'] is None
     assert out['total_estimated_usd'] == pytest.approx(0.5)
     assert out['chart']['actual_usd'] == [None]
+
+
+def test_fetch_retries_on_429(monkeypatch):
+    monkeypatch.setenv('OPENAI_ADMIN_KEY', 'sk-admin-test')
+    monkeypatch.setattr(AA.time, 'sleep', lambda s: None)
+    sess = _Session([_Resp(429, {}), _Resp(200, {'data': [], 'has_more': False})])
+    out = AA.fetch_actual_costs_uncached(date(2026, 10, 1), date(2026, 10, 1), session=sess)
+    assert out['ok'] and len(sess.calls) == 2
+
+
+def test_errors_cached_briefly(monkeypatch):
+    AA.clear_cache()
+    monkeypatch.setattr(AA, 'fetch_actual_costs_uncached',
+                        lambda s, e, session=None: {'ok': False, 'error': 'x'})
+    AA.fetch_actual_costs(date(2026, 10, 1), date(2026, 10, 1))
+    exp = list(AA._cache.values())[0][0] - AA.time.monotonic()
+    assert exp <= AA.ERROR_CACHE_TTL_SEC
+    AA.clear_cache()
