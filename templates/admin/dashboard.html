@@ -381,7 +381,8 @@
             <div class="kpi">
                 <div class="kpi-label">Purchases</div>
                 <div class="kpi-value" data-kpi="purchase_count">{{ kpis.purchase_count }}</div>
-                <div class="kpi-sub">${{ '%.2f'|format(kpis.purchase_revenue_usd) }} credited</div>
+                <div class="kpi-sub" data-kpi="purchase_gross">${{ '%.2f'|format(kpis.purchase_gross_usd) }} gross paid (list price)</div>
+                <div class="kpi-sub" data-kpi="purchase_net">{% if kpis.purchase_net_usd is not none %}${{ '%.2f'|format(kpis.purchase_net_usd) }} net after Stripe fees, tax &amp; refunds{% else %}net: Stripe unavailable{% endif %}</div>
             </div>
             <div class="kpi">
                 <div class="kpi-label">BYOK</div>
@@ -680,6 +681,96 @@
         </div>
         {% endif %}
     </section>
+
+    <section class="admin-section" id="adminMargin" data-costs="margin">
+        <h2>Daily margin (USD)</h2>
+        {% set mg = margin %}
+        {% if mg.fatal %}
+        <div class="stripe-error" role="alert">{{ mg.error }}</div>
+        {% else %}
+        <p class="costs-note">
+            Same period as the filter above ({{ actual_costs.start }} → {{ actual_costs.end }}).
+            Days are <strong>UTC</strong> days (OpenAI bills per UTC day), so a day here runs
+            02:00–02:00 Oslo time; Stripe income is bucketed the same way. Income = Stripe net
+            after fees, tax and refunds, converted at each charge's own rate. Today is partial.
+        </p>
+        {% if not mg.cost_ok %}<div class="stripe-error" role="status">Actual cost unavailable: {{ mg.cost_error }}</div>{% endif %}
+        {% if not mg.stripe_ok %}<div class="stripe-error" role="status">Stripe unavailable, income shows $0.</div>{% endif %}
+        <div class="costs-grid">
+            <div class="cost-card"><h3>Income in period</h3><div class="actual-figure">${{ '%.2f'|format(mg.daily.total_income_usd) }}</div><div class="actual-sub">Stripe net</div></div>
+            <div class="cost-card"><h3>Actual API cost</h3><div class="actual-figure">{% if mg.daily.total_cost_usd is not none %}${{ '%.2f'|format(mg.daily.total_cost_usd) }}{% else %}—{% endif %}</div><div class="actual-sub">OpenAI billing</div></div>
+            <div class="cost-card"><h3>Margin</h3><div class="actual-figure">{% if mg.daily.total_margin_usd is not none %}{{ '−' if mg.daily.total_margin_usd < 0 else '' }}${{ '%.2f'|format(mg.daily.total_margin_usd|abs) }}{% else %}—{% endif %}</div><div class="actual-sub">income − actual cost</div></div>
+            <div class="cost-card"><h3>Cost per minute</h3><div class="actual-figure">${{ '%.4f'|format(mg.cost_per_min_usd) }}</div><div class="actual-sub">{{ 'actual cost' if mg.cost_per_min_source == 'actual' else 'list price' }} / {{ mg.transcribed_minutes }} min transcribed · list ${{ '%.3f'|format(mg.whisper_list_usd_per_min) }}</div></div>
+        </div>
+        <div class="chart-card" data-costs="margin-chart">
+            <h3>Income, actual cost and margin per UTC day</h3>
+            <canvas id="chartMarginDaily" height="180"></canvas>
+        </div>
+        <div class="actual-table-wrap">
+            <table class="actual-table" data-costs="margin-table">
+                <thead><tr><th>Day (UTC)</th><th>Income</th><th>Actual cost</th><th>Margin</th></tr></thead>
+                <tbody>{% for r in mg.daily.rows|reverse %}
+                <tr><td>{{ r.day }}{% if r.partial %} <span class="est-badge">partial</span>{% endif %}</td>
+                    <td>${{ '%.2f'|format(r.income_usd) }}</td>
+                    <td>{% if r.cost_usd is not none %}${{ '%.2f'|format(r.cost_usd) }}{% else %}—{% endif %}</td>
+                    <td>{% if r.margin_usd is not none %}{{ '%+.2f'|format(r.margin_usd) }}{% else %}—{% endif %}</td></tr>
+                {% endfor %}</tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="admin-section" id="adminContribution" data-costs="contribution">
+        <h2>Contribution margin per plan</h2>
+        {% set c = mg.contribution %}
+        <p class="costs-note">
+            Purchases made in the period. Fees and tax are the real Stripe figures for each payment.
+            Cost = minutes × ${{ '%.4f'|format(mg.cost_per_min_usd) }}/min (actual cost ÷ minutes transcribed in the period).
+            "All used" assumes every sold minute gets transcribed; "used so far" uses each buyer's share of
+            paid minutes already spent. Contribution % is of gross.
+        </p>
+        <div class="actual-table-wrap">
+            <table class="actual-table" data-costs="contribution-table">
+                <thead><tr><th>Plan</th><th>Buys</th><th>Gross</th><th>Fees + tax</th><th>Net</th><th>Min sold</th><th>Cost (all used)</th><th>Contribution (all used)</th><th>Min used</th><th>Cost (so far)</th><th>Contribution (so far)</th></tr></thead>
+                <tbody>
+                {% for g in c.plans %}
+                <tr data-plan="{{ g.plan }}"><td>{{ g.label }}</td><td>{{ g.count }}</td>
+                    <td>${{ '%.2f'|format(g.gross_usd) }}</td>
+                    <td>${{ '%.2f'|format(g.fees_usd + g.tax_usd) }}</td>
+                    <td>${{ '%.2f'|format(g.net_usd) }}</td>
+                    <td>{{ '%.0f'|format(g.minutes_sold) }}</td>
+                    <td>${{ '%.2f'|format(g.cost_all_used_usd) }}</td>
+                    <td>{{ '%+.2f'|format(g.db_all_used_usd) }}{% if g.db_pct_all_used is not none %} ({{ g.db_pct_all_used }}%){% endif %}<br><span class="money-muted">{{ '%+.2f'|format(g.db_per_purchase_all_used_usd) }}/buy</span></td>
+                    <td>{{ '%.0f'|format(g.minutes_used) }}</td>
+                    <td>${{ '%.2f'|format(g.cost_used_so_far_usd) }}</td>
+                    <td>{{ '%+.2f'|format(g.db_used_so_far_usd) }}{% if g.db_pct_used_so_far is not none %} ({{ g.db_pct_used_so_far }}%){% endif %}<br><span class="money-muted">{{ '%+.2f'|format(g.db_per_purchase_used_so_far_usd) }}/buy</span></td></tr>
+                {% else %}
+                <tr><td colspan="11" class="admin-empty">No purchases in this period.</td></tr>
+                {% endfor %}
+                <tr data-plan="trial"><td>{{ c.trial.label }}</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>
+                    <td>{{ '%.0f'|format(c.trial.minutes_used) }}</td><td>${{ '%.2f'|format(c.trial.cost_usd) }}</td><td>−${{ '%.2f'|format(c.trial.cost_usd) }}</td></tr>
+                <tr class="money-row net"><td><strong>Total</strong></td><td>{{ c.totals.count|int }}</td>
+                    <td>${{ '%.2f'|format(c.totals.gross_usd) }}</td><td>${{ '%.2f'|format(c.totals.fees_usd + c.totals.tax_usd) }}</td>
+                    <td>${{ '%.2f'|format(c.totals.net_usd) }}</td><td></td><td>${{ '%.2f'|format(c.totals.cost_all_used_usd) }}</td>
+                    <td>{{ '%+.2f'|format(c.totals.db_all_used_usd) }}</td><td></td><td>${{ '%.2f'|format(c.totals.cost_used_so_far_usd) }}</td>
+                    <td>{{ '%+.2f'|format(c.totals.db_used_so_far_usd) }}<br><span class="money-muted">after trial: {{ '%+.2f'|format(c.totals.db_after_trial_usd) }}</span></td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <h3 class="costs-note" style="margin-top:16px;color:var(--ink);font-weight:700;">Per price point (vol_v1, if all minutes are used)</h3>
+        <div class="actual-table-wrap">
+            <table class="actual-table" data-costs="theoretical-table">
+                <thead><tr><th>Pack</th><th>Price</th><th>Fees + tax{% if mg.observed_fee_tax_pct is not none %} ({{ mg.observed_fee_tax_pct }}% seen){% endif %}</th><th>Fee model (30¢ + 6.4%)</th><th>Cost (actual/min)</th><th>Cost (list $0.006)</th><th>Contribution</th></tr></thead>
+                <tbody>{% for t in mg.theoretical %}
+                <tr><td>{{ t.minutes }} min</td><td>${{ '%.2f'|format(t.price_usd) }}</td><td>${{ '%.2f'|format(t.fee_tax_usd) }}</td><td>${{ '%.2f'|format(t.model_fee_usd) }}</td>
+                    <td>${{ '%.2f'|format(t.cost_usd) }}</td><td>${{ '%.2f'|format(t.cost_list_usd) }}</td>
+                    <td>{{ '%+.2f'|format(t.db_usd) }}{% if t.db_pct is not none %} ({{ t.db_pct }}%){% endif %}</td></tr>
+                {% endfor %}</tbody>
+            </table>
+        </div>
+        {% endif %}
+    </section>
+
     {% endcall %}
 
     {% call tab_panel('admin-payments') %}
@@ -811,6 +902,9 @@
 <script type="application/json" id="adminChartData">{{ charts | tojson }}</script>
 {% if stripe_revenue.ok %}
 <script type="application/json" id="adminStripeWeekly">{{ stripe_revenue.weekly_net | tojson }}</script>
+{% endif %}
+{% if margin and margin.daily %}
+<script type="application/json" id="adminMarginChart">{{ margin.daily.chart | tojson }}</script>
 {% endif %}
 {% if actual_costs and actual_costs.chart %}
 <script type="application/json" id="adminActualCostsChart">{{ actual_costs.chart | tojson }}</script>
@@ -1039,6 +1133,33 @@
                     scales: {
                         x: { ticks: { color: palette.text, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 12 } }, grid: { display: false } },
                         y: { beginAtZero: true, ticks: { color: palette.text, font: { size: 12 }, callback: function (v) { return '$' + v; } }, grid: { color: palette.grid } },
+                    },
+                },
+            });
+        } catch (e) { /* ignore chart parse errors */ }
+    }
+
+    var mEl = document.getElementById('adminMarginChart');
+    var mctx = document.getElementById('chartMarginDaily');
+    if (mEl && mctx && typeof Chart !== 'undefined') {
+        try {
+            var md = JSON.parse(mEl.textContent);
+            new Chart(mctx, {
+                type: 'bar',
+                data: {
+                    labels: md.labels,
+                    datasets: [
+                        { label: 'Income (Stripe net)', data: md.income_usd, backgroundColor: palette.line, borderRadius: 2 },
+                        { label: 'Actual cost', data: md.cost_usd, backgroundColor: palette.costFixed, borderRadius: 2 },
+                        { type: 'line', label: 'Margin', data: md.margin_usd, borderColor: palette.fail, backgroundColor: 'transparent', pointRadius: 0, borderWidth: 2, tension: 0.2 },
+                    ],
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { legend: { display: true, labels: { color: palette.text, boxWidth: 12, font: { size: 11 } } } },
+                    scales: {
+                        x: { ticks: { color: palette.text, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 12 } }, grid: { display: false } },
+                        y: { ticks: { color: palette.text, font: { size: 12 }, callback: function (v) { return '$' + v; } }, grid: { color: palette.grid } },
                     },
                 },
             });
