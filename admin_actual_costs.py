@@ -63,10 +63,12 @@ def resolve_range(preset=None, start=None, end=None, *, today=None):
             e = date.fromisoformat((end or '').strip())
         except ValueError:
             return resolve_range('30d', today=today)
+        if s > e:
+            s, e = e, s
         if e > today:
             e = today
         if s > e:
-            s, e = e, s
+            s = e
         if (e - s).days + 1 > MAX_RANGE_DAYS:
             s = e - timedelta(days=MAX_RANGE_DAYS - 1)
         return preset, s, e
