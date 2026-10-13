@@ -380,6 +380,7 @@ def collect_kpis(db, trial_global_seconds, trial_daily_seconds=None):
         'trial_used_minutes': round(int(trial_daily_used_seconds) / 60.0, 1),
         'trial_global_minutes': int(trial_daily_seconds or 0) // 60,
         'purchase_count': purchase_count,
+        'purchase_gross_usd': round(purchase_revenue_cents / 100.0, 2),
         'purchase_revenue_usd': round(purchase_revenue_cents / 100.0, 2),
         'byok_users': int(byok_users),
     }
@@ -864,6 +865,7 @@ def collect_headline_kpis(db, trial_daily_seconds, costs=None, stripe_revenue=No
         'income_approx_count': income_approx,
         'income_unconverted_count': income_unconverted,
         'income_source': income_source,
+        'purchase_net_usd': round(income['all'], 2) if usd else None,
         'margin_all_usd': round(income['all'] - api['all'], 2),
         'margin_7d_usd': round(income['7d'] - api['7d'], 2),
         'margin_today_usd': round(income['today'] - api['today'], 2),
@@ -1391,14 +1393,19 @@ def fetch_stripe_revenue_uncached():
             net = int(_stripe_obj_get(bt, 'net') or 0)
             src = _stripe_obj_get(bt, 'source')
             src_cur = None
+            src_pi = None
             if src is not None and not isinstance(src, str):
                 src_cur = (_stripe_obj_get(src, 'currency') or '').lower() or None
+                src_pi = _stripe_obj_get(src, 'payment_intent')
+                if src_pi is not None and not isinstance(src_pi, str):
+                    src_pi = _stripe_obj_get(src_pi, 'id')
             norm_bts.append({
                 'created': created, 'type': btype, 'currency': currency,
                 'amount': int(_stripe_obj_get(bt, 'amount') or 0),
                 'fee': int(_stripe_obj_get(bt, 'fee') or 0), 'net': net,
                 'exchange_rate': _stripe_obj_get(bt, 'exchange_rate'),
                 'source_currency': src_cur,
+                'payment_intent': src_pi,
                 'fee_details': [
                     ((_stripe_obj_get(fd, 'type') or '').strip(),
                      int(_stripe_obj_get(fd, 'amount') or 0))
@@ -1530,6 +1537,7 @@ def fetch_stripe_revenue_uncached():
         'bt_truncated': bt_truncated,
         'primary_currency': primary,
         'usd': summarize_bts_usd(norm_bts),
+        'bts_norm': norm_bts,
     }
 
 
@@ -1643,6 +1651,18 @@ def dashboard():
         current_app.logger.exception('admin actual costs panel failed')
         actual_costs = {'ok': False, 'fatal': True, 'rows': [],
                         'error': 'Actual costs unavailable (' + type(exc).__name__ + ')'}
+    # Daily margin + contribution per plan, same range as the actual-cost panel.
+    try:
+        from admin_margin import collect_margin
+        from admin_actual_costs import resolve_range
+        _p, m_start, m_end = resolve_range(
+            request.args.get('cost_range'), request.args.get('cost_from'),
+            request.args.get('cost_to'))
+        margin = collect_margin(db, stripe_revenue, m_start, m_end)
+    except Exception as exc:  # noqa: BLE001
+        current_app.logger.exception('admin margin panel failed')
+        margin = {'fatal': True,
+                  'error': 'Margin unavailable (' + type(exc).__name__ + ')'}
     try:
         from admin_actual_costs import actual_cost_windows
         actual_kpi = actual_cost_windows(db)
@@ -1673,6 +1693,7 @@ def dashboard():
         stripe_revenue=stripe_revenue,
         costs=costs,
         actual_costs=actual_costs,
+        margin=margin,
         mcp_stats=mcp_stats,
     )
 
