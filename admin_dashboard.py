@@ -1483,6 +1483,22 @@ def dashboard():
             'note': '',
             'as_of_oslo': format_oslo(datetime.now(timezone.utc)),
         }
+    # Actual OpenAI spend (Costs API, admin key) vs estimate — never fails the page.
+    try:
+        from admin_actual_costs import collect_actual_vs_estimated
+        actual_costs = collect_actual_vs_estimated(
+            db,
+            preset=request.args.get('cost_range'),
+            start=request.args.get('cost_from'),
+            end=request.args.get('cost_to'),
+            cost_type=request.args.get('cost_type'),
+        )
+        if actual_costs.get('fetched_at'):
+            actual_costs['fetched_at_oslo'] = format_oslo(actual_costs['fetched_at'])
+    except Exception as exc:  # noqa: BLE001
+        current_app.logger.exception('admin actual costs panel failed')
+        actual_costs = {'ok': False, 'fatal': True, 'rows': [],
+                        'error': 'Actual costs unavailable (' + type(exc).__name__ + ')'}
     kpis = collect_headline_kpis(
         db, trial_daily, costs=costs, stripe_revenue=stripe_revenue)
     try:
@@ -1505,6 +1521,7 @@ def dashboard():
         trial_default_minutes=trial_default // 60,
         stripe_revenue=stripe_revenue,
         costs=costs,
+        actual_costs=actual_costs,
         mcp_stats=mcp_stats,
     )
 
