@@ -1417,8 +1417,8 @@
                     <div class="footer-col">
                         <h2 class="footer-heading">Transcribe</h2>
                         <ul class="footer-list">
-                            {% for endpoint, label in landing_footer_links %}
-                            <li><a href="{{ url_for(endpoint) }}"{% if endpoint == 'landing_no' %} hreflang="no" lang="no"{% endif %}>{{ label }}</a></li>
+                            {% for endpoint, label, link_lang in landing_footer_links %}
+                            <li><a href="{{ url_for(endpoint) }}"{% if link_lang != 'en' %} hreflang="{{ link_lang }}" lang="{{ link_lang }}"{% endif %}>{{ label }}</a></li>
                             {% endfor %}
                         </ul>
                     </div>

@@ -16771,12 +16771,13 @@ def test_landing_page_renders_with_seo_basics(trial_on, path):
     assert '<meta property="og:title"' in html
     # The paste box posts into the existing home flow.
     assert 'action="/"' in html and 'name="q"' in html
-    # Links to the other landings, /ai and the guides.
-    for other in LANDING_PATHS:
-        if other != path:
-            assert f'href="{other}"' in html
+    # Links to the other same-language landings, /ai and the guides.
+    import landing_pages as LP
+    endpoint = {p: e for e, p in LP.PAGES}[path]
+    for other_ep, _ in LP.related_links(endpoint):
+        assert f'href="{dict(LP.PAGES)[other_ep]}"' in html
     assert 'href="/ai"' in html and 'href="/guides"' in html
-    expected_lang = 'no' if path.startswith('/no/') else 'en'
+    expected_lang = 'nb' if path.startswith('/no/') else 'en'
     assert f'<html lang="{expected_lang}">' in html
 
 
@@ -16834,15 +16835,83 @@ def test_landing_pages_in_sitemap_and_footer(trial_on):
     for path in LANDING_PATHS:
         assert any(loc.endswith(path) for loc in locs), f'{path} not in sitemap'
     home = client.get('/').data.decode()
-    for path in LANDING_PATHS:
+    import landing_pages as LP
+    for endpoint in LP.FOOTER:
+        path = dict(LP.PAGES)[endpoint]
         assert f'href="{path}"' in home, f'{path} not in footer'
+    # Every Norwegian page is reachable from the Norwegian entry point.
+    no_home = client.get('/no/podcast-til-tekst').data.decode()
+    for endpoint in LP.NB_PAGES:
+        if endpoint != 'landing_no':
+            assert f'href="{dict(LP.PAGES)[endpoint]}"' in no_home
+
+
+def _alternates(html):
+    import re as _re
+    return dict(_re.findall(r'<link rel="alternate" hreflang="([^"]+)" href="([^"]+)"', html))
 
 
 def test_norwegian_landing_has_hreflang_pair(trial_on):
     client = A.app.test_client()
     for path in ('/podcast-to-text', '/no/podcast-til-tekst'):
         html = client.get(path).data.decode()
-        assert 'hreflang="no"' in html and 'hreflang="en"' in html
+        assert 'hreflang="nb"' in html and 'hreflang="en"' in html
+        assert 'hreflang="no"' not in html
+
+
+def test_hreflang_is_reciprocal_and_nb_everywhere(trial_on):
+    import landing_pages as LP
+    client = A.app.test_client()
+    paths = dict(LP.PAGES)
+    for nb, en in LP.HREFLANG_PAIRS.items():
+        a_nb = _alternates(client.get(paths[nb]).data.decode())
+        a_en = _alternates(client.get(paths[en]).data.decode())
+        assert a_nb == a_en
+        assert a_nb['nb'].endswith(paths[nb]) and a_nb['en'].endswith(paths[en])
+        assert a_nb['x-default'] == a_nb['en']
+    for endpoint in LP.NB_PAGES:
+        html = client.get(paths[endpoint]).data.decode()
+        assert '<html lang="nb">' in html
+        assert 'hreflang="no"' not in html and 'lang="no"' not in html
+        assert _alternates(html)['nb'].endswith(paths[endpoint])
+    assert 'hreflang="no"' not in client.get('/').data.decode()
+
+
+def test_sitemap_has_hreflang_alternates(trial_on):
+    import landing_pages as LP
+    import xml.etree.ElementTree as ET
+    xml = A.app.test_client().get('/sitemap.xml').data.decode()
+    ns = {'s': 'http://www.sitemaps.org/schemas/sitemap/0.9', 'x': 'http://www.w3.org/1999/xhtml'}
+    root = ET.fromstring(xml)
+    by_loc = {u.find('s:loc', ns).text: u for u in root.findall('s:url', ns)}
+    paths = dict(LP.PAGES)
+    for nb, en in LP.HREFLANG_PAIRS.items():
+        for ep in (nb, en):
+            url = next(u for loc, u in by_loc.items() if loc.endswith(paths[ep]))
+            langs = {l.get('hreflang') for l in url.findall('x:link', ns)}
+            assert langs == {'en', 'nb', 'x-default'}
+    for ep in LP.NB_PAGES:
+        assert any(loc.endswith(paths[ep]) for loc in by_loc)
+
+
+def test_norwegian_pages_are_distinct_and_norwegian(trial_on):
+    import landing_pages as LP
+    import re as _re
+    client = A.app.test_client()
+    bodies = {}
+    for ep in LP.NB_PAGES:
+        html = client.get(dict(LP.PAGES)[ep]).data.decode()
+        main = html.split('<article', 1)[1].split('</article>', 1)[0]
+        main = main.split('aria-labelledby="landing-related"', 1)[0]  # cross-language links
+        words = set(_re.findall(r'[a-zæøå]{4,}', _re.sub('<[^>]+>', ' ', main).lower()))
+        bodies[ep] = words
+        assert {'podkast', 'tekst'} & words
+        assert 'transcript' not in main.lower().replace('podskrift', '')
+    eps = list(bodies)
+    for i, a in enumerate(eps):
+        for b in eps[i + 1:]:
+            j = len(bodies[a] & bodies[b]) / len(bodies[a] | bodies[b])
+            assert j < 0.6, f'{a} vs {b} too similar ({j:.2f})'
 
 
 def test_llms_txt_pricing_mcp_and_landings(trial_on, monkeypatch):

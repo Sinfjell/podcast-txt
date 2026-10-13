@@ -9944,8 +9944,9 @@ def podcast_show(slug):
 def inject_landing_footer_links():
     """Keyword landing pages, linked from every footer for crawl depth."""
     return {'landing_footer_links': [
-        (endpoint, landing_pages_mod.SHORT_LABELS[endpoint])
-        for endpoint, _ in landing_pages_mod.PAGES]}
+        (endpoint, landing_pages_mod.SHORT_LABELS[endpoint],
+         landing_pages_mod.lang_of(endpoint))
+        for endpoint in landing_pages_mod.FOOTER]}
 
 
 def _faq_pack_phrase():
@@ -9980,7 +9981,7 @@ def _render_landing(endpoint):
     page_url = public_url(endpoint)
     trial = advertised_trial_minutes()
     pack = _landing_pack()
-    if page['lang'] == 'no':
+    if page['lang'] == landing_pages_mod.NB:
         bits = [f'{trial} gratisminutter.'] if trial else []
         if pack:
             bits.append('Deretter ' + landing_pages_mod.pack_phrase(pack, 'no') + '.')
@@ -9989,13 +9990,9 @@ def _render_landing(endpoint):
         if pack:
             p = landing_pages_mod.pack_phrase(pack)
             bits.append(f'Then {p}, no subscription.')
-    hreflang = []
-    if endpoint in ('landing_podcast_to_text', 'landing_no'):
-        hreflang = [('en', public_url('landing_podcast_to_text')),
-                    ('no', public_url('landing_no')),
-                    ('x-default', public_url('landing_podcast_to_text'))]
-    related = [(e, landing_pages_mod.SHORT_LABELS[e])
-               for e, _ in landing_pages_mod.PAGES if e != endpoint]
+    hreflang = [(hl, public_url(e))
+                for hl, e in landing_pages_mod.hreflang_alternates(endpoint)]
+    related = landing_pages_mod.related_links(endpoint)
     return render_template(
         'landing.html',
         page=page,
@@ -10114,7 +10111,7 @@ def llms_txt():
     cost = '\n'.join(cost_lines)
     landing_lines = '\n'.join(
         f'- [{landing_page_data(e)["title"]}]({public_url(e)})'
-        + (' (Norwegian)' if e == 'landing_no' else '')
+        + (' (Norwegian)' if landing_pages_mod.lang_of(e) == landing_pages_mod.NB else '')
         for e, _ in landing_pages_mod.PAGES)
     mcp_section = (f"""## Use it from ChatGPT, Claude and other AI apps (MCP)
 Podskrift is a remote MCP server at {_mcp_connector_url()} (Streamable HTTP,
@@ -10224,9 +10221,21 @@ def sitemap_xml():
         pages.append(public_url('podcast_show', slug=show['slug']))
     # No lastmod: it was emitting today's date on every fetch, which claims all
     # pages change daily. That is a discount signal, not a freshness one.
-    urls = '\n'.join(f'  <url><loc>{escape(u)}</loc></url>' for u in pages)
+    alternates = {}
+    for endpoint, _ in landing_pages_mod.PAGES:
+        alts = landing_pages_mod.hreflang_alternates(endpoint)
+        if len(alts) > 1:
+            alternates[public_url(endpoint)] = [(hl, public_url(e)) for hl, e in alts]
+
+    def _url(u):
+        links = ''.join(
+            f'<xhtml:link rel="alternate" hreflang="{hl}" href="{escape(h)}"/>'
+            for hl, h in alternates.get(u, ()))
+        return f'  <url><loc>{escape(u)}</loc>{links}</url>'
+    urls = '\n'.join(_url(u) for u in pages)
     xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
-           '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+           '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" '
+           'xmlns:xhtml="http://www.w3.org/1999/xhtml">\n'
            f'{urls}\n</urlset>\n')
     return Response(xml, mimetype='application/xml')
 
