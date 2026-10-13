@@ -247,9 +247,25 @@
     }
     .admin-flex-between h2 { margin: 0; }
     .money-muted { color: var(--muted); }
+    .cost-filter {
+        display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px;
+        margin: 8px 0 16px;
+    }
+    .cost-filter label { display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: var(--muted); }
+    .cost-filter select, .cost-filter input[type="date"] {
+        min-height: 44px; padding: 0 12px; border: 1px solid var(--line-strong);
+        border-radius: var(--radius-sm); background: var(--bg); color: var(--ink); font: inherit;
+    }
+    .actual-figure { font-size: 22px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+    .actual-sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .actual-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+    .actual-table th, .actual-table td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+    .actual-table th:first-child, .actual-table td:first-child { text-align: left; }
+    .actual-table-wrap { max-height: 360px; overflow: auto; margin-top: 16px; }
     .admin-empty { color: var(--muted); }
 </style>
 
+{% set cost_tab_open = request.args.get('cost_range') is not none %}
 <div class="admin-wrap ph-no-capture">
     <div class="admin-header">
         <h1>Admin</h1>
@@ -318,17 +334,17 @@
 
     <nav class="admin-nav" aria-label="Admin sections">
         {{ tabs("Admin sections", [
-            {"id": "admin-overview", "label": "Overview", "selected": true},
+            {"id": "admin-overview", "label": "Overview", "selected": not cost_tab_open},
             {"id": "admin-signups", "label": "Signups"},
             {"id": "admin-users", "label": "Users"},
             {"id": "admin-transcripts", "label": "Transcripts"},
-            {"id": "admin-costs", "label": "Costs"},
+            {"id": "admin-costs", "label": "Costs", "selected": cost_tab_open},
             {"id": "admin-payments", "label": "Payments"},
             {"id": "admin-mcp", "label": "MCP"},
         ]) }}
     </nav>
 
-    {% call tab_panel('admin-overview', selected=true) %}
+    {% call tab_panel('admin-overview', selected=not cost_tab_open) %}
     <section class="admin-section" id="adminOverview">
         <div class="admin-flex-between">
             <h2>Overview</h2>
@@ -515,7 +531,7 @@
     </section>
     {% endcall %}
 
-    {% call tab_panel('admin-costs') %}
+    {% call tab_panel('admin-costs', selected=cost_tab_open) %}
     <section class="admin-section" id="adminCosts" data-costs="section">
         <h2>Costs <span class="est-badge">estimate</span></h2>
         {% if costs.error %}
@@ -573,6 +589,88 @@
         <div class="chart-card" data-costs="daily-chart">
             <h3>Estimated cost per day (30d)</h3>
             <canvas id="chartCostsDaily" height="180"></canvas>
+        </div>
+        {% endif %}
+    </section>
+
+    <section class="admin-section" id="adminActualCosts" data-costs="actual">
+        <h2>Actual OpenAI cost vs estimate</h2>
+        {% set ac = actual_costs %}
+        {% if ac.fatal %}
+        <div class="stripe-error" role="alert">{{ ac.error }}</div>
+        {% else %}
+        <form class="cost-filter" method="get" action="#adminActualCosts" data-costs="filter">
+            <label>Period
+                <select name="cost_range" data-costs="range">
+                    {% for p, lab in [('today','Today'),('7d','Last 7 days'),('30d','Last 30 days'),('90d','Last 90 days'),('custom','Custom range')] %}
+                    <option value="{{ p }}"{% if ac.preset == p %} selected{% endif %}>{{ lab }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>From <input type="date" name="cost_from" value="{{ ac.start }}"></label>
+            <label>To <input type="date" name="cost_to" value="{{ ac.end }}"></label>
+            <label>Cost type
+                <select name="cost_type">
+                    {% for c, lab in [('all','All OpenAI'),('transcription','Transcription'),('summary','Summaries')] %}
+                    <option value="{{ c }}"{% if ac.cost_type == c %} selected{% endif %}>{{ lab }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <button type="submit" class="btn btn-secondary">Apply</button>
+        </form>
+        <p class="costs-note">
+            {{ ac.start }} → {{ ac.end }} (UTC days, as OpenAI bills them). Actual comes from
+            the OpenAI Costs API and lags a few hours, so today is partial.
+            {% if ac.fetched_at_oslo %}Fetched {{ ac.fetched_at_oslo }} ({{ admin_tz_name }}){% if ac.cached %}, cached up to 15 min{% endif %}.{% endif %}
+            {% if ac.ok and not ac.project_scoped %}Covers the whole OpenAI organization (set OPENAI_COST_PROJECT_ID to limit it to Podskrift).{% endif %}
+        </p>
+        {% if ac.missing_key %}
+        <div class="stripe-error" role="status" data-costs="missing-key">
+            Actual cost needs an OpenAI <strong>Admin key</strong>. Create one at
+            platform.openai.com → Settings → Organization → Admin keys and add it to the
+            server as <code>OPENAI_ADMIN_KEY</code>. Estimates are shown until then.
+        </div>
+        {% elif not ac.ok %}
+        <div class="stripe-error" role="alert">{{ ac.error }}</div>
+        {% endif %}
+        <div class="costs-grid actual-totals" data-costs="actual-totals">
+            <div class="cost-card"><h3>Actual today (UTC, partial)</h3>
+                <div class="actual-figure">{% if ac.ok and ac.today %}${{ '%.2f'|format(ac.today.actual_usd or 0) }}{% else %}—{% endif %}</div>
+                <div class="actual-sub">Est. {% if ac.today %}${{ '%.2f'|format(ac.today.estimated_usd) }}{% else %}— (today not in range){% endif %}</div></div>
+            <div class="cost-card"><h3>Actual in period</h3>
+                <div class="actual-figure">{% if ac.total_actual_usd is not none %}${{ '%.2f'|format(ac.total_actual_usd) }}{% else %}—{% endif %}</div>
+                <div class="actual-sub">OpenAI invoice basis</div></div>
+            <div class="cost-card"><h3>Estimated in period</h3>
+                <div class="actual-figure">${{ '%.2f'|format(ac.total_estimated_usd) }}</div>
+                <div class="actual-sub">From stored audio seconds</div></div>
+            <div class="cost-card"><h3>Actual − estimate</h3>
+                <div class="actual-figure">{% if ac.diff_usd is not none %}{{ '+' if ac.diff_usd >= 0 else '−' }}${{ '%.2f'|format(ac.diff_usd|abs) }}{% else %}—{% endif %}</div>
+                <div class="actual-sub">Positive = estimate is too low</div></div>
+        </div>
+        <div class="chart-card" data-costs="actual-chart">
+            <h3>Actual vs estimated per day</h3>
+            <canvas id="chartCostsActual" height="180"></canvas>
+        </div>
+        {% if ac.line_items %}
+        <div class="actual-table-wrap">
+            <table class="actual-table" data-costs="line-items">
+                <thead><tr><th>OpenAI line item (period)</th><th>Actual</th></tr></thead>
+                <tbody>{% for li in ac.line_items %}<tr><td>{{ li.name }}</td><td>${{ '%.2f'|format(li.usd) }}</td></tr>{% endfor %}</tbody>
+            </table>
+        </div>
+        {% endif %}
+        <div class="actual-table-wrap">
+            <table class="actual-table" data-costs="daily-table">
+                <thead><tr><th>Day (UTC)</th><th>Actual</th><th>Estimated</th><th>Diff</th></tr></thead>
+                <tbody>
+                {% for r in ac.rows %}
+                <tr><td>{{ r.day }}{% if r.partial %} <span class="est-badge">partial</span>{% endif %}</td>
+                    <td>{% if r.actual_usd is not none %}${{ '%.2f'|format(r.actual_usd) }}{% else %}—{% endif %}</td>
+                    <td>${{ '%.2f'|format(r.estimated_usd) }}</td>
+                    <td>{% if r.actual_usd is not none %}{{ '%+.2f'|format(r.actual_usd - r.estimated_usd) }}{% else %}—{% endif %}</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
         </div>
         {% endif %}
     </section>
@@ -707,6 +805,9 @@
 <script type="application/json" id="adminChartData">{{ charts | tojson }}</script>
 {% if stripe_revenue.ok %}
 <script type="application/json" id="adminStripeWeekly">{{ stripe_revenue.weekly_net | tojson }}</script>
+{% endif %}
+{% if actual_costs and actual_costs.chart %}
+<script type="application/json" id="adminActualCostsChart">{{ actual_costs.chart | tojson }}</script>
 {% endif %}
 {% if costs and not costs.error %}
 <script type="application/json" id="adminCostsChart">{{ costs.chart | tojson }}</script>
@@ -911,6 +1012,32 @@
     var data = JSON.parse(dataEl.textContent);
     var charts = {};
 
+
+    var actualEl = document.getElementById('adminActualCostsChart');
+    var actx = document.getElementById('chartCostsActual');
+    if (actualEl && actx && typeof Chart !== 'undefined') {
+        try {
+            var ad = JSON.parse(actualEl.textContent);
+            new Chart(actx, {
+                type: 'bar',
+                data: {
+                    labels: ad.labels,
+                    datasets: [
+                        { label: 'Actual (OpenAI)', data: ad.actual_usd, backgroundColor: palette.line, borderRadius: 2 },
+                        { label: 'Estimated', data: ad.estimated_usd, backgroundColor: palette.costFixed, borderRadius: 2 },
+                    ],
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { legend: { display: true, labels: { color: palette.text, boxWidth: 12, font: { size: 11 } } } },
+                    scales: {
+                        x: { ticks: { color: palette.text, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 12 } }, grid: { display: false } },
+                        y: { beginAtZero: true, ticks: { color: palette.text, font: { size: 12 }, callback: function (v) { return '$' + v; } }, grid: { color: palette.grid } },
+                    },
+                },
+            });
+        } catch (e) { /* ignore chart parse errors */ }
+    }
     var costsEl = document.getElementById('adminCostsChart');
     if (costsEl) {
         try {
