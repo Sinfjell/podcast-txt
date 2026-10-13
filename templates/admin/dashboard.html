@@ -298,10 +298,10 @@
         </button>
         <div class="kpi" data-kpi="margin">
             <div class="kpi-label">Margin (USD)</div>
-            <div class="kpi-value">${{ '%.2f'|format(kpis.margin_all_usd) }}</div>
+            <div class="kpi-value">{{ '−' if kpis.margin_all_usd < 0 else '' }}${{ '%.2f'|format(kpis.margin_all_usd|abs) }}</div>
             <div class="kpi-sub">
-                ${{ '%.2f'|format(kpis.margin_7d_usd) }} / 7d ·
-                ${{ '%.2f'|format(kpis.margin_today_usd) }} today ·
+                {{ '−' if kpis.margin_7d_usd < 0 else '' }}${{ '%.2f'|format(kpis.margin_7d_usd|abs) }} / 7d ·
+                {{ '−' if kpis.margin_today_usd < 0 else '' }}${{ '%.2f'|format(kpis.margin_today_usd|abs) }} today ·
                 income − {{ 'actual' if kpis.cost_source == 'actual' else 'estimated' }} API cost
             </div>
         </div>
