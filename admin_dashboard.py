@@ -21,6 +21,27 @@ from zoneinfo import ZoneInfo
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
 
+#: Display labels for credit_purchases.status (stored values never change).
+PURCHASE_STATUS_LABELS = {
+    'credited': 'Paid',
+    'pending': 'Pending',
+    'refunded': 'Refunded',
+    'partially_refunded': 'Partly refunded',
+    'disputed': 'Disputed',
+    'needs_review': 'Needs review',
+}
+
+
+def purchase_status_label(status):
+    """Human label for a purchase status; unknown values are title-cased."""
+    key = (status or '').strip().lower()
+    if key in PURCHASE_STATUS_LABELS:
+        return PURCHASE_STATUS_LABELS[key]
+    return key.replace('_', ' ').capitalize() if key else '—'
+
+
+admin_bp.add_app_template_filter(purchase_status_label, 'purchase_status_label')
+
 ADMIN_TZ = ZoneInfo('Europe/Oslo')
 _DEFAULT_ADMIN_EMAILS = 'sindrefjelle@gmail.com'
 

@@ -17782,3 +17782,35 @@ def test_register_get_sets_device_cookie_once():
     assert 'ps_did=' in r.headers.get('Set-Cookie', '')
     r2 = c.get('/register')
     assert 'ps_did=' not in r2.headers.get('Set-Cookie', '')
+
+
+def test_admin_purchase_status_display_labels():
+    import admin_dashboard as AD
+    assert AD.purchase_status_label('credited') == 'Paid'
+    assert AD.purchase_status_label('pending') == 'Pending'
+    assert AD.purchase_status_label('refunded') == 'Refunded'
+    assert AD.purchase_status_label('needs_review') == 'Needs review'
+    assert AD.purchase_status_label('some_new') == 'Some new'
+    assert AD.purchase_status_label(None) == '—'
+
+
+def test_admin_user_detail_shows_paid_not_credited(monkeypatch):
+    from models import db, CreditPurchase
+    monkeypatch.setenv('ADMIN_EMAILS', 'admin-status-label@test.com')
+    client, uid = _admin_login('admin-status-label@test.com')
+    with A.app.app_context():
+        db.session.add(CreditPurchase(
+            user_id=uid, stripe_session_id='cs_status_label_1',
+            amount_cents=500, amount_total_cents=500, currency='usd',
+            minutes=300, status='credited'))
+        db.session.add(CreditPurchase(
+            user_id=uid, stripe_session_id='cs_status_label_2',
+            amount_cents=500, amount_total_cents=500, currency='usd',
+            minutes=300, status='refunded'))
+        db.session.commit()
+        stored = {p.status for p in CreditPurchase.query.filter_by(user_id=uid)}
+    assert stored == {'credited', 'refunded'}  # DB value unchanged
+    body = client.get(f'/admin/users/{uid}').data.decode()
+    assert '>Paid</span>' in body
+    assert '>Refunded</span>' in body
+    assert '>credited<' not in body

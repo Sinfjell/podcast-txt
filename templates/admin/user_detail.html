@@ -52,6 +52,9 @@
     }
     .status-pill.completed { background: var(--accent-tint); color: var(--on-accent-tint); }
     .status-pill.error { background: var(--danger-tint); color: var(--on-danger-tint); }
+    .status-pill.purchase-credited { background: var(--accent-tint); color: var(--on-accent-tint); }
+    .status-pill.purchase-refunded, .status-pill.purchase-disputed { background: var(--danger-tint); color: var(--on-danger-tint); }
+    .status-pill.purchase-pending, .status-pill.purchase-needs_review { background: var(--warning-tint); color: var(--on-warning-tint); }
     .status-pill.cancelled { background: var(--warning-tint); color: var(--on-warning-tint); }
     .feed-url {
         max-width: 280px; overflow: hidden; text-overflow: ellipsis;
@@ -137,7 +140,7 @@
                         <td>{{ p.created_oslo }}</td>
                         <td>{{ p.minutes }}</td>
                         <td>${{ '%.2f'|format(p.amount_usd) }} {{ p.currency }}</td>
-                        <td>{{ p.status }}</td>
+                        <td><span class="status-pill purchase-{{ p.status }}" title="Stored status: {{ p.status }}">{{ p.status|purchase_status_label }}</span></td>
                     </tr>
                 {% else %}
                     <tr><td colspan="4" style="color: var(--muted);">No purchases.</td></tr>
