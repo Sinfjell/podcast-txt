@@ -275,28 +275,34 @@
     <div class="kpi-grid" id="adminKpis" role="group" aria-label="Headline metrics">
         <button type="button" class="kpi" data-series="api_cost" data-kpi="api_cost"
                 aria-pressed="false">
-            <div class="kpi-label">API cost <span class="est-badge">est.</span></div>
+            <div class="kpi-label">API cost (USD)
+                {% if kpis.cost_source == 'actual' %}<span class="est-badge" data-kpi="cost_source">actual</span>{% else %}<span class="est-badge" data-kpi="cost_source">est.</span>{% endif %}</div>
             <div class="kpi-value">${{ '%.2f'|format(kpis.api_cost_all_usd) }}</div>
             <div class="kpi-sub">
                 ${{ '%.2f'|format(kpis.api_cost_7d_usd) }} / 7d ·
-                ${{ '%.2f'|format(kpis.api_cost_today_usd) }} today
+                ${{ '%.2f'|format(kpis.api_cost_today_usd) }} today{% if kpis.cost_source == 'actual' %} (UTC, partial){% endif %}
+                {% if kpis.cost_source == 'actual' %} · OpenAI billing{% else %} · from audio minutes{% endif %}
             </div>
         </button>
         <button type="button" class="kpi" data-series="income" data-kpi="income"
                 aria-pressed="false">
-            <div class="kpi-label">Income</div>
+            <div class="kpi-label">Income (USD)</div>
             <div class="kpi-value">${{ '%.2f'|format(kpis.income_all_usd) }}</div>
             <div class="kpi-sub">
                 ${{ '%.2f'|format(kpis.income_7d_usd) }} / 7d ·
                 ${{ '%.2f'|format(kpis.income_today_usd) }} today
-                {% if kpis.income_source == 'stripe_net' %} · Stripe net{% endif %}
+                {% if kpis.income_source == 'stripe_net_usd' %}
+                · Stripe net after fees &amp; tax{% for cur, cents in kpis.income_native_all.items() if cur != 'usd' %} ({{ cur|upper }} {{ '%.2f'|format(cents / 100) }} at charge rates){% endfor %}{% if kpis.income_approx_count %} · {{ kpis.income_approx_count }} fee rows at nearest rate{% endif %}{% if kpis.income_unconverted_count %} · {{ kpis.income_unconverted_count }} not converted{% endif %}
+                {% else %} · pack prices (Stripe unavailable){% endif %}
             </div>
         </button>
         <div class="kpi" data-kpi="margin">
-            <div class="kpi-label">Margin</div>
+            <div class="kpi-label">Margin (USD)</div>
             <div class="kpi-value">${{ '%.2f'|format(kpis.margin_all_usd) }}</div>
             <div class="kpi-sub">
-                income − API · ${{ '%.2f'|format(kpis.margin_7d_usd) }} / 7d
+                ${{ '%.2f'|format(kpis.margin_7d_usd) }} / 7d ·
+                ${{ '%.2f'|format(kpis.margin_today_usd) }} today ·
+                income − {{ 'actual' if kpis.cost_source == 'actual' else 'estimated' }} API cost
             </div>
         </div>
         <div class="kpi" data-kpi="trial_pool_left">

@@ -140,3 +140,105 @@ def test_errors_cached_briefly(monkeypatch):
     exp = list(AA._cache.values())[0][0] - AA.time.monotonic()
     assert exp <= AA.ERROR_CACHE_TTL_SEC
     AA.clear_cache()
+
+
+# --------------------------------------------------------------------------
+# USD income / margin (money reporting)
+# --------------------------------------------------------------------------
+from datetime import timedelta as _td
+
+
+def _bt(created, btype, amount, fee, net, rate=None, src='usd', fds=(), cur='nok'):
+    return {'created': created, 'type': btype, 'currency': cur, 'amount': amount,
+            'fee': fee, 'net': net, 'exchange_rate': rate,
+            'source_currency': src if rate else None, 'fee_details': list(fds)}
+
+
+def test_bt_usd_factor_uses_charge_exchange_rate():
+    import admin_dashboard as AD
+    assert AD._bt_usd_factor('usd', None, None) == 1.0
+    assert AD._bt_usd_factor('nok', 9.5, 'usd') == pytest.approx(1 / 9.5)
+    assert AD._bt_usd_factor('nok', None, None) is None
+    assert AD._bt_usd_factor('nok', 9.5, 'eur') is None  # not a USD charge
+
+
+def test_summarize_bts_usd_real_shape():
+    """Shape copied from prod: $11 charge settled in NOK, fees + withheld tax,
+    a standalone NOK stripe_fee (no rate), and a refunded $5 charge."""
+    import admin_dashboard as AD
+    now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+    t = int(now.timestamp())
+    bts = [
+        _bt(t - 3600, 'charge', 10501, 2763, 7738, 9.54594,
+            fds=[('stripe_fee', 452), ('stripe_fee', 210), ('withheld_tax', 2101)]),
+        _bt(t - 7200, 'stripe_fee', -233, 0, -233),
+        _bt(t - 20 * 86400, 'charge', 4797, 1371, 3426, 9.59499,
+            fds=[('stripe_fee', 96), ('stripe_fee', 315), ('withheld_tax', 960)]),
+        _bt(t - 20 * 86400 + 60, 'refund', -4797, -959, -3838, 9.595,
+            fds=[('withheld_tax_refund', -959)]),
+        _bt(t - 3000, 'payout', -5000, 0, -5000),  # ignored (not income)
+    ]
+    out = AD.summarize_bts_usd(bts, now=now)
+    today = out['today']
+    assert today['gross_usd'] == pytest.approx(11.0, abs=0.01)  # 10501/9.54594 = $11
+    # net = (7738 - 233) NOK, charge at its own rate, fee row at nearest rate
+    assert today['net_usd'] == pytest.approx((7738 - 233) / 9.54594 / 100, abs=0.01)
+    assert today['approx_count'] == 1 and today['unconverted_count'] == 0
+    assert today['withheld_tax_usd'] == pytest.approx(2101 / 9.54594 / 100, abs=0.01)
+    assert out['7d']['net_usd'] == today['net_usd']
+    allw = out['all']
+    assert allw['refunds_usd'] == pytest.approx(4797 / 9.595 / 100, abs=0.01)
+    expected_all = (7738 / 9.54594 - 233 / 9.54594 + 3426 / 9.59499 - 3838 / 9.595) / 100
+    assert allw['net_usd'] == pytest.approx(expected_all, abs=0.01)
+    assert allw['native_net']['nok'] == 7738 - 233 + 3426 - 3838
+
+
+def test_summarize_bts_usd_unconvertible_is_counted_not_guessed():
+    import admin_dashboard as AD
+    now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+    out = AD.summarize_bts_usd(
+        [_bt(int(now.timestamp()) - 60, 'stripe_fee', -100, 0, -100)], now=now)
+    assert out['all']['unconverted_count'] == 1
+    assert out['all']['net_usd'] == 0
+
+
+def test_headline_kpis_margin_is_usd_minus_actual(monkeypatch):
+    import admin_dashboard as AD
+    monkeypatch.setattr(AD, 'collect_kpis', lambda *a, **k: {
+        'trial_daily_used_minutes': 0, 'trial_daily_limit_minutes': 0})
+    stripe = {'ok': True, 'usd': {
+        'all': {'net_usd': 24.0, 'native_net': {'nok': 23340}},
+        '7d': {'net_usd': 20.0, 'native_net': {}},
+        'today': {'net_usd': 7.86, 'native_net': {}}}}
+    costs = {'windows': {'all': {'openai_usd': 50.0}, '7d': {'openai_usd': 40.0},
+                         'today': {'openai_usd': 4.0}}}
+    actual = {'ok': True, 'all': 58.29, '7d': 54.08, 'today': 2.86}
+    k = AD.collect_headline_kpis(None, 0, costs=costs, stripe_revenue=stripe,
+                                 actual_cost=actual)
+    assert k['cost_source'] == 'actual'
+    assert k['income_all_usd'] == 24.0 and k['income_source'] == 'stripe_net_usd'
+    assert k['margin_all_usd'] == pytest.approx(24.0 - 58.29)
+    assert k['margin_7d_usd'] == pytest.approx(20.0 - 54.08)
+    assert k['margin_today_usd'] == pytest.approx(7.86 - 2.86)
+    # Falls back to estimate when actual is unavailable.
+    k2 = AD.collect_headline_kpis(None, 0, costs=costs, stripe_revenue=stripe,
+                                  actual_cost={'ok': False})
+    assert k2['cost_source'] == 'estimate'
+    assert k2['margin_all_usd'] == pytest.approx(24.0 - 50.0)
+
+
+def test_actual_cost_windows_sums_utc_days():
+    today = date(2026, 10, 13)
+    days = {(today - _td(days=i)).isoformat(): {'transcription': 1.0, 'summary': 0.5, 'other': 0.0}
+            for i in range(10)}
+    seen = {}
+    def fetcher(s, e):
+        seen['range'] = (s, e)
+        return {'ok': True, 'days': days}
+    out = AA.actual_cost_windows(None, today=today, fetcher=fetcher)
+    assert out['today'] == pytest.approx(1.5)
+    assert out['7d'] == pytest.approx(10.5)
+    assert out['all'] == pytest.approx(15.0)
+    assert seen['range'] == (today - _td(days=29), today)
+    assert AA.actual_cost_windows(None, today=today,
+                                  fetcher=lambda s, e: {'ok': False})['ok'] is False

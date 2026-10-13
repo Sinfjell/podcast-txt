@@ -807,63 +807,66 @@ def collect_series(db, metric, days=30):
     return None
 
 
-def collect_headline_kpis(db, trial_daily_seconds, costs=None, stripe_revenue=None):
-    """Top-row KPIs: API cost, income, margin, free pool left, signups."""
+def collect_headline_kpis(db, trial_daily_seconds, costs=None, stripe_revenue=None,
+                          actual_cost=None):
+    """Top-row KPIs: API cost, income, margin, free pool left, signups.
+
+    Everything here is USD. Income is Stripe net converted per balance
+    transaction (its own exchange_rate); without Stripe it falls back to
+    credited pack prices (USD list price). API cost is OpenAI's actual cost
+    (Costs API) when ``actual_cost['ok']``, else the estimate. Margin uses
+    whichever cost source is shown, and says so via ``cost_source``.
+    """
     base = collect_kpis(db, trial_daily_seconds, trial_daily_seconds=trial_daily_seconds)
     used = float(base.get('trial_daily_used_minutes') or 0)
     limit = float(base.get('trial_daily_limit_minutes') or 0)
     pool_left = max(0.0, round(limit - used, 1))
 
-    api_all = api_7d = api_today = 0.0
-    if costs and not costs.get('error'):
-        windows = costs.get('windows') or {}
-        api_all = float((windows.get('all') or {}).get('openai_usd') or 0)
-        api_7d = float((windows.get('7d') or {}).get('openai_usd') or 0)
-        api_today = float((windows.get('today') or {}).get('openai_usd') or 0)
-
-    income_all = income_7d = income_today = 0.0
-    income_source = 'purchases'
-    if stripe_revenue and stripe_revenue.get('ok'):
-        def _net_for(window):
-            rows = (stripe_revenue.get('summaries') or {}).get(window) or []
-            if not rows:
-                return 0.0
-            primary = stripe_revenue.get('primary_currency') or 'usd'
-            for r in rows:
-                if r.get('currency') == primary:
-                    return round(int(r.get('net') or 0) / 100.0, 2)
-            return round(int(rows[0].get('net') or 0) / 100.0, 2)
-        income_all = _net_for('all')
-        income_7d = _net_for('7d')
-        # Stripe panel has no "today" window — approximate from credited packs.
-        income_source = 'stripe_net'
-    if costs and not costs.get('error'):
-        windows = costs.get('windows') or {}
-        income_today = float((windows.get('today') or {}).get('revenue_usd') or 0)
-        if income_source != 'stripe_net':
-            income_all = float((windows.get('all') or {}).get('revenue_usd') or 0)
-            income_7d = float((windows.get('7d') or {}).get('revenue_usd') or 0)
+    windows = (costs or {}).get('windows') or {} if costs and not costs.get('error') else {}
+    est = {k: float((windows.get(k) or {}).get('openai_usd') or 0)
+           for k in ('all', '7d', 'today')}
+    if actual_cost and actual_cost.get('ok'):
+        api = {k: float(actual_cost.get(k) or 0) for k in ('all', '7d', 'today')}
+        cost_source = 'actual'
     else:
-        income_today = 0.0
-        if income_source != 'stripe_net':
-            income_all = float(base.get('purchase_revenue_usd') or 0)
+        api = est
+        cost_source = 'estimate'
 
-    margin_all = round(income_all - api_all, 2)
-    margin_7d = round(income_7d - api_7d, 2)
-    margin_today = round(income_today - api_today, 2)
+    income_source = 'purchases'
+    income_native = {}
+    usd = (stripe_revenue or {}).get('usd') if stripe_revenue and stripe_revenue.get('ok') else None
+    income_approx = income_unconverted = 0
+    if usd:
+        income = {k: float((usd.get(k) or {}).get('net_usd') or 0)
+                  for k in ('all', '7d', 'today')}
+        income_native = {k: dict((usd.get(k) or {}).get('native_net') or {})
+                         for k in ('all', '7d', 'today')}
+        income_approx = int((usd.get('all') or {}).get('approx_count') or 0)
+        income_unconverted = int((usd.get('all') or {}).get('unconverted_count') or 0)
+        income_source = 'stripe_net_usd'
+    else:
+        income = {k: float((windows.get(k) or {}).get('revenue_usd') or 0)
+                  for k in ('all', '7d', 'today')}
+        if not windows:
+            income['all'] = float(base.get('purchase_revenue_usd') or 0)
 
     return {
         **base,
-        'api_cost_all_usd': round(api_all, 2),
-        'api_cost_7d_usd': round(api_7d, 2),
-        'api_cost_today_usd': round(api_today, 2),
-        'income_all_usd': round(income_all, 2),
-        'income_7d_usd': round(income_7d, 2),
-        'income_today_usd': round(income_today, 2),
+        'api_cost_all_usd': round(api['all'], 2),
+        'api_cost_7d_usd': round(api['7d'], 2),
+        'api_cost_today_usd': round(api['today'], 2),
+        'api_cost_est_all_usd': round(est['all'], 2),
+        'cost_source': cost_source,
+        'income_all_usd': round(income['all'], 2),
+        'income_7d_usd': round(income['7d'], 2),
+        'income_today_usd': round(income['today'], 2),
+        'income_native_all': income_native.get('all') or {},
+        'income_approx_count': income_approx,
+        'income_unconverted_count': income_unconverted,
         'income_source': income_source,
-        'margin_all_usd': margin_all,
-        'margin_7d_usd': margin_7d,
-        'margin_today_usd': margin_today,
+        'margin_all_usd': round(income['all'] - api['all'], 2),
+        'margin_7d_usd': round(income['7d'] - api['7d'], 2),
+        'margin_today_usd': round(income['today'] - api['today'], 2),
         'trial_pool_left_minutes': pool_left,
     }
 
@@ -1155,6 +1158,108 @@ def _accumulate_bt(bucket, bt):
         bucket['net'] += net
 
 
+def _bt_usd_factor(currency, exchange_rate, source_currency):
+    """Factor turning a balance_transaction's settlement amounts into USD.
+
+    Stripe sets ``exchange_rate`` when the charge currency differs from the
+    settlement currency: settlement = original * exchange_rate. So for a USD
+    charge settled in NOK, USD = NOK / exchange_rate (fees on the same BT use
+    the same rate). Returns None when the BT cannot be converted exactly.
+    """
+    cur = (currency or '').lower()
+    if cur == 'usd':
+        return 1.0
+    try:
+        rate = float(exchange_rate) if exchange_rate is not None else 0.0
+    except (TypeError, ValueError):
+        rate = 0.0
+    if rate > 0 and (source_currency or '').lower() == 'usd':
+        return 1.0 / rate
+    return None
+
+
+def _empty_usd_bucket():
+    return {'gross_usd': 0.0, 'fees_usd': 0.0, 'withheld_tax_usd': 0.0,
+            'refunds_usd': 0.0, 'net_usd': 0.0, 'native_net': {},
+            'approx_count': 0, 'unconverted_count': 0, 'bt_count': 0}
+
+
+def summarize_bts_usd(bts, *, now=None):
+    """USD money summary per window (today Oslo / 7d / 30d / all).
+
+    ``bts`` are dicts: created, type, currency, amount, fee, net,
+    exchange_rate, source_currency, fee_details[(type, amount)].
+    Exact conversion uses each BT's own exchange_rate. Standalone NOK rows
+    with no rate (e.g. Stripe billing fees) use the rate of the nearest
+    rated BT in time and are counted as ``approx_count``.
+    """
+    now = now or datetime.now(timezone.utc)
+    cut = {
+        'all': 0,
+        '30d': int((now - timedelta(days=30)).timestamp()),
+        '7d': int((now - timedelta(days=7)).timestamp()),
+        'today': int(now.astimezone(ADMIN_TZ).replace(
+            hour=0, minute=0, second=0, microsecond=0).timestamp()),
+    }
+    rated = sorted(
+        (int(b['created'] or 0), _bt_usd_factor(b['currency'], b['exchange_rate'], b['source_currency']), (b['currency'] or '').lower())
+        for b in bts
+        if (b['currency'] or '').lower() != 'usd'
+        and _bt_usd_factor(b['currency'], b['exchange_rate'], b['source_currency']))
+    out = {k: _empty_usd_bucket() for k in cut}
+    money_types = _REVENUE_BT_TYPES | _CHARGE_BT_TYPES | _REFUND_BT_TYPES | {'stripe_fee'}
+    for b in bts:
+        btype = (b['type'] or '').strip()
+        if btype not in money_types:
+            continue
+        cur = (b['currency'] or '').lower()
+        created = int(b['created'] or 0)
+        factor = _bt_usd_factor(cur, b['exchange_rate'], b['source_currency'])
+        approx = False
+        if factor is None:
+            same = [r for r in rated if r[2] == cur]
+            if same:
+                factor = min(same, key=lambda r: abs(r[0] - created))[1]
+                approx = True
+        amount = int(b['amount'] or 0)
+        net = int(b['net'] or 0)
+        fees = tax = 0
+        for fd_type, fd_amt in b.get('fee_details') or []:
+            if fd_type in ('withheld_tax', 'withheld_tax_refund', 'tax'):
+                tax += int(fd_amt or 0)
+            else:
+                fees += int(fd_amt or 0)
+        if not b.get('fee_details') and btype != 'stripe_fee':
+            fees += int(b['fee'] or 0)
+        if btype == 'stripe_fee':
+            fees += abs(amount)
+        if btype in ('tax', 'tax_fee'):
+            tax += abs(amount)
+        for key, c in cut.items():
+            if created < c:
+                continue
+            w = out[key]
+            w['bt_count'] += 1
+            w['native_net'][cur] = w['native_net'].get(cur, 0) + net
+            if factor is None:
+                w['unconverted_count'] += 1
+                continue
+            if approx:
+                w['approx_count'] += 1
+            f = factor / 100.0
+            if btype in _CHARGE_BT_TYPES and amount > 0:
+                w['gross_usd'] += amount * f
+            if btype in _REFUND_BT_TYPES:
+                w['refunds_usd'] += abs(amount) * f
+            w['fees_usd'] += fees * f
+            w['withheld_tax_usd'] += tax * f
+            w['net_usd'] += net * f
+    for w in out.values():
+        for k in ('gross_usd', 'fees_usd', 'withheld_tax_usd', 'refunds_usd', 'net_usd'):
+            w[k] = round(w[k], 2)
+    return out
+
+
 def _payout_destination_last4(payout):
     dest = _stripe_obj_get(payout, 'destination')
     if dest is None:
@@ -1255,15 +1360,17 @@ def fetch_stripe_revenue_uncached():
     weekly_by_currency = {}  # currency -> {week_label: net}
     bt_count = 0
     bt_truncated = False
+    norm_bts = []
 
     try:
         try:
             bt_page = client.v1.balance_transactions.list(
-                params={'limit': 100},
+                params={'limit': 100, 'expand': ['data.source']},
                 options={'max_network_retries': 0},
             )
         except TypeError:
-            bt_page = client.v1.balance_transactions.list(params={'limit': 100})
+            bt_page = client.v1.balance_transactions.list(
+                params={'limit': 100, 'expand': ['data.source']})
 
         def _iter_bts(page):
             if hasattr(page, 'auto_paging_iter'):
@@ -1282,6 +1389,21 @@ def fetch_stripe_revenue_uncached():
             created = int(_stripe_obj_get(bt, 'created') or 0)
             btype = (_stripe_obj_get(bt, 'type') or '').strip()
             net = int(_stripe_obj_get(bt, 'net') or 0)
+            src = _stripe_obj_get(bt, 'source')
+            src_cur = None
+            if src is not None and not isinstance(src, str):
+                src_cur = (_stripe_obj_get(src, 'currency') or '').lower() or None
+            norm_bts.append({
+                'created': created, 'type': btype, 'currency': currency,
+                'amount': int(_stripe_obj_get(bt, 'amount') or 0),
+                'fee': int(_stripe_obj_get(bt, 'fee') or 0), 'net': net,
+                'exchange_rate': _stripe_obj_get(bt, 'exchange_rate'),
+                'source_currency': src_cur,
+                'fee_details': [
+                    ((_stripe_obj_get(fd, 'type') or '').strip(),
+                     int(_stripe_obj_get(fd, 'amount') or 0))
+                    for fd in (_stripe_obj_get(bt, 'fee_details') or [])],
+            })
 
             for window, cutoff in (('all', 0), ('30d', cutoff_30d), ('7d', cutoff_7d)):
                 if window != 'all' and created < cutoff:
@@ -1407,6 +1529,7 @@ def fetch_stripe_revenue_uncached():
         'bt_count': bt_count if not bt_truncated else STRIPE_ADMIN_BT_MAX,
         'bt_truncated': bt_truncated,
         'primary_currency': primary,
+        'usd': summarize_bts_usd(norm_bts),
     }
 
 
@@ -1520,8 +1643,15 @@ def dashboard():
         current_app.logger.exception('admin actual costs panel failed')
         actual_costs = {'ok': False, 'fatal': True, 'rows': [],
                         'error': 'Actual costs unavailable (' + type(exc).__name__ + ')'}
+    try:
+        from admin_actual_costs import actual_cost_windows
+        actual_kpi = actual_cost_windows(db)
+    except Exception:  # noqa: BLE001
+        current_app.logger.exception('admin actual cost KPI failed')
+        actual_kpi = {'ok': False}
     kpis = collect_headline_kpis(
-        db, trial_daily, costs=costs, stripe_revenue=stripe_revenue)
+        db, trial_daily, costs=costs, stripe_revenue=stripe_revenue,
+        actual_cost=actual_kpi)
     try:
         mcp_stats = collect_mcp_stats(db)
     except Exception as exc:  # noqa: BLE001

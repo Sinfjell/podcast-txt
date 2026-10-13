@@ -285,3 +285,36 @@ def collect_actual_vs_estimated(db, preset=None, start=None, end=None,
         'chart': {'labels': labels, 'actual_usd': a_series,
                   'estimated_usd': e_series},
     }
+
+
+def actual_cost_windows(db, *, today=None, fetcher=None):
+    """Actual OpenAI USD for today (UTC, partial) / last 7 UTC days / all time.
+
+    "All time" runs from the first app activity (capped at MAX_RANGE_DAYS).
+    Returns ``{'ok': False, ...}`` when no admin key or the API fails.
+    """
+    today = today or datetime.now(timezone.utc).date()
+    first = None
+    if db is not None:
+        from admin_dashboard import _parse_db_datetime
+        raw = db.session.execute(text(
+            "SELECT MIN(started_at) FROM transcription_tasks")).scalar()
+        dt = _parse_db_datetime(raw) if raw else None
+        if dt is not None:
+            first = dt.astimezone(timezone.utc).date() if dt.tzinfo else dt.date()
+    start = first or today - timedelta(days=29)
+    start = max(start, today - timedelta(days=MAX_RANGE_DAYS - 1))
+    res = (fetcher or fetch_actual_costs)(start, today)
+    if not res.get('ok'):
+        return {'ok': False, 'missing_key': bool(res.get('missing_key')),
+                'error': res.get('error')}
+    days = res.get('days') or {}
+    def _sum(lo):
+        return sum(sum(v.values()) for k, v in days.items() if k >= lo.isoformat())
+    return {
+        'ok': True,
+        'today': round(_sum(today), 4),
+        '7d': round(_sum(today - timedelta(days=6)), 4),
+        'all': round(_sum(start), 4),
+        'since': start.isoformat(),
+    }
