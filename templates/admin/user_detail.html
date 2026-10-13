@@ -139,7 +139,7 @@
                     <tr>
                         <td>{{ p.created_oslo }}</td>
                         <td>{{ p.minutes }}</td>
-                        <td>${{ '%.2f'|format(p.amount_usd) }} {{ p.currency }}</td>
+                        <td>{{ (p.amount_usd)|usd }} {{ p.currency }}</td>
                         <td><span class="status-pill purchase-{{ p.status }}" title="Stored status: {{ p.status }}">{{ p.status|purchase_status_label }}</span></td>
                     </tr>
                 {% else %}
