@@ -93,6 +93,10 @@ jobs:
       - name: Run test suite
         # Whole suite, not just test_app.py: test_email, test_site_standards,
         # test_design_system and the admin/ops tests are guards too.
+        env:
+          # Test-mode key of the production Stripe account (see
+          # test_stripe_contract.py). Unset on forks; those tests then skip.
+          STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
         run: python -m pytest -q
 
   deploy:
