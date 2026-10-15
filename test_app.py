@@ -15539,6 +15539,28 @@ def _patch_reset_mail(monkeypatch):
     return state
 
 
+def test_send_password_reset_email_builds_idempotency_key(monkeypatch):
+    """Real send path (not the fake): PODSKRIFT-14 was a missing hashlib import."""
+    import email_notify
+    import mail as mailer
+
+    sent = {}
+
+    def fake_send_email(**kwargs):
+        sent.update(kwargs)
+        return mailer.SEND_SENT
+
+    monkeypatch.setattr(mailer, 'mail_ready', lambda: True)
+    monkeypatch.setattr(mailer, 'send_email', fake_send_email)
+
+    outcome = email_notify.send_password_reset_email(
+        to='a@example.com', reset_url='https://podskrift.com/reset/abc', user_id=7)
+
+    assert outcome == mailer.SEND_SENT
+    assert sent['idempotency_key'].startswith('password-reset:7:')
+    assert len(sent['idempotency_key'].rsplit(':', 1)[1]) == 16
+
+
 @pytest.fixture(autouse=False)
 def _clear_password_reset_limits():
     A._password_reset_attempts.clear()
