@@ -153,3 +153,24 @@ jobs:
                echo "podskrift is active"
                echo "HEAD $(git rev-parse --short HEAD)"
               '
+
+      - name: Check the live site answers
+        # The restart above only proves systemd started the unit. This proves
+        # gunicorn serves the pages visitors hit first. It cannot undo the
+        # deploy; a red run is the alarm (GitHub emails the committer).
+        run: |
+          set -euo pipefail
+          BASE="https://podskrift.com"
+          for i in $(seq 1 12); do
+            if curl -fsS --max-time 10 "$BASE/health" | grep -q '"ok":true'; then
+              echo "health ok"
+              break
+            fi
+            [ "$i" -eq 12 ] && { echo "::error::$BASE/health did not answer ok after the deploy"; exit 1; }
+            sleep 5
+          done
+          for path in / /pricing /login /whats-new; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$BASE$path")
+            echo "$path -> $code"
+            [ "$code" = "200" ] || { echo "::error::$BASE$path returned $code after the deploy"; exit 1; }
+          done
