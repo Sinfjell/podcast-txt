@@ -105,7 +105,7 @@ UI must follow [`DESIGN.md`](DESIGN.md). Short version:
 1. Compose from `templates/components/macros.html` — do not hand-roll buttons, tabs, notices, checklists, snippets, or form chrome.
 2. Reuse tokens in `templates/base.html` and rules in `static/components.css`. No new colours/fonts, no `style=`, no hex, no pills/shadows/gradients.
 3. One accent-filled (primary) button per screen. Check `/design/components` (debug or admin) in light and dark before opening a PR; attach light+dark screenshots.
-4. `python -m pytest test_design_system.py -q` must stay green (CI enforces the above).
+4. `python -m pytest test_design_system.py -q` must stay green (CI enforces the above: it runs the whole suite plus a `ruff` check for undefined names).
 
 ## Testing
 
