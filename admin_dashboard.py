@@ -1712,6 +1712,25 @@ def series_api():
     return resp
 
 
+@admin_bp.route('/economy')
+def economy():
+    """Revenue, income, cost and result over time, with activity charts."""
+    from models import db
+    try:
+        stripe_revenue = collect_stripe_revenue()
+    except Exception:  # noqa: BLE001
+        current_app.logger.exception('admin economy: Stripe revenue failed')
+        stripe_revenue = {'ok': False}
+    try:
+        from admin_economy import collect_economy
+        eco = collect_economy(db, stripe_revenue)
+    except Exception:  # noqa: BLE001
+        current_app.logger.exception('admin economy failed')
+        eco = None
+    from admin_margin import PLAN_LABELS
+    return render_template('admin/economy.html', eco=eco, plan_labels=PLAN_LABELS)
+
+
 @admin_bp.route('/users/<int:user_id>')
 def user_page(user_id):
     from models import db

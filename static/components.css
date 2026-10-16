@@ -1348,3 +1348,73 @@ body:has(.ds-signal) { overflow-x: clip; }
   margin-top: var(--space-3);
   width: 100%;
 }
+
+/* ---------------------------------------------------------------------------
+   Admin economy page (/admin/economy): period controls, KPI cards, charts and
+   breakdown bars. Tokens only; the page composes these with .ds-section.
+   --------------------------------------------------------------------------- */
+.econ { display: flex; flex-direction: column; gap: var(--space-6); max-width: 1100px; margin: 0 auto; }
+.econ-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-3) var(--space-6); }
+.econ-control { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.econ-control[hidden] { display: none; }
+.econ-label { font-size: 0.75rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.econ-seg { display: inline-flex; flex-wrap: wrap; gap: var(--space-2); }
+.econ-seg .btn { min-height: 2.5rem; padding: 0 var(--space-4); }
+.econ-seg .btn[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.econ > *, .econ .ds-section > * { min-width: 0; }
+.econ-dates { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.econ-dates input, .econ-select {
+    min-height: 2.5rem; padding: 0 var(--space-3); font: inherit; color: var(--ink);
+    background: var(--paper); border: 1px solid var(--line-strong); border-radius: var(--radius);
+}
+.econ-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-3); }
+.econ-kpi {
+    display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; text-align: left;
+    font: inherit; color: var(--ink); cursor: pointer; padding: var(--space-4);
+    background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.econ-kpi:hover { border-color: var(--line-strong); }
+.econ-kpi[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-tint); color: var(--on-accent-tint); }
+.econ-kpi:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.econ-kpi__label { font-size: 0.8125rem; font-weight: 700; color: var(--muted); }
+.econ-kpi[aria-pressed="true"] .econ-kpi__label, .econ-kpi[aria-pressed="true"] .econ-kpi__sub { color: var(--on-accent-tint); }
+.econ-kpi__value { font-size: 1.875rem; font-weight: 800; letter-spacing: -0.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.econ-kpi__sub { font-size: 0.875rem; color: var(--muted); }
+.econ-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: var(--space-3); }
+.econ-lede { margin: 0; max-width: 62ch; font-size: 0.9375rem; color: var(--muted); }
+.econ-chart { position: relative; height: 300px; min-width: 0; max-width: 100%; }
+.econ-chart--short { height: 260px; }
+.econ-legend { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); font-size: 0.875rem; color: var(--muted); }
+.econ-legend__item { display: inline-flex; align-items: center; gap: var(--space-2); }
+.econ-legend__swatch { width: 10px; height: 10px; border-radius: 2px; background: var(--ink); }
+.econ-legend__swatch--accent { background: var(--accent); }
+.econ-legend__swatch--hover { background: var(--accent-hover); }
+.econ-legend__swatch--muted { background: var(--muted); }
+.econ-legend__swatch--line { background: var(--line-strong); }
+.econ-legend__swatch--danger { background: var(--danger); }
+.econ-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-6); }
+.econ-grid > div { min-width: 0; }
+.econ-h { margin: 0 0 var(--space-2); font-size: 0.75rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.econ-bars { display: flex; flex-direction: column; gap: var(--space-2); }
+.econ-bar { display: grid; grid-template-columns: minmax(70px, 130px) 1fr auto; gap: var(--space-3); align-items: center; font-size: 0.875rem; }
+.econ-bar__name { overflow-wrap: anywhere; color: var(--muted); }
+.econ-bar__track { display: block; height: 8px; background: var(--surface); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.econ-bar__fill { display: block; height: 100%; min-width: 2px; background: var(--accent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.econ-bar__fill--ink { background: var(--ink); }
+.econ-bar__fill--muted { background: var(--muted); }
+.econ-bar__fill--danger { background: var(--danger); }
+.econ-bar__value { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.econ-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--space-4); }
+.econ-stat { display: flex; flex-direction: column; gap: var(--space-1); }
+.econ-stat__value { font-size: 1.375rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.econ-stat__label { font-size: 0.875rem; color: var(--muted); }
+.econ-note { margin: var(--space-2) 0 0; font-size: 0.875rem; color: var(--muted); }
+.econ-table-wrap { overflow-x: auto; }
+.econ-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+.econ-table th, .econ-table td { text-align: left; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--line); vertical-align: top; }
+.econ-table th { font-size: 0.75rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+.econ-table td.num, .econ-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+@media (max-width: 520px) {
+    .econ-kpi__value { font-size: 1.5rem; }
+    .econ-bar { grid-template-columns: 90px 1fr auto; }
+}
