@@ -10,7 +10,7 @@
 {% block content %}
 <div class="econ ph-no-capture">
     {{ page_header("Economy", "Revenue, income, cost and result in USD, with period filter and cumulative view. Click a card to see how it breaks down. Days are UTC, like the Stripe and OpenAI numbers.") }}
-    <p class="econ-lede"><a href="{{ url_for('admin.dashboard') }}">← Admin</a></p>
+    <p class="econ-lede"><a href="{{ url_for('admin.dashboard') }}">← Admin</a>{% if eco %} · <a href="#payers">Users who have paid ({{ eco.paying_users }})</a>{% endif %}</p>
 
     {% if not eco %}
         {{ notice("The economy view could not be built. The error is in the server log.", variant="error") }}
@@ -52,6 +52,13 @@
 
     <div class="econ-kpis" id="econKpis" role="group" aria-label="Headline numbers"></div>
 
+    {% call section(title=None, variant='bordered', attrs='id="econResult"') %}
+    <div class="econ-head"><h2 class="ds-section__title">Result per day</h2></div>
+    <p class="econ-lede" id="econResultLede"></p>
+    <div class="econ-legend" id="econResultLegend"></div>
+    <div class="econ-chart"><canvas id="econResultChart" aria-label="Result per day" role="img"></canvas></div>
+    {% endcall %}
+
     {% call section(title=None, variant='bordered', attrs='id="econDetail" aria-live="polite"') %}
     <div class="econ-head"><h2 class="ds-section__title" id="econDetailTitle">Revenue</h2></div>
     <p class="econ-lede" id="econDetailLede"></p>
@@ -84,7 +91,7 @@
     <div class="econ-chart econ-chart--short"><canvas id="econActChart" aria-label="Activity chart" role="img"></canvas></div>
     {% endcall %}
 
-    {% call section(title="Users who have paid", variant='bordered') %}
+    {% call section(title="Users who have paid", variant='bordered', attrs='id="payers"') %}
     {% if eco.payers %}
     <p class="econ-lede">{{ eco.paying_users }} paying user{{ '' if eco.paying_users == 1 else 's' }}. Paid is revenue after VAT and refunds.</p>
     <div class="econ-table-wrap">

@@ -195,6 +195,9 @@ def test_economy_page_admin_only(seeded, monkeypatch):
         body = resp.data.decode()
         assert 'id="econData"' in body and 'admin-economy.js' in body
         assert 'noindex' in body
+        assert 'id="econResultChart"' in body
+        assert 'id="payers"' in body and 'href="#payers"' in body
+        assert 'eco-payer@example.com' in body
         assert c.get('/admin').status_code == 200
         assert 'href="/admin/economy"' in c.get('/admin').data.decode()
     monkeypatch.setenv('ADMIN_EMAILS', 'someone-else@example.com')

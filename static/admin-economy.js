@@ -14,7 +14,7 @@
         danger: token('--danger'), paper: token('--paper'),
     };
     var st = { preset: 'all', mode: 'cum', sel: 'revenue', from: D.days[0], to: D.days[D.days.length - 1] };
-    var charts = { main: null, act: null };
+    var charts = { main: null, act: null, res: null };
     var S = D.series;
 
     function $(id) { return document.getElementById(id); }
@@ -50,7 +50,7 @@
         { k: 'result', name: 'Result', hint: 'income minus cost' },
     ];
 
-    function render() { var r = range(); renderKpis(r); renderDetail(r); renderActivity(r); }
+    function render() { var r = range(); renderKpis(r); renderResult(r); renderDetail(r); renderActivity(r); }
 
     function renderKpis(r) {
         var i0 = r[0], i1 = r[1], empty = i1 < i0, h = '';
@@ -67,6 +67,30 @@
                 '<span class="econ-kpi__sub">' + esc(sub) + '</span></button>';
         });
         $('econKpis').innerHTML = h;
+    }
+
+    /* ---- result per day: bars per day, cumulative line on the right axis ---- */
+    function renderResult(r) {
+        var i0 = r[0], i1 = r[1];
+        if (charts.res) { charts.res.destroy(); charts.res = null; }
+        if (i1 < i0) { $('econResultLede').textContent = 'No days in this period.'; $('econResultLegend').innerHTML = ''; return; }
+        var res = slice(S.result, i0, i1), total = sum(S.result, i0, i1), neg = res.filter(function (v) { return v < 0; }).length;
+        $('econResultLede').textContent = 'Income minus cost, day by day. ' + (total < 0 ? 'Over the period we lose ' : 'Over the period we make ') + money(Math.abs(total)) +
+            '; ' + neg + ' of ' + res.length + ' days are below zero.';
+        $('econResultLegend').innerHTML = legendHtml([{ label: 'Result per day', color: C.accent }]) +
+            '<span class="econ-legend__item"><span class="econ-legend__swatch econ-legend__swatch--danger"></span>Day below zero</span>' +
+            '<span class="econ-legend__item"><span class="econ-legend__swatch"></span>Cumulative result (right axis)</span>';
+        var o = chartOptions(true, false);
+        o.scales.y2 = { position: 'right', grid: { drawOnChartArea: false }, ticks: { color: C.muted, font: { size: 12 }, callback: function (v) { return money(v, 0); } } };
+        charts.res = new Chart($('econResultChart'), {
+            type: 'bar',
+            data: { labels: slice(D.days, i0, i1).map(label), datasets: [
+                { type: 'bar', label: 'Result per day', data: res, yAxisID: 'y', borderRadius: 3,
+                  backgroundColor: res.map(function (v) { return v < 0 ? C.danger : C.accent; }) },
+                { type: 'line', label: 'Cumulative result', data: cumul(S.result, i0, i1), yAxisID: 'y2', borderColor: C.ink, backgroundColor: C.ink, borderWidth: 2, pointRadius: 0, tension: 0.2 },
+            ] },
+            options: o,
+        });
     }
 
     function seriesFor(k) {
