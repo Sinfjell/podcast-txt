@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import button, section, page_header, notice, chip, empty_state %}
+{% block title %}Economy — Podskrift admin{% endblock %}
+{% block meta_description %}Internal admin economy view. Not for public indexing.{% endblock %}
+{% block robots_meta %}<meta name="robots" content="noindex, nofollow">{% endblock %}
+{% block canonical_url %}{% endblock %}
+{% block og_title %}Economy — Podskrift admin{% endblock %}
+{% block og_description %}Internal admin economy view.{% endblock %}
+
+{% block content %}
+<div class="econ ph-no-capture">
+    {{ page_header("Economy", "Revenue, income, cost and result in USD, with period filter and cumulative view. Click a card to see how it breaks down. Days are UTC, like the Stripe and OpenAI numbers.") }}
+    <p class="econ-lede"><a href="{{ url_for('admin.dashboard') }}">← Admin</a></p>
+
+    {% if not eco %}
+        {{ notice("The economy view could not be built. The error is in the server log.", variant="error") }}
+    {% else %}
+    {% set src = eco.sources %}
+    {% if src.cost != 'actual' %}
+        {{ notice("Cost is an estimate: list price times settled minutes. Set OPENAI_ADMIN_KEY to use OpenAI's own numbers." ~ (' (' ~ src.cost_error ~ ')' if src.cost_error else ''), variant="warning") }}
+    {% endif %}
+    {% if src.fixed == 'none' %}
+        {{ notice("No fixed costs configured (COST_FIXED_MONTHLY_USD or COST_FIXED_MONTHLY_BREAKDOWN), so hosting counts as $0.", variant="warning") }}
+    {% endif %}
+
+    <div class="econ-controls">
+        <div class="econ-control">
+            <span class="econ-label" id="econPeriodLabel">Period</span>
+            <div class="econ-seg" role="group" aria-labelledby="econPeriodLabel" id="econPeriod">
+                {{ button("Last 7 days", attrs='data-preset="7" aria-pressed="false"') }}
+                {{ button("Last 30 days", attrs='data-preset="30" aria-pressed="false"') }}
+                {{ button("All time", attrs='data-preset="all" aria-pressed="true"') }}
+                {{ button("Pick dates", attrs='data-preset="custom" aria-pressed="false"') }}
+            </div>
+        </div>
+        <div class="econ-control" id="econDates" hidden>
+            <span class="econ-label">From and to</span>
+            <div class="econ-dates">
+                <input type="date" id="econFrom" aria-label="From date" min="{{ eco.start }}" max="{{ eco.end }}" value="{{ eco.start }}">
+                <span>to</span>
+                <input type="date" id="econTo" aria-label="To date" min="{{ eco.start }}" max="{{ eco.end }}" value="{{ eco.end }}">
+            </div>
+        </div>
+        <div class="econ-control">
+            <span class="econ-label" id="econModeLabel">View</span>
+            <div class="econ-seg" role="group" aria-labelledby="econModeLabel" id="econMode">
+                {{ button("Cumulative", attrs='data-mode="cum" aria-pressed="true"') }}
+                {{ button("Per day", attrs='data-mode="day" aria-pressed="false"') }}
+            </div>
+        </div>
+    </div>
+
+    <div class="econ-kpis" id="econKpis" role="group" aria-label="Headline numbers"></div>
+
+    {% call section(title=None, variant='bordered', attrs='id="econDetail" aria-live="polite"') %}
+    <div class="econ-head"><h2 class="ds-section__title" id="econDetailTitle">Revenue</h2></div>
+    <p class="econ-lede" id="econDetailLede"></p>
+    <div class="econ-legend" id="econLegend"></div>
+    <div class="econ-chart"><canvas id="econChart" aria-label="Economy chart" role="img"></canvas></div>
+    <div class="econ-grid" id="econBreakdown"></div>
+    {% endcall %}
+
+    {% call section(title=None, variant='bordered') %}
+    <div class="econ-head">
+        <h2 class="ds-section__title">Signups, transcripts and payers</h2>
+        <div class="econ-dates">
+            <label class="econ-label" for="econActMetric">Show</label>
+            <select class="econ-select" id="econActMetric">
+                <option value="signups">Signups</option>
+                <option value="transcripts">Completed transcripts</option>
+                <option value="minutes">Minutes transcribed</option>
+                <option value="new_payers">New paying users</option>
+            </select>
+            <label class="econ-label" for="econActAudience">Users</label>
+            <select class="econ-select" id="econActAudience">
+                <option value="split">All, paying highlighted</option>
+                <option value="all">All users</option>
+                <option value="paying">Only users who have paid</option>
+            </select>
+        </div>
+    </div>
+    <p class="econ-lede">A paying user is anyone who has bought minutes, counted from signup, so earlier signups are highlighted once they pay. Uses the period and view chosen above.</p>
+    <div class="econ-legend" id="econActLegend"></div>
+    <div class="econ-chart econ-chart--short"><canvas id="econActChart" aria-label="Activity chart" role="img"></canvas></div>
+    {% endcall %}
+
+    {% call section(title="Users who have paid", variant='bordered') %}
+    {% if eco.payers %}
+    <p class="econ-lede">{{ eco.paying_users }} paying user{{ '' if eco.paying_users == 1 else 's' }}. Paid is revenue after VAT and refunds.</p>
+    <div class="econ-table-wrap">
+        <table class="econ-table">
+            <thead><tr>
+                <th>User</th><th>Signed up</th><th>First purchase</th><th>Last purchase</th>
+                <th class="num">Purchases</th><th class="num">Paid</th><th class="num">Minutes bought</th>
+                <th class="num">Used</th><th class="num">Transcripts</th>
+            </tr></thead>
+            <tbody>
+            {% for p in eco.payers %}
+                <tr>
+                    <td><a href="{{ url_for('admin.user_page', user_id=p.id) }}">{{ p.email }}</a></td>
+                    <td>{{ p.signed_up }}</td><td>{{ p.first_purchase }}</td><td>{{ p.last_purchase }}</td>
+                    <td class="num">{{ p.purchases }}</td>
+                    <td class="num">${{ '%.2f'|format(p.paid_usd) }}</td>
+                    <td class="num">{{ p.minutes_bought }}</td>
+                    <td class="num">{{ p.used_pct|int }} %</td>
+                    <td class="num">{{ p.transcripts }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+        {{ empty_state("No paying users yet", "Users appear here after their first purchase.") }}
+    {% endif %}
+    {% endcall %}
+
+    {% call section(title="What is measured and what is estimated", variant='bordered') %}
+    <div class="econ-table-wrap">
+        <table class="econ-table">
+            <thead><tr><th>Number</th><th>Status</th><th>Source</th></tr></thead>
+            <tbody>
+                <tr><td>Revenue</td><td>{{ chip("Measured", "muted") }}</td><td>Credit purchases in the database: amount paid minus VAT minus refunded money. Not reconciled against payouts.</td></tr>
+                <tr><td>Stripe fees</td><td>
+                    {% if src.fees == 'stripe' %}{{ chip("Measured", "muted") }}
+                    {% elif src.fees == 'mixed' %}{{ chip("Partly estimated", "warning") }}
+                    {% else %}{{ chip("Estimated", "warning") }}{% endif %}</td>
+                    <td>{{ src.fees_stripe_count }} of {{ src.purchase_count }} purchases matched a Stripe balance transaction. The rest use the fee model in pricing_volume.py{% if not src.stripe_ok %} (Stripe was not reachable){% endif %}.</td></tr>
+                <tr><td>Transcription cost</td><td>{% if src.cost == 'actual' %}{{ chip("Measured", "muted") }}{% else %}{{ chip("Estimated", "warning") }}{% endif %}</td>
+                    <td>{% if src.cost == 'actual' %}OpenAI Costs API{% else %}Whisper list price times settled minutes{% endif %}, split into trial and paid by each day's minutes. BYOK jobs are excluded.</td></tr>
+                <tr><td>Fixed costs</td><td>{% if src.fixed == 'configured' %}{{ chip("Configured", "muted") }}{% else %}{{ chip("Missing", "warning") }}{% endif %}</td>
+                    <td>{% if src.fixed == 'configured' %}${{ '%.2f'|format(src.fixed_monthly_usd) }} per month from the environment, prorated per day.{% else %}Not set.{% endif %}</td></tr>
+            </tbody>
+        </table>
+    </div>
+    {% endcall %}
+
+    <script type="application/json" id="econData">{{ {
+        'days': eco.days, 'series': eco.series, 'purchases': eco.purchases,
+        'activity': eco.activity, 'today': eco.today,
+        'unused_paid_minutes': eco.unused_paid_minutes,
+        'unused_paid_cost_usd': eco.unused_paid_cost_usd,
+        'cost_source': src.cost, 'plan_labels': plan_labels,
+    } | tojson }}</script>
+    <script src="{{ url_for('static', filename='vendor/chart-4.4.7.umd.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='admin-economy.js') }}"></script>
+    {% endif %}
+</div>
+{% endblock %}
