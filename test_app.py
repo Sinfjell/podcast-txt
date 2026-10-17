@@ -6819,6 +6819,120 @@ def test_mcp_get_transcript_starts_job(mcp_on, ph_events):
     assert all(isinstance(e['properties'].get('success'), bool) for e in called)
 
 
+# ── mcp_tool_called coverage: exactly one event per tools/call, every tool ──
+
+_MCP_TOOL_CALL_ARGS = {
+    'search_podcasts': {'query': 'Spårtsklubben'},
+    'list_episodes': {'podcast': 'Spårtsklubben'},
+    'list_my_transcripts': {},
+    'get_my_transcript': {'task_id': 'cust-a-ep'},
+    'get_transcript': {'episode': 'Spårtsklubben|2026-09-10'},
+    'get_transcript_status': {'job_id': 'cust-a-ep'},
+}
+
+
+def _mcp_called(ph_events):
+    return [e for e in ph_events.events if e['event'] == 'mcp_tool_called']
+
+
+def test_mcp_tool_called_args_cover_every_registered_tool():
+    """A new tool must be added to the coverage table (and so to the tests)."""
+    assert set(_MCP_TOOL_CALL_ARGS) == MCP._registered_tool_names()
+
+
+@pytest.mark.parametrize('tool', sorted(_MCP_TOOL_CALL_ARGS))
+def test_mcp_every_tool_emits_exactly_one_mcp_tool_called(mcp_on, ph_events, tool):
+    _payload, result = _mcp_tool(mcp_on['key_a'], tool, _MCP_TOOL_CALL_ARGS[tool])
+    called = _mcp_called(ph_events)
+    assert len(called) == 1, called
+    ev = called[0]
+    assert ev['distinct_id'] == str(mcp_on['a'])
+    props = ev['properties']
+    assert props['tool'] == tool
+    assert isinstance(props['success'], bool)
+    assert props['success'] is (result.get('isError') is False)
+    assert isinstance(props['duration_ms'], int)
+    assert 'email' not in props and 'episode' not in props and 'query' not in props
+
+
+@pytest.mark.parametrize('tool', sorted(_MCP_TOOL_CALL_ARGS))
+def test_mcp_tool_crash_still_emits_one_failed_event(mcp_on, ph_events,
+                                                     monkeypatch, tool):
+    def boom(*a, **kw):
+        raise RuntimeError('kaboom')
+    monkeypatch.setattr(MCP, f'tool_{tool}', boom)
+    payload, result = _mcp_tool(mcp_on['key_a'], tool, _MCP_TOOL_CALL_ARGS[tool])
+    assert result.get('isError') is True
+    assert payload['error'] == 'internal_error'
+    called = _mcp_called(ph_events)
+    assert len(called) == 1, called
+    assert called[0]['properties']['tool'] == tool
+    assert called[0]['properties']['success'] is False
+    assert called[0]['properties']['error'] == 'internal_error'
+
+
+def test_mcp_get_transcript_start_is_tagged_job_started(mcp_on, ph_events):
+    """The start call (user 389 case) is one event with job_started=True."""
+    payload, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript',
+                           _MCP_TOOL_CALL_ARGS['get_transcript'])
+    assert payload['transcript_status'] == 'pending'
+    called = _mcp_called(ph_events)
+    assert len(called) == 1
+    props = called[0]['properties']
+    assert props['tool'] == 'get_transcript'
+    assert props['success'] is True
+    assert props['job_started'] is True
+    assert props['reused'] is False
+    assert props['transcript_status'] == 'pending'
+
+    # Asking again for the same episode re-uses the job: not a new start.
+    _mcp_tool(mcp_on['key_a'], 'get_transcript',
+              _MCP_TOOL_CALL_ARGS['get_transcript'])
+    called = _mcp_called(ph_events)
+    assert len(called) == 2
+    assert called[1]['properties']['job_started'] is False
+    assert called[1]['properties']['reused'] is True
+
+
+def test_mcp_get_transcript_refusal_is_one_failed_event(mcp_on, ph_events):
+    from models import db, User
+    with A.app.app_context():
+        u = db.session.get(User, mcp_on['a'])
+        u.trial_seconds_used = u.trial_seconds_limit or 3600
+        u.paid_seconds_balance = 0
+        db.session.commit()
+    payload, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript',
+                           _MCP_TOOL_CALL_ARGS['get_transcript'])
+    assert payload['error'] == 'insufficient_balance'
+    called = _mcp_called(ph_events)
+    assert len(called) == 1
+    props = called[0]['properties']
+    assert props['success'] is False
+    assert props['error'] == 'insufficient_balance'
+    assert props['job_started'] is False
+
+
+def test_mcp_unknown_tool_emits_one_event_without_raw_name(mcp_on, ph_events):
+    _payload, result = _mcp_tool(mcp_on['key_a'], 'drop_tables_please', {})
+    assert result.get('isError') is True
+    called = _mcp_called(ph_events)
+    assert len(called) == 1
+    assert called[0]['properties']['tool'] == 'unknown'
+    assert called[0]['properties']['success'] is False
+    # Free-text error ("Unknown tool: <name>") is bucketed, never echoed.
+    assert called[0]['properties']['error'] == 'other'
+
+
+def test_mcp_tool_called_capture_failure_never_breaks_tool(mcp_on, monkeypatch):
+    def broken(*a, **kw):
+        raise RuntimeError('posthog down')
+    monkeypatch.setattr(MCP, '_capture_tool', broken)
+    payload, result = _mcp_tool(mcp_on['key_a'], 'get_my_transcript',
+                                _MCP_TOOL_CALL_ARGS['get_my_transcript'])
+    assert result.get('isError') is False
+    assert payload['task_id'] == 'cust-a-ep'
+
+
 def test_mcp_get_transcript_insufficient_balance(mcp_on, ph_events):
     from models import db, User
     with A.app.app_context():
