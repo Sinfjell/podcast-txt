@@ -124,7 +124,7 @@ def test_admin_page_renders_margin_panels_and_purchase_wording(monkeypatch):
     assert 'Contribution margin per plan' in body
     assert 'Margin unavailable' not in body
     assert 'Per price point (vol_v1' in body
-    assert 'gross paid (list price)' in body
+    assert 'gross paid (all payments, list price)' in body
     assert ' credited</div>' not in body
     assert 'UTC' in body and 'partial' in body
 
@@ -138,3 +138,45 @@ def test_cost_per_minute_uses_all_transcribed_minutes():
 def test_cost_per_minute_implausible_falls_back_to_list():
     assert M.cost_per_minute(64.68, 12.1, 0) == (0.006, 'list_implausible')
     assert M.cost_per_minute(0.006 * 5 * 100, 100, 0)[1] == 'actual'
+
+
+def test_format_usd_negative_uses_true_minus():
+    import admin_dashboard as AD
+    assert AD.format_usd(-0.35) == '\u2212$0.35'
+    assert AD.format_usd(0.35) == '$0.35'
+    assert AD.format_usd(0.35, sign=True) == '+$0.35'
+    assert AD.format_usd(-0.001) == '$0.00'
+    assert AD.format_usd(-0.001, sign=True) == '+$0.00'
+    assert AD.format_usd(None) == '—'
+    assert AD.format_usd(-1234.5) == '\u2212$1234.50'
+
+
+def test_admin_page_has_no_dollar_minus_and_purchases_same_basis(monkeypatch):
+    import re
+    import test_app as TA
+    from models import db, CreditPurchase
+    monkeypatch.setenv('ADMIN_EMAILS', 'admin-nits@test.com')
+    monkeypatch.delenv('OPENAI_ADMIN_KEY', raising=False)
+    client, uid = TA._admin_login('admin-nits@test.com')
+    with TA.A.app.app_context():
+        db.session.add(CreditPurchase(
+            user_id=uid, stripe_session_id='cs_nits_1', amount_cents=500,
+            amount_total_cents=500, currency='usd', minutes=300, status='credited'))
+        db.session.add(CreditPurchase(
+            user_id=uid, stripe_session_id='cs_nits_2', amount_cents=500,
+            amount_total_cents=500, currency='usd', minutes=300, status='refunded',
+            amount_refunded_cents=500, seconds_clawed_back=18000))
+        db.session.commit()
+    body = client.get('/admin?cost_range=7d').data.decode()
+    assert not re.search(r'\$-\d', body)
+    assert '+-' not in body
+    m = re.search(r'data-kpi="purchase_refunds">([^<]+)<', body)
+    assert m and m.group(1).startswith('\u2212$') and 'refunded' in m.group(1)
+    assert 'gross paid (all payments, list price)' in body
+    with TA.A.app.app_context():
+        import admin_dashboard as AD
+        import app as A
+        k = AD.collect_kpis(db, A.TRIAL_DAILY_SECONDS)
+    assert k['paid_refunded_count'] >= 1
+    assert k['paid_count_all'] >= k['purchase_count'] + k['paid_refunded_count']
+    assert k['paid_gross_all_usd'] >= k['purchase_gross_usd'] + 5.0
