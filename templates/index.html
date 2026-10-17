@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "components/macros.html" import snippet, button, proof_list, announce, command_bar, inline_select, works_with, signal_wave, transcript_window %}
+{% from "components/macros.html" import snippet, button, proof_list, announce, command_bar, inline_select, works_with, signal_wave, transcript_window, notice %}
 
 {% block title %}Spotify & podcast transcripts — Podskrift{% endblock %}
 {% block meta_description %}Paste a Spotify episode link or search any podcast, and get the full transcript as text and .srt. {{ language_count }} languages, powered by OpenAI Whisper.{% if trial_minutes %} First {{ trial_minutes }} minutes free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.{% endif %}{% endblock %}
@@ -205,6 +205,7 @@
             {% endif %}
             <div class="ds-hero__left">
                 <div id="searchResults"></div>
+                <template id="tooLongNoticeTpl">{{ notice(too_long_message, variant='info', class='mb-1') }}</template>
                 {# Anonymous: advertised new-signup grant. Logged-in trial users: their
                    own limit (+ remaining) so a 180-min legacy account is never told
                    "60 in total" next to a correct balance banner. Own-key users: hide. #}
@@ -435,6 +436,8 @@
     var TRIAL_REMAINING_MIN = {{ trial_badge_remaining_min|tojson }};
     var PAID_REMAINING_MIN = {{ trial_badge_paid_min|tojson }};
     var TRIAL_MAX_EPISODE_MIN = {{ trial_max_episode_min|tojson }};
+    var MAX_EPISODE_MIN = {{ max_episode_min|tojson }};
+    var MAX_EPISODE_LABEL = {{ max_episode_label|tojson }};
     var STRIPE_BUY = {{ stripe_buy_enabled|tojson }};
     var BUY_LABEL = {{ credit_pack_label|tojson }};
     var BUY_URL = {{ url_for('billing_checkout')|tojson }};
@@ -443,8 +446,30 @@
     var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
     var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
 
+    // Over Podskrift's length limit: explained up front, before signup or a
+    // start, never sold as a pack (no plan changes the limit).
+    function episodeTooLong(durationMin) {
+        if (durationMin == null || !MAX_EPISODE_MIN) return false;
+        return Number(durationMin) > MAX_EPISODE_MIN;
+    }
+
+    function showTooLong(durationMin) {
+        var old = document.getElementById('tooLongNotice');
+        if (old) old.remove();
+        var tpl = document.getElementById('tooLongNoticeTpl');
+        var box = tpl.content.firstElementChild.cloneNode(true);
+        box.id = 'tooLongNotice';
+        box.querySelector('.ds-notice__body').textContent =
+            'This episode is about ' + Math.round(Number(durationMin))
+            + ' minutes long. Podskrift can transcribe episodes up to '
+            + MAX_EPISODE_LABEL + ", so it can't take this one. Try a shorter episode.";
+        resultsDiv.insertBefore(box, resultsDiv.firstChild);
+        box.scrollIntoView({block: 'nearest'});
+    }
+
     var TRIAL_PARTIAL_MIN = 5;
     function episodeNeedsOwnKey(durationMin) {
+        if (episodeTooLong(durationMin)) return false;
         if (TRIAL_REMAINING_MIN === null || durationMin == null) return false;
         var estimateSec = Math.max(60, Math.floor(Number(durationMin) * 60));
         if (!(estimateSec > 0)) return false;
@@ -633,15 +658,26 @@
             badges.appendChild(warn);
         }
 
+        var tooLong = item.type === 'episode' && episodeTooLong(item.duration_min);
         var badge = document.createElement('span');
-        badge.className = 'badge';
-        badge.textContent = item.type === 'episode' ? 'Transcribe' : 'Episodes';
+        if (tooLong) {
+            badge.className = 'ds-chip ds-chip--muted';
+            badge.setAttribute('data-too-long', '');
+            badge.textContent = 'Too long \u00B7 max ' + MAX_EPISODE_LABEL;
+        } else {
+            badge.className = 'badge';
+            badge.textContent = item.type === 'episode' ? 'Transcribe' : 'Episodes';
+        }
         badges.appendChild(badge);
         row.appendChild(badges);
 
         row.addEventListener('click', function() {
             if (item.type !== 'episode') {
                 postForm(PARSE_RSS_URL, { rss_url: item.feed_url });
+                return;
+            }
+            if (tooLong) {
+                showTooLong(item.duration_min);
                 return;
             }
             // Episode hits carry the audio URL already -- no need to find the

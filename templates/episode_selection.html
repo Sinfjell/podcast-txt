@@ -5,7 +5,7 @@
 {% block robots_meta %}<meta name="robots" content="noindex">{% endblock %}
 
 {% block content %}
-{% from "components/macros.html" import chip %}
+{% from "components/macros.html" import chip, notice %}
 <style>
     .ep-back { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; font-size: 15px; font-weight: 700; }
     .ep-head { display: flex; flex-wrap: wrap; gap: 16px 20px; align-items: center; margin-bottom: 20px; }
@@ -129,7 +129,9 @@
                   · Uses ~{{ episode.duration_min|round|int }} min
                   {% endif %}
                 {% endif %}
-                {% if episode.buy_label %}
+                {% if episode.too_long %}
+                · {{ chip('Too long · max ' ~ max_episode_label, variant='muted', attrs='data-too-long') }}
+                {% elif episode.buy_label %}
                 · {{ chip(episode.buy_label, variant=episode.buy_variant) }}
                 {% elif episode.needs_own_key %}
                 · <span class="badge badge-needs-key">{% if stripe_buy_enabled %}Needs key or pack{% else %}Needs own key{% endif %} · {{ episode.duration_min|round|int }} min</span>
@@ -171,6 +173,7 @@
     {% endif %}
 
     <div id="startError" class="hidden mt-2" style="margin-top: 16px;"></div>
+    <div id="tooLongNotice" class="hidden mt-2">{{ notice(too_long_message, variant='info') }}</div>
 
     <div class="ep-desktop-start">
         <button type="submit" class="btn btn-secondary btn-lg" id="transcribeBtn" disabled>
@@ -251,6 +254,8 @@ document.addEventListener('DOMContentLoaded', function() {
     var TRIAL_REMAINING_MIN = {{ trial_badge_remaining_min|tojson }};
     var PAID_REMAINING_MIN = {{ trial_badge_paid_min|tojson }};
     var TRIAL_MAX_EPISODE_MIN = {{ trial_max_episode_min|tojson }};
+    var MAX_EPISODE_MIN = {{ max_episode_min|tojson }};
+    var MAX_EPISODE_LABEL = {{ max_episode_label|tojson }};
     var STRIPE_BUY = {{ stripe_buy_enabled|tojson }};
     var BUY_LABEL = {{ credit_pack_label|tojson }};
     var BUY_URL = {{ url_for('billing_checkout')|tojson }};
@@ -421,8 +426,30 @@ document.addEventListener('DOMContentLoaded', function() {
         while (startError.firstChild) startError.removeChild(startError.firstChild);
     }
 
+    // Over Podskrift's length limit: no plan or key changes that, so it is
+    // explained before signup or a start, never sold as a pack.
+    function episodeTooLong(durationMin) {
+        if (durationMin == null || !MAX_EPISODE_MIN) return false;
+        return Number(durationMin) > MAX_EPISODE_MIN;
+    }
+
+    function showTooLong(durationMin) {
+        var box = document.getElementById('tooLongNotice');
+        var body = box.querySelector('.ds-notice__body');
+        body.textContent = 'This episode is about ' + Math.round(Number(durationMin))
+            + ' minutes long. Podskrift can transcribe episodes up to '
+            + MAX_EPISODE_LABEL + ", so it can't take this one. Try a shorter episode.";
+        box.classList.remove('hidden');
+        box.scrollIntoView({block: 'nearest'});
+    }
+
+    function hideTooLong() {
+        document.getElementById('tooLongNotice').classList.add('hidden');
+    }
+
     var TRIAL_PARTIAL_MIN = 5;
     function episodeNeedsOwnKey(durationMin) {
+        if (episodeTooLong(durationMin)) return false;
         if (ON_OWN_KEY || durationMin == null) return false;
         var estimateSec = Math.max(60, Math.floor(Number(durationMin) * 60));
         if (!(estimateSec > 0)) return false;
@@ -456,6 +483,7 @@ document.addEventListener('DOMContentLoaded', function() {
         var duration = card.dataset.durationMin != null ? Number(card.dataset.durationMin) : null;
         selectedTitle = title;
         selectedDuration = duration;
+        if (episodeTooLong(duration)) showTooLong(duration); else hideTooLong();
         stickyTitle.textContent = title;
         var meter = meterText(duration);
         stickyMeter.textContent = meter;
@@ -551,7 +579,14 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         }
         meta.textContent = metaText;
-        if (ep.buy_label) {
+        if (episodeTooLong(ep.duration_min)) {
+            meta.appendChild(document.createTextNode(' \u00B7 '));
+            var longChip = document.createElement('span');
+            longChip.className = 'ds-chip ds-chip--muted';
+            longChip.setAttribute('data-too-long', '');
+            longChip.textContent = 'Too long \u00B7 max ' + MAX_EPISODE_LABEL;
+            meta.appendChild(longChip);
+        } else if (ep.buy_label) {
             meta.appendChild(document.createTextNode(' \u00B7 '));
             var chipEl = document.createElement('span');
             chipEl.className = 'ds-chip' + (ep.buy_variant === 'muted' ? ' ds-chip--muted' : '');
@@ -627,6 +662,12 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('episodeForm').addEventListener('submit', function(e) {
         e.preventDefault();
         if (!grid.querySelector('input[name="episode"]:checked')) return;
+        if (episodeTooLong(selectedDuration)) {
+            clearStartError();
+            showTooLong(selectedDuration);
+            return;
+        }
+        hideTooLong();
         if (maybeOpenBuyInstead(e)) return;
 
         if (!IS_AUTHENTICATED) {

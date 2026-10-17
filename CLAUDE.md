@@ -49,6 +49,13 @@ before merging, regardless of how many files the diff has.
 - **Never derive coverage from ffprobe's duration.** Concatenated MP3s (dynamic
   ad insertion) report short, and 16 minutes went silently untranscribed.
   `-f segment` walks the real stream.
+- **Length is the limit, not bytes.** A source over `MAX_AUDIO_BYTES` is piped
+  through ffmpeg as it downloads (`_StreamTranscoder`) and only a 16 kHz mono
+  re-encode, bounded by `-t`, lands on disk; the source ceiling is
+  `MAX_SOURCE_BYTES`. `MAX_EPISODE_SECONDS` is enforced on the measured audio
+  in `transcribe_audio()` before reconcile (the feed's duration may only be used
+  to refuse early). Limit outcomes are `SourceAudioUnavailable.LIMIT_REASONS`:
+  refunded, explained, never a Sentry error.
 - The disk floor must exceed `workers x MAX_CONCURRENT_TRANSCRIPTIONS x
   (MAX_AUDIO_BYTES + parts)`: the check reserves nothing, so concurrent requests
   all see the same free space. `test_the_disk_floor_clears_what_admission_

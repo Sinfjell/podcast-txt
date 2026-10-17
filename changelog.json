@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "long-episodes-up-to-six-hours",
+      "date": "2026-10-17",
+      "title": "Very long episodes now work",
+      "summary": "Episodes up to six hours now transcribe, even when the audio file is huge. If an episode is longer than that, Podskrift tells you before you start instead of failing halfway."
+    },
+    {
       "id": "pay-per-minute-launch-pricing",
       "date": "2026-10-12",
       "title": "Buy exactly the minutes you need",
