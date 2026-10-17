@@ -15520,22 +15520,30 @@ def _request_reset(client, csrf, email, **extra):
 
 
 def _patch_reset_mail(monkeypatch):
-    """Capture reset URLs; confirm-changed sends are counted separately."""
+    """Capture outgoing reset mail at the transport only.
+
+    Only `mail.send_email` (the Mailgun call) is replaced, so the route and the
+    real `email_notify.send_*` functions run. Replacing the latter hid
+    PODSKRIFT-14: a missing import made every reset 500 while 10 tests passed.
+    """
+    import re
     import email_notify
     import mail as mailer
 
     state = {'reset_urls': [], 'changed': 0}
 
-    def fake_reset(*, to, reset_url, user_id):
-        state['reset_urls'].append(reset_url)
+    def fake_send_email(**kwargs):
+        if kwargs.get('kind') == email_notify.PASSWORD_RESET:
+            url = re.search(r'https?://\S+/reset-password/[\w-]+', kwargs['text'])
+            assert url, 'reset mail has no reset link'
+            state['reset_urls'].append(url.group(0))
+        elif kwargs.get('kind') == email_notify.PASSWORD_CHANGED:
+            state['changed'] += 1
+        else:
+            raise AssertionError(f"unexpected mail kind {kwargs.get('kind')!r}")
         return mailer.SEND_SENT
 
-    def fake_changed(*, to, user_id):
-        state['changed'] += 1
-        return mailer.SEND_SENT
-
-    monkeypatch.setattr(email_notify, 'send_password_reset_email', fake_reset)
-    monkeypatch.setattr(email_notify, 'send_password_changed_email', fake_changed)
+    monkeypatch.setattr(mailer, 'send_email', fake_send_email)
     return state
 
 
@@ -15559,6 +15567,28 @@ def test_send_password_reset_email_builds_idempotency_key(monkeypatch):
     assert outcome == mailer.SEND_SENT
     assert sent['idempotency_key'].startswith('password-reset:7:')
     assert len(sent['idempotency_key'].rsplit(':', 1)[1]) == 16
+
+
+def test_send_password_changed_email_real_path(monkeypatch):
+    """Same guard as the reset mail: run the real function, fake only the transport."""
+    import email_notify
+    import mail as mailer
+
+    sent = {}
+
+    def fake_send_email(**kwargs):
+        sent.update(kwargs)
+        return mailer.SEND_SENT
+
+    monkeypatch.setattr(mailer, 'mail_ready', lambda: True)
+    monkeypatch.setattr(mailer, 'send_email', fake_send_email)
+
+    outcome = email_notify.send_password_changed_email(to='a@example.com', user_id=7)
+
+    assert outcome == mailer.SEND_SENT
+    assert sent['kind'] == email_notify.PASSWORD_CHANGED
+    assert sent['to'] == 'a@example.com'
+    assert sent['subject'] and sent['text'] and sent['html']
 
 
 @pytest.fixture(autouse=False)
