@@ -678,6 +678,7 @@
         el('statCost').textContent = d.estimated_cost ? '$' + d.estimated_cost.toFixed(3) : '—';
         el('statEta').textContent =
             (d.status === 'completed') ? 'Done'
+            : (d.status === 'error' || d.status === 'cancelled') ? '—'
             : (d.eta_seconds !== null && d.eta_seconds !== undefined) ? fmtDuration(d.eta_seconds)
             : 'Estimating…';
     }

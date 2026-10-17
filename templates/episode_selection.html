@@ -440,7 +440,6 @@ document.addEventListener('DOMContentLoaded', function() {
             + ' minutes long. Podskrift can transcribe episodes up to '
             + MAX_EPISODE_LABEL + ", so it can't take this one. Try a shorter episode.";
         box.classList.remove('hidden');
-        box.scrollIntoView({block: 'nearest'});
     }
 
     function hideTooLong() {
@@ -495,6 +494,15 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         stickyBtn.disabled = false;
         stickyBtn.textContent = defaultStickyLabel(duration);
+        if (episodeTooLong(duration)) {
+            // Nothing to start: say why where the button would be.
+            var limitMeter = 'Over the ' + MAX_EPISODE_LABEL + ' limit';
+            stickyMeter.textContent = limitMeter;
+            desktopMeter.textContent = limitMeter;
+            desktopMeter.classList.remove('hidden');
+            stickyBtn.disabled = true;
+            transcribeBtn.disabled = true;
+        }
         if (FEED_ARTWORK && stickyArt) {
             stickyArt.src = FEED_ARTWORK;
             stickyArt.classList.remove('hidden');
@@ -665,6 +673,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (episodeTooLong(selectedDuration)) {
             clearStartError();
             showTooLong(selectedDuration);
+            document.getElementById('tooLongNotice').scrollIntoView({block: 'center'});
             return;
         }
         hideTooLong();
