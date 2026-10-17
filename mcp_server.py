@@ -1543,84 +1543,128 @@ def tool_get_my_transcript(user, task_id: str, *, format: str = 'txt',
     }, user)
 
 
-def _capture_tool(tool: str, user_id, success: bool):
-    """PostHog mcp_tool_called — tool name + success only (no PII)."""
-    product_analytics.capture(
-        'mcp_tool_called',
-        user_id,
-        {'tool': tool, 'success': bool(success)},
-    )
+_ERROR_CODE_RE = re.compile(r'^[a-z][a-z0-9_]{0,40}$')
+
+
+def _registered_tool_names() -> set[str]:
+    return {d['name'] for d in _tool_defs()}
+
+
+def _tool_event_props(tool: str, ok: bool, out, started: float) -> dict:
+    """Coarse, PII-free properties for one mcp_tool_called event."""
+    props = {
+        'tool': tool if tool in _registered_tool_names() else 'unknown',
+        'success': bool(ok),
+        'duration_ms': int(max(0.0, time.monotonic() - started) * 1000),
+    }
+    if isinstance(out, dict):
+        err = out.get('error')
+        if err:
+            # Only slug-like codes (insufficient_balance, rate_limited …);
+            # free-text messages may echo user input, so bucket them.
+            props['error'] = err if (isinstance(err, str)
+                                     and _ERROR_CODE_RE.match(err)) else 'other'
+        if tool == 'get_transcript':
+            reused = out.get('reused')
+            if isinstance(reused, bool):
+                props['reused'] = reused
+            # The start call: a new job was queued (not a re-fetch / refusal).
+            props['job_started'] = bool(
+                not err and reused is False and (out.get('task_id') or out.get('job_id')))
+        status = out.get('transcript_status')
+        if isinstance(status, str) and _ERROR_CODE_RE.match(status):
+            props['transcript_status'] = status
+    return props
+
+
+def _capture_tool(tool: str, user_id, success: bool, props: dict | None = None):
+    """PostHog mcp_tool_called — tool name + outcome only (no PII)."""
+    payload = dict(props or {})
+    payload.setdefault('tool', tool)
+    payload['success'] = bool(success)
+    product_analytics.capture('mcp_tool_called', user_id, payload)
+
+
+def _call_tool(name: str, args: dict, user) -> tuple[dict, bool, bool]:
+    """Run one tool. Returns (payload, success, is_error). No analytics here."""
+    if name == 'search_podcasts':
+        out = tool_search_podcasts(args.get('query') or '')
+        ok = 'error' not in out or bool(out.get('results'))
+        return out, ok, not ok and not out.get('results')
+    if name == 'list_episodes':
+        out = tool_list_episodes(args.get('podcast') or '', args.get('limit'))
+        ok = 'error' not in out
+        return out, ok, not ok
+    if name == 'list_my_transcripts':
+        out = tool_list_my_transcripts(
+            user,
+            query=args.get('query') or '',
+            podcast=args.get('podcast') or '',
+            since=args.get('since') or '',
+            until=args.get('until') or '',
+            status=args.get('status') or 'all',
+            limit=args.get('limit'),
+            cursor=args.get('cursor') or '',
+        )
+        ok = 'error' not in out
+        return out, ok, not ok
+    if name == 'get_my_transcript':
+        out = tool_get_my_transcript(
+            user,
+            args.get('task_id') or '',
+            format=args.get('format') or 'txt',
+            offset=args.get('offset'),
+            max_chars=args.get('max_chars'),
+        )
+        ok = 'error' not in out
+        return out, ok, not ok
+    if name == 'get_transcript':
+        out = tool_get_transcript(
+            user, args.get('episode') or '', args.get('language') or '',
+            meta=args)
+        # insufficient_balance is a clean refusal, not a crash, but still not
+        # a successful call; a failed transcript is not a success either.
+        ok = out.get('error') is None and out.get('transcript_status') != 'failed'
+        return out, ok, 'error' in out
+    if name == 'get_transcript_status':
+        out = tool_get_transcript_status(
+            user,
+            args.get('job_id') or '',
+            task_id=args.get('task_id') or '',
+            include_text=args.get('include_text', True),
+            offset=args.get('offset'),
+            max_chars=args.get('max_chars'),
+        )
+        ok = 'error' not in out
+        return out, ok, not ok
+    return {'error': f'Unknown tool: {name}'}, False, True
 
 
 def _run_tool(name: str, arguments: dict, user) -> dict:
+    """Run a tool and emit exactly one mcp_tool_called, on every path.
+
+    The event is sent in ``finally`` so early returns, refusals and crashes
+    are all counted once. get_transcript / get_transcript_status may block
+    for up to MCP_WAIT_SECONDS before returning, so the event timestamp is
+    the end of the call; ``duration_ms`` gives the length.
+    """
     args = arguments if isinstance(arguments, dict) else {}
+    started = time.monotonic()
+    out, ok = None, False
     try:
-        if name == 'search_podcasts':
-            out = tool_search_podcasts(args.get('query') or '')
-            ok = 'error' not in out or bool(out.get('results'))
-            _capture_tool(name, user.id, ok)
-            return _tool_text(out, is_error=not ok and not out.get('results'))
-        if name == 'list_episodes':
-            out = tool_list_episodes(args.get('podcast') or '', args.get('limit'))
-            ok = 'error' not in out
-            _capture_tool(name, user.id, ok)
-            return _tool_text(out, is_error=not ok)
-        if name == 'list_my_transcripts':
-            out = tool_list_my_transcripts(
-                user,
-                query=args.get('query') or '',
-                podcast=args.get('podcast') or '',
-                since=args.get('since') or '',
-                until=args.get('until') or '',
-                status=args.get('status') or 'all',
-                limit=args.get('limit'),
-                cursor=args.get('cursor') or '',
-            )
-            ok = 'error' not in out
-            _capture_tool(name, user.id, ok)
-            return _tool_text(out, is_error=not ok)
-        if name == 'get_my_transcript':
-            out = tool_get_my_transcript(
-                user,
-                args.get('task_id') or '',
-                format=args.get('format') or 'txt',
-                offset=args.get('offset'),
-                max_chars=args.get('max_chars'),
-            )
-            ok = 'error' not in out
-            _capture_tool(name, user.id, ok)
-            return _tool_text(out, is_error=not ok)
-        if name == 'get_transcript':
-            out = tool_get_transcript(
-                user, args.get('episode') or '', args.get('language') or '',
-                meta=args)
-            ok = out.get('error') is None and out.get('transcript_status') != 'failed'
-            # insufficient_balance is a clean refusal, not a tool crash
-            if out.get('error') == 'insufficient_balance':
-                ok = False
-            _capture_tool(name, user.id, ok and 'error' not in out)
-            return _tool_text(out, is_error='error' in out)
-        if name == 'get_transcript_status':
-            out = tool_get_transcript_status(
-                user,
-                args.get('job_id') or '',
-                task_id=args.get('task_id') or '',
-                include_text=args.get('include_text', True),
-                offset=args.get('offset'),
-                max_chars=args.get('max_chars'),
-            )
-            ok = 'error' not in out
-            _capture_tool(name, user.id, ok)
-            return _tool_text(out, is_error=not ok)
-        _capture_tool(name, getattr(user, 'id', 'mcp'), False)
-        return _tool_text({'error': f'Unknown tool: {name}'}, is_error=True)
+        out, ok, is_error = _call_tool(name, args, user)
+        return _tool_text(out, is_error=is_error)
     except Exception:  # noqa: BLE001 — never 500 a tool call into the LLM
         _app().app.logger.exception('mcp tool %s failed', name)
-        _capture_tool(name, getattr(user, 'id', 'mcp'), False)
-        return _tool_text(
-            {'error': 'internal_error', 'message': 'Tool failed; try again shortly.'},
-            is_error=True,
-        )
+        ok = False
+        out = {'error': 'internal_error', 'message': 'Tool failed; try again shortly.'}
+        return _tool_text(out, is_error=True)
+    finally:
+        try:
+            _capture_tool(name, getattr(user, 'id', None) or 'mcp', ok,
+                          _tool_event_props(name, ok, out, started))
+        except Exception:  # noqa: BLE001 — analytics must never break a tool
+            _app().app.logger.exception('mcp_tool_called capture failed')
 
 
 def _handle_initialize(params: dict) -> dict:
