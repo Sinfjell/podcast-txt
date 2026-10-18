@@ -29,8 +29,9 @@ OPENAI_AUDIO_USD_PER_MIN = {
     'gpt-4o-mini-transcribe': 0.003,    # https://openai.com/api/pricing/
 }
 
-# Production always sends whisper-1 today (app._whisper_transcribe_chunk);
-# tasks do not store the model name, so estimates default here.
+# Tasks finished before the Together switch store no provider cost, so their
+# estimate defaults to whisper-1. Newer tasks carry ``stt_cost_usd`` (what the
+# provider(s) really billed, retries/fallbacks/shadow included) and that wins.
 DEFAULT_TRANSCRIPTION_MODEL = 'whisper-1'
 
 # When a ready summary has no stored cost and no token counts.
@@ -240,6 +241,20 @@ def _finalize_window(w):
     return w
 
 
+def split_actual_stt_cost(actual_usd, trial_secs, paid_secs):
+    """Split a task's real provider cost pro-rata into (trial, paid) USD.
+
+    A job with no settled seconds (fully refunded failure) still spent the
+    money; it is booked as trial, matching where refunds return to.
+    """
+    actual = max(0.0, float(actual_usd or 0.0))
+    total = int(trial_secs or 0) + int(paid_secs or 0)
+    if total <= 0:
+        return actual, 0.0
+    trial = actual * int(trial_secs or 0) / total
+    return trial, actual - trial
+
+
 def collect_costs(db, *, chart_days=30, model=None):
     """Build cost estimates for today / 7d / 30d / all-time + daily chart.
 
@@ -276,6 +291,7 @@ def collect_costs(db, *, chart_days=30, model=None):
                summary_prompt_tokens,
                summary_completion_tokens,
                summary_cost_usd_est,
+               stt_cost_usd,
                CASE WHEN summary_json IS NOT NULL AND summary_json != ''
                     THEN 1 ELSE 0 END AS has_summary_json
           FROM transcription_tasks
@@ -337,7 +353,7 @@ def collect_costs(db, *, chart_days=30, model=None):
         (tid, uid, status, event_at, _started, audio_duration,
          trial_charged, paid_charged, chunk_index,
          summary_status, summary_model, prompt_tok, completion_tok,
-         summary_cost, has_summary_json) = r
+         summary_cost, stt_cost, has_summary_json) = r
 
         source = task_key_source(trial_charged, paid_charged)
         trial_secs = int(trial_charged or 0) if trial_charged is not None else 0
@@ -349,6 +365,9 @@ def collect_costs(db, *, chart_days=30, model=None):
                 trial_secs, transcription_model)
             paid_cost = estimate_transcription_cost_usd(
                 paid_secs, transcription_model)
+            if stt_cost is not None:
+                trial_cost, paid_cost = split_actual_stt_cost(
+                    float(stt_cost), trial_secs, paid_secs)
             # Failed/cancelled that still hit OpenAI (spent seconds > 0, or
             # chunk_index set meaning at least one chunk was uploaded).
             hit_openai = (trial_secs + paid_secs) > 0 or (

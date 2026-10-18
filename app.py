@@ -74,6 +74,7 @@ from site_standards import init_site_standards
 import email_notify
 import lifecycle_emails
 import mail as mailer
+import stt as stt_mod
 import summary as summary_mod
 import trial_abuse
 import pricing_volume
@@ -3200,7 +3201,8 @@ def _cleanup_glob(pattern):
             pass
 
 
-def transcribe_audio(audio_file, task_id, openai_client, language=None):
+def transcribe_audio(audio_file, task_id, openai_client, language=None,
+                     key_source=None):
     """Transcribe audio using OpenAI Whisper API.
 
     Progress is written as checkpoints (chunk index + when that chunk started);
@@ -3338,8 +3340,12 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
             )
 
         upload_start = time.time()
+        # Provider for the whole job (per-chunk fallback is inside). An unknown
+        # key_source is treated as the user's own key: whisper-1, their bill.
+        stt_job = _stt_job_for_task(task_id, key_source, language)
         full_text, all_segments = _transcribe_chunks(
-            audio_chunks, remaining, task_id, openai_client, language, audio_duration
+            audio_chunks, remaining, task_id, openai_client, language, audio_duration,
+            stt_job=stt_job,
         )
     finally:
         for leftover in remaining:
@@ -3360,6 +3366,8 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
         segments_json=json.dumps(all_segments) if all_segments else None,
         audio_duration=audio_duration,
         transcription_time=elapsed,
+        stt_provider=stt_job.provider_label(),
+        stt_cost_usd=round(stt_job.cost_usd, 5),
         completed_at=datetime.now(timezone.utc),
     )
 
@@ -3415,8 +3423,312 @@ def _whisper_transcribe_chunk(openai_client, chunk_file, language, *,
     raise last_exc
 
 
+# ---------------------------------------------------------------------------
+# Speech-to-text provider routing (stt.py has the pure rules)
+# ---------------------------------------------------------------------------
+#
+# STT_PROVIDER=together sends platform-funded chunks (trial, and paid once
+# STT_TOGETHER_FUNDING=all) to Together AI whisper-large-v3. Every failure mode
+# found in the 2026-10-18 test falls back to whisper-1 for that chunk, on the
+# same platform OpenAI client the job would have used anyway:
+#   429/5xx/dropped connection -> retried, then whisper-1
+#   auto-detected language outside the rollout list (or wrong) -> whisper-1
+#   dropped 30 s window / "Teksting av ..." -> +-2 s window re-sent, then whisper-1
+# None of this changes what the user is charged: billing is still the measured
+# audio reserved before the first chunk. stt_cost_usd records what WE paid.
+
+TOGETHER_CHUNK_ATTEMPTS = 3
+TOGETHER_TIMEOUT_SECONDS = 300.0
+
+
+class SttJob:
+    """Per-job provider state: who transcribes, what it cost, what happened."""
+
+    def __init__(self, provider, reason, *, task_id=None, user_id=None,
+                 together_client=None):
+        self.provider = provider
+        self.reason = reason
+        self.task_id = task_id
+        self.user_id = user_id
+        self.together_client = together_client
+        self.pinned_language = None
+        self.cost_usd = 0.0
+        self.providers_used = set()
+        self.events = collections.Counter()
+
+    def charge(self, provider, seconds):
+        self.cost_usd += stt_mod.cost_usd(provider, seconds)
+        self.providers_used.add(provider)
+
+    def provider_label(self):
+        if len(self.providers_used) > 1:
+            return 'mixed'
+        if self.providers_used:
+            return next(iter(self.providers_used))
+        return self.provider
+
+
+def build_together_client():
+    """OpenAI SDK pointed at Together, or None without TOGETHER_API_KEY."""
+    key = stt_mod.together_api_key()
+    if not key:
+        return None
+    return OpenAI(
+        api_key=key,
+        base_url=os.getenv('TOGETHER_BASE_URL') or stt_mod.TOGETHER_BASE_URL,
+        timeout=httpx.Timeout(connect=30.0, read=TOGETHER_TIMEOUT_SECONDS,
+                              write=TOGETHER_TIMEOUT_SECONDS, pool=30.0),
+        max_retries=0,
+    )
+
+
+def _stt_job_for_task(task_id, key_source, language):
+    """Route a job from its key source, funding and language."""
+    task = db.session.get(TranscriptionTask, task_id)
+    trial_s = int(task.trial_seconds_charged or 0) if task is not None else 0
+    paid_s = int(task.paid_seconds_charged or 0) if task is not None else 0
+    user_id = task.user_id if task is not None else None
+    provider, reason = stt_mod.route_job(key_source, language, trial_s, paid_s)
+    client = build_together_client() if provider == stt_mod.PROVIDER_TOGETHER else None
+    if provider == stt_mod.PROVIDER_TOGETHER and client is None:
+        provider, reason = stt_mod.PROVIDER_OPENAI, 'no_together_key'
+    app.logger.info('stt route task=%s provider=%s reason=%s', task_id, provider, reason)
+    return SttJob(provider, reason, task_id=task_id, user_id=user_id,
+                  together_client=client)
+
+
+def _together_retryable(exc):
+    """429 (not out-of-credit), 5xx, timeouts and dropped connections."""
+    if isinstance(exc, (APITimeoutError, APIConnectionError)):
+        return True
+    status = getattr(exc, 'status_code', None)
+    if status == 429:
+        return getattr(exc, 'code', None) != 'insufficient_quota'
+    return status is not None and (status >= 500 or status == 408)
+
+
+def _together_transcribe(client, path, language, *, label=''):
+    """One Together call with bounded retries. Returns a whisper-1-shaped result.
+
+    Raises the last error when attempts run out or the error is not
+    retryable; the caller falls back to whisper-1.
+    """
+    import types
+    last_exc = None
+    for attempt in range(1, TOGETHER_CHUNK_ATTEMPTS + 1):
+        try:
+            with open(path, 'rb') as f:
+                kwargs = {
+                    'model': stt_mod.TOGETHER_MODEL,
+                    'file': f,
+                    'response_format': 'verbose_json',
+                    'timestamp_granularities': ['segment'],
+                }
+                if language:
+                    kwargs['language'] = language
+                r = client.audio.transcriptions.create(**kwargs)
+            segs = [types.SimpleNamespace(start=float(getattr(s, 'start', 0) or 0),
+                                          end=float(getattr(s, 'end', 0) or 0),
+                                          text=getattr(s, 'text', '') or '')
+                    for s in (getattr(r, 'segments', None) or [])]
+            return types.SimpleNamespace(text=getattr(r, 'text', '') or '',
+                                         segments=segs,
+                                         language=getattr(r, 'language', None))
+        except Exception as exc:  # noqa: BLE001 - classified below
+            last_exc = exc
+            # Never log the exception text: provider 401 bodies can echo keys.
+            app.logger.warning('Together %s attempt %s/%s failed (%s %s)', label,
+                               attempt, TOGETHER_CHUNK_ATTEMPTS, type(exc).__name__,
+                               getattr(exc, 'status_code', ''))
+            if not _together_retryable(exc) or attempt >= TOGETHER_CHUNK_ATTEMPTS:
+                break
+            time.sleep(min(2 ** (attempt - 1), 8))
+    raise last_exc
+
+
+def _cut_audio_window(src, offset, length, dst):
+    """Re-encode [offset, offset+length) of `src` into `dst` (prod format)."""
+    subprocess.run(
+        ['ffmpeg', '-v', 'error', '-y', '-ss', f'{offset:.2f}', '-t', f'{length:.2f}',
+         '-i', src, '-map_metadata', '-1', '-vn', '-ac', '1', '-ar', '16000',
+         '-b:a', f'{WHISPER_AUDIO_BITRATE_KBPS}k', dst],
+        check=True, capture_output=True, timeout=120)
+    return dst
+
+
+def _retry_segment_window(job, chunk_file, segs, i, language, label, chunk_seconds):
+    """Re-send the +-2 s window around segs[i]. Returns (retry_text, length) or None."""
+    offset, length = stt_mod.retry_window(segs[i], chunk_seconds)
+    window = f'{chunk_file}.retry{i}.mp3'
+    try:
+        _cut_audio_window(chunk_file, offset, length, window)
+        retry = _together_transcribe(job.together_client, window, language,
+                                     label=f'{label} window {i}')
+        job.charge(stt_mod.PROVIDER_TOGETHER, length)
+    except Exception:  # noqa: BLE001 - any failure means "not repaired"
+        return None
+    finally:
+        if os.path.exists(window):
+            os.remove(window)
+    return retry.text or '', length
+
+
+def _splice_retry(segs, result, i, retry_text):
+    prev_text = segs[i - 1]['text'] if i > 0 else ''
+    next_text = segs[i + 1]['text'] if i + 1 < len(segs) else ''
+    fixed = stt_mod.trim_overlap(prev_text, retry_text, next_text)
+    segs[i]['text'] = ' ' + fixed
+    result.segments[i].text = ' ' + fixed
+
+
+def _repair_dropped_windows(job, result, chunk_file, language, label, chunk_seconds):
+    """Re-send +-2 s windows around flagged segments. True when all repaired.
+
+    Hard flags (near-empty long window, invented credit line) must be repaired
+    or the chunk falls back to whisper-1. Soft flags (partial drop) are only
+    improved when the retry is clearly longer; they never cause a fallback.
+    """
+    segs = [{'start': s.start, 'end': s.end, 'text': s.text} for s in result.segments]
+    flagged = stt_mod.suspicious_segments(segs)
+    soft = stt_mod.soft_suspicious_segments(segs, exclude=set(flagged))
+    if not flagged and not soft:
+        return True
+    job.events['flagged_windows'] += len(flagged)
+    job.events['soft_flagged_windows'] += len(soft)
+    app.logger.info('stt %s: %d suspicious + %d slow segment(s) at %s', label,
+                    len(flagged), len(soft),
+                    ', '.join(f"{segs[i]['start']:.0f}-{segs[i]['end']:.0f}s"
+                              for i in (flagged + soft)[:8]))
+    if len(flagged) > stt_mod.MAX_RETRY_WINDOWS_PER_CHUNK:
+        return False
+    changed = False
+    for i in flagged:
+        got = _retry_segment_window(job, chunk_file, segs, i, language, label,
+                                    chunk_seconds)
+        if got is None:
+            return False
+        retry_text, length = got
+        if not stt_mod.retry_recovered(segs[i]['text'], retry_text, length):
+            app.logger.info('stt %s: retry of segment %d not recovered (%d words)',
+                            label, i, len(retry_text.split()))
+            return False
+        _splice_retry(segs, result, i, retry_text)
+        job.events['repaired_windows'] += 1
+        changed = True
+    for i in soft:
+        got = _retry_segment_window(job, chunk_file, segs, i, language, label,
+                                    chunk_seconds)
+        if got is None or not stt_mod.retry_improved(segs[i]['text'], got[0]):
+            continue
+        _splice_retry(segs, result, i, got[0])
+        job.events['soft_repaired_windows'] += 1
+        changed = True
+    if changed:
+        # A repaired hallucination can be empty (it was music): drop it. Together's
+        # segment texts do not always start with a space.
+        result.segments = [s for s in result.segments if s.text.strip()]
+        result.text = ' '.join(s.text.strip() for s in result.segments)
+    return True
+
+
+def _start_shadow_comparison(job, openai_client, chunk_file, language, together_text,
+                             chunk_seconds):
+    """Also run this chunk on whisper-1 in the background and log the diff."""
+    shadow_path = f'{chunk_file}.shadow.mp3'
+    try:
+        shutil.copyfile(chunk_file, shadow_path)
+    except OSError:
+        return None
+    job.charge(stt_mod.PROVIDER_OPENAI, chunk_seconds)
+    user_id, task_id = job.user_id, job.task_id
+
+    def run():
+        try:
+            ref = _whisper_transcribe_chunk(openai_client, shadow_path, language,
+                                            chunk_label='shadow')
+            ref_text = getattr(ref, 'text', '') or ''
+            props = {
+                'task_id': task_id,
+                'language': language or getattr(ref, 'language', None),
+                'similarity': stt_mod.similarity(ref_text, together_text),
+                'length_ratio': round(len(together_text.split())
+                                      / max(1, len(ref_text.split())), 3),
+                'together_words': len(together_text.split()),
+                'whisper_words': len(ref_text.split()),
+                'chunk_seconds': round(chunk_seconds, 1),
+            }
+            app.logger.info('stt shadow %s', props)
+            product_analytics.capture('stt_shadow_compared', user_id, props)
+        except Exception as exc:  # noqa: BLE001 - shadow must never hurt the job
+            app.logger.warning('stt shadow failed (%s)', type(exc).__name__)
+        finally:
+            if os.path.exists(shadow_path):
+                os.remove(shadow_path)
+
+    t = threading.Thread(target=run, daemon=True, name='stt-shadow')
+    t.start()
+    return t
+
+
+def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
+                             task_id=None, chunk_label=None, chunk_seconds=0.0):
+    """Transcribe one chunk on the job's provider, falling back to whisper-1."""
+    def whisper():
+        job.charge(stt_mod.PROVIDER_OPENAI, chunk_seconds)
+        return _whisper_transcribe_chunk(openai_client, chunk_file, language,
+                                         task_id=task_id, chunk_label=chunk_label)
+
+    if job.provider != stt_mod.PROVIDER_TOGETHER or job.together_client is None:
+        return whisper()
+
+    label = chunk_label or os.path.basename(chunk_file)
+    try:
+        result = _together_transcribe(job.together_client, chunk_file, language,
+                                      label=label)
+        job.charge(stt_mod.PROVIDER_TOGETHER, chunk_seconds)
+    except Exception as exc:  # noqa: BLE001 - classified in _together_transcribe
+        job.events['fallback_error'] += 1
+        app.logger.warning('stt fallback to whisper-1 for %s: %s %s', label,
+                           type(exc).__name__, getattr(exc, 'status_code', ''))
+        return whisper()
+
+    if not language:
+        detected = normalize_language_code(result.language)
+        if not stt_mod.language_allowed(detected):
+            # Not rolled out, or implausible (accented English read as Swahili):
+            # this chunk and the rest of the job go to whisper-1.
+            job.events['fallback_language'] += 1
+            app.logger.info('stt language %r not on Together; whisper-1 for the '
+                            'rest of task %s', detected, task_id)
+            job.provider = stt_mod.PROVIDER_OPENAI
+            return whisper()
+        job.pinned_language = detected
+        language = detected
+
+    if not _repair_dropped_windows(job, result, chunk_file, language, label,
+                                   chunk_seconds):
+        job.events['fallback_gap'] += 1
+        app.logger.info('stt dropped window not repaired; whisper-1 for %s', label)
+        return whisper()
+
+    if stt_mod.shadow_rate() > 0 and secrets.randbelow(10_000) < int(
+            stt_mod.shadow_rate() * 10_000):
+        job.events['shadow'] += 1
+        _start_shadow_comparison(job, openai_client, chunk_file, language,
+                                 result.text, chunk_seconds)
+    return result
+
+
+def _stt_analytics_props(task):
+    """Provider and real cost for transcript_completed (no text, no keys)."""
+    return {
+        'stt_provider': getattr(task, 'stt_provider', None),
+        'stt_cost_usd': getattr(task, 'stt_cost_usd', None),
+    }
+
+
 def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language,
-                       audio_duration):
+                       audio_duration, stt_job=None):
     """Send each chunk to Whisper, publishing partial text as it goes.
 
     Returns (full_text, segments). `remaining` is mutated as chunks are consumed
@@ -3429,6 +3741,8 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
     all_segments = []
     full_text = ""
     total = len(audio_chunks)
+    if stt_job is None:
+        stt_job = SttJob(stt_mod.PROVIDER_OPENAI, 'unrouted', task_id=task_id)
 
     for i, chunk_file in enumerate(audio_chunks):
         if is_shutting_down():
@@ -3464,11 +3778,17 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
         # Exhausted retries raise APITimeoutError / APIConnectionError; the
         # worker marks the task failed, fires transcript_failed (reason=network),
         # and refunds unspent trial minutes.
-        chunk_transcript = _whisper_transcribe_chunk(
-            openai_client, chunk_file, language,
+        chunk_seconds = audio_duration / total if total else 0
+        chunk_transcript = _transcribe_chunk_routed(
+            stt_job, openai_client, chunk_file, language,
             task_id=task_id,
             chunk_label=f'chunk {i + 1}/{total}',
+            chunk_seconds=chunk_seconds,
         )
+        # A language the first chunk pinned (auto-detect on Together) is sent
+        # with every later chunk, so the job cannot drift between languages.
+        if not language and stt_job.pinned_language:
+            language = stt_job.pinned_language
 
         full_text += chunk_transcript.text + " "
 
@@ -3494,6 +3814,8 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
             transcript_text=full_text.strip(),
             progress=_transcribe_checkpoint(i + 1, total),
             language=stored_lang,
+            stt_provider=stt_job.provider_label(),
+            stt_cost_usd=round(stt_job.cost_usd, 5),
         )
 
         os.remove(chunk_file)
@@ -7227,7 +7549,8 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
                 with app.app_context():
                     try:
                         download_audio(source_url, audio_filename, task_id)
-                        transcribe_audio(audio_filename, task_id, openai_client, language=language)
+                        transcribe_audio(audio_filename, task_id, openai_client,
+                                         language=language, key_source=key_source)
                     except TaskAbandoned:
                         # The sweeper wrote the error and settled the charge. Refund
                         # anyway: it is idempotent, and it is the backstop if anything
@@ -7345,6 +7668,7 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
                                 done_props.update(_funding_analytics_props(
                                     key_source, finished.trial_seconds_charged,
                                     finished.paid_seconds_charged))
+                                done_props.update(_stt_analytics_props(finished))
                                 meta = task_partial_meta(finished)
                                 if meta:
                                     n_min, m_min = partial_minutes_pair(meta)
@@ -7800,7 +8124,8 @@ def _spawn_worker_for_existing_task(task):
                 try:
                     download_audio(source_url, audio_filename, task_id)
                     transcribe_audio(
-                        audio_filename, task_id, openai_client, language=language)
+                        audio_filename, task_id, openai_client, language=language,
+                        key_source=key_source)
                 except TaskAbandoned:
                     abandoned = db.session.get(TranscriptionTask, task_id)
                     if abandoned:
@@ -7880,6 +8205,7 @@ def _spawn_worker_for_existing_task(task):
                             done_props.update(_funding_analytics_props(
                                 key_source, finished.trial_seconds_charged,
                                 finished.paid_seconds_charged))
+                            done_props.update(_stt_analytics_props(finished))
                         product_analytics.capture(
                             'transcript_completed', user_id, done_props)
                         if finished is not None:
@@ -9512,6 +9838,9 @@ def _segments_to_srt(segments_json, fallback_text=''):
         return None
     if not segments:
         return None
+    # Together returns segments of up to 30 s; split those into readable cues.
+    # whisper-1's ~3-5 s segments pass through unchanged.
+    segments = stt_mod.split_segments_for_srt(segments)
     lines = []
     for i, seg in enumerate(segments, 1):
         lines.append(f"{i}")
