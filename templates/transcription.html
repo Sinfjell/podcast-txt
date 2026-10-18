@@ -4,6 +4,7 @@
 {% block container_class %}container-wide{% endblock %}
 
 {% block content %}
+{% from "components/macros.html" import notice, button %}
 <!-- Episode header: gives the page something to show for the minutes it runs -->
 <div class="episode-hero tx-head">
     <img id="heroArtwork" alt="" style="display: none;">
@@ -169,6 +170,15 @@
         display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
     }
 </style>
+
+<!-- A Podskrift limit (episode too long / too large), not a crash: said as
+     information, with the way forward, instead of a red "Error". -->
+<div id="limitContainer" class="hidden" data-limit-notice>
+    {{ notice(too_long_message, variant='info') }}
+    <div class="text-center mt-2">
+        {{ button('Pick another episode', href=url_for('index')) }}
+    </div>
+</div>
 
 <div id="errorContainer" class="hidden">
     <div class="alert alert-error" style="flex-direction: column; align-items: flex-start;">
@@ -668,6 +678,7 @@
         el('statCost').textContent = d.estimated_cost ? '$' + d.estimated_cost.toFixed(3) : '—';
         el('statEta').textContent =
             (d.status === 'completed') ? 'Done'
+            : (d.status === 'error' || d.status === 'cancelled') ? '—'
             : (d.eta_seconds !== null && d.eta_seconds !== undefined) ? fmtDuration(d.eta_seconds)
             : 'Estimating…';
     }
@@ -778,6 +789,15 @@
                 show(el('downloadTxt'), true);
                 show(el('downloadGroup'), true);
             }
+            return;
+        }
+
+        if (d.status === 'error' && d.error_kind === 'limit') {
+            show(el('progressCard'), false);
+            hideTranscriptIfEmpty();
+            var limitBox = el('limitContainer');
+            limitBox.querySelector('.ds-notice__body').textContent = d.error;
+            show(limitBox, true);
             return;
         }
 

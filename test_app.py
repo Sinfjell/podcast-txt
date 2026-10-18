@@ -9289,8 +9289,9 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'pay-per-minute-launch-pricing'
-    entries = entries[1:]
+    assert entries[0]['id'] == 'long-episodes-up-to-six-hours'
+    assert entries[1]['id'] == 'pay-per-minute-launch-pricing'
+    entries = entries[2:]
     assert entries[0]['id'] == 'new-home-and-header'
     assert entries[1]['id'] == 'ai-what-you-can-ask'
     assert entries[2]['id'] == 'mcp-list-my-transcripts'
@@ -14223,8 +14224,9 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'pay-per-minute-launch-pricing'
-    entries = entries[1:]
+    assert entries[0]['id'] == 'long-episodes-up-to-six-hours'
+    assert entries[1]['id'] == 'pay-per-minute-launch-pricing'
+    entries = entries[2:]
     assert entries[0]['id'] == 'new-home-and-header'
     assert entries[1]['id'] == 'ai-what-you-can-ask'
     assert entries[2]['id'] == 'mcp-list-my-transcripts'
@@ -17950,3 +17952,396 @@ def test_admin_user_detail_shows_paid_not_credited(monkeypatch):
     assert '>Paid</span>' in body
     assert '>Refunded</span>' in body
     assert '>credited<' not in body
+
+
+# --------------------------------------------------------------------------
+# Long / large episodes (PODSKRIFT-15): stream past the byte cap, refuse on
+# measured length, explain limits instead of failing them.
+# --------------------------------------------------------------------------
+
+def _synth_mp3(path, seconds, bitrate='128k', channels=2):
+    import subprocess
+    subprocess.run(
+        ['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi',
+         '-i', f'sine=f=440:d={seconds}', '-ac', str(channels),
+         '-b:a', bitrate, str(path)],
+        check=True, capture_output=True)
+    return path
+
+
+class _ByteStreamResponse:
+    """A streamed 200 that serves `data` and records what was pulled."""
+
+    is_redirect = False
+    is_permanent_redirect = False
+    status_code = 200
+
+    def __init__(self, data, declare_length=True, declared=None):
+        self._data = data
+        self.headers = {}
+        if declare_length:
+            self.headers['content-length'] = str(
+                declared if declared is not None else len(data))
+        self.delivered = 0
+        self.iterated = False
+        self.closed = False
+
+    def raise_for_status(self):
+        pass
+
+    def iter_content(self, chunk_size=8192):
+        self.iterated = True
+        for i in range(0, len(self._data), chunk_size):
+            block = self._data[i:i + chunk_size]
+            self.delivered += len(block)
+            yield block
+
+    def close(self):
+        self.closed = True
+
+
+def _download_bytes(monkeypatch, tmp_path, response):
+    from unittest import mock
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda raw: True)
+    monkeypatch.setattr(A.requests.Session, 'get',
+                        lambda self, *a, **kw: response)
+    target = tmp_path / 'ep.mp3'
+    with mock.patch.object(A, '_update_task', return_value=True):
+        A.download_audio('https://example.com/ep.mp3', str(target), 'no-such-task')
+    return target
+
+
+@pytest.mark.parametrize('declare_length', [True, False])
+def test_a_source_over_the_byte_cap_is_streamed_not_refused(
+        monkeypatch, tmp_path, declare_length):
+    """The PODSKRIFT-15 regression: over MAX_AUDIO_BYTES used to fail the job.
+
+    Declared: switch to the streaming re-encode as soon as the size is known.
+    Undeclared: switch the moment the cap is crossed, replaying what is on disk.
+    Either way only a 16 kHz mono re-encode is left, and nothing else."""
+    # 192 kbps stereo, the shape of the large feeds that hit the old cap.
+    source = _synth_mp3(tmp_path / 'src.mp3', 60, bitrate='192k').read_bytes()
+    monkeypatch.setattr(A, 'MAX_AUDIO_BYTES', 200 * 1024)
+    resp = _ByteStreamResponse(source, declare_length=declare_length)
+
+    target = _download_bytes(monkeypatch, tmp_path, resp)
+
+    assert resp.delivered == len(source)
+    assert resp.closed
+    duration = A.probe_audio_duration(str(target))
+    assert duration is not None and abs(duration - 60) < 1.5
+    # Mono 16 kHz at the intermediate bitrate: a fraction of the source.
+    assert target.stat().st_size < len(source) / 2
+    import subprocess
+    probe = subprocess.run(
+        ['ffprobe', '-v', 'error', '-show_entries', 'stream=channels,sample_rate',
+         '-of', 'default=noprint_wrappers=1', str(target)],
+        capture_output=True, text=True, check=True).stdout
+    assert 'channels=1' in probe and 'sample_rate=16000' in probe
+    leftovers = sorted(p.name for p in tmp_path.iterdir()
+                       if p.name not in ('src.mp3', 'ep.mp3'))
+    assert leftovers == [], f'temp files left behind: {leftovers}'
+
+
+def test_a_small_source_is_still_saved_as_is(monkeypatch, tmp_path):
+    """Under the cap nothing changes: the bytes on disk are the source."""
+    source = _synth_mp3(tmp_path / 'src.mp3', 5).read_bytes()
+    target = _download_bytes(monkeypatch, tmp_path, _ByteStreamResponse(source))
+    assert target.read_bytes() == source
+
+
+def test_streaming_stops_pulling_at_the_length_limit(monkeypatch, tmp_path):
+    """ffmpeg stops at -t (limit + margin), and so does the download: an
+    over-long episode is not pulled to the end just to be refused."""
+    source = _synth_mp3(tmp_path / 'src.mp3', 240, bitrate='64k',
+                        channels=1).read_bytes()  # ~1.9 MB
+    monkeypatch.setattr(A, 'MAX_AUDIO_BYTES', 64 * 1024)
+    monkeypatch.setattr(A, 'MAX_EPISODE_SECONDS', 30)
+    monkeypatch.setattr(A, 'STREAM_LIMIT_MARGIN_SECONDS', 5)
+    resp = _ByteStreamResponse(source)
+
+    target = _download_bytes(monkeypatch, tmp_path, resp)
+
+    assert resp.delivered < len(source) * 0.6, 'kept downloading past the limit'
+    assert resp.closed
+    duration = A.probe_audio_duration(str(target))
+    # Over the limit, so transcribe_audio() can measure it and refuse.
+    assert duration > A.MAX_EPISODE_SECONDS
+    assert abs(duration - 35) < 1.5
+
+
+def test_a_declared_size_over_the_source_ceiling_is_refused_unread(
+        monkeypatch, tmp_path):
+    resp = _ByteStreamResponse(b'', declared=A.MAX_SOURCE_BYTES + 1)
+    with pytest.raises(A.SourceAudioUnavailable) as exc:
+        _download_bytes(monkeypatch, tmp_path, resp)
+    assert exc.value.reason == A.SourceAudioUnavailable.REASON_TOO_LARGE
+    assert not resp.iterated
+    assert resp.closed
+
+
+def test_an_undeclared_source_over_the_ceiling_is_refused_and_cleaned_up(
+        monkeypatch, tmp_path):
+    source = _synth_mp3(tmp_path / 'src.mp3', 60).read_bytes()
+    monkeypatch.setattr(A, 'MAX_AUDIO_BYTES', 100 * 1024)
+    monkeypatch.setattr(A, 'MAX_SOURCE_BYTES', 300 * 1024)
+    resp = _ByteStreamResponse(source, declare_length=False)
+    with pytest.raises(A.SourceAudioUnavailable) as exc:
+        _download_bytes(monkeypatch, tmp_path, resp)
+    assert exc.value.reason == A.SourceAudioUnavailable.REASON_TOO_LARGE
+    assert resp.delivered <= 300 * 1024 + 8192
+    assert resp.closed
+    leftovers = [p.name for p in tmp_path.iterdir() if 'stream' in p.name]
+    assert leftovers == []
+
+
+def _mp4_boxes(*boxes):
+    out = b''
+    for name, payload in boxes:
+        out += (8 + len(payload)).to_bytes(4, 'big') + name + payload
+    return out
+
+
+def test_mp4_layout_sniffing():
+    ftyp = (b'ftyp', b'isom\0\0\0\0isommp41')
+    assert A._mp4_needs_seeking(_mp4_boxes(ftyp, (b'mdat', b'\0' * 64), (b'moov', b'')))
+    assert not A._mp4_needs_seeking(_mp4_boxes(ftyp, (b'moov', b'\0' * 64), (b'mdat', b'')))
+    assert not A._mp4_needs_seeking(_mp4_boxes(ftyp, (b'free', b'\0' * 8), (b'moov', b'')))
+    assert not A._mp4_needs_seeking(b'ID3\x04\0\0\0\0\0\0' + b'\0' * 64)  # mp3
+    assert not A._mp4_needs_seeking(b'')
+
+
+def test_a_huge_mp4_with_its_index_at_the_end_is_refused_early(
+        monkeypatch, tmp_path):
+    """ffmpeg cannot read moov-at-end from a pipe; say so after the sniff
+    instead of streaming gigabytes into a certain failure."""
+    data = _mp4_boxes((b'ftyp', b'isom\0\0\0\0isommp41'),
+                      (b'mdat', b'\0' * (200 * 1024)))
+    monkeypatch.setattr(A, 'MAX_AUDIO_BYTES', 32 * 1024)
+    resp = _ByteStreamResponse(data)
+    with pytest.raises(A.SourceAudioUnavailable) as exc:
+        _download_bytes(monkeypatch, tmp_path, resp)
+    assert exc.value.reason == A.SourceAudioUnavailable.REASON_UNSTREAMABLE
+    assert resp.delivered < len(data)
+
+
+def test_a_preview_only_streams_what_it_will_send(trial_on):
+    """A free preview of a long episode stops pulling just past its reservation;
+    a full job keeps the whole length limit."""
+    from models import db, TranscriptionTask
+    uid = _make_user('stream-limit@test.com', limit=3600)
+    with A.app.app_context():
+        for tid in ('stream-partial', 'stream-full'):
+            old = db.session.get(TranscriptionTask, tid)
+            if old:
+                db.session.delete(old)
+        db.session.add(TranscriptionTask(
+            id='stream-partial', user_id=uid, episode_title='x',
+            status='downloading', trial_seconds_charged=3600,
+            paid_seconds_charged=0,
+            partial_meta=A.encode_partial_task_meta(3600, 4 * 3600)))
+        db.session.add(TranscriptionTask(
+            id='stream-full', user_id=uid, episode_title='x',
+            status='downloading', trial_seconds_charged=0,
+            paid_seconds_charged=4 * 3600))
+        db.session.commit()
+        assert A._stream_limit_seconds('stream-partial') == (
+            3600 + A.STREAM_LIMIT_MARGIN_SECONDS)
+        assert A._stream_limit_seconds('stream-full') == (
+            A.MAX_EPISODE_SECONDS + A.STREAM_LIMIT_MARGIN_SECONDS)
+
+
+def _run_job_measured_at(monkeypatch, tmp_path, uid, *, stated_min, measured_s,
+                         trimmed_to=None):
+    """Enqueue through the real worker with the audio's measured length faked.
+
+    Returns (payload, whisper_calls). Whisper is a recorder: the money
+    assertion is whether anything reached it."""
+    import shutil
+    import types
+    audio = _synth_mp3(tmp_path / 'tone.mp3', 3, channels=1)
+    state = {'trimmed': None}
+    whisper_calls = []
+
+    def probe(f):
+        return float(state['trimmed']) if state['trimmed'] else float(measured_s)
+
+    def fake_trim(path, seconds):
+        state['trimmed'] = int(seconds)
+        return path
+
+    monkeypatch.setattr(A, 'probe_audio_duration', probe)
+    monkeypatch.setattr(A, 'trim_audio_file', fake_trim)
+    monkeypatch.setattr(A, 'prepare_audio_for_whisper',
+                        lambda f, **kw: [str(audio)])
+    monkeypatch.setattr(A, '_transcribe_chunks',
+                        lambda *a, **kw: whisper_calls.append(a) or ('text', []))
+    monkeypatch.setattr(A, 'download_audio',
+                        lambda url, path, task_id: shutil.copy(str(audio), path))
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: target and target()))
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user, {'title': 'Long', 'audio_url': 'https://example.com/long.mp3',
+                   'duration_min': stated_min}, source='web')
+    assert status == 200, payload
+    return payload, whisper_calls, state
+
+
+def test_measured_over_the_limit_is_refused_before_whisper_and_refunded(
+        monkeypatch, tmp_path, trial_on, sentry_events, ph_events):
+    """The money path: the feed under-states the length (it is client-supplied),
+    the measured audio is over MAX_EPISODE_SECONDS. Nothing may reach Whisper,
+    the whole reservation comes back, and it is a limit, not a Sentry error."""
+    from models import db, TranscriptionTask
+    uid = _make_user('too-long-measured@test.com', limit=600, used=0)
+    _set_paid(uid, 10 * 3600)
+    payload, whisper_calls, _ = _run_job_measured_at(
+        monkeypatch, tmp_path, uid, stated_min=60,
+        measured_s=A.MAX_EPISODE_SECONDS + 600)
+
+    task = _wait_task_error_settled(
+        payload['task_id'], user_id=uid, expect_used=0, expect_paid=10 * 3600)
+    assert whisper_calls == [], 'an over-long episode reached Whisper'
+    assert task.status == 'error'
+    assert task.error_message == A.SourceAudioUnavailable._MESSAGES[
+        A.SourceAudioUnavailable.REASON_TOO_LONG]
+    assert 'Nothing was charged' in task.error_message
+    assert _used(uid) == 0
+    assert _paid(uid) == 10 * 3600
+    failed = [e for e in ph_events.events
+              if e['event'] == 'transcript_failed' and e['distinct_id'] == str(uid)]
+    assert [e['properties']['reason'] for e in failed] == [
+        'episode_too_long_to_process']
+    assert sentry_events == [], 'an expected limit fired the Sentry error alert'
+
+    A.app.config['TESTING'] = True
+    client = A.app.test_client()
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    status = client.get(f"/status/{payload['task_id']}").get_json()
+    assert status['error_kind'] == 'limit'
+    with A.app.app_context():
+        assert db.session.get(TranscriptionTask, payload['task_id']).trial_settled
+
+
+def test_measured_within_the_limit_is_charged_on_what_was_measured(
+        monkeypatch, tmp_path, trial_on):
+    """Control for the test above: a long episode under the limit goes through
+    and is billed on the measured length, not the feed's."""
+    from models import db, TranscriptionTask
+    uid = _make_user('long-ok@test.com', limit=600, used=600)
+    _set_paid(uid, 10 * 3600)
+    measured = 4 * 3600 + 4 * 60  # the PODSKRIFT-15 episode: 244 minutes
+    payload, whisper_calls, _ = _run_job_measured_at(
+        monkeypatch, tmp_path, uid, stated_min=200, measured_s=measured)
+    assert len(whisper_calls) == 1
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, payload['task_id'])
+        assert task.status == 'completed', task.error_message
+        assert (task.trial_seconds_charged or 0) + (
+            task.paid_seconds_charged or 0) == measured
+    assert _paid(uid) == 10 * 3600 - measured
+
+
+def test_a_free_preview_of_an_over_limit_episode_still_runs(
+        monkeypatch, tmp_path, trial_on):
+    """The preview is trimmed to its reservation before the length check, so a
+    trial user still gets their free minutes of a very long episode."""
+    from models import db, TranscriptionTask
+    uid = _make_user('preview-long@test.com', limit=3600, used=0)
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
+    payload, whisper_calls, state = _run_job_measured_at(
+        monkeypatch, tmp_path, uid, stated_min=300,
+        measured_s=A.MAX_EPISODE_SECONDS + 3600)
+    assert state['trimmed'] == 3600
+    assert len(whisper_calls) == 1
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, payload['task_id'])
+        assert task.status == 'completed', task.error_message
+        assert A.task_is_partial(task)
+        assert task.trial_seconds_charged == 3600
+    assert _used(uid) == 3600
+
+
+def test_a_stated_length_over_the_limit_is_refused_before_anything_is_reserved(
+        monkeypatch, trial_on, ph_events):
+    from models import db, TranscriptionTask
+    uid = _make_user('too-long-stated@test.com', limit=600, used=0)
+    _set_paid(uid, 10 * 3600)
+    with A.app.app_context():
+        before = db.session.query(TranscriptionTask).filter_by(user_id=uid).count()
+    over = A.MAX_EPISODE_SECONDS / 60 + 1
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/huge.mp3', 'episode_title': 'Huge',
+        'duration_min': str(over)})
+    assert resp.status_code == 422
+    body = resp.get_json()
+    assert body['too_long'] is True
+    assert body['reason'] == 'episode_too_long_to_process'
+    assert f'about {round(over)} minutes' in body['error']
+    assert 'up to 6 hours' in body['error']
+    assert 'charged' not in body['error']  # nothing started, nothing to reassure
+    assert _used(uid) == 0
+    assert _paid(uid) == 10 * 3600
+    with A.app.app_context():
+        after = db.session.query(TranscriptionTask).filter_by(user_id=uid).count()
+    assert after == before
+    # The refusal handed no capacity slot to a job that does not exist.
+    for _ in range(A.MAX_CONCURRENT_TRANSCRIPTIONS):
+        assert A._transcription_slots.acquire(blocking=False)
+    refused = [e for e in ph_events.events if e['event'] == 'transcript_refused']
+    assert refused and refused[0]['properties']['reason'] == 'episode_too_long_to_process'
+
+    # Exactly at the limit is allowed.
+    A._transcription_slots = __import__('threading').BoundedSemaphore(
+        A.MAX_CONCURRENT_TRANSCRIPTIONS)
+    ok = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/limit.mp3', 'episode_title': 'At limit',
+        'duration_min': str(A.MAX_EPISODE_SECONDS / 60)})
+    assert ok.status_code == 200, ok.get_json()
+
+
+def test_an_over_long_pick_is_explained_before_signup(trial_on):
+    """Paste-then-signup (how user 404 arrived): refuse before /register."""
+    A.app.config['TESTING'] = True
+    A.app.config['WTF_CSRF_ENABLED'] = False
+    client = A.app.test_client()
+    resp = client.post('/pending-transcription', data={
+        'audio_url': 'https://example.com/huge.mp3', 'episode_title': 'Huge',
+        'duration_min': '400'})
+    assert resp.status_code == 302
+    assert '/register' not in resp.headers['Location']
+    with client.session_transaction() as sess:
+        assert A.PENDING_TRANSCRIPTION_KEY not in sess
+        flashes = sess.get('_flashes') or []
+    assert any('about 400 minutes' in msg for _, msg in flashes)
+
+    ok = client.post('/pending-transcription', data={
+        'audio_url': 'https://example.com/fine.mp3', 'episode_title': 'Fine',
+        'duration_min': '244'})
+    assert ok.status_code == 302
+    assert '/register' in ok.headers['Location']
+
+
+def test_episode_rows_flag_over_long_episodes(trial_on):
+    with A.app.test_request_context('/'):
+        eps = A._annotate_episodes_for_trial([
+            {'duration_min': 244.0}, {'duration_min': 400.0}, {'duration_min': None}])
+    assert [e['too_long'] for e in eps] == [False, True, False]
+    assert eps[1]['needs_own_key'] is False  # a pack would not help
+
+
+def test_limit_messages_are_plain_and_carry_the_limit():
+    msgs = A.SourceAudioUnavailable._MESSAGES
+    for reason in A.SourceAudioUnavailable.LIMIT_REASONS:
+        assert 'Nothing was charged' in msgs[reason]
+        assert 'MB' not in msgs[reason]
+    assert A.format_episode_limit(6 * 3600) == '6 hours'
+    assert A.format_episode_limit(3600) == '1 hour'
+    assert A.format_episode_limit(90 * 60) == '90 minutes'

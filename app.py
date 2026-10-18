@@ -558,7 +558,84 @@ SOURCE_AUDIO_TRANSIENT_STATUSES = frozenset({500, 502, 503, 504})
 MAX_REDIRECTS = 20
 # The source ceiling. It is a term in the disk floor below, so raising it means
 # raising that too -- see the ## Invariants section in CLAUDE.md.
-MAX_AUDIO_BYTES = 500 * 1024 * 1024
+MAX_AUDIO_BYTES_CEILING = 500 * 1024 * 1024
+# Lowerable (never raisable) by env so staging can exercise the streaming path
+# below with an ordinary-sized long episode.
+MAX_AUDIO_BYTES = min(MAX_AUDIO_BYTES_CEILING,
+                      max(1, _env_int('MAX_AUDIO_MB', 500)) * 1024 * 1024)
+
+# Episodes whose source is larger than MAX_AUDIO_BYTES are no longer refused:
+# download_audio() pipes them through ffmpeg as they arrive and keeps only a
+# 16 kHz mono re-encode on disk, so what sits on the volume is bounded by
+# LENGTH, not by the source's bitrate. A four-hour 320 kbps episode is ~570 MB
+# of source but ~115 MB on disk. (PODSKRIFT-15: a new user's 244-minute
+# episode failed after 7 s on the old byte cap.)
+#
+# The real ceiling is therefore how long an episode may be. Clamped so the
+# streamed intermediate always fits inside MAX_AUDIO_BYTES -- the disk floor is
+# sized on that -- and so one prepare_audio_for_whisper() pass still finishes
+# inside FFMPEG_TIMEOUT_SECONDS.
+MAX_EPISODE_SECONDS = min(720, max(60, _env_int('MAX_EPISODE_MINUTES', 360))) * 60
+#: Bytes of SOURCE we are willing to pull through the streaming re-encode. Never
+#: stored, so this guards bandwidth and wall clock rather than disk.
+MAX_SOURCE_BYTES = max(MAX_AUDIO_BYTES, _env_int('MAX_SOURCE_MB', 4096) * 1024 * 1024)
+#: The streamed intermediate is re-encoded once more into Whisper parts, so it
+#: is kept above WHISPER_AUDIO_BITRATE_KBPS to limit generation loss.
+STREAM_INTERMEDIATE_BITRATE_KBPS = 64
+#: ffmpeg is told to stop this far past the limit it enforces, so "longer than
+#: the limit" is measurable rather than silently cut to fit.
+STREAM_LIMIT_MARGIN_SECONDS = 60
+#: Sniff this much of the source before switching to the streaming path.
+STREAM_SNIFF_BYTES = 64 * 1024
+#: Wall clock for one streamed pull. A slow CDN trickling gigabytes must not
+#: hold a transcription slot all night.
+STREAM_MAX_WALL_SECONDS = 60 * 60
+assert ((MAX_EPISODE_SECONDS + STREAM_LIMIT_MARGIN_SECONDS)
+        * STREAM_INTERMEDIATE_BITRATE_KBPS * 1000 / 8 < MAX_AUDIO_BYTES_CEILING), \
+    'the streamed intermediate of a maximum-length episode must fit the disk floor budget'
+
+
+def format_episode_limit(seconds=None):
+    """'6 hours' / '90 minutes' -- the length limit in words for user copy."""
+    seconds = MAX_EPISODE_SECONDS if seconds is None else int(seconds)
+    if seconds % 3600 == 0:
+        hours = seconds // 3600
+        return f'{hours} hour' + ('' if hours == 1 else 's')
+    return f'{seconds // 60} minutes'
+
+
+def episode_too_long_to_process(duration_min):
+    """True when a stated duration is over what Podskrift will transcribe.
+
+    The stated duration is client/feed supplied, so this may only ever be used
+    to REFUSE early (which costs nothing). download_audio() and
+    transcribe_audio() enforce the same limit on the audio we measured.
+    """
+    try:
+        minutes = float(duration_min)
+    except (TypeError, ValueError):
+        return False
+    return minutes * 60 > MAX_EPISODE_SECONDS
+
+
+def episode_too_long_message(duration_min=None, *, after_start=False):
+    """Friendly refusal copy for an episode over MAX_EPISODE_SECONDS.
+
+    `after_start` is the in-job wording: the job existed (and reserved
+    minutes) before we measured, so say plainly that nothing was charged.
+    """
+    limit = format_episode_limit()
+    charged = ' Nothing was charged.' if after_start else ''
+    try:
+        minutes = int(round(float(duration_min)))
+    except (TypeError, ValueError):
+        minutes = None
+    if minutes:
+        return (f'This episode is about {minutes} minutes long. Podskrift can '
+                f'transcribe episodes up to {limit}, so it can\'t take this '
+                f'one.{charged} Try a shorter episode.')
+    return (f'This episode is longer than {limit}, the most Podskrift can '
+            f'transcribe in one go.{charged} Try a shorter episode.')
 
 # How many transcriptions this PROCESS will run at once. A job in flight holds
 # its source plus the re-encoded parts, and re-encoding is the one CPU-hungry
@@ -1006,6 +1083,11 @@ class SourceAudioUnavailable(Exception):
 
     REASON_MISSING = 'source_audio_missing'
     REASON_FORBIDDEN = 'source_audio_forbidden'
+    # Limits rather than refusals, but the same kind of outcome: expected,
+    # explained to the user, refunded, and kept out of Sentry's error alerts.
+    REASON_TOO_LONG = 'episode_too_long_to_process'
+    REASON_TOO_LARGE = 'source_audio_too_large'
+    REASON_UNSTREAMABLE = 'source_audio_unstreamable'
 
     _MESSAGES = {
         REASON_MISSING: (
@@ -1016,7 +1098,22 @@ class SourceAudioUnavailable(Exception):
             "The podcast host blocked access to this episode's audio. "
             "Try another episode."
         ),
+        REASON_TOO_LONG: episode_too_long_message(after_start=True),
+        REASON_TOO_LARGE: (
+            f"This episode's file is over {MAX_SOURCE_BYTES // (1024 ** 3)} GB, "
+            "more than Podskrift can fetch. Nothing was charged. "
+            "Try another episode."
+        ),
+        REASON_UNSTREAMABLE: (
+            "This episode is a very large video file that can only be read "
+            "once it is fully downloaded, so Podskrift can't process it. "
+            "Nothing was charged. Try the show's audio-only feed, or another "
+            "episode."
+        ),
     }
+
+    #: Reasons that are limits of Podskrift, not of the podcast host.
+    LIMIT_REASONS = frozenset({REASON_TOO_LONG, REASON_TOO_LARGE, REASON_UNSTREAMABLE})
 
     def __init__(self, reason, status_code=None):
         if reason not in self._MESSAGES:
@@ -1024,6 +1121,10 @@ class SourceAudioUnavailable(Exception):
         super().__init__(self._MESSAGES[reason])
         self.reason = reason
         self.status_code = status_code
+
+
+_LIMIT_ERROR_MESSAGES = frozenset(
+    SourceAudioUnavailable._MESSAGES[r] for r in SourceAudioUnavailable.LIMIT_REASONS)
 
 
 class TaskAbandoned(Exception):
@@ -2561,42 +2662,111 @@ def download_audio(url, filename, task_id):
         )
 
     total_size = int(response.headers.get('content-length', 0) or 0)
+    if total_size > MAX_SOURCE_BYTES:
+        # Refused before a byte is pulled: a declared size is enough to know.
+        response.close()
+        raise SourceAudioUnavailable(SourceAudioUnavailable.REASON_TOO_LARGE)
     downloaded = 0
     last_db_update = 0.0
+    started_at = time.monotonic()
 
     # Report bytes even when the CDN omits content-length -- without this the bar
     # sat at 0% for the whole download on every feed that doesn't send the header.
     _update_task(task_id, bytes_downloaded=0, bytes_total=total_size)
 
+    # Two ways to land the audio, decided by size:
+    # - up to MAX_AUDIO_BYTES the source is written to disk as-is (unchanged);
+    # - past it, the source is piped through ffmpeg as it arrives and only a
+    #   16 kHz mono re-encode is kept (see MAX_EPISODE_SECONDS). The switch
+    #   happens as soon as a declared content-length says so, or the moment an
+    #   undeclared download crosses the cap -- the bytes already on disk are
+    #   replayed into ffmpeg first, so nothing is downloaded twice.
+    stream_out = f'{filename}.stream.mp3'
+    transcoder = None
+    finished = False
+    f = None
+
+    def _switch_to_streaming():
+        nonlocal transcoder, f
+        f.close()
+        f = None
+        with open(filename, 'rb') as src:
+            head = src.read(STREAM_SNIFF_BYTES)
+        if _mp4_needs_seeking(head):
+            raise SourceAudioUnavailable(
+                SourceAudioUnavailable.REASON_UNSTREAMABLE)
+        limit = _stream_limit_seconds(task_id)
+        app.logger.info(
+            'task %s: source over %s MB (declared %s bytes), streaming '
+            're-encode with a %ss limit', task_id,
+            MAX_AUDIO_BYTES // (1024 * 1024), total_size or 'no', limit)
+        transcoder = _StreamTranscoder(stream_out, limit)
+        with open(filename, 'rb') as src:
+            while True:
+                block = src.read(1024 * 1024)
+                if not block or not transcoder.feed(block):
+                    break
+        os.remove(filename)
+
     # A streamed response holds its connection open, so every exit from this
     # loop has to close it -- the size cap, a cancellation, and a write failing
     # on a full disk, which is exactly the case the capacity limits exist for.
     try:
-        with open(filename, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if is_shutting_down():
-                    raise ServerRestart(auto_resumed=True)
-                if not chunk:
-                    continue
+        f = open(filename, 'wb')
+        for chunk in response.iter_content(chunk_size=8192):
+            if is_shutting_down():
+                raise ServerRestart(auto_resumed=True)
+            if not chunk:
+                continue
+            downloaded += len(chunk)
+            if downloaded > MAX_SOURCE_BYTES:
+                raise SourceAudioUnavailable(
+                    SourceAudioUnavailable.REASON_TOO_LARGE)
+            if transcoder is None:
                 f.write(chunk)
-                downloaded += len(chunk)
-                if downloaded > MAX_AUDIO_BYTES:
-                    raise Exception(
-                        f'This episode is larger than the '
-                        f'{MAX_AUDIO_BYTES // (1024 * 1024)} MB limit Podskrift will download.'
-                    )
-                now = time.time()
-                if now - last_db_update >= 1:
-                    # The return value is the cancel signal: _update_task refuses
-                    # to write to a task that has reached a terminal status.
-                    # Without this, Stop during a download let the whole episode
-                    # download and then re-encode while the UI said it had
-                    # stopped -- holding a concurrency slot and disk for nothing.
-                    if not _update_task(task_id, bytes_downloaded=downloaded):
-                        raise TaskAbandoned('Task was cancelled during download.')
-                    last_db_update = now
+                if (downloaded > MAX_AUDIO_BYTES
+                        or (total_size > MAX_AUDIO_BYTES
+                            and downloaded >= STREAM_SNIFF_BYTES)):
+                    _switch_to_streaming()
+            elif not transcoder.feed(chunk):
+                # ffmpeg stopped reading: it reached its -t limit. The rest
+                # of the episode is not needed (preview) or is over the
+                # length limit, which transcribe_audio() measures and refuses.
+                break
+            if transcoder is not None and transcoder.stopped_early:
+                break
+            now = time.time()
+            if now - last_db_update >= 1:
+                # The return value is the cancel signal: _update_task refuses
+                # to write to a task that has reached a terminal status.
+                # Without this, Stop during a download let the whole episode
+                # download and then re-encode while the UI said it had
+                # stopped -- holding a concurrency slot and disk for nothing.
+                if not _update_task(task_id, bytes_downloaded=downloaded):
+                    raise TaskAbandoned('Task was cancelled during download.')
+                last_db_update = now
+            if (transcoder is not None
+                    and time.monotonic() - started_at > STREAM_MAX_WALL_SECONDS):
+                raise Exception(
+                    'This episode took too long to download. Please try again later.')
+        if f is not None:
+            f.close()
+            f = None
+        if transcoder is not None:
+            transcoder.finish()
+            os.replace(stream_out, filename)
+        finished = True
     finally:
         response.close()
+        if f is not None:
+            f.close()
+        if transcoder is not None:
+            transcoder.kill()
+        if not finished and os.path.exists(stream_out):
+            try:
+                os.remove(stream_out)
+            except OSError:
+                pass
 
     _update_task(
         task_id,
@@ -2604,6 +2774,140 @@ def download_audio(url, filename, task_id):
         bytes_total=total_size or downloaded,
     )
     return filename
+
+
+def _stream_limit_seconds(task_id):
+    """How much audio the streaming re-encode should keep, in seconds.
+
+    The length limit plus a margin, so an over-long episode is measured as
+    over-long instead of being cut to fit. A free preview only ever sends its
+    reserved minutes to Whisper, so it stops pulling just past those -- a
+    trial user's 60-minute preview of a four-hour episode no longer downloads
+    and re-encodes all four hours. Billing is unaffected: transcribe_audio()
+    still measures the file and trims to the reservation.
+    """
+    limit = MAX_EPISODE_SECONDS + STREAM_LIMIT_MARGIN_SECONDS
+    try:
+        task = db.session.get(TranscriptionTask, task_id)
+    except Exception:  # noqa: BLE001 - outside an app context (tests, tools)
+        task = None
+    if task is not None and task_partial_meta(task):
+        reserved = (int(task.trial_seconds_charged or 0)
+                    + int(task.paid_seconds_charged or 0))
+        if reserved > 0:
+            limit = min(limit, reserved + STREAM_LIMIT_MARGIN_SECONDS)
+    return int(limit)
+
+
+def _mp4_needs_seeking(head):
+    """True for an MP4/M4A whose index (moov) comes after the media (mdat).
+
+    ffmpeg cannot read such a file from a pipe -- it needs the index first --
+    so streaming it would download gigabytes and then fail. Faststart files
+    (moov first, as most podcast hosts publish) stream fine. Anything that is
+    not an ISO-BMFF file, or whose layout cannot be told from `head`, is let
+    through; ffmpeg's own error is the backstop.
+    """
+    if len(head) < 8 or head[4:8] != b'ftyp':
+        return False
+    offset = 0
+    while offset + 8 <= len(head):
+        size = int.from_bytes(head[offset:offset + 4], 'big')
+        box = head[offset + 4:offset + 8]
+        if box == b'moov':
+            return False
+        if box == b'mdat':
+            return True
+        if size == 1:
+            if offset + 16 > len(head):
+                return False
+            size = int.from_bytes(head[offset + 8:offset + 16], 'big')
+        if size < 8:
+            return False
+        offset += size
+    return False
+
+
+class _StreamTranscoder:
+    """ffmpeg reading the source on stdin, writing 16 kHz mono MP3 to disk.
+
+    Streams by construction (the Capacity invariant): ffmpeg holds a few
+    frames, never the episode. `-t` bounds the output, so disk use is bounded
+    by length whatever the source's bitrate. stderr goes to a temp file, not a
+    pipe, so a chatty ffmpeg cannot deadlock against our writes.
+    """
+
+    def __init__(self, out_path, limit_seconds):
+        if shutil.which('ffmpeg') is None:
+            raise _ffmpeg_error(
+                'Audio processing is unavailable on the server right now. '
+                'Please try again later, or contact support if it persists.')
+        import tempfile
+        self.out_path = out_path
+        self.limit_seconds = int(limit_seconds)
+        self.stopped_early = False
+        self._stderr = tempfile.TemporaryFile()
+        self.proc = subprocess.Popen(
+            ['nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y',
+             '-i', 'pipe:0', '-map_metadata', '-1',
+             '-vn', '-ac', '1', '-ar', str(WHISPER_SAMPLE_RATE),
+             '-b:a', f'{STREAM_INTERMEDIATE_BITRATE_KBPS}k', '-threads', '1',
+             '-t', str(self.limit_seconds), '-f', 'mp3', out_path],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=self._stderr,
+        )
+
+    def feed(self, data):
+        """Hand ffmpeg more source. False once it has stopped reading."""
+        if self.stopped_early:
+            return False
+        try:
+            self.proc.stdin.write(data)
+            return True
+        except (BrokenPipeError, ValueError, OSError):
+            self.stopped_early = True
+            return False
+
+    def _read_stderr(self):
+        try:
+            self._stderr.seek(0)
+            return self._stderr.read()[-8000:]
+        except (OSError, ValueError):
+            return b''
+
+    def finish(self):
+        """Close stdin and wait. Raises on an ffmpeg failure."""
+        try:
+            self.proc.stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+        try:
+            returncode = self.proc.wait(timeout=FFMPEG_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            self.kill()
+            if is_shutting_down():
+                raise ServerRestart(auto_resumed=True)
+            raise _ffmpeg_error(
+                'This episode took too long to process. Please try a shorter one.')
+        if (returncode != 0 or not os.path.exists(self.out_path)
+                or os.path.getsize(self.out_path) < MIN_PART_BYTES):
+            raise _ffmpeg_error(
+                'This audio file could not be processed. It may be corrupt or in an '
+                'unsupported format.', self._read_stderr(), returncode=returncode)
+
+    def kill(self):
+        """Idempotent: stop ffmpeg if it is still running, release the temp file."""
+        try:
+            if self.proc.poll() is None:
+                self.proc.kill()
+                self.proc.wait(timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        for stream in (self.proc.stdin, self._stderr):
+            try:
+                stream.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
 
 
 def probe_audio_duration(audio_file):
@@ -2943,6 +3247,14 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None):
             measured_duration if measured_duration is not None
             else float(reserved_seconds)
         )
+
+    # The length limit, on the audio we measured (the feed's claim was only
+    # checked at enqueue, and only to refuse early). Raised before reconcile
+    # so nothing is re-reserved for an episode we will not transcribe; the
+    # failure path refunds the enqueue reservation in full, because no chunk
+    # has been sent. A free preview was trimmed above, so it never trips this.
+    if billable_duration > MAX_EPISODE_SECONDS:
+        raise SourceAudioUnavailable(SourceAudioUnavailable.REASON_TOO_LONG)
 
     # Last point at which refusing is still free: everything below this line
     # bills OpenAI. May return 'trim' for unknown-duration overruns that we
@@ -4361,6 +4673,15 @@ def pending_transcription():
     err = _stash_pending_from_request()
     if err:
         flash(err, 'error')
+        return redirect(url_for('index'))
+
+    # Before signup, not after: asking someone to make an account for an
+    # episode we will then refuse is the worst version of this message.
+    stashed_duration = session[PENDING_TRANSCRIPTION_KEY].get('duration_min')
+    if episode_too_long_to_process(stashed_duration):
+        session.pop(PENDING_TRANSCRIPTION_KEY, None)
+        session.modified = True
+        flash(episode_too_long_message(stashed_duration), 'info')
         return redirect(url_for('index'))
 
     if current_user.is_authenticated:
@@ -6239,7 +6560,8 @@ def _annotate_episodes_for_trial(episodes, rss_url=None):
     remaining = trial_badge_remaining_minutes()
     paid = trial_badge_paid_minutes()
     for ep in episodes:
-        ep['needs_own_key'] = episode_needs_own_key(
+        ep['too_long'] = episode_too_long_to_process(ep.get('duration_min'))
+        ep['needs_own_key'] = (not ep['too_long']) and episode_needs_own_key(
             ep.get('duration_min'), remaining, paid_minutes=paid)
     if not (VOLUME_PRICING_ENABLED and stripe_checkout_enabled()
             and current_user.is_authenticated
@@ -6258,6 +6580,8 @@ def _annotate_episodes_for_trial(episodes, rss_url=None):
         }
     for ep in episodes:
         duration = ep.get('duration_min')
+        if ep.get('too_long'):
+            continue
         if ep.get('audio_url') and ep['audio_url'] in done:
             ep['buy_label'], ep['buy_variant'] = 'In your history', 'muted'
         elif duration and math.ceil(float(duration)) <= balance:
@@ -6531,6 +6855,21 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
         'podcast_name': podcast_name,
         'nth_transcript': nth_transcript,
     }
+
+    # Over the length limit by the feed's own account: refuse now, before a
+    # slot, a reservation or a download. Only ever a refusal -- the stated
+    # duration is client-supplied, so the measured check in transcribe_audio()
+    # is what actually holds. Not an error: no Sentry, no failed job.
+    if episode_too_long_to_process(duration_min):
+        app.logger.info('refusing transcription: stated %.0f min is over the '
+                        '%s limit', duration_min, format_episode_limit())
+        product_analytics.capture('transcript_refused', user_id, {
+            **ph_props, 'reason': SourceAudioUnavailable.REASON_TOO_LONG})
+        return {
+            'error': episode_too_long_message(duration_min),
+            'reason': SourceAudioUnavailable.REASON_TOO_LONG,
+            'too_long': True,
+        }, 422
 
     # Admission control, before anything is reserved or written, so a refusal
     # has nothing to unwind. This box is shared with 50+ other services, so
@@ -7561,6 +7900,9 @@ def get_status(task_id):
     elif task.status == 'error':
         err = task.error_message or 'Unknown error'
         result['error'] = err
+        if err in _LIMIT_ERROR_MESSAGES:
+            # A limit, not a crash: the result page words it that way.
+            result['error_kind'] = 'limit'
         own_key_pack = (
             OWN_KEY_PACK_OFFER.lower() in err.lower()
             or 'free or paid minutes' in err.lower()
@@ -9670,6 +10012,9 @@ def inject_trial_badge():
         'trial_max_episode_min': (
             TRIAL_MAX_EPISODE_SECONDS // 60 if TRIAL_MAX_EPISODE_SECONDS else None
         ),
+        'max_episode_min': MAX_EPISODE_SECONDS // 60,
+        'max_episode_label': format_episode_limit(),
+        'too_long_message': episode_too_long_message(),
         'whisper_cost_per_minute': WHISPER_COST_PER_MINUTE,
         'openai_hourly_cost': f'{openai_whisper_cost_usd(60):.2f}',
         'openai_90min_cost': f'{openai_whisper_cost_usd(90):.2f}',
