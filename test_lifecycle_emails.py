@@ -381,6 +381,125 @@ def test_mailgun_suppressed_address_is_skipped_without_claim(trial_on, stripe_on
     assert _sent_rows(uid) == []
 
 
+# --- Suppression lookup: key without read access (401/403) -------------------
+
+@pytest.mark.parametrize('codes,expected', [
+    ((404, 404, 404), mailer.SUPPRESSION_CLEAR),
+    ((200,), mailer.SUPPRESSION_SUPPRESSED),
+    ((404, 200), mailer.SUPPRESSION_SUPPRESSED),
+    ((401,), mailer.SUPPRESSION_NO_ACCESS),
+    ((403,), mailer.SUPPRESSION_NO_ACCESS),
+    ((404, 401), mailer.SUPPRESSION_NO_ACCESS),
+    ((500,), mailer.SUPPRESSION_UNKNOWN),
+    ((503,), mailer.SUPPRESSION_UNKNOWN),
+    ((429,), mailer.SUPPRESSION_UNKNOWN),
+    ((400,), mailer.SUPPRESSION_UNKNOWN),
+])
+def test_suppression_status_codes(monkeypatch, codes, expected):
+    _enable(monkeypatch)
+    with mock.patch.object(mailer.requests, 'get',
+                           side_effect=[_ok(c) for c in codes]):
+        assert mailer.suppression_status('a@gmail.com') == expected
+
+
+def test_suppression_status_timeout_is_unknown(monkeypatch):
+    _enable(monkeypatch)
+    with mock.patch.object(mailer.requests, 'get',
+                           side_effect=mailer.requests.Timeout()):
+        assert mailer.suppression_status('a@gmail.com') == mailer.SUPPRESSION_UNKNOWN
+
+
+def test_suppression_no_access_is_not_logged_per_address(monkeypatch, caplog):
+    _enable(monkeypatch)
+    with caplog.at_level('WARNING', logger='mail'), \
+            mock.patch.object(mailer.requests, 'get', return_value=_ok(401)):
+        for _ in range(3):
+            mailer.suppression_status('a@gmail.com')
+    assert [r for r in caplog.records if r.name == 'mail'] == []
+
+
+def _two_due_users():
+    a = _make_user(f'na-a-{uuid.uuid4().hex[:6]}@gmail.com', limit=3600, used=3600)
+    b = _make_user(f'na-b-{uuid.uuid4().hex[:6]}@gmail.com', limit=3600, used=3600)
+    _partial_task(a)
+    _partial_task(b)
+    return a, b
+
+
+@pytest.mark.parametrize('code', [401, 403])
+def test_sweep_sends_when_suppression_lists_not_readable(
+        trial_on, stripe_on, ph_events, monkeypatch, caplog, code):
+    _enable(monkeypatch)
+    a, b = _two_due_users()
+    with caplog.at_level('WARNING'), \
+            mock.patch.object(mailer.requests, 'get', return_value=_ok(code)), \
+            mock.patch.object(mailer.requests, 'post', return_value=_ok()) as post:
+        with A.app.app_context():
+            first = L.sweep(only_user_ids=[a, b])
+            second = L.sweep(only_user_ids=[a, b])
+    assert first['sent'] == {L.TRIAL_ENDED_1H: 2}, first
+    assert first['outcomes'] == {'sent': 2}
+    assert first['notes'] == [L.NOTE_SUPPRESSION_NO_ACCESS]
+    assert second['sent'] == {}
+    assert post.call_count == 2
+    assert _sent_rows(a) == [f'lifecycle:trial_ended_1h:{a}']
+    assert _sent_rows(b) == [f'lifecycle:trial_ended_1h:{b}']
+    # One warning per sweep (the second sweep never reaches the lookup), not
+    # one per user, and nothing from mail.py's per-address logging.
+    warnings = [r for r in caplog.records if r.levelname == 'WARNING'
+                and 'suppression' in r.getMessage()]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    assert warnings[0].name == 'lifecycle_emails'
+
+
+@pytest.mark.parametrize('get_kwargs', [
+    {'return_value': _ok(500)},
+    {'return_value': _ok(502)},
+    {'side_effect': mailer.requests.Timeout()},
+    {'side_effect': mailer.requests.ConnectionError()},
+])
+def test_sweep_still_skips_on_timeout_and_5xx(trial_on, stripe_on, monkeypatch, get_kwargs):
+    _enable(monkeypatch)
+    a, b = _two_due_users()
+    with mock.patch.object(mailer.requests, 'get', **get_kwargs), \
+            mock.patch.object(mailer.requests, 'post') as post:
+        with A.app.app_context():
+            res = L.sweep(only_user_ids=[a, b])
+    post.assert_not_called()
+    assert res['outcomes'] == {'skipped_unknown': 2}
+    assert res['sent'] == {}
+    assert 'notes' not in res
+    assert _sent_rows(a) == [] and _sent_rows(b) == []
+
+
+def test_sweep_clear_lists_add_no_note(trial_on, stripe_on, monkeypatch, caplog):
+    _enable(monkeypatch)
+    a, _b = _two_due_users()
+    with caplog.at_level('WARNING'), \
+            mock.patch.object(mailer.requests, 'get', return_value=_ok(404)), \
+            mock.patch.object(mailer.requests, 'post', return_value=_ok()):
+        with A.app.app_context():
+            res = L.sweep(only_user_ids=[a])
+    assert res['sent'] == {L.TRIAL_ENDED_1H: 1}
+    assert 'notes' not in res
+    assert not [r for r in caplog.records if 'suppression' in r.getMessage()]
+
+
+def test_send_one_without_notes_still_sends_and_warns(trial_on, stripe_on, monkeypatch, caplog):
+    from models import User
+    _enable(monkeypatch)
+    a, _b = _two_due_users()
+    with caplog.at_level('WARNING'), \
+            mock.patch.object(mailer.requests, 'get', return_value=_ok(401)), \
+            mock.patch.object(mailer.requests, 'post', return_value=_ok()) as post:
+        with A.app.app_context():
+            out = L.send_one(L.TRIAL_ENDED_1H, A.db.session.get(User, a),
+                             public_base='https://podskrift.com',
+                             secret_key=A.app.secret_key)
+    assert out == 'sent' and post.call_count == 1
+    assert len([r for r in caplog.records if 'suppression' in r.getMessage()]) == 1
+
+
 def test_failed_send_releases_the_claim(trial_on, stripe_on, monkeypatch):
     _enable(monkeypatch)
     uid = _make_user(f'fail-{uuid.uuid4().hex[:6]}@gmail.com', limit=3600, used=3600)
