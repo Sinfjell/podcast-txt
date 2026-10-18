@@ -72,6 +72,7 @@ from observability import init_sentry, report_stale_task, report_task_failure
 import analytics as product_analytics
 from site_standards import init_site_standards
 import email_notify
+import lifecycle_emails
 import mail as mailer
 import summary as summary_mod
 import trial_abuse
@@ -5290,6 +5291,9 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
     payment_intent = _session_payment_intent_id(d)
     location = (metadata.get('location') or metadata.get('source') or '')[:64] or None
     ph_sid = (metadata.get('ph_sid') or '')[:128] or None
+    email_campaign = metadata.get('email_campaign') or None
+    if email_campaign not in lifecycle_emails.CAMPAIGNS:
+        email_campaign = None
 
     prior_credited = CreditPurchase.query.filter_by(
         user_id=user_id, status='credited').count()
@@ -5310,6 +5314,7 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
         pricing_version=(
             (metadata.get('pricing_version') or '')[:16] or (
                 'legacy_v0' if metadata.get('pack') == CREDIT_PACK_SKU else None)),
+        email_campaign=email_campaign,
         status='credited',
     )
     db.session.add(purchase)
@@ -5370,6 +5375,7 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
             else 'fixed_pack'),
         'pricing_version': metadata.get('pricing_version') or None,
         'is_first_purchase': prior_credited == 0,
+        'email_campaign': email_campaign,
         'revenue': (amount_total_cents or amount_for_legacy or 0) / 100.0,
         '$set': person_set,
     }
@@ -5670,6 +5676,30 @@ def settings():
     )
 
 
+def _checkout_email_campaign():
+    """Lifecycle campaign to credit this checkout to, or None.
+
+    Only from a signed email click stashed on this session in the last
+    week (lifecycle_emails.SESSION_CAMPAIGN_KEY), for the same user.
+    """
+    stash = session.get(lifecycle_emails.SESSION_CAMPAIGN_KEY)
+    if not isinstance(stash, dict):
+        return None
+    campaign = stash.get('c')
+    try:
+        at = float(stash.get('at') or 0)
+        uid = int(stash.get('u') or 0)
+    except (TypeError, ValueError):
+        return None
+    if campaign not in lifecycle_emails.CAMPAIGNS:
+        return None
+    if uid != current_user.id:
+        return None
+    if time.time() - at > lifecycle_emails.CLICK_ATTRIBUTION_SECONDS:
+        return None
+    return campaign
+
+
 @app.route('/billing/checkout', methods=['POST'])
 @login_required
 def billing_checkout():
@@ -5796,6 +5826,9 @@ def billing_checkout():
         meta['pricing_version'] = pricing_volume.CURRENT_PRICING_VERSION
     if ph_sid:
         meta['ph_sid'] = ph_sid
+    email_campaign = _checkout_email_campaign()
+    if email_campaign:
+        meta['email_campaign'] = email_campaign
     if return_to:
         # Stripe metadata values are short strings; keep a relative path only.
         meta['return_to'] = return_to[:500]
@@ -5885,6 +5918,7 @@ def billing_checkout():
         'paid_remaining_min': paid_remaining_min,
         'expires_hours': CHECKOUT_EXPIRES_HOURS,
         'recovery_enabled': bool(CHECKOUT_RECOVERY_ENABLED),
+        'email_campaign': email_campaign,
     }
     started_props.update(trial_variant_props(current_user))
     if ph_sid:
@@ -6207,6 +6241,109 @@ def _finalize_global_unsubscribe(user):
 def _is_rfc8058_one_click_unsubscribe() -> bool:
     """True for List-Unsubscribe-Post bodies (RFC 8058), not the confirm form."""
     return (request.form.get('List-Unsubscribe') or '').strip() == 'One-Click'
+
+
+@app.route('/e/<token>')
+def lifecycle_email_click(token):
+    """Signed lifecycle-email link: record the click, then land on the offer.
+
+    The token names the user, campaign and action; it never logs anyone in.
+    A signed-out visitor goes through /login and comes back here. Checkout is
+    a POST with CSRF, so the "checkout" actions render a one-button page that
+    submits itself to /billing/checkout (episode fields included, so the
+    episode starts on its own once paid).
+    """
+    data = lifecycle_emails.parse_click_token(app.secret_key, token)
+    if data is None:
+        return redirect(url_for('index'))
+    uid, campaign, action = data['u'], data['c'], data['a']
+    # The login round trip comes back with r=1; count the click once.
+    if request.args.get('r') != '1':
+        product_analytics.capture('lifecycle_email_clicked', uid, {
+            'campaign': campaign,
+            'action': action,
+            'signed_in': bool(current_user.is_authenticated),
+        })
+    if not current_user.is_authenticated:
+        back = request.full_path if request.query_string else request.path
+        sep = '&' if '?' in back else '?'
+        return redirect(url_for('login', next=f'{back}{sep}r=1'))
+    if current_user.id != uid:
+        # Someone else's link (forwarded mail): no checkout in their name.
+        return redirect(url_for('index'))
+    session[lifecycle_emails.SESSION_CAMPAIGN_KEY] = {
+        'c': campaign, 'u': uid, 'at': time.time()}
+    session.modified = True
+
+    task = None
+    if data.get('t'):
+        task = TranscriptionTask.query.filter_by(
+            id=data['t'], user_id=current_user.id).first()
+    own_key = bool(getattr(current_user, 'openai_api_key', None))
+    source = f'email_{campaign}'[:64]
+
+    if action == lifecycle_emails.ACTION_FINISH and task is not None:
+        partial = task_partial_meta(task)
+        trial_left, paid_left = _platform_remaining_seconds(current_user.id)
+        offer = None
+        m_min = None
+        if partial and not own_key and stripe_checkout_enabled():
+            _n, m_min = partial_minutes_pair(partial)
+            offer = episode_offer(m_min, (trial_left + paid_left) // 60)
+        if offer is None or not task.source_audio_url:
+            # Already covered (bought since), own key, or no price: the
+            # result page has the right button for whatever is true now.
+            return redirect(url_for('transcription_page', task_id=task.id))
+        fields = {
+            'source': source,
+            'minutes': offer['minutes'],
+            'price_source': 'episode',
+            'audio_url': task.source_audio_url,
+            'rss_url': task.rss_url or '',
+            'episode_title': task.episode_title or 'Episode',
+            'podcast_name': task.podcast_name or '',
+            'artwork': task.artwork_url or '',
+            'published': task.episode_published or '',
+            'duration_min': m_min,
+            'language': normalize_language_code(task.language) or '',
+            'return_to': url_for('transcription_page', task_id=task.id),
+        }
+        return render_template(
+            'email_go.html',
+            heading=f'Finish \u201c{task.episode_title or "this episode"}\u201d',
+            lede=f'{m_min} min for {offer["price"]}. Taking you to checkout\u2026',
+            button_label=f'Continue to checkout ({offer["price"]})',
+            action_url=url_for('billing_checkout'),
+            fields=fields,
+        )
+    if action == lifecycle_emails.ACTION_PACK and stripe_checkout_enabled() and not own_key:
+        return render_template(
+            'email_go.html',
+            heading=f'{CREDIT_PACK_MINUTES} minutes for {DEFAULT_PACK_PRICE}',
+            lede='One-time, minutes never expire. Taking you to checkout\u2026',
+            button_label=f'Continue to checkout ({DEFAULT_PACK_PRICE})',
+            action_url=url_for('billing_checkout'),
+            fields={'source': source, 'return_to': url_for('index')},
+        )
+    if action == lifecycle_emails.ACTION_SHOW and task is not None and task.rss_url:
+        return render_template(
+            'email_go.html',
+            heading=f'Episodes of {task.podcast_name or "this show"}',
+            lede='Loading the episode list\u2026',
+            button_label='Show episodes',
+            action_url=url_for('parse_rss'),
+            fields={'rss_url': task.rss_url},
+        )
+    if action == lifecycle_emails.ACTION_EPISODE and isinstance(data.get('e'), dict):
+        ep = data['e']
+        if ep.get('audio_url'):
+            return redirect(url_for(
+                'go_transcribe',
+                audio_url=ep.get('audio_url'),
+                rss_url=ep.get('rss_url') or '',
+                episode_title=ep.get('title') or 'Episode',
+                podcast_name=ep.get('podcast_name') or ''))
+    return redirect(url_for('index'))
 
 
 @app.route('/email/unsubscribe/<token>', methods=['GET', 'POST'])
@@ -12633,6 +12770,11 @@ with app.app_context():
     # used to sit until the next deploy. Interval is coarse; the hang budget
     # on Whisper is what bounds how long a live call may stay quiet.
     start_stale_watchdog()
+
+    # Lifecycle email (trial ended / unused balance). Real server boots only:
+    # an ops script importing app must never start mailing people.
+    if _SERVER_STARTED_AT_ENV:
+        lifecycle_emails.start_sweeper()
 
     # One-time migration: move old transcriptions table to transcription_tasks
     if 'transcriptions' in inspector.get_table_names():

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import page_header, button %}
+{% block title %}{{ heading }} — Podskrift{% endblock %}
+{% block robots_meta %}<meta name="robots" content="noindex">{% endblock %}
+
+{% block content %}
+<div class="email-go">
+    {{ page_header(heading, lede) }}
+    <form method="POST" action="{{ action_url }}" id="emailGoForm">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        {% for name, value in fields.items() %}
+        <input type="hidden" name="{{ name }}" value="{{ value }}">
+        {% endfor %}
+        {{ button(button_label, variant='primary', type='submit') }}
+    </form>
+</div>
+<script>
+(function() {
+    var form = document.getElementById('emailGoForm');
+    if (!form) return;
+    // One automatic submit per page load; Back to this page shows the button.
+    if (window.sessionStorage) {
+        var key = 'emailGo:' + location.pathname;
+        if (sessionStorage.getItem(key)) return;
+        sessionStorage.setItem(key, '1');
+    }
+    if (form.requestSubmit) form.requestSubmit(); else form.submit();
+})();
+</script>
+{% endblock %}

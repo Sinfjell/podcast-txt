@@ -254,3 +254,42 @@ def send_email(
             _report_once('transport', exc)
             return SEND_AMBIGUOUS
     return SEND_FAILED
+
+
+#: suppression_status outcomes.
+SUPPRESSION_CLEAR = 'clear'
+SUPPRESSION_SUPPRESSED = 'suppressed'
+SUPPRESSION_UNKNOWN = 'unknown'
+_SUPPRESSION_LISTS = ('bounces', 'complaints', 'unsubscribes')
+
+
+def suppression_status(address: str, *, timeout: float = 6.0) -> str:
+    """Is ``address`` on Mailgun's bounce, complaint or unsubscribe list?
+
+    For opt-out-able mail (lifecycle) only. Returns SUPPRESSION_CLEAR when
+    every list answers 404, SUPPRESSION_SUPPRESSED when any answers 200, and
+    SUPPRESSION_UNKNOWN on anything else (disabled, auth, timeouts) so the
+    caller can skip this round rather than guess. Never raises; never logs
+    the address.
+    """
+    if not address or not mail_ready():
+        return SUPPRESSION_UNKNOWN
+    from urllib.parse import quote
+    base = f'{mailgun_base_url()}/v3/{mailgun_domain()}'
+    auth = ('api', mailgun_api_key())
+    for name in _SUPPRESSION_LISTS:
+        try:
+            resp = requests.get(
+                f'{base}/{name}/{quote(address, safe="")}',
+                auth=auth, timeout=max(1.0, float(timeout)))
+        except requests.RequestException as exc:
+            logger.warning('mailgun suppression check transport error: %s',
+                           type(exc).__name__)
+            return SUPPRESSION_UNKNOWN
+        if resp.status_code == 200:
+            return SUPPRESSION_SUPPRESSED
+        if resp.status_code != 404:
+            logger.warning('mailgun suppression check %s returned %s',
+                           name, resp.status_code)
+            return SUPPRESSION_UNKNOWN
+    return SUPPRESSION_CLEAR
