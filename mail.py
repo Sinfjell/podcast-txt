@@ -260,6 +260,10 @@ def send_email(
 SUPPRESSION_CLEAR = 'clear'
 SUPPRESSION_SUPPRESSED = 'suppressed'
 SUPPRESSION_UNKNOWN = 'unknown'
+#: The key may send but not read suppression lists (401/403). Mailgun still
+#: drops mail to bounced, complained and unsubscribed addresses itself, so the
+#: caller may send; it logs once per sweep instead of once per address.
+SUPPRESSION_NO_ACCESS = 'no_access'
 _SUPPRESSION_LISTS = ('bounces', 'complaints', 'unsubscribes')
 
 
@@ -267,10 +271,11 @@ def suppression_status(address: str, *, timeout: float = 6.0) -> str:
     """Is ``address`` on Mailgun's bounce, complaint or unsubscribe list?
 
     For opt-out-able mail (lifecycle) only. Returns SUPPRESSION_CLEAR when
-    every list answers 404, SUPPRESSION_SUPPRESSED when any answers 200, and
-    SUPPRESSION_UNKNOWN on anything else (disabled, auth, timeouts) so the
-    caller can skip this round rather than guess. Never raises; never logs
-    the address.
+    every list answers 404, SUPPRESSION_SUPPRESSED when any answers 200,
+    SUPPRESSION_NO_ACCESS when the key is not allowed to read the lists
+    (401/403; not logged here, the caller logs once), and SUPPRESSION_UNKNOWN
+    on anything else (disabled, timeouts, 5xx, 429) so the caller can skip
+    this round rather than guess. Never raises; never logs the address.
     """
     if not address or not mail_ready():
         return SUPPRESSION_UNKNOWN
@@ -288,6 +293,8 @@ def suppression_status(address: str, *, timeout: float = 6.0) -> str:
             return SUPPRESSION_UNKNOWN
         if resp.status_code == 200:
             return SUPPRESSION_SUPPRESSED
+        if resp.status_code in (401, 403):
+            return SUPPRESSION_NO_ACCESS
         if resp.status_code != 404:
             logger.warning('mailgun suppression check %s returned %s',
                            name, resp.status_code)

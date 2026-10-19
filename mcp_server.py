@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 from flask import Response, g, jsonify, request
 
 import analytics as product_analytics
+import podcast_optout
 
 # Protocol versions we accept on initialize (newest first).
 # Echo the client's version when supported; otherwise fall back to newest.
@@ -769,7 +770,7 @@ def tool_search_podcasts(query: str) -> dict:
     except Exception as e:  # noqa: BLE001 — surface directory errors cleanly
         return {'results': [], 'error': f'Podcast directory unreachable: {e}'}
     results = []
-    for item in raw:
+    for item in podcast_optout.filter_items(raw):
         if item.get('feedUrl'):
             show = A._itunes_show_result(item)
             results.append({
@@ -789,6 +790,8 @@ def _resolve_podcast_feed(podcast: str) -> tuple[str | None, str | None, str | N
     podcast = (podcast or '').strip()
     if not podcast:
         return None, None, 'podcast is required'
+    if podcast_optout.match_fields(urls=[podcast], names=[podcast]):
+        return None, None, podcast_optout.OPTOUT_MESSAGE
 
     # Direct feed URL
     if podcast.startswith('http://') or podcast.startswith('https://'):
@@ -843,6 +846,8 @@ def _resolve_podcast_feed(podcast: str) -> tuple[str | None, str | None, str | N
         )
     show = shows[0]
     feed = show.get('feedUrl')
+    if podcast_optout.match_item(show):
+        return None, None, podcast_optout.OPTOUT_MESSAGE
     if not feed or not A._is_fetchable_url(feed):
         return None, None, 'Matched show has no fetchable RSS feed.'
     return feed, show.get('collectionName'), None
@@ -862,6 +867,8 @@ def _episode_list_id(ep: dict, rss_url: str) -> str:
 def tool_list_episodes(podcast: str, limit: int | None = None) -> dict:
     A = _app()
     feed_url, show_name, err = _resolve_podcast_feed(podcast)
+    if err == podcast_optout.OPTOUT_MESSAGE:
+        return _optout_result({'episodes': [], 'count': 0})
     if err:
         return {'error': err, 'episodes': [], 'count': 0}
     try:
@@ -871,6 +878,8 @@ def tool_list_episodes(podcast: str, limit: int | None = None) -> dict:
     lim = max(1, min(lim, 50))
 
     episodes, feed_err = A.get_episodes_from_rss(feed_url)
+    if feed_err == podcast_optout.OPTOUT_MESSAGE:
+        return _optout_result({'episodes': [], 'count': 0})
     if feed_err or not episodes:
         return {
             'error': feed_err or 'No episodes found in that feed.',
@@ -1134,6 +1143,13 @@ def _resolve_task_status_payload(task, user, *, reused: bool,
     return _attach_balance_fact(payload, user)
 
 
+def _optout_result(extra=None) -> dict:
+    out = {'error': podcast_optout.OPTOUT_REASON,
+           'message': podcast_optout.OPTOUT_MESSAGE}
+    out.update(extra or {})
+    return out
+
+
 def tool_get_transcript(user, episode: str, language: str = '',
                         meta: dict | None = None) -> dict:
     A = _app()
@@ -1152,15 +1168,23 @@ def tool_get_transcript(user, episode: str, language: str = '',
     task_id = parsed.get('task_id')
     if task_id and not (task_id.startswith('http://') or task_id.startswith('https://')):
         task = _user_task(user.id, task_id)
+        if task is not None and podcast_optout.is_opted_out_task(task):
+            return _optout_result()
         if task is not None:
             status = A.agent_transcript_status(task)
             if status in ('ready', 'pending', 'failed'):
                 return _resolve_task_status_payload(task, user, reused=True)
             # Fall through to resolve if id looked like a task but was not usable
 
+    if podcast_optout.match_item(parsed) or podcast_optout.match_url(episode):
+        return _optout_result()
     catalog, resolve_err = _catalog_from_parsed(parsed)
+    if resolve_err == podcast_optout.OPTOUT_MESSAGE:
+        return _optout_result()
     if resolve_err or not catalog:
         return {'error': resolve_err or 'Episode not found'}
+    if podcast_optout.match_item(catalog):
+        return _optout_result()
 
     # Same audio already queued, running or done for this account → reuse it.
     # list_episodes ids are audio URLs, which _find_existing_agent_task cannot
@@ -1286,6 +1310,8 @@ def tool_get_transcript_status(user, job_id: str = '', *,
     task = _user_task(user.id, job_id)
     if task is None:
         return {'error': 'Job not found', 'transcript_status': 'none'}
+    if podcast_optout.is_opted_out_task(task):
+        return _optout_result({'transcript_status': 'none'})
     if isinstance(include_text, str):
         include_text = include_text.strip().lower() not in (
             '0', 'false', 'no', 'off')
@@ -1391,6 +1417,8 @@ def tool_list_my_transcripts(user, *, query: str = '', podcast: str = '',
 
     matched = []
     for task in candidates:
+        if podcast_optout.is_opted_out_task(task):
+            continue
         bucket = _list_status_bucket(task)
         if bucket is None:
             continue
@@ -1446,6 +1474,8 @@ def tool_get_my_transcript(user, task_id: str, *, format: str = 'txt',
     task = _user_task(user.id, task_id)
     if task is None:
         return {'error': 'Transcript not found', 'transcript_status': 'none'}
+    if podcast_optout.is_opted_out_task(task):
+        return _optout_result({'transcript_status': 'none'})
 
     bucket = _list_status_bucket(task)
     meta = {

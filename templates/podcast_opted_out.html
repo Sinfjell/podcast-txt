@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import page_header, button %}
+{% block title %}Not available — Podskrift{% endblock %}
+{% block meta_description %}{{ message }}{% endblock %}
+{% block robots_meta %}<meta name="robots" content="noindex">{% endblock %}
+{% block canonical_link %}{% endblock %}
+
+{% block content %}
+<div>
+    {{ page_header('Not available on Podskrift', message) }}
+    <p>
+        {{ button('Search for another podcast', variant='primary', href=url_for('index')) }}
+    </p>
+</div>
+{% endblock %}

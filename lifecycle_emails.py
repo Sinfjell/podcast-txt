@@ -47,6 +47,7 @@ UNUSED_BALANCE = 'unused_balance'
 CAMPAIGNS = (TRIAL_ENDED_1H, TRIAL_ENDED_24H, UNUSED_BALANCE)
 #: Kind written to email_sent_log.kind (one per campaign).
 SENT_LOG_KIND_PREFIX = 'lifecycle_'
+NOTE_SUPPRESSION_NO_ACCESS = 'suppression_no_access'
 
 #: Click actions a token may carry.
 ACTION_FINISH = 'finish'      # checkout for the episode they were transcribing
@@ -661,6 +662,8 @@ def _next_episode_suggestion(user, last_task) -> Optional[dict]:
         rss_url = newest.rss_url if newest is not None else None
     if not rss_url or not A._is_fetchable_url(rss_url):
         return None
+    if A.podcast_optout.match_url(rss_url):
+        return None
     episodes, error = A.get_episodes_from_rss(rss_url, timeout=20)
     if error or not episodes:
         return None
@@ -755,11 +758,15 @@ def build_context(campaign: str, user, *, public_base: str, secret_key: str,
 
 def send_one(campaign: str, user, *, public_base: str, secret_key: str,
              to_override: Optional[str] = None, claim: bool = True,
-             fetch_next_episode: bool = True) -> str:
+             fetch_next_episode: bool = True,
+             notes: Optional[set] = None) -> str:
     """Claim, render and send one lifecycle email. Returns an outcome string.
 
     ``to_override`` + ``claim=False`` is the ops test path: same content,
     different recipient, nothing recorded against the real user.
+
+    ``notes`` collects sweep-level conditions (e.g. ``'suppression_no_access'``)
+    so the sweep can log them once instead of once per user.
     """
     A = _app()
     import email_notify
@@ -769,7 +776,15 @@ def send_one(campaign: str, user, *, public_base: str, secret_key: str,
     to = to_override or user.email
     if not to_override:
         suppressed = mailer.suppression_status(to)
-        if suppressed != mailer.SUPPRESSION_CLEAR:
+        if suppressed == mailer.SUPPRESSION_NO_ACCESS:
+            # The key cannot read the lists; Mailgun itself drops mail to
+            # suppressed addresses, so send. Logged once per sweep.
+            if notes is not None:
+                notes.add(NOTE_SUPPRESSION_NO_ACCESS)
+            else:
+                logger.warning('mailgun suppression lists not readable (401/403); '
+                               'relying on Mailgun to drop suppressed addresses')
+        elif suppressed != mailer.SUPPRESSION_CLEAR:
             # 'suppressed' never sends; 'unknown' retries next sweep.
             return f'skipped_{suppressed}'
     if claim and not email_notify.claim_email_send(
@@ -833,6 +848,7 @@ def sweep(*, now: Optional[datetime] = None, dry_run: bool = False,
         cap = max_sends if max_sends is not None else _env_int(
             'LIFECYCLE_MAX_PER_SWEEP', 25)
         sent_n = 0
+        notes: set = set()
         for user in candidate_users(rules):
             if only is not None and user.id not in only:
                 continue
@@ -849,11 +865,15 @@ def sweep(*, now: Optional[datetime] = None, dry_run: bool = False,
                 outcome = send_one(
                     campaign, user, public_base=A.PUBLIC_BASE_URL,
                     secret_key=A.app.secret_key,
-                    fetch_next_episode=fetch_next_episode)
+                    fetch_next_episode=fetch_next_episode, notes=notes)
                 result['outcomes'][outcome] = result['outcomes'].get(outcome, 0) + 1
                 if outcome == 'sent':
                     sent_n += 1
                     result['sent'][campaign] = result['sent'].get(campaign, 0) + 1
+        if NOTE_SUPPRESSION_NO_ACCESS in notes:
+            result['notes'] = sorted(notes)
+            logger.warning('mailgun suppression lists not readable (401/403) this '
+                           'sweep; sent anyway, Mailgun drops suppressed addresses')
         return result
     except Exception:  # noqa: BLE001
         logger.exception('lifecycle sweep failed')
