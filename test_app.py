@@ -346,6 +346,128 @@ def test_hung_chunk_in_loop_refunds_only_unsent_remainder(
     assert _used(uid) == 300
 
 
+def test_multi_chunk_segment_offsets_use_fixed_part_lengths(
+        trial_on, monkeypatch, tmp_path):
+    """ffmpeg cuts SEGMENT_SECONDS parts; offsets must not use duration/N.
+
+    A 33.5 min episode (2010 s) is three parts: 900 + 900 + 210. The old
+    equal-split offset put chunk 2 at 670 s (~11:10) instead of 900 s.
+    """
+    from models import db, TranscriptionTask
+    import types
+
+    uid = _make_user('segoff@test.com', limit=7200)
+    audio_duration = 2010.0
+    part_lengths = [900.0, 900.0, 210.0]
+    chunks = []
+    for i, dur in enumerate(part_lengths):
+        f = tmp_path / f'part_{i}.mp3'
+        f.write_bytes(b'\0' * 16)
+        chunks.append(str(f))
+
+    durations = dict(zip(chunks, part_lengths))
+    monkeypatch.setattr(A, 'probe_audio_duration',
+                        lambda path: durations.get(path))
+
+    seen_chunk_seconds = []
+
+    def fake_routed(job, client, chunk_file, language, **kw):
+        seen_chunk_seconds.append(kw.get('chunk_seconds'))
+        # Local timestamps restart at 0 on every part (ffmpeg -reset_timestamps).
+        idx = chunks.index(chunk_file)
+        local_end = min(30.0, part_lengths[idx] - 1.0)
+        return types.SimpleNamespace(
+            text=f'chunk-{idx}',
+            language='en',
+            segments=[
+                types.SimpleNamespace(start=0.0, end=10.0, text=f' a{idx}'),
+                types.SimpleNamespace(start=10.0, end=local_end, text=f' b{idx}'),
+            ],
+        )
+
+    monkeypatch.setattr(A, '_transcribe_chunk_routed', fake_routed)
+
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='seg-off', user_id=uid, episode_title='x',
+            status='transcribing', chunk_total=3, chunk_index=None,
+            trial_seconds_charged=2010))
+        db.session.commit()
+        text, segments = A._transcribe_chunks(
+            chunks, set(chunks), 'seg-off', object(), 'en', audio_duration)
+
+    assert text == 'chunk-0 chunk-1 chunk-2'
+    assert seen_chunk_seconds == part_lengths
+    starts = [s['start'] for s in segments]
+    ends = [s['end'] for s in segments]
+    assert starts == [0.0, 10.0, 900.0, 910.0, 1800.0, 1810.0]
+    assert ends == [10.0, 30.0, 910.0, 930.0, 1810.0, 1830.0]
+    # Monotonic, non-overlapping across chunk boundaries.
+    for prev, cur in zip(segments, segments[1:]):
+        assert cur['start'] >= prev['start']
+        assert cur['start'] >= prev['end'] - 0.05
+    # Regression guard: equal-split would have started chunk 2 at 670.
+    assert starts[2] == pytest.approx(900.0)
+    assert starts[2] != pytest.approx(audio_duration / 3)
+
+
+def test_chunk_audio_seconds_falls_back_to_segment_seconds(monkeypatch, tmp_path):
+    """When ffprobe cannot read a part, assume SEGMENT_SECONDS (short last)."""
+    monkeypatch.setattr(A, 'probe_audio_duration', lambda path: None)
+    f = tmp_path / 'p.mp3'
+    f.write_bytes(b'\0' * 8)
+    assert A._chunk_audio_seconds(
+        str(f), index=0, total=3, audio_duration=2010.0) == A.SEGMENT_SECONDS
+    assert A._chunk_audio_seconds(
+        str(f), index=2, total=3, audio_duration=2010.0) == pytest.approx(210.0)
+
+
+def _backfill_segment_offsets_mod():
+    import importlib.util
+    path = A.os.path.join(A.os.path.dirname(A.__file__),
+                          'ops', 'backfill_segment_offsets.py')
+    spec = importlib.util.spec_from_file_location('backfill_segment_offsets', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_backfill_segment_offsets_corrects_provable_equal_split():
+    mod = _backfill_segment_offsets_mod()
+    duration = 2010.0
+    n = 3
+    wrong = duration / n  # 670
+    # Simulate the bug: local segments + i * wrong.
+    buggy = [
+        {'start': 0.0, 'end': 10.0, 'text': ' a0'},
+        {'start': 880.0, 'end': 895.0, 'text': ' b0'},
+        {'start': wrong + 0.0, 'end': wrong + 10.0, 'text': ' a1'},
+        {'start': wrong + 880.0, 'end': wrong + 895.0, 'text': ' b1'},
+        {'start': 2 * wrong + 0.0, 'end': 2 * wrong + 10.0, 'text': ' a2'},
+        {'start': 2 * wrong + 200.0, 'end': 2 * wrong + 209.0, 'text': ' b2'},
+    ]
+    fixed, reason = mod.plan_segment_correction(duration, n, buggy)
+    assert reason == 'ok'
+    assert [s['start'] for s in fixed] == [
+        0.0, 880.0, 900.0, 1780.0, 1800.0, 2000.0]
+    # Idempotent: corrected layout no longer matches the bug signature.
+    again, reason2 = mod.plan_segment_correction(duration, n, fixed)
+    assert again is None and reason2 == 'group_count:1!=3'
+
+
+def test_backfill_segment_offsets_skips_ambiguous_and_single_chunk():
+    mod = _backfill_segment_offsets_mod()
+    assert mod.plan_segment_correction(
+        600, 1, [{'start': 0, 'end': 1, 'text': 'x'}])[1] == 'not_multi_chunk'
+    # No start regression → cannot prove chunk boundaries.
+    monotonic_wrong_looking = [
+        {'start': 0.0, 'end': 10.0, 'text': 'a'},
+        {'start': 100.0, 'end': 110.0, 'text': 'b'},
+    ]
+    assert mod.plan_segment_correction(
+        2010, 3, monotonic_wrong_looking)[1].startswith('group_count:')
+
+
 def test_worker_death_sweep_fails_refunds_and_emits_stale(
         trial_on, ph_events, sentry_events):
     """A daemon thread killed mid-chunk never runs its except handler. The
@@ -9289,9 +9411,10 @@ def test_whats_new_page_renders_changelog_entries(trial_on):
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'long-episodes-up-to-six-hours'
-    assert entries[1]['id'] == 'pay-per-minute-launch-pricing'
-    entries = entries[2:]
+    assert entries[0]['id'] == 'fix-multi-chunk-segment-timestamps'
+    assert entries[1]['id'] == 'long-episodes-up-to-six-hours'
+    assert entries[2]['id'] == 'pay-per-minute-launch-pricing'
+    entries = entries[3:]
     assert entries[0]['id'] == 'new-home-and-header'
     assert entries[1]['id'] == 'ai-what-you-can-ask'
     assert entries[2]['id'] == 'mcp-list-my-transcripts'
@@ -14224,9 +14347,10 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 def test_changelog_has_share_listen_links_entry():
     entries = A.load_changelog_entries()
     assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'long-episodes-up-to-six-hours'
-    assert entries[1]['id'] == 'pay-per-minute-launch-pricing'
-    entries = entries[2:]
+    assert entries[0]['id'] == 'fix-multi-chunk-segment-timestamps'
+    assert entries[1]['id'] == 'long-episodes-up-to-six-hours'
+    assert entries[2]['id'] == 'pay-per-minute-launch-pricing'
+    entries = entries[3:]
     assert entries[0]['id'] == 'new-home-and-header'
     assert entries[1]['id'] == 'ai-what-you-can-ask'
     assert entries[2]['id'] == 'mcp-list-my-transcripts'
@@ -18694,10 +18818,13 @@ def test_stt_cost_constants_are_internal_and_separate():
     assert A.WHISPER_COST_PER_MINUTE == 0.006
 
 
-def test_stt_transcribe_chunks_records_provider_and_cost(tmp_path, together_on):
+def test_stt_transcribe_chunks_records_provider_and_cost(
+        tmp_path, together_on, monkeypatch):
     from models import db, TranscriptionTask
     uid = _make_user('stt-cost@test.com', limit=3600)
     chunks = [_chunk(tmp_path, f'c{i}.mp3') for i in range(2)]
+    # Parts are 10 min each; do not rely on ffprobe of the tiny fixture bytes.
+    monkeypatch.setattr(A, 'probe_audio_duration', lambda path: 600.0)
     tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)], 'en'),
                          _openai_exc(503), _openai_exc(503), _openai_exc(503))
     oa = _ScriptedClient()

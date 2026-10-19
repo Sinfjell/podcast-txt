@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "fix-multi-chunk-segment-timestamps",
+      "date": "2026-10-19",
+      "title": "Timestamps stay aligned on long episodes",
+      "summary": "On longer episodes, clicking a line and downloading subtitles (SRT/VTT) now matches the real audio time instead of drifting earlier after the first part."
+    },
+    {
       "id": "long-episodes-up-to-six-hours",
       "date": "2026-10-17",
       "title": "Very long episodes now work",

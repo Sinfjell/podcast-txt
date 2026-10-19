@@ -180,6 +180,26 @@ sudo -u podskrift .venv/bin/python ops/purge-optout-podcast.py --apply
 
 The purge prints counts and numeric user ids only; user accounts are kept.
 
+## Backfill segment timestamps (multi-chunk offset bug)
+
+Older multi-chunk transcripts stored segment times with
+`i * (audio_duration / chunk_total)` instead of fixed 900 s part starts, so
+captions after chunk 1 drift early (seek / SRT / VTT). New jobs are fixed in
+`app.py`; existing rows can be rewritten when the stored structure still makes
+the old formula provable.
+
+Dry-run by default (prints JSON counts + a few samples). Not run on deploy.
+
+```bash
+bash ops/backup-db.sh
+sudo -u podskrift .venv/bin/python ops/backfill_segment_offsets.py
+sudo -u podskrift .venv/bin/python ops/backfill_segment_offsets.py --apply
+# optional: --task-id <id>  --db /path/to/podcast.db
+```
+
+Skips single-chunk jobs, rows already corrected, and anything that does not
+clearly match the equal-split signature. Idempotent: a second apply is a no-op.
+
 ## Database backups
 
 Until 2026-09-09 there were none. The database is the only copy of every user's

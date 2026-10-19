@@ -3728,6 +3728,28 @@ def _stt_analytics_props(task):
     }
 
 
+def _chunk_audio_seconds(chunk_file, *, index, total, audio_duration):
+    """Duration of one prepared Whisper part, for offsets and gap checks.
+
+    ffmpeg cuts fixed ``SEGMENT_SECONDS`` parts (last one shorter). Prefer the
+    measured length of the part file: packet boundaries can leave a part a
+    fraction of a second off the nominal cut. Never use
+    ``audio_duration / total`` — that is not how the segmenter cuts, and it
+    shifts every segment after chunk 1 earlier (overlapping captions / seek).
+    """
+    measured = probe_audio_duration(chunk_file)
+    if measured is not None and measured > 0:
+        return float(measured)
+    if total <= 0:
+        return 0.0
+    if index < total - 1:
+        return float(SEGMENT_SECONDS)
+    remainder = float(audio_duration or 0) - (total - 1) * float(SEGMENT_SECONDS)
+    if remainder > 0:
+        return remainder
+    return float(SEGMENT_SECONDS)
+
+
 def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language,
                        audio_duration, stt_job=None):
     """Send each chunk to Whisper, publishing partial text as it goes.
@@ -3742,6 +3764,9 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
     all_segments = []
     full_text = ""
     total = len(audio_chunks)
+    # Wall-clock start of the current part in the re-encoded stream. Cumulative
+    # measured part lengths, not audio_duration/N — see _chunk_audio_seconds.
+    chunk_offset = 0.0
     if stt_job is None:
         stt_job = SttJob(stt_mod.PROVIDER_OPENAI, 'unrouted', task_id=task_id)
 
@@ -3779,7 +3804,9 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
         # Exhausted retries raise APITimeoutError / APIConnectionError; the
         # worker marks the task failed, fires transcript_failed (reason=network),
         # and refunds unspent trial minutes.
-        chunk_seconds = audio_duration / total if total else 0
+        chunk_seconds = _chunk_audio_seconds(
+            chunk_file, index=i, total=total, audio_duration=audio_duration,
+        )
         chunk_transcript = _transcribe_chunk_routed(
             stt_job, openai_client, chunk_file, language,
             task_id=task_id,
@@ -3794,14 +3821,15 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
         full_text += chunk_transcript.text + " "
 
         if hasattr(chunk_transcript, 'segments') and chunk_transcript.segments:
-            chunk_dur = audio_duration / total
-            offset = i * chunk_dur
+            offset = chunk_offset
             for seg in chunk_transcript.segments:
                 all_segments.append({
                     'start': seg.start + offset,
                     'end': seg.end + offset,
                     'text': seg.text
                 })
+
+        chunk_offset += chunk_seconds
 
         detected = getattr(chunk_transcript, 'language', None)
         # Store ISO codes only. Whisper returns names like 'english'; the
