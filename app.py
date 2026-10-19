@@ -45,6 +45,7 @@ from flask import (Flask, render_template, request, jsonify, send_file, flash,
                    redirect, url_for, Response, g, session, has_request_context,
                    make_response, abort)
 import show_pages as show_pages_mod
+import podcast_optout
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from urllib.parse import parse_qs, urljoin, urlparse, urlunparse, unquote
 import uuid
@@ -3854,6 +3855,8 @@ def convert_apple_podcasts_url_to_rss(apple_url):
         match = re.search(r'/id(\d+)', apple_url)
         if not match:
             return None, "Could not extract podcast ID from URL"
+        if podcast_optout.match_apple(match.group(1)):
+            return None, podcast_optout.OPTOUT_MESSAGE
 
         lookup_url = f"https://itunes.apple.com/lookup?id={match.group(1)}"
         resp = requests.get(lookup_url, timeout=10)
@@ -3866,6 +3869,8 @@ def convert_apple_podcasts_url_to_rss(apple_url):
         rss_url = data['results'][0].get('feedUrl')
         if not rss_url:
             return None, "RSS feed URL not available"
+        if podcast_optout.match_item(data['results'][0]):
+            return None, podcast_optout.OPTOUT_MESSAGE
         return rss_url, None
     except Exception as e:
         return None, f"Error converting URL: {e}"
@@ -3920,6 +3925,10 @@ def get_episodes_from_rss(rss_url, *, timeout=None):
     so a hung host cannot block the caller indefinitely. The default path keeps
     feedparser's own fetch for existing callers.
     """
+    looks_like_url = isinstance(rss_url, str) and len(rss_url) < 4096 and (
+        '://' in rss_url[:16] or not rss_url.lstrip().startswith('<'))
+    if looks_like_url and podcast_optout.match_url(rss_url):
+        return None, podcast_optout.OPTOUT_MESSAGE
     try:
         if timeout is not None:
             if not _is_fetchable_url(rss_url):
@@ -3985,6 +3994,15 @@ def get_episodes_from_rss(rss_url, *, timeout=None):
 
         if not episodes:
             return None, "No playable audio episodes found in this feed"
+
+        feed_links = [getattr(feed.feed, 'link', None) or '']
+        for link in getattr(feed.feed, 'links', None) or []:
+            try:
+                feed_links.append(link.get('href') or '')
+            except AttributeError:
+                continue
+        if podcast_optout.match_feed_content(feed_title, episodes, feed_links):
+            return None, podcast_optout.OPTOUT_MESSAGE
 
         return episodes, None
     except Exception as e:
@@ -6407,6 +6425,9 @@ def go_transcribe():
     episode_title = (request.args.get('episode_title') or '').strip() or 'Episode'
     podcast_name = (request.args.get('podcast_name') or '').strip()
     episode_index_raw = request.args.get('episode_index')
+    if podcast_optout.match_fields(urls=[rss_url, audio_url], names=[podcast_name]):
+        flash(podcast_optout.OPTOUT_MESSAGE, 'error')
+        return redirect(url_for('index'))
     if rss_url and not _is_fetchable_url(rss_url):
         flash('That feed URL cannot be fetched.', 'error')
         return redirect(url_for('index'))
@@ -6937,6 +6958,9 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
     `source` is 'web', 'mcp', or 'api' — stored on the task and used for analytics.
     `source_client` is an optional connector display name (MCP OAuth clients).
     """
+    if podcast_optout.match_item(meta) or podcast_optout.match_url(rss_url):
+        return podcast_optout.payload(), 403
+
     language = normalize_language_code(language)
     source = normalize_task_source(source)
     client_label = (source_client or '').strip()[:64] or None
@@ -7418,6 +7442,12 @@ def start_transcription():
 
     audio_url = request.form.get('audio_url')
     rss_url = (request.form.get('rss_url') or '').strip() or None
+    if podcast_optout.match_fields(
+            urls=[audio_url, rss_url, request.form.get('apple_url'),
+                  request.form.get('spotify_url'), request.form.get('episode_link'),
+                  request.form.get('show_link')],
+            names=[request.form.get('podcast_name')]):
+        return jsonify(podcast_optout.payload()), 403
     # Direct-audio starts may also carry the show feed (search / Spotify). Drop
     # anything we would refuse to fetch — never persist a private URL.
     if rss_url and not _is_fetchable_url(rss_url):
@@ -7449,6 +7479,8 @@ def start_transcription():
             return jsonify({'error': 'Invalid episode selection'}), 400
 
         episodes, error = get_episodes_from_rss(rss_url)
+        if error == podcast_optout.OPTOUT_MESSAGE:
+            return jsonify(podcast_optout.payload()), 403
         if error or episode_index < 0 or episode_index >= len(episodes):
             return jsonify({'error': 'Invalid episode selection'}), 400
 
@@ -7995,6 +8027,8 @@ def get_status(task_id):
     task = db.session.get(TranscriptionTask, task_id)
     if not task or task.user_id != current_user.id:
         return jsonify({'error': 'Task not found'}), 404
+    if podcast_optout.is_opted_out_task(task):
+        return jsonify(podcast_optout.payload()), 410
 
     _fail_if_stale(task)
     # Touch last_polled_at so transcript-ready email can tell "still watching"
@@ -8281,6 +8315,8 @@ def download_file(task_id, file_type):
     # user was charged pro-rata for exactly that -- so it has to be reachable.
     if not task or task.user_id != current_user.id:
         return "File not found", 404
+    if podcast_optout.is_opted_out_task(task):
+        return podcast_optout.OPTOUT_MESSAGE, 410
     # A cancelled task keeps whatever was transcribed before it stopped, and the
     # user was charged pro-rata for exactly that -- so it has to be reachable.
     # Only .txt: segments_json is normally NULL on a cancelled task, and an .srt
@@ -8360,6 +8396,8 @@ def transcription_page(task_id):
     task = db.session.get(TranscriptionTask, task_id)
     if not task or task.user_id != current_user.id:
         return "Task not found", 404
+    if podcast_optout.is_opted_out_task(task):
+        return _podcast_opted_out_page()
     if (request.args.get('utm_source') or '').strip().lower() == 'email':
         campaign = (request.args.get('utm_campaign') or '').strip()[:64] or 'unknown'
         product_analytics.capture(
@@ -8386,7 +8424,17 @@ def _task_owned_or_404(task_id):
     task = db.session.get(TranscriptionTask, task_id)
     if not task or task.user_id != current_user.id:
         return None, (jsonify({'error': 'Task not found'}), 404)
+    if podcast_optout.is_opted_out_task(task):
+        return None, (jsonify(podcast_optout.payload()), 410)
     return task, None
+
+
+def _podcast_opted_out_page():
+    """410 page for a show whose creator opted out of Podskrift."""
+    resp = make_response(render_template(
+        'podcast_opted_out.html', message=podcast_optout.OPTOUT_MESSAGE), 410)
+    resp.headers['X-Robots-Tag'] = 'noindex'
+    return resp
 
 
 def mint_share_token():
@@ -8862,6 +8910,8 @@ def _public_share_or_404(token):
     task = db.session.get(TranscriptionTask, share.task_id)
     if not task or task.status != 'completed' or not (task.transcript_text or '').strip():
         return None, None
+    if podcast_optout.is_opted_out_task(task):
+        return None, None
     return share, task
 
 
@@ -9085,6 +9135,9 @@ def history():
         user_id=current_user.id, status='completed'
     ).order_by(TranscriptionTask.completed_at.desc()).limit(50).all())
 
+    active, failed, completed = (
+        [t for t in group if not podcast_optout.is_opted_out_task(t)]
+        for group in (active, failed, completed))
     rows = []
     for task in active:
         percent, eta = compute_live_progress(task)
@@ -9169,6 +9222,8 @@ def search_transcripts(user_id, query, limit=TRANSCRIPT_SEARCH_LIMIT):
             .order_by(T.completed_at.desc()).yield_per(20))
     matches = []
     for row in rows:
+        if podcast_optout.match_name(row.podcast_name):
+            continue
         text = row.transcript_text or ''
         hit = pattern.search(text)
         if not hit and not pattern.search(row.episode_title or ''):
@@ -9571,6 +9626,8 @@ def agent_list_episodes():
                   .limit(500).all())
     episodes = []
     for task in candidates:
+        if podcast_optout.is_opted_out_task(task):
+            continue
         if target_date is not None:
             pub = _episode_published_date(task.episode_published)
             if pub != target_date:
@@ -9597,6 +9654,8 @@ def agent_get_episode(task_id):
     task = _agent_task_query().filter(TranscriptionTask.id == task_id).first()
     if not task:
         return jsonify({'error': 'Episode not found'}), 404
+    if podcast_optout.is_opted_out_task(task):
+        return jsonify(podcast_optout.payload()), 410
     return jsonify(_agent_episode_payload(task))
 
 
@@ -9611,6 +9670,8 @@ def agent_get_transcript(task_id):
     task = _agent_task_query().filter(TranscriptionTask.id == task_id).first()
     if not task:
         return jsonify({'error': 'Episode not found', 'transcript_status': 'none'}), 404
+    if podcast_optout.is_opted_out_task(task):
+        return jsonify(podcast_optout.payload({'transcript_status': 'none'})), 410
 
     status = agent_transcript_status(task)
     fmt = (request.args.get('format') or 'txt').strip().lower()
@@ -9729,8 +9790,19 @@ def _episodes_on_date(episodes, target_date):
 def resolve_catalog_episode(publisher=None, target_date=None, url=None):
     """Find a public RSS/iTunes episode without needing a TranscriptionTask.
 
-    Returns ``(catalog_payload, None)`` or ``(None, error_message)``.
+    Returns ``(catalog_payload, None)`` or ``(None, error_message)``. Shows
+    whose creator opted out resolve to ``podcast_optout.OPTOUT_MESSAGE``.
     """
+    if podcast_optout.match_fields(urls=[url], names=[publisher]):
+        return None, podcast_optout.OPTOUT_MESSAGE
+    catalog, err = _resolve_catalog_episode(
+        publisher=publisher, target_date=target_date, url=url)
+    if catalog and podcast_optout.match_item(catalog):
+        return None, podcast_optout.OPTOUT_MESSAGE
+    return catalog, err
+
+
+def _resolve_catalog_episode(publisher=None, target_date=None, url=None):
     publisher = (publisher or '').strip()
     url = (url or '').strip()
 
@@ -9948,6 +10020,8 @@ def agent_resolve_episode():
         target_date=target_date,
         url=url or None,
     )
+    if err == podcast_optout.OPTOUT_MESSAGE:
+        return jsonify(podcast_optout.payload({'episode': None})), 403
     if err:
         # 404 for not-found / no feed; 400 for bad input already returned above.
         status = 400 if err.startswith('Provide ') or 'needs date' in err else 404
@@ -10021,10 +10095,14 @@ def agent_start_transcription():
             target_date=target_date,
             url=url or None,
         )
+        if resolve_err == podcast_optout.OPTOUT_MESSAGE:
+            return jsonify(podcast_optout.payload()), 403
         if resolve_err:
             status = 400 if resolve_err.startswith('Provide ') or 'needs date' in resolve_err else 404
             return jsonify({'error': resolve_err}), status
 
+    if podcast_optout.match_item(catalog):
+        return jsonify(podcast_optout.payload()), 403
     existing = _find_existing_agent_task(user.id, catalog)
     if existing is not None:
         payload = _agent_episode_payload(existing)
@@ -10371,6 +10449,8 @@ def podcasts_index():
 @app.route('/podcasts/<slug>')
 def podcast_show(slug):
     """Per-show landing page: description, recent episodes, FAQ. No transcript text."""
+    if show_pages_mod.is_opted_out_slug(slug):
+        return _podcast_opted_out_page()
     show = show_pages_mod.find_show(slug, db.session, TranscriptionTask)
     if not show:
         abort(404)
@@ -11416,7 +11496,7 @@ def search_podcasts():
         return jsonify({'results': [], 'error': str(e)})
 
     results = []
-    for item in data.get('results', []):
+    for item in podcast_optout.filter_items(data.get('results', [])):
         if is_episode:
             if item.get('episodeUrl'):
                 results.append(_itunes_episode_result(item))
@@ -11721,7 +11801,7 @@ def _itunes_search(term, entity):
     resp = requests.get('https://itunes.apple.com/search', timeout=10, params={
         'term': term, 'media': 'podcast', 'entity': entity, 'limit': 25})
     resp.raise_for_status()
-    return resp.json().get('results', [])
+    return podcast_optout.filter_items(resp.json().get('results', []))
 
 
 def _public_shows_named(show_name):
@@ -11928,6 +12008,9 @@ def resolve_spotify_url(raw):
         return _spotify_resolve_outcome(
             [], "That doesn't look like a Spotify episode or show link.",
             'unreadable_link')
+    if kind == 'show' and podcast_optout.match_spotify(spotify_id):
+        return _spotify_resolve_outcome(
+            [], podcast_optout.OPTOUT_MESSAGE, podcast_optout.OPTOUT_REASON)
     meta, meta_detail = fetch_spotify_metadata(kind, spotify_id)
     if not meta:
         return _spotify_resolve_outcome(
@@ -11935,6 +12018,10 @@ def resolve_spotify_url(raw):
             'unreadable_link', error_detail=meta_detail)
 
     show_name = meta.get('show') or ''
+    if podcast_optout.match_name(show_name):
+        return _spotify_resolve_outcome(
+            [], podcast_optout.OPTOUT_MESSAGE, podcast_optout.OPTOUT_REASON,
+            show_name)
     title = meta.get('title') or ''
     paid = (meta.get('playability_reason') or '').upper() == 'PAYMENT_REQUIRED'
 
@@ -12087,7 +12174,7 @@ def _itunes_lookup(itunes_id, *, entity=None, limit=None):
         params['limit'] = limit
     resp = requests.get('https://itunes.apple.com/lookup', timeout=10, params=params)
     resp.raise_for_status()
-    return resp.json().get('results', [])
+    return podcast_optout.filter_items(resp.json().get('results', []))
 
 
 def _apple_resolve_outcome(results, error=None, error_kind=None):
@@ -12151,6 +12238,9 @@ def resolve_apple_url(raw):
         return _apple_resolve_outcome(
             [], "That doesn't look like an Apple Podcasts link.",
             'unreadable_link')
+    if podcast_optout.match_apple(show_id):
+        return _apple_resolve_outcome(
+            [], podcast_optout.OPTOUT_MESSAGE, podcast_optout.OPTOUT_REASON)
 
     if episode_id:
         items = _itunes_lookup(show_id, entity='podcastEpisode', limit=200)
@@ -12775,6 +12865,7 @@ with app.app_context():
     # an ops script importing app must never start mailing people.
     if _SERVER_STARTED_AT_ENV:
         lifecycle_emails.start_sweeper()
+        podcast_optout.start_refresher()
 
     # One-time migration: move old transcriptions table to transcription_tasks
     if 'transcriptions' in inspector.get_table_names():
