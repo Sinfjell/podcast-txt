@@ -32,7 +32,14 @@
     <h2>Services that process data for us</h2>
     <ul>
         <li><strong>OpenAI</strong>: episode audio is sent to OpenAI's
-            Whisper API to produce the transcript.</li>
+            Whisper API to produce the transcript. If you use your own OpenAI
+            API key, your transcripts always go to OpenAI.</li>
+        <li><strong>Together AI</strong> (US): speech-to-text for some
+            transcriptions, using the open Whisper large-v3 model. Episode
+            audio is sent to Together AI's API and the transcript comes back
+            to us. Storage of prompts and model responses is turned off for
+            our account, so Together AI does not keep the audio or the
+            transcript.</li>
         <li><strong>PostHog</strong> (EU Cloud): product analytics and
             session replay, so we can see where signup-to-first-transcript
             drops off.
