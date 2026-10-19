@@ -18865,3 +18865,10 @@ def test_stt_gap_retry_over_music_bed_counts_as_recovered():
 def test_stt_gap_retry_must_bring_back_clearly_more_words():
     assert not STT.retry_recovered(' '.join(['a'] * 15), ' '.join(['b'] * 20), 30)
     assert STT.retry_recovered(' '.join(['a'] * 15), ' '.join(['b'] * 30), 30)
+
+
+def test_privacy_lists_together_ai_as_processor():
+    body = A.app.test_client().get('/privacy').data.decode()
+    assert 'Together AI' in body
+    assert '(US)' in body
+    assert 'Storage of prompts and model responses is turned off' in body
