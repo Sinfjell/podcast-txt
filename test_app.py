@@ -9133,7 +9133,7 @@ def test_transcript_completed_outside_request_context(ph_events, monkeypatch, tr
             daemon=True, start=lambda: deferred.append(target)))
     monkeypatch.setattr(A, 'download_audio', lambda *a, **kw: None)
 
-    def finish(audio_file, task_id, openai_client, language=None):
+    def finish(audio_file, task_id, openai_client, language=None, key_source=None):
         # Mimic a successful Whisper run: transcript saved, charge still open
         # (trial_settled stays False until refund/settle — same as production).
         A._update_task(
@@ -9195,7 +9195,7 @@ def test_analytics_raise_after_success_cannot_fail_the_job(monkeypatch, trial_on
             daemon=True, start=lambda: target and target()))
     monkeypatch.setattr(A, 'download_audio', lambda *a, **kw: None)
 
-    def finish(audio_file, task_id, openai_client, language=None):
+    def finish(audio_file, task_id, openai_client, language=None, key_source=None):
         A._update_task(
             task_id, status='completed', phase='completed', progress=100,
             transcript_text='ok', chunk_total=1, chunk_index=0)
@@ -18345,3 +18345,523 @@ def test_limit_messages_are_plain_and_carry_the_limit():
     assert A.format_episode_limit(6 * 3600) == '6 hours'
     assert A.format_episode_limit(3600) == '1 hour'
     assert A.format_episode_limit(90 * 60) == '90 minutes'
+
+
+# --------------------------------------------------------------------------
+# Speech-to-text provider routing: Together whisper-large-v3 + whisper-1 fallback
+# --------------------------------------------------------------------------
+
+import stt as STT  # noqa: E402
+
+
+@pytest.fixture
+def together_on(monkeypatch):
+    """STT_PROVIDER=together with a fake key, all languages/funding rolled out."""
+    monkeypatch.setenv('STT_PROVIDER', 'together')
+    monkeypatch.setenv('TOGETHER_API_KEY', 'tg-test-not-a-real-key')
+    monkeypatch.setenv('STT_TOGETHER_FUNDING', 'all')
+    monkeypatch.setenv('STT_TOGETHER_LANGUAGES', 'en,no,da')
+    monkeypatch.setenv('STT_SHADOW_RATE', '0')
+    monkeypatch.setattr(A.time, 'sleep', lambda *_: None)
+    return True
+
+
+def _seg(start, end, text):
+    import types
+    return types.SimpleNamespace(start=start, end=end, text=text)
+
+
+def _result(text, segments=None, language='en'):
+    import types
+    return types.SimpleNamespace(text=text, segments=segments or [], language=language)
+
+
+class _ScriptedClient:
+    """audio.transcriptions.create returns/raises the next scripted item."""
+
+    def __init__(self, *script):
+        self.script = list(script)
+        self.calls = []
+        outer = self
+
+        class _T:
+            @staticmethod
+            def create(**kw):
+                outer.calls.append({k: v for k, v in kw.items() if k != 'file'})
+                item = outer.script.pop(0) if outer.script else outer.default
+                if isinstance(item, BaseException):
+                    raise item
+                return item
+
+        class _Audio:
+            transcriptions = _T
+
+        self.audio = _Audio
+        self.default = _result('whisper default', [_seg(0, 4, ' whisper default')])
+
+
+def _job(client, provider=STT.PROVIDER_TOGETHER):
+    return A.SttJob(provider, 'test', task_id='stt-t', user_id=None,
+                    together_client=client)
+
+
+def _chunk(tmp_path, name='c.mp3'):
+    p = tmp_path / name
+    p.write_bytes(b'\0' * 16)
+    return str(p)
+
+
+_GOOD = ' '.join(['word'] * 40)
+
+
+# -- routing ---------------------------------------------------------------
+
+def test_stt_default_is_whisper1_until_enabled(monkeypatch):
+    monkeypatch.delenv('STT_PROVIDER', raising=False)
+    monkeypatch.setenv('TOGETHER_API_KEY', 'tg-test-not-a-real-key')
+    assert STT.route_job('trial', 'en', 600, 0) == (STT.PROVIDER_OPENAI, 'disabled')
+    monkeypatch.setenv('STT_PROVIDER', 'whisper-1')
+    assert STT.route_job('trial', 'en', 600, 0)[0] == STT.PROVIDER_OPENAI
+
+
+def test_stt_own_key_always_stays_on_whisper1(together_on):
+    assert STT.route_job('user', 'en', None, 0) == (STT.PROVIDER_OPENAI, 'own_key')
+    assert STT.route_job(None, 'en', None, 0)[0] == STT.PROVIDER_OPENAI
+
+
+def test_stt_no_together_key_stays_on_whisper1(together_on, monkeypatch):
+    monkeypatch.delenv('TOGETHER_API_KEY')
+    assert STT.route_job('trial', 'en', 600, 0) == (STT.PROVIDER_OPENAI, 'no_together_key')
+
+
+def test_stt_rollout_stages(together_on, monkeypatch):
+    # Stage 1: English trial minutes only.
+    monkeypatch.setenv('STT_TOGETHER_FUNDING', 'trial')
+    monkeypatch.setenv('STT_TOGETHER_LANGUAGES', 'en')
+    assert STT.route_job('trial', 'en', 600, 0)[0] == STT.PROVIDER_TOGETHER
+    assert STT.route_job('trial', 'en', 0, 600) == (STT.PROVIDER_OPENAI, 'paid_not_rolled_out')
+    assert STT.route_job('trial', 'no', 600, 0) == (STT.PROVIDER_OPENAI, 'language_not_rolled_out')
+    assert STT.route_job('trial', '', 600, 0)[0] == STT.PROVIDER_TOGETHER  # auto: chunk 1 decides
+    # Stage 2: all English.
+    monkeypatch.setenv('STT_TOGETHER_FUNDING', 'all')
+    assert STT.route_job('trial', 'en', 300, 300)[0] == STT.PROVIDER_TOGETHER
+    # Stage 3: Norwegian and Danish too.
+    monkeypatch.setenv('STT_TOGETHER_LANGUAGES', 'en,no,da')
+    assert STT.route_job('trial', 'no', 0, 600)[0] == STT.PROVIDER_TOGETHER
+    assert STT.route_job('trial', 'sv', 0, 600)[0] == STT.PROVIDER_OPENAI
+
+
+def test_stt_job_for_byok_task_never_builds_together_client(together_on, monkeypatch):
+    from models import db, TranscriptionTask
+    built = []
+    monkeypatch.setattr(A, 'build_together_client', lambda: built.append(1) or object())
+    uid = _make_user('stt-byok@test.com', key='sk-user')
+    with A.app.app_context():
+        db.session.merge(TranscriptionTask(id='stt-byok', user_id=uid, episode_title='x',
+                                           status='transcribing'))
+        db.session.commit()
+        job = A._stt_job_for_task('stt-byok', 'user', 'en')
+    assert job.provider == STT.PROVIDER_OPENAI and job.together_client is None
+    assert built == []
+
+
+# -- retries and fallback --------------------------------------------------
+
+def test_stt_together_success_sends_language_and_costs_together_rate(tmp_path, together_on):
+    tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)], 'no'))
+    oa = _ScriptedClient()
+    job = _job(tg)
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'no', chunk_seconds=600)
+    assert r.text == _GOOD
+    assert tg.calls[0]['language'] == 'no'
+    assert tg.calls[0]['model'] == STT.TOGETHER_MODEL
+    assert oa.calls == []
+    assert job.cost_usd == pytest.approx(10 * 0.0015)
+    assert job.provider_label() == STT.PROVIDER_TOGETHER
+
+
+def test_stt_5xx_and_429_are_retried_then_fall_back_to_whisper1(tmp_path, together_on):
+    tg = _ScriptedClient(_openai_exc(503), _openai_exc(429, 'rate_limit_exceeded'),
+                         _openai_exc(502))
+    oa = _ScriptedClient()
+    job = _job(tg)
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'en', chunk_seconds=60)
+    assert len(tg.calls) == A.TOGETHER_CHUNK_ATTEMPTS
+    assert len(oa.calls) == 1 and oa.calls[0]['model'] == 'whisper-1'
+    assert r.text == 'whisper default'
+    # Failed Together calls bill nothing; the fallback bills whisper-1.
+    assert job.cost_usd == pytest.approx(0.006)
+    assert job.provider_label() == STT.PROVIDER_OPENAI
+
+
+def test_stt_transient_error_then_success_stays_on_together(tmp_path, together_on):
+    tg = _ScriptedClient(A.APIConnectionError(request=None),
+                         _result(_GOOD, [_seg(0, 20, ' ' + _GOOD)]))
+    oa = _ScriptedClient()
+    job = _job(tg)
+    A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'en', chunk_seconds=60)
+    assert len(tg.calls) == 2 and oa.calls == []
+
+
+def test_stt_out_of_credit_falls_back_at_once(tmp_path, together_on):
+    tg = _ScriptedClient(_openai_exc(429, 'insufficient_quota'))
+    oa = _ScriptedClient()
+    job = _job(tg)
+    A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'en', chunk_seconds=60)
+    assert len(tg.calls) == 1 and len(oa.calls) == 1
+
+
+def test_stt_auth_error_is_not_retried(tmp_path, together_on):
+    tg = _ScriptedClient(_openai_exc(401, 'invalid_api_key'))
+    oa = _ScriptedClient()
+    A._transcribe_chunk_routed(_job(tg), oa, _chunk(tmp_path), 'en', chunk_seconds=60)
+    assert len(tg.calls) == 1 and len(oa.calls) == 1
+
+
+def test_stt_whisper1_job_never_calls_together(tmp_path, together_on):
+    tg = _ScriptedClient()
+    oa = _ScriptedClient()
+    job = _job(tg, provider=STT.PROVIDER_OPENAI)
+    A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'en', chunk_seconds=60)
+    assert tg.calls == [] and len(oa.calls) == 1
+
+
+# -- language --------------------------------------------------------------
+
+def test_stt_auto_language_pins_detected_language(tmp_path, together_on):
+    tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)], 'no'))
+    job = _job(tg)
+    A._transcribe_chunk_routed(job, _ScriptedClient(), _chunk(tmp_path), '',
+                               chunk_seconds=60)
+    assert 'language' not in tg.calls[0]
+    assert job.pinned_language == 'no'
+
+
+def test_stt_wrong_or_unrolled_language_reruns_on_whisper1(tmp_path, together_on):
+    """Accented English came back as Swahili: re-run on whisper-1, job switches."""
+    tg = _ScriptedClient(_result('habari ' * 30, [_seg(0, 20, ' habari')], 'sw'))
+    oa = _ScriptedClient()
+    job = _job(tg)
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), '', chunk_seconds=60)
+    assert r.text == 'whisper default' and len(oa.calls) == 1
+    assert job.provider == STT.PROVIDER_OPENAI
+    assert job.provider_label() == 'mixed'      # paid Together once, then whisper-1
+    # Later chunks go straight to whisper-1.
+    A._transcribe_chunk_routed(job, oa, _chunk(tmp_path, 'd.mp3'), '', chunk_seconds=60)
+    assert len(tg.calls) == 1 and len(oa.calls) == 2
+
+
+# -- dropped windows and invented text -------------------------------------
+
+def test_stt_hallucination_and_gap_detection():
+    assert STT.is_hallucination(' Teksting av Nicolai Winther')
+    assert STT.is_hallucination('Thanks for watching!')
+    assert not STT.is_hallucination('Vi snakker om tekst og teksting i dag.')
+    segs = [{'start': 0, 'end': 8, 'text': _GOOD},
+            {'start': 8, 'end': 30, 'text': ' Det er mye.'},       # dropped window
+            {'start': 30, 'end': 34, 'text': ' Teksting av Nicolai Winther'},
+            {'start': 34, 'end': 60, 'text': ' ' + _GOOD}]
+    assert STT.suspicious_segments(segs) == [1, 2]
+    assert STT.retry_window(segs[1], 59) == (6.0, 26.0)
+    assert STT.retry_window({'start': 1, 'end': 58.5, 'text': ''}, 59) == (0.0, 59.0)
+
+
+def test_stt_dropped_window_is_repaired_with_shifted_retry(tmp_path, together_on, monkeypatch):
+    cuts = []
+    def fake_cut(src, off, ln, dst):
+        cuts.append((off, ln))
+        open(dst, 'wb').close()
+        return dst
+
+    monkeypatch.setattr(A, '_cut_audio_window', fake_cut)
+    retry_text = 'Det er mye. ' + ' '.join(['ord'] * 30) + ' og så videre'
+    tg = _ScriptedClient(
+        _result('a', [_seg(0, 8, ' Hei og velkommen'), _seg(8, 30, ' Det er mye.'),
+                      _seg(30, 34, ' og så videre')], 'no'),
+        _result(retry_text, [], 'no'))
+    oa = _ScriptedClient()
+    job = _job(tg)
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'no', chunk_seconds=34)
+    assert cuts == [(6.0, 26.0)]
+    assert oa.calls == []
+    assert r.segments[1].text.strip().startswith('Det er mye. ord')
+    # Overlap with the next segment is trimmed, not duplicated.
+    assert not r.segments[1].text.strip().endswith('og så videre')
+    assert r.text.count('ord') == 30
+    assert job.events['repaired_windows'] == 1
+    assert job.cost_usd == pytest.approx(STT.cost_usd('together', 34 + 26))
+
+
+def test_stt_unrepaired_window_falls_back_to_whisper1(tmp_path, together_on, monkeypatch):
+    monkeypatch.setattr(A, '_cut_audio_window',
+                        lambda src, off, ln, dst: open(dst, 'wb').close() or dst)
+    tg = _ScriptedClient(
+        _result('a', [_seg(0, 30, ' Det er mye.')], 'no'),
+        _result('Det er mye.', [], 'no'))          # still dropped
+    oa = _ScriptedClient()
+    job = _job(tg)
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'no', chunk_seconds=30)
+    assert r.text == 'whisper default' and len(oa.calls) == 1
+    assert job.events['fallback_gap'] == 1
+
+
+def test_stt_hallucinated_retry_is_not_accepted(tmp_path, together_on, monkeypatch):
+    monkeypatch.setattr(A, '_cut_audio_window',
+                        lambda src, off, ln, dst: open(dst, 'wb').close() or dst)
+    tg = _ScriptedClient(
+        _result('a', [_seg(0, 5, ' Teksting av Nicolai Winther')], 'no'),
+        _result('Teksting av Nicolai Winther ' * 5, [], 'no'))
+    oa = _ScriptedClient()
+    A._transcribe_chunk_routed(_job(tg), oa, _chunk(tmp_path), 'no', chunk_seconds=5)
+    assert len(oa.calls) == 1
+
+
+def test_stt_too_many_flagged_windows_go_straight_to_whisper1(tmp_path, together_on, monkeypatch):
+    monkeypatch.setattr(A, '_cut_audio_window', lambda *a: pytest.fail('no retries'))
+    segs = [_seg(i * 30, i * 30 + 30, ' hm') for i in range(STT.MAX_RETRY_WINDOWS_PER_CHUNK + 1)]
+    tg = _ScriptedClient(_result('hm', segs, 'en'))
+    oa = _ScriptedClient()
+    A._transcribe_chunk_routed(_job(tg), oa, _chunk(tmp_path), 'en', chunk_seconds=150)
+    assert len(tg.calls) == 1 and len(oa.calls) == 1
+
+
+def test_stt_trim_overlap():
+    assert STT.trim_overlap('we went to the', 'to the shop and then', 'and then home') == 'shop'
+    assert STT.trim_overlap('', 'nothing shared here', '') == 'nothing shared here'
+
+
+# -- shadow sample ---------------------------------------------------------
+
+def test_stt_shadow_compares_against_whisper1_and_logs_to_posthog(
+        tmp_path, together_on, monkeypatch, ph_events):
+    monkeypatch.setenv('STT_SHADOW_RATE', '1')
+    threads = []
+    real_thread = A.threading.Thread
+
+    def capture_thread(*a, **kw):
+        t = real_thread(*a, **kw)
+        threads.append(t)
+        return t
+
+    monkeypatch.setattr(A.threading, 'Thread', capture_thread)
+    tg = _ScriptedClient(_result('hello there world', [_seg(0, 5, ' hello there world')]))
+    oa = _ScriptedClient(_result('hello there big world', []))
+    chunk = _chunk(tmp_path)
+    job = _job(tg)
+    job.user_id = 4242
+    A._transcribe_chunk_routed(job, oa, chunk, 'en', chunk_seconds=60)
+    for t in threads:
+        t.join(5)
+    assert len(oa.calls) == 1 and oa.calls[0]['model'] == 'whisper-1'
+    ev = [e for e in ph_events.events if e['event'] == 'stt_shadow_compared']
+    assert len(ev) == 1
+    props = ev[0]['properties']
+    assert 0 < props['similarity'] < 1
+    assert props['together_words'] == 3 and props['whisper_words'] == 4
+    assert not os.path.exists(chunk + '.shadow.mp3')
+    # Shadow spend is real spend.
+    assert job.cost_usd == pytest.approx(0.0015 + 0.006)
+
+
+def test_stt_shadow_off_at_rate_zero(tmp_path, together_on):
+    tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)]))
+    oa = _ScriptedClient()
+    A._transcribe_chunk_routed(_job(tg), oa, _chunk(tmp_path), 'en', chunk_seconds=60)
+    assert oa.calls == []
+
+
+# -- SRT -------------------------------------------------------------------
+
+def test_stt_long_segments_are_split_into_short_srt_cues():
+    text = ' '.join(f'w{i}' for i in range(60))
+    cues = STT.split_segments_for_srt([{'start': 10.0, 'end': 40.0, 'text': text},
+                                       {'start': 40.0, 'end': 43.0, 'text': 'short one'}])
+    assert len(cues) >= 5
+    assert cues[0]['start'] == 10.0 and cues[-2]['end'] == 40.0
+    assert all(c['end'] - c['start'] <= STT.SRT_MAX_CUE_SECONDS + 1 for c in cues[:-1])
+    assert ' '.join(c['text'] for c in cues[:-1]) == text
+    assert cues[-1] == {'start': 40.0, 'end': 43.0, 'text': 'short one'}
+    srt = A._segments_to_srt(json.dumps([{'start': 0, 'end': 30, 'text': text}]))
+    assert srt.count(' --> ') >= 5
+
+
+# -- cost accounting -------------------------------------------------------
+
+def test_stt_cost_constants_are_internal_and_separate():
+    assert STT.cost_usd('together', 60) == pytest.approx(0.0015)
+    assert STT.cost_usd('whisper-1', 60) == pytest.approx(0.006)
+    # User-facing BYOK copy stays on OpenAI's list price.
+    assert A.WHISPER_COST_PER_MINUTE == 0.006
+
+
+def test_stt_transcribe_chunks_records_provider_and_cost(tmp_path, together_on):
+    from models import db, TranscriptionTask
+    uid = _make_user('stt-cost@test.com', limit=3600)
+    chunks = [_chunk(tmp_path, f'c{i}.mp3') for i in range(2)]
+    tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)], 'en'),
+                         _openai_exc(503), _openai_exc(503), _openai_exc(503))
+    oa = _ScriptedClient()
+    with A.app.app_context():
+        db.session.merge(TranscriptionTask(
+            id='stt-cost', user_id=uid, episode_title='x', status='transcribing',
+            chunk_total=2, chunk_index=0, trial_seconds_charged=1200))
+        db.session.commit()
+        job = _job(tg)
+        A._transcribe_chunks(chunks, set(chunks), 'stt-cost', oa, 'en', 1200.0,
+                             stt_job=job)
+        t = db.session.get(TranscriptionTask, 'stt-cost')
+        assert t.stt_provider == 'mixed'
+        assert t.stt_cost_usd == pytest.approx(10 * 0.0015 + 10 * 0.006)
+        # Billing is untouched by the provider: still the reserved seconds.
+        assert t.trial_seconds_charged == 1200
+
+
+def test_stt_admin_costs_prefer_actual_provider_cost():
+    import admin_costs
+    assert admin_costs.split_actual_stt_cost(0.03, 600, 0) == (0.03, 0.0)
+    trial, paid = admin_costs.split_actual_stt_cost(0.04, 300, 900)
+    assert trial == pytest.approx(0.01) and paid == pytest.approx(0.03)
+    assert admin_costs.split_actual_stt_cost(0.02, 0, 0) == (0.02, 0.0)
+
+
+def test_stt_admin_costs_use_stt_cost_usd_when_present():
+    import admin_costs
+    from models import db, TranscriptionTask
+    uid = _make_user('stt-admin@test.com', limit=3600)
+    with A.app.app_context():
+        for tid in ('stt-admin-a', 'stt-admin-b'):
+            old = db.session.get(TranscriptionTask, tid)
+            if old:
+                db.session.delete(old)
+        db.session.commit()
+        before = admin_costs.collect_costs(db)['windows']['all']['openai_trial_usd']
+        db.session.add(TranscriptionTask(
+            id='stt-admin-a', user_id=uid, episode_title='x', status='completed',
+            trial_seconds_charged=600, paid_seconds_charged=0,
+            stt_provider='together', stt_cost_usd=0.015,
+            completed_at=datetime.now(timezone.utc).replace(tzinfo=None)))
+        db.session.add(TranscriptionTask(
+            id='stt-admin-b', user_id=uid, episode_title='x', status='completed',
+            trial_seconds_charged=600, paid_seconds_charged=0,
+            completed_at=datetime.now(timezone.utc).replace(tzinfo=None)))
+        db.session.commit()
+        after = admin_costs.collect_costs(db)['windows']['all']['openai_trial_usd']
+    # 10 min on Together at its real price + 10 min legacy whisper-1 estimate.
+    assert after - before == pytest.approx(0.015 + 0.06)
+
+
+@pytest.mark.parametrize('own_key, expected', [(None, 'trial'), ('sk-user-own', 'user')])
+def test_stt_worker_passes_key_source_to_transcribe_audio(
+        trial_on, monkeypatch, own_key, expected):
+    """BYOK must reach routing as 'user' so it can never land on Together."""
+    import types
+    uid = _make_user(f'stt-ks-{expected}@test.com', key=own_key, limit=3600)
+    seen = {}
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: target and target()))
+    monkeypatch.setattr(A, 'download_audio', lambda *a, **kw: None)
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+
+    def fake_transcribe(audio_file, task_id, client, language=None, key_source=None):
+        seen['key_source'] = key_source
+        raise A.TaskAbandoned()
+
+    monkeypatch.setattr(A, 'transcribe_audio', fake_transcribe)
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user, {'title': 'Ep', 'audio_url': 'https://example.com/ep-stt.mp3',
+                   'duration_min': 5})
+        assert status == 200, payload
+    assert seen['key_source'] == expected
+
+
+@pytest.mark.skipif(not __import__('shutil').which('ffmpeg'), reason='needs ffmpeg')
+def test_stt_cut_audio_window_produces_the_requested_slice(tmp_path):
+    import subprocess
+    src = tmp_path / 'src.mp3'
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'sine=d=12',
+                    '-ac', '1', str(src)], check=True)
+    out = A._cut_audio_window(str(src), 4.0, 5.0, str(tmp_path / 'w.mp3'))
+    assert abs(A.probe_audio_duration(out) - 5.0) < 0.3
+
+
+def test_stt_detected_language_not_rolled_out_reruns_on_whisper1(tmp_path, together_on, monkeypatch):
+    """Stage 1 is English only: an auto-detected Norwegian episode goes to whisper-1."""
+    monkeypatch.setenv('STT_TOGETHER_LANGUAGES', 'en')
+    tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)], 'no'))
+    oa = _ScriptedClient()
+    job = _job(tg)
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), '', chunk_seconds=60)
+    assert r.text == 'whisper default' and len(oa.calls) == 1
+    assert job.provider == STT.PROVIDER_OPENAI and job.pinned_language is None
+
+
+def test_stt_invented_credit_line_is_dropped_when_clean_retry_is_empty(
+        tmp_path, together_on, monkeypatch):
+    monkeypatch.setattr(A, '_cut_audio_window',
+                        lambda src, off, ln, dst: open(dst, 'wb').close() or dst)
+    tg = _ScriptedClient(
+        _result('x', [_seg(0, 20, 'Første del av praten her ' * 4),
+                      _seg(20, 24, 'Teksting av Nicolai Winther'),
+                      _seg(24, 40, 'Andre del av praten her ' * 4)], 'no'),
+        _result('', [], 'no'))                       # music only
+    oa = _ScriptedClient()
+    r = A._transcribe_chunk_routed(_job(tg), oa, _chunk(tmp_path), 'no', chunk_seconds=40)
+    assert oa.calls == []
+    assert 'Teksting' not in r.text and len(r.segments) == 2
+    # Segment texts are joined with a space even when Together omits it.
+    assert 'her Andre' in r.text
+
+
+def _steady(n, start=0.0, dur=10.0, wps=3):
+    return [_seg(start + k * dur, start + (k + 1) * dur, ' ' + ' '.join(['ord'] * int(dur * wps)))
+            for k in range(n)]
+
+
+def test_stt_partial_drop_is_improved_by_soft_retry(tmp_path, together_on, monkeypatch):
+    monkeypatch.setattr(A, '_cut_audio_window',
+                        lambda src, off, ln, dst: open(dst, 'wb').close() or dst)
+    segs = _steady(6) + [_seg(60, 90, ' ' + ' '.join(['kort'] * 25))] + _steady(3, 90)
+    tg = _ScriptedClient(_result('x', segs, 'en'),
+                         _result(' '.join(['full'] * 85), [], 'en'))
+    oa = _ScriptedClient()
+    job = _job(tg)
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'en', chunk_seconds=120)
+    assert oa.calls == [] and len(tg.calls) == 2
+    assert r.text.count('full') == 85 and 'kort' not in r.text
+    assert job.events['soft_repaired_windows'] == 1
+
+
+def test_stt_soft_retry_that_is_not_better_keeps_original_without_fallback(
+        tmp_path, together_on, monkeypatch):
+    monkeypatch.setattr(A, '_cut_audio_window',
+                        lambda src, off, ln, dst: open(dst, 'wb').close() or dst)
+    segs = _steady(6) + [_seg(60, 90, ' ' + ' '.join(['kort'] * 25))] + _steady(3, 90)
+    tg = _ScriptedClient(_result('orig', segs, 'en'),
+                         _result(' '.join(['same'] * 26), [], 'en'))
+    oa = _ScriptedClient()
+    r = A._transcribe_chunk_routed(_job(tg), oa, _chunk(tmp_path), 'en', chunk_seconds=120)
+    assert oa.calls == [] and r.text == 'orig'
+
+
+def test_stt_soft_flags_need_a_clearly_slow_long_segment():
+    segs = [{'start': k * 10, 'end': k * 10 + 10, 'text': 'a ' * 30} for k in range(6)]
+    assert STT.soft_suspicious_segments(segs) == []
+    segs.append({'start': 60, 'end': 90, 'text': 'a ' * 40})     # 1.3 w/s vs 3
+    assert STT.soft_suspicious_segments(segs) == [6]
+    assert STT.soft_suspicious_segments(segs, exclude={6}) == []
+
+
+def test_stt_gap_retry_over_music_bed_counts_as_recovered():
+    # da_politiken 737-767 s: 4 words, the +-2 s retry brought back 20 in 34 s.
+    assert STT.retry_recovered('Og vi rejækter det.', ' '.join(['ord'] * 20), 34)
+    assert not STT.retry_recovered('Og vi rejækter det.', ' '.join(['ord'] * 12), 34)
+    assert not STT.retry_recovered('Det er mye.', 'Det er mye. Ja.', 26)
+
+
+def test_stt_gap_retry_must_bring_back_clearly_more_words():
+    assert not STT.retry_recovered(' '.join(['a'] * 15), ' '.join(['b'] * 20), 30)
+    assert STT.retry_recovered(' '.join(['a'] * 15), ' '.join(['b'] * 30), 30)

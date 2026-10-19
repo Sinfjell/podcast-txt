@@ -214,6 +214,11 @@ class TranscriptionTask(db.Model):
     summary_prompt_tokens = db.Column(db.Integer, nullable=True)
     summary_completion_tokens = db.Column(db.Integer, nullable=True)
     summary_cost_usd_est = db.Column(db.Float, nullable=True)
+    # Which speech-to-text provider ran the job ('whisper-1', 'together' or
+    # 'mixed' after a per-chunk fallback) and what it really cost us in USD,
+    # retries, fallbacks and shadow comparisons included. Internal only.
+    stt_provider = db.Column(db.String(32), nullable=True)
+    stt_cost_usd = db.Column(db.Float, nullable=True)
     # When this row is a read-only copy for a summary-email subscriber, points at
     # the shared source task (same audio transcribed once).
     summary_source_task_id = db.Column(db.String(36), nullable=True)
@@ -394,6 +399,8 @@ TASK_COLUMN_MIGRATIONS = {
     'summary_prompt_tokens': 'INTEGER',
     'summary_completion_tokens': 'INTEGER',
     'summary_cost_usd_est': 'FLOAT',
+    'stt_provider': 'VARCHAR(32)',
+    'stt_cost_usd': 'FLOAT',
     'summary_source_task_id': 'VARCHAR(36)',
     'source': 'VARCHAR(16)',
     'source_client': 'VARCHAR(64)',

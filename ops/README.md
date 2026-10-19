@@ -374,6 +374,40 @@ Named events:
 allowance gives. `trial_daily_budget_exhausted` fires on the first refusal of
 the day when the shared daily budget is empty.
 
+## Speech-to-text provider (Together whisper-large-v3)
+
+Platform-funded jobs can run on Together AI `openai/whisper-large-v3`
+($0.0015/min vs whisper-1 $0.006/min). Off by default; `stt.py` has the rules
+and `app._transcribe_chunk_routed` the calls. Users with their own OpenAI key
+always stay on whisper-1.
+
+| Var | Default | Notes |
+| --- | --- | --- |
+| `STT_PROVIDER` | `whisper-1` | `together` turns it on. **Rollback:** set `whisper-1` (or delete the line) and `systemctl restart podskrift`. |
+| `TOGETHER_API_KEY` | unset | Required for `together`; without it every job stays on whisper-1. |
+| `STT_TOGETHER_FUNDING` | `trial` | `trial` = free-trial jobs only; `all` = trial + paid credit jobs. |
+| `STT_TOGETHER_LANGUAGES` | `en` | Comma list. Auto-detected jobs whose first chunk comes back outside this list (or implausible, e.g. Swahili for accented English) re-run on whisper-1. |
+| `STT_SHADOW_RATE` | `0.02` | Share of Together chunks also sent to whisper-1 in the background; PostHog `stt_shadow_compared` (similarity, length ratio, word counts; no text). Costs ~4x the sampled minutes. `0` = off. |
+| `STT_TOGETHER_USD_PER_MIN` | `0.0015` | Internal cost constant only (admin costs, `transcription_tasks.stt_cost_usd`). User-facing BYOK copy stays on `WHISPER_COST_PER_MINUTE`. |
+
+Rollout: 1) `STT_PROVIDER=together` (trial + `en`), 2) `STT_TOGETHER_FUNDING=all`,
+3) `STT_TOGETHER_LANGUAGES=en,no,da`. Watch `stt_shadow_compared` and the
+`stt fallback` / `stt route` log lines between stages.
+
+Per chunk, Together failures fall back to whisper-1 on the platform key:
+429/5xx/timeouts/dropped connections are retried 3 times first
+(`insufficient_quota`, 4xx are not); a segment that looks like a dropped 30 s
+window (>= 10 s at < 0.6 words/s) or a subtitle-credit hallucination
+("Teksting av ...") is re-sent as a +-2 s window and spliced in, else the
+chunk re-runs on whisper-1. Long Together segments are split into <= 7 s SRT
+cues. Billing never changes: users pay the reserved audio minutes either way;
+`stt_provider` / `stt_cost_usd` record what we really paid (retries, fallbacks
+and shadow included) and /admin costs use it when present.
+
+Before enabling in production: in Together **Organization Settings → Privacy** set "Store
+prompts and model responses" to **No** (zero data retention; serverless runs in
+the US), then add `TOGETHER_API_KEY` and `STT_PROVIDER=together` to `.env`.
+
 ## Free-trial budget env vars
 
 | Var | Default | Notes |
