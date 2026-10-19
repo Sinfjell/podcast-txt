@@ -661,6 +661,8 @@ def _next_episode_suggestion(user, last_task) -> Optional[dict]:
         rss_url = newest.rss_url if newest is not None else None
     if not rss_url or not A._is_fetchable_url(rss_url):
         return None
+    if A.podcast_optout.match_url(rss_url):
+        return None
     episodes, error = A.get_episodes_from_rss(rss_url, timeout=20)
     if error or not episodes:
         return None

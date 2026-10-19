@@ -17,6 +17,8 @@ import time
 import unicodedata
 from pathlib import Path
 
+import podcast_optout
+
 logger = logging.getLogger(__name__)
 
 SHOW_PAGES_PATH = Path(__file__).resolve().parent / 'data' / 'show_pages.json'
@@ -121,7 +123,7 @@ def load_curated_shows(path: Path | None = None) -> list[dict]:
                 'description': _strip_html(raw.get('description') or ''),
                 'source': 'curated',
             }
-            if slug in by_slug:
+            if slug in by_slug or podcast_optout.match_item(show):
                 continue
             by_slug[slug] = show
             cleaned.append(show)
@@ -177,6 +179,8 @@ def community_shows_from_db(db_session, TranscriptionTask, *, reserved_slugs=Non
         key = name.casefold()
         if key in by_name or key in reserved_name_keys:
             continue
+        if podcast_optout.match_fields(urls=[rss_url], names=[name]):
+            continue
         by_name[key] = {'name': name, 'feed_url': rss_url}
 
     out = []
@@ -218,6 +222,19 @@ def all_shows(db_session=None, TranscriptionTask=None) -> list[dict]:
             reserved_names=curated_names,
         )
     return curated + community
+
+
+def is_opted_out_slug(slug: str) -> bool:
+    """The slug an opted-out show had (or would get) on /podcasts/<slug>."""
+    want = (slug or '').strip().lower()
+    if not want:
+        return False
+    for entry in podcast_optout.OPTOUTS:
+        for name in entry['names']:
+            base = slugify_show_name(name)
+            if want == base or re.fullmatch(re.escape(base) + r'-\d+', want):
+                return True
+    return False
 
 
 def find_show(slug: str, db_session=None, TranscriptionTask=None) -> dict | None:

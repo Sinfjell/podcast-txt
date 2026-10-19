@@ -160,6 +160,26 @@ printf '%s\n' \
 systemctl restart podskrift
 ```
 
+## Creator opt-outs
+
+`podcast_optout.py` lists podcasts whose creators asked not to be transcribed.
+Every entry point (web paste/search/episode list, MCP, HTTP API, transcript
+retrieval, show pages, sitemap) refuses or hides them with one neutral
+message. Match keys: feed URL variants, the show's own hosts, Apple/Spotify
+ids, the exact show title, and the exact enclosure files in
+`podcast_optout_audio.json` (refreshed from the feed every 6 h on server boot).
+
+To add a show: append to `OPTOUTS`, add its enclosure keys, deploy, then purge
+stored data (backup first):
+
+```bash
+bash ops/backup-db.sh
+sudo -u podskrift .venv/bin/python ops/purge-optout-podcast.py          # dry run
+sudo -u podskrift .venv/bin/python ops/purge-optout-podcast.py --apply
+```
+
+The purge prints counts and numeric user ids only; user accounts are kept.
+
 ## Database backups
 
 Until 2026-09-09 there were none. The database is the only copy of every user's
