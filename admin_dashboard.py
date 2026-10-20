@@ -42,6 +42,25 @@ def purchase_status_label(status):
 
 admin_bp.add_app_template_filter(purchase_status_label, 'purchase_status_label')
 
+
+def format_usd(value, sign=False):
+    """'$1.23', '−$0.35' (true minus sign), or '+$1.23' with sign=True."""
+    if value is None:
+        return '—'
+    try:
+        v = round(float(value), 2)
+    except (TypeError, ValueError):
+        return '—'
+    if v == 0:
+        v = 0.0  # no '−$0.00'
+    body = '$%.2f' % abs(v)
+    if v < 0:
+        return '\u2212' + body
+    return ('+' + body) if sign else body
+
+
+admin_bp.add_app_template_filter(format_usd, 'usd')
+
 ADMIN_TZ = ZoneInfo('Europe/Oslo')
 _DEFAULT_ADMIN_EMAILS = 'sindrefjelle@gmail.com'
 
@@ -356,6 +375,16 @@ def collect_kpis(db, trial_global_seconds, trial_daily_seconds=None):
           FROM credit_purchases
          WHERE status = 'credited'
     """)).fetchone()
+    # Every payment taken (refunded ones included), so gross, refunds and
+    # Stripe net on the Purchases card share one basis.
+    paid_all = db.session.execute(text("""
+        SELECT COUNT(*),
+               COALESCE(SUM(COALESCE(amount_total_cents, amount_cents)), 0),
+               COALESCE(SUM(COALESCE(amount_refunded_cents, 0)), 0),
+               COALESCE(SUM(CASE WHEN status = 'refunded' THEN 1 ELSE 0 END), 0)
+          FROM credit_purchases
+         WHERE status IN ('credited', 'refunded', 'disputed')
+    """)).fetchone()
     purchase_count = int(purchases[0] or 0) if purchases else 0
     purchase_revenue_cents = int(purchases[1] or 0) if purchases else 0
 
@@ -381,6 +410,10 @@ def collect_kpis(db, trial_global_seconds, trial_daily_seconds=None):
         'trial_global_minutes': int(trial_daily_seconds or 0) // 60,
         'purchase_count': purchase_count,
         'purchase_gross_usd': round(purchase_revenue_cents / 100.0, 2),
+        'paid_count_all': int(paid_all[0] or 0) if paid_all else 0,
+        'paid_gross_all_usd': round(int(paid_all[1] or 0) / 100.0, 2) if paid_all else 0.0,
+        'paid_refunded_usd': round(int(paid_all[2] or 0) / 100.0, 2) if paid_all else 0.0,
+        'paid_refunded_count': int(paid_all[3] or 0) if paid_all else 0,
         'purchase_revenue_usd': round(purchase_revenue_cents / 100.0, 2),
         'byok_users': int(byok_users),
     }

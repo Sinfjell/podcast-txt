@@ -278,20 +278,20 @@
                 aria-pressed="false">
             <div class="kpi-label">API cost (USD)
                 {% if kpis.cost_source == 'actual' %}<span class="est-badge" data-kpi="cost_source">actual</span>{% else %}<span class="est-badge" data-kpi="cost_source">est.</span>{% endif %}</div>
-            <div class="kpi-value">${{ '%.2f'|format(kpis.api_cost_all_usd) }}</div>
+            <div class="kpi-value">{{ (kpis.api_cost_all_usd)|usd }}</div>
             <div class="kpi-sub">
-                ${{ '%.2f'|format(kpis.api_cost_7d_usd) }} / 7d ·
-                ${{ '%.2f'|format(kpis.api_cost_today_usd) }} today{% if kpis.cost_source == 'actual' %} (UTC, partial){% endif %}
+                {{ (kpis.api_cost_7d_usd)|usd }} / 7d ·
+                {{ (kpis.api_cost_today_usd)|usd }} today{% if kpis.cost_source == 'actual' %} (UTC, partial){% endif %}
                 {% if kpis.cost_source == 'actual' %} · OpenAI billing{% else %} · from audio minutes{% endif %}
             </div>
         </button>
         <button type="button" class="kpi" data-series="income" data-kpi="income"
                 aria-pressed="false">
             <div class="kpi-label">Income (USD)</div>
-            <div class="kpi-value">${{ '%.2f'|format(kpis.income_all_usd) }}</div>
+            <div class="kpi-value">{{ (kpis.income_all_usd)|usd }}</div>
             <div class="kpi-sub">
-                ${{ '%.2f'|format(kpis.income_7d_usd) }} / 7d ·
-                ${{ '%.2f'|format(kpis.income_today_usd) }} today
+                {{ (kpis.income_7d_usd)|usd }} / 7d ·
+                {{ (kpis.income_today_usd)|usd }} today
                 {% if kpis.income_source == 'stripe_net_usd' %}
                 · Stripe net after fees &amp; tax{% for cur, cents in kpis.income_native_all.items() if cur != 'usd' %} ({{ cur|upper }} {{ '%.2f'|format(cents / 100) }} at charge rates){% endfor %}{% if kpis.income_approx_count %} · {{ kpis.income_approx_count }} fee rows at nearest rate{% endif %}{% if kpis.income_unconverted_count %} · {{ kpis.income_unconverted_count }} not converted{% endif %}
                 {% else %} · pack prices (Stripe unavailable){% endif %}
@@ -299,10 +299,10 @@
         </button>
         <div class="kpi" data-kpi="margin">
             <div class="kpi-label">Margin (USD)</div>
-            <div class="kpi-value">{{ '−' if kpis.margin_all_usd < 0 else '' }}${{ '%.2f'|format(kpis.margin_all_usd|abs) }}</div>
+            <div class="kpi-value">{{ kpis.margin_all_usd|usd }}</div>
             <div class="kpi-sub">
-                {{ '−' if kpis.margin_7d_usd < 0 else '' }}${{ '%.2f'|format(kpis.margin_7d_usd|abs) }} / 7d ·
-                {{ '−' if kpis.margin_today_usd < 0 else '' }}${{ '%.2f'|format(kpis.margin_today_usd|abs) }} today ·
+                {{ kpis.margin_7d_usd|usd }} / 7d ·
+                {{ kpis.margin_today_usd|usd }} today ·
                 income − {{ 'actual' if kpis.cost_source == 'actual' else 'estimated' }} API cost
             </div>
         </div>
@@ -381,9 +381,10 @@
             </button>
             <div class="kpi">
                 <div class="kpi-label">Purchases</div>
-                <div class="kpi-value" data-kpi="purchase_count">{{ kpis.purchase_count }}</div>
-                <div class="kpi-sub" data-kpi="purchase_gross">${{ '%.2f'|format(kpis.purchase_gross_usd) }} gross paid (list price)</div>
-                <div class="kpi-sub" data-kpi="purchase_net">{% if kpis.purchase_net_usd is not none %}${{ '%.2f'|format(kpis.purchase_net_usd) }} net after Stripe fees, tax &amp; refunds{% else %}net: Stripe unavailable{% endif %}</div>
+                <div class="kpi-value" data-kpi="purchase_count">{{ kpis.paid_count_all }}</div>
+                <div class="kpi-sub" data-kpi="purchase_gross">{{ kpis.paid_gross_all_usd|usd }} gross paid (all payments, list price)</div>
+                {% if kpis.paid_refunded_count %}<div class="kpi-sub" data-kpi="purchase_refunds">{{ (0 - kpis.paid_refunded_usd)|usd }} refunded ({{ kpis.paid_refunded_count }})</div>{% endif %}
+                <div class="kpi-sub" data-kpi="purchase_net">{% if kpis.purchase_net_usd is not none %}{{ kpis.purchase_net_usd|usd }} net after Stripe fees, tax &amp; refunds{% else %}net: Stripe unavailable{% endif %}</div>
             </div>
             <div class="kpi">
                 <div class="kpi-label">BYOK</div>
@@ -548,12 +549,12 @@
         <p class="costs-note" data-costs="note">
             {{ costs.note }}
             {% if costs.fixed_monthly_usd %}
-            Fixed opex ${{ '%.2f'|format(costs.fixed_monthly_usd) }}/mo
-            (~${{ '%.2f'|format(costs.fixed_daily_usd) }}/day)
+            Fixed opex {{ (costs.fixed_monthly_usd)|usd }}/mo
+            (~{{ (costs.fixed_daily_usd)|usd }}/day)
             {% if costs.fixed_breakdown %}
             —
             {% for item in costs.fixed_breakdown %}
-            {{ item.name }} ${{ '%.2f'|format(item.usd) }}{% if not loop.last %}, {% endif %}
+            {{ item.name }} {{ (item.usd)|usd }}{% if not loop.last %}, {% endif %}
             {% endfor %}
             {% endif %}
             ·
@@ -566,15 +567,15 @@
             {% set w = costs.windows[key] %}
             <div class="cost-card" data-costs-window="{{ key }}">
                 <h3>{{ title }}</h3>
-                <div class="money-row"><span class="label">Est. OpenAI (trial)</span><span>${{ '%.2f'|format(w.openai_trial_usd) }}</span></div>
-                <div class="money-row"><span class="label">Est. OpenAI (paid)</span><span>${{ '%.2f'|format(w.openai_paid_usd) }}</span></div>
-                <div class="money-row"><span class="label">Est. summaries</span><span>${{ '%.2f'|format(w.openai_summary_usd) }}</span></div>
-                <div class="money-row"><span class="label">Fixed (prorated)</span><span>${{ '%.2f'|format(w.fixed_usd) }}</span></div>
-                <div class="money-row net"><span class="label">Est. total cost</span><span>${{ '%.2f'|format(w.total_usd) }}</span></div>
-                <div class="money-row"><span class="label">Revenue (credits)</span><span>${{ '%.2f'|format(w.revenue_usd) }}</span></div>
+                <div class="money-row"><span class="label">Est. OpenAI (trial)</span><span>{{ (w.openai_trial_usd)|usd }}</span></div>
+                <div class="money-row"><span class="label">Est. OpenAI (paid)</span><span>{{ (w.openai_paid_usd)|usd }}</span></div>
+                <div class="money-row"><span class="label">Est. summaries</span><span>{{ (w.openai_summary_usd)|usd }}</span></div>
+                <div class="money-row"><span class="label">Fixed (prorated)</span><span>{{ (w.fixed_usd)|usd }}</span></div>
+                <div class="money-row net"><span class="label">Est. total cost</span><span>{{ (w.total_usd)|usd }}</span></div>
+                <div class="money-row"><span class="label">Revenue (credits)</span><span>{{ (w.revenue_usd)|usd }}</span></div>
                 <div class="money-row"><span class="label">Gross margin</span>
                     <span>
-                        ${{ '%.2f'|format(w.gross_margin_usd) }}
+                        {{ (w.gross_margin_usd)|usd }}
                         {% if w.gross_margin_pct is not none %}
                         ({{ '%.1f'|format(w.gross_margin_pct) }}%)
                         {% endif %}
@@ -585,10 +586,10 @@
                 <div class="money-row"><span class="label">BYOK minutes (excl.)</span><span>{{ w.byok_minutes }}</span></div>
                 <div class="money-row"><span class="label">Failed w/ OpenAI hit</span><span>{{ w.failed_with_openai_count }}</span></div>
                 <div class="money-row"><span class="label">Cost / active user</span>
-                    <span>{% if w.cost_per_active_user_usd is not none %}${{ '%.2f'|format(w.cost_per_active_user_usd) }}{% else %}—{% endif %}</span>
+                    <span>{% if w.cost_per_active_user_usd is not none %}{{ (w.cost_per_active_user_usd)|usd }}{% else %}—{% endif %}</span>
                 </div>
                 <div class="money-row"><span class="label">Cost / paid user</span>
-                    <span>{% if w.cost_per_paid_user_usd is not none %}${{ '%.2f'|format(w.cost_per_paid_user_usd) }}{% else %}—{% endif %}</span>
+                    <span>{% if w.cost_per_paid_user_usd is not none %}{{ (w.cost_per_paid_user_usd)|usd }}{% else %}—{% endif %}</span>
                 </div>
             </div>
             {% endfor %}
@@ -643,16 +644,16 @@
         {% endif %}
         <div class="costs-grid actual-totals" data-costs="actual-totals">
             <div class="cost-card"><h3>Actual today (UTC, partial)</h3>
-                <div class="actual-figure">{% if ac.ok and ac.today %}${{ '%.2f'|format(ac.today.actual_usd or 0) }}{% else %}—{% endif %}</div>
-                <div class="actual-sub">Est. {% if ac.today %}${{ '%.2f'|format(ac.today.estimated_usd) }}{% else %}— (today not in range){% endif %}</div></div>
+                <div class="actual-figure">{% if ac.ok and ac.today %}{{ (ac.today.actual_usd or 0)|usd }}{% else %}—{% endif %}</div>
+                <div class="actual-sub">Est. {% if ac.today %}{{ (ac.today.estimated_usd)|usd }}{% else %}— (today not in range){% endif %}</div></div>
             <div class="cost-card"><h3>Actual in period</h3>
-                <div class="actual-figure">{% if ac.total_actual_usd is not none %}${{ '%.2f'|format(ac.total_actual_usd) }}{% else %}—{% endif %}</div>
+                <div class="actual-figure">{% if ac.total_actual_usd is not none %}{{ (ac.total_actual_usd)|usd }}{% else %}—{% endif %}</div>
                 <div class="actual-sub">OpenAI invoice basis</div></div>
             <div class="cost-card"><h3>Estimated in period</h3>
-                <div class="actual-figure">${{ '%.2f'|format(ac.total_estimated_usd) }}</div>
+                <div class="actual-figure">{{ (ac.total_estimated_usd)|usd }}</div>
                 <div class="actual-sub">From stored audio seconds</div></div>
             <div class="cost-card"><h3>Actual − estimate</h3>
-                <div class="actual-figure">{% if ac.diff_usd is not none %}{{ '+' if ac.diff_usd >= 0 else '−' }}${{ '%.2f'|format(ac.diff_usd|abs) }}{% else %}—{% endif %}</div>
+                <div class="actual-figure">{% if ac.diff_usd is not none %}{{ ac.diff_usd|usd(sign=True) }}{% else %}—{% endif %}</div>
                 <div class="actual-sub">Positive = estimate is too low</div></div>
         </div>
         <div class="chart-card" data-costs="actual-chart">
@@ -663,7 +664,7 @@
         <div class="actual-table-wrap">
             <table class="actual-table" data-costs="line-items">
                 <thead><tr><th>OpenAI line item (period)</th><th>Actual</th></tr></thead>
-                <tbody>{% for li in ac.line_items %}<tr><td>{{ li.name }}</td><td>${{ '%.2f'|format(li.usd) }}</td></tr>{% endfor %}</tbody>
+                <tbody>{% for li in ac.line_items %}<tr><td>{{ li.name }}</td><td>{{ (li.usd)|usd }}</td></tr>{% endfor %}</tbody>
             </table>
         </div>
         {% endif %}
@@ -673,9 +674,9 @@
                 <tbody>
                 {% for r in ac.rows %}
                 <tr><td>{{ r.day }}{% if r.partial %} <span class="est-badge">partial</span>{% endif %}</td>
-                    <td>{% if r.actual_usd is not none %}${{ '%.2f'|format(r.actual_usd) }}{% else %}—{% endif %}</td>
-                    <td>${{ '%.2f'|format(r.estimated_usd) }}</td>
-                    <td>{% if r.actual_usd is not none %}{{ '%+.2f'|format(r.actual_usd - r.estimated_usd) }}{% else %}—{% endif %}</td></tr>
+                    <td>{% if r.actual_usd is not none %}{{ (r.actual_usd)|usd }}{% else %}—{% endif %}</td>
+                    <td>{{ (r.estimated_usd)|usd }}</td>
+                    <td>{% if r.actual_usd is not none %}{{ (r.actual_usd - r.estimated_usd)|usd(sign=True) }}{% else %}—{% endif %}</td></tr>
                 {% endfor %}
                 </tbody>
             </table>
@@ -698,9 +699,9 @@
         {% if not mg.cost_ok %}<div class="stripe-error" role="status">Actual cost unavailable: {{ mg.cost_error }}</div>{% endif %}
         {% if not mg.stripe_ok %}<div class="stripe-error" role="status">Stripe unavailable, income shows $0.</div>{% endif %}
         <div class="costs-grid">
-            <div class="cost-card"><h3>Income in period</h3><div class="actual-figure">${{ '%.2f'|format(mg.daily.total_income_usd) }}</div><div class="actual-sub">Stripe net</div></div>
-            <div class="cost-card"><h3>Actual API cost</h3><div class="actual-figure">{% if mg.daily.total_cost_usd is not none %}${{ '%.2f'|format(mg.daily.total_cost_usd) }}{% else %}—{% endif %}</div><div class="actual-sub">OpenAI billing</div></div>
-            <div class="cost-card"><h3>Margin</h3><div class="actual-figure">{% if mg.daily.total_margin_usd is not none %}{{ '−' if mg.daily.total_margin_usd < 0 else '' }}${{ '%.2f'|format(mg.daily.total_margin_usd|abs) }}{% else %}—{% endif %}</div><div class="actual-sub">income − actual cost</div></div>
+            <div class="cost-card"><h3>Income in period</h3><div class="actual-figure">{{ (mg.daily.total_income_usd)|usd }}</div><div class="actual-sub">Stripe net</div></div>
+            <div class="cost-card"><h3>Actual API cost</h3><div class="actual-figure">{% if mg.daily.total_cost_usd is not none %}{{ (mg.daily.total_cost_usd)|usd }}{% else %}—{% endif %}</div><div class="actual-sub">OpenAI billing</div></div>
+            <div class="cost-card"><h3>Margin</h3><div class="actual-figure">{% if mg.daily.total_margin_usd is not none %}{{ mg.daily.total_margin_usd|usd }}{% else %}—{% endif %}</div><div class="actual-sub">income − actual cost</div></div>
             <div class="cost-card"><h3>Cost per minute</h3><div class="actual-figure">${{ '%.4f'|format(mg.cost_per_min_usd) }}</div><div class="actual-sub">{% if mg.cost_per_min_source == 'actual' %}actual cost{% elif mg.cost_per_min_source == 'list_implausible' %}list price (actual ÷ minutes was implausible){% else %}list price{% endif %} / {{ mg.transcribed_minutes }} min transcribed · list ${{ '%.3f'|format(mg.whisper_list_usd_per_min) }}</div></div>
         </div>
         <div class="chart-card" data-costs="margin-chart">
@@ -712,9 +713,9 @@
                 <thead><tr><th>Day (UTC)</th><th>Income</th><th>Actual cost</th><th>Margin</th></tr></thead>
                 <tbody>{% for r in mg.daily.rows|reverse %}
                 <tr><td>{{ r.day }}{% if r.partial %} <span class="est-badge">partial</span>{% endif %}</td>
-                    <td>${{ '%.2f'|format(r.income_usd) }}</td>
-                    <td>{% if r.cost_usd is not none %}${{ '%.2f'|format(r.cost_usd) }}{% else %}—{% endif %}</td>
-                    <td>{% if r.margin_usd is not none %}{{ '%+.2f'|format(r.margin_usd) }}{% else %}—{% endif %}</td></tr>
+                    <td>{{ (r.income_usd)|usd }}</td>
+                    <td>{% if r.cost_usd is not none %}{{ (r.cost_usd)|usd }}{% else %}—{% endif %}</td>
+                    <td>{% if r.margin_usd is not none %}{{ (r.margin_usd)|usd(sign=True) }}{% else %}—{% endif %}</td></tr>
                 {% endfor %}</tbody>
             </table>
         </div>
@@ -735,25 +736,25 @@
                 <tbody>
                 {% for g in c.plans %}
                 <tr data-plan="{{ g.plan }}"><td>{{ g.label }}</td><td>{{ g.count }}</td>
-                    <td>${{ '%.2f'|format(g.gross_usd) }}</td>
-                    <td>${{ '%.2f'|format(g.fees_usd + g.tax_usd) }}</td>
-                    <td>${{ '%.2f'|format(g.net_usd) }}</td>
+                    <td>{{ (g.gross_usd)|usd }}</td>
+                    <td>{{ (g.fees_usd + g.tax_usd)|usd }}</td>
+                    <td>{{ (g.net_usd)|usd }}</td>
                     <td>{{ '%.0f'|format(g.minutes_sold) }}</td>
-                    <td>${{ '%.2f'|format(g.cost_all_used_usd) }}</td>
-                    <td>{{ '%+.2f'|format(g.db_all_used_usd) }}{% if g.db_pct_all_used is not none %} ({{ g.db_pct_all_used }}%){% endif %}<br><span class="money-muted">{{ '%+.2f'|format(g.db_per_purchase_all_used_usd) }}/buy</span></td>
+                    <td>{{ (g.cost_all_used_usd)|usd }}</td>
+                    <td>{{ (g.db_all_used_usd)|usd(sign=True) }}{% if g.db_pct_all_used is not none %} ({{ g.db_pct_all_used }}%){% endif %}<br><span class="money-muted">{{ (g.db_per_purchase_all_used_usd)|usd(sign=True) }}/buy</span></td>
                     <td>{{ '%.0f'|format(g.minutes_used) }}</td>
-                    <td>${{ '%.2f'|format(g.cost_used_so_far_usd) }}</td>
-                    <td>{{ '%+.2f'|format(g.db_used_so_far_usd) }}{% if g.db_pct_used_so_far is not none %} ({{ g.db_pct_used_so_far }}%){% endif %}<br><span class="money-muted">{{ '%+.2f'|format(g.db_per_purchase_used_so_far_usd) }}/buy</span></td></tr>
+                    <td>{{ (g.cost_used_so_far_usd)|usd }}</td>
+                    <td>{{ (g.db_used_so_far_usd)|usd(sign=True) }}{% if g.db_pct_used_so_far is not none %} ({{ g.db_pct_used_so_far }}%){% endif %}<br><span class="money-muted">{{ (g.db_per_purchase_used_so_far_usd)|usd(sign=True) }}/buy</span></td></tr>
                 {% else %}
                 <tr><td colspan="11" class="admin-empty">No purchases in this period.</td></tr>
                 {% endfor %}
                 <tr data-plan="trial"><td>{{ c.trial.label }}</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>
-                    <td>{{ '%.0f'|format(c.trial.minutes_used) }}</td><td>${{ '%.2f'|format(c.trial.cost_usd) }}</td><td>−${{ '%.2f'|format(c.trial.cost_usd) }}</td></tr>
+                    <td>{{ '%.0f'|format(c.trial.minutes_used) }}</td><td>{{ (c.trial.cost_usd)|usd }}</td><td>−{{ (c.trial.cost_usd)|usd }}</td></tr>
                 <tr class="contrib-total"><td><strong>Total</strong></td><td>{{ c.totals.count|int }}</td>
-                    <td>${{ '%.2f'|format(c.totals.gross_usd) }}</td><td>${{ '%.2f'|format(c.totals.fees_usd + c.totals.tax_usd) }}</td>
-                    <td>${{ '%.2f'|format(c.totals.net_usd) }}</td><td></td><td>${{ '%.2f'|format(c.totals.cost_all_used_usd) }}</td>
-                    <td>{{ '%+.2f'|format(c.totals.db_all_used_usd) }}</td><td></td><td>${{ '%.2f'|format(c.totals.cost_used_so_far_usd) }}</td>
-                    <td>{{ '%+.2f'|format(c.totals.db_used_so_far_usd) }}<br><span class="money-muted">after trial: {{ '%+.2f'|format(c.totals.db_after_trial_usd) }}</span></td></tr>
+                    <td>{{ (c.totals.gross_usd)|usd }}</td><td>{{ (c.totals.fees_usd + c.totals.tax_usd)|usd }}</td>
+                    <td>{{ (c.totals.net_usd)|usd }}</td><td></td><td>{{ (c.totals.cost_all_used_usd)|usd }}</td>
+                    <td>{{ (c.totals.db_all_used_usd)|usd(sign=True) }}</td><td></td><td>{{ (c.totals.cost_used_so_far_usd)|usd }}</td>
+                    <td>{{ (c.totals.db_used_so_far_usd)|usd(sign=True) }}<br><span class="money-muted">after trial: {{ (c.totals.db_after_trial_usd)|usd(sign=True) }}</span></td></tr>
                 </tbody>
             </table>
         </div>
@@ -763,9 +764,9 @@
             <table class="actual-table" data-costs="theoretical-table">
                 <thead><tr><th>Pack</th><th>Price</th><th>Fees + tax{% if mg.observed_fee_tax_pct is not none %} ({{ mg.observed_fee_tax_pct }}% seen){% endif %}</th><th>Fee model (30¢ + 6.4%)</th><th>Cost (actual/min)</th><th>Cost (list $0.006)</th><th>Contribution</th></tr></thead>
                 <tbody>{% for t in mg.theoretical %}
-                <tr><td>{{ t.minutes }} min</td><td>${{ '%.2f'|format(t.price_usd) }}</td><td>${{ '%.2f'|format(t.fee_tax_usd) }}</td><td>${{ '%.2f'|format(t.model_fee_usd) }}</td>
-                    <td>${{ '%.2f'|format(t.cost_usd) }}</td><td>${{ '%.2f'|format(t.cost_list_usd) }}</td>
-                    <td>{{ '%+.2f'|format(t.db_usd) }}{% if t.db_pct is not none %} ({{ t.db_pct }}%){% endif %}</td></tr>
+                <tr><td>{{ t.minutes }} min</td><td>{{ (t.price_usd)|usd }}</td><td>{{ (t.fee_tax_usd)|usd }}</td><td>{{ (t.model_fee_usd)|usd }}</td>
+                    <td>{{ (t.cost_usd)|usd }}</td><td>{{ (t.cost_list_usd)|usd }}</td>
+                    <td>{{ (t.db_usd)|usd(sign=True) }}{% if t.db_pct is not none %} ({{ t.db_pct }}%){% endif %}</td></tr>
                 {% endfor %}</tbody>
             </table>
         </div>
@@ -1133,7 +1134,7 @@
                     plugins: { legend: { display: true, labels: { color: palette.text, boxWidth: 12, font: { size: 11 } } } },
                     scales: {
                         x: { ticks: { color: palette.text, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 12 } }, grid: { display: false } },
-                        y: { beginAtZero: true, ticks: { color: palette.text, font: { size: 12 }, callback: function (v) { return '$' + v; } }, grid: { color: palette.grid } },
+                        y: { beginAtZero: true, ticks: { color: palette.text, font: { size: 12 }, callback: function (v) { return (v < 0 ? '\u2212$' + (-v) : '$' + v); } }, grid: { color: palette.grid } },
                     },
                 },
             });
@@ -1160,7 +1161,7 @@
                     plugins: { legend: { display: true, labels: { color: palette.text, boxWidth: 12, font: { size: 11 } } } },
                     scales: {
                         x: { ticks: { color: palette.text, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 12 } }, grid: { display: false } },
-                        y: { ticks: { color: palette.text, font: { size: 12 }, callback: function (v) { return '$' + v; } }, grid: { color: palette.grid } },
+                        y: { ticks: { color: palette.text, font: { size: 12 }, callback: function (v) { return (v < 0 ? '\u2212$' + (-v) : '$' + v); } }, grid: { color: palette.grid } },
                     },
                 },
             });
