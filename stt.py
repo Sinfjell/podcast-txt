@@ -4,7 +4,8 @@ Podskrift transcribes on OpenAI ``whisper-1`` unless ``STT_PROVIDER=together``.
 With Together, jobs paid for by the platform key (trial or credit packs) run on
 Together AI ``openai/whisper-large-v3`` at a quarter of the price, with
 whisper-1 as the per-chunk fallback. Users with their own OpenAI key always stay
-on whisper-1: it is their key and their bill.
+on OpenAI (never Together): it is their key and their bill. BYOK users may
+pick ``gpt-transcribe`` (Best quality) instead of the default whisper-1.
 
 Everything here is pure (no Flask, no DB) so it can be tested directly; the
 calls themselves live in ``app._transcribe_chunk_routed``.
@@ -27,22 +28,40 @@ from __future__ import annotations
 import difflib
 import os
 import re
+import statistics
 import unicodedata
 
 OPENAI_MODEL = 'whisper-1'
+MODEL_GPT_TRANSCRIBE = 'gpt-transcribe'
+# BYOK "Best quality": shorter parts (output token cap ~2k truncates 900 s),
+# no segment timestamps from the API — we invent one segment per part.
+GPT_TRANSCRIBE_SEGMENT_SECONDS = 300
+ALLOWED_BYOK_MODELS = frozenset({OPENAI_MODEL, MODEL_GPT_TRANSCRIBE})
+
 TOGETHER_MODEL = 'openai/whisper-large-v3'
 TOGETHER_BASE_URL = 'https://api.together.xyz/v1'
 
 PROVIDER_OPENAI = 'whisper-1'
 PROVIDER_TOGETHER = 'together'
+PROVIDER_GPT_TRANSCRIBE = MODEL_GPT_TRANSCRIBE
 
 # What each provider actually costs us per audio minute. Internal accounting
 # only (admin costs, PostHog). User-facing "est. cost" copy is about BYOK and
-# stays on app.WHISPER_COST_PER_MINUTE (OpenAI's list price).
+# stays on app.WHISPER_COST_PER_MINUTE (OpenAI's list price). BYOK still
+# records the model so cost reports can exclude those rows by funding.
 PROVIDER_USD_PER_MIN = {
-    PROVIDER_OPENAI: 0.006,      # https://openai.com/api/pricing/
-    PROVIDER_TOGETHER: 0.0015,   # api.together.xyz/v1/models price_per_minute
+    PROVIDER_OPENAI: 0.006,           # https://openai.com/api/pricing/
+    PROVIDER_TOGETHER: 0.0015,        # api.together.xyz/v1/models price_per_minute
+    PROVIDER_GPT_TRANSCRIBE: 0.0045,  # gpt-transcribe list price ($/min)
 }
+
+# Completeness guard for gpt-transcribe: a part whose words/sec is below this
+# fraction of the median neighbouring rate is re-run on whisper-1 (same user
+# key). Caught the Car Talk phone-intro drop at ~0.60× in the Oct 2026 test.
+COMPLETENESS_RATE_FRACTION = 0.7
+COMPLETENESS_MIN_SECONDS = 30.0
+# ffmpeg leaves a ~0.1 s crumb on exact-length cuts; gpt-transcribe 400s it.
+MIN_PART_SECONDS = 1.0
 
 # Segment-level guard: Together cuts audio on a 30 s grid, and some windows
 # come back nearly empty although someone is talking ("Det er mye." for 101
@@ -116,12 +135,66 @@ def usd_per_minute(provider):
                               str(PROVIDER_USD_PER_MIN[PROVIDER_TOGETHER])))
         except ValueError:
             return PROVIDER_USD_PER_MIN[PROVIDER_TOGETHER]
+    if provider in PROVIDER_USD_PER_MIN:
+        return PROVIDER_USD_PER_MIN[provider]
     return PROVIDER_USD_PER_MIN[PROVIDER_OPENAI]
 
 
 def cost_usd(provider, seconds):
     """What `seconds` of audio sent to `provider` cost us."""
     return max(0.0, float(seconds or 0)) / 60.0 * usd_per_minute(provider)
+
+
+def normalize_transcription_model(value):
+    """BYOK model pick → canonical name. Unknown / empty → whisper-1."""
+    raw = (value or '').strip().lower()
+    if raw == MODEL_GPT_TRANSCRIBE:
+        return MODEL_GPT_TRANSCRIBE
+    return OPENAI_MODEL
+
+
+def segment_seconds_for_model(model):
+    """Part length for this OpenAI model, or None to keep the app default (900)."""
+    if normalize_transcription_model(model) == MODEL_GPT_TRANSCRIBE:
+        return GPT_TRANSCRIBE_SEGMENT_SECONDS
+    return None
+
+
+def part_word_rate(text, seconds):
+    """Words per second for a part; 0 when duration is non-positive."""
+    dur = float(seconds or 0)
+    if dur <= 0:
+        return 0.0
+    return _words(text) / dur
+
+
+def incomplete_part_indexes(texts, seconds_list,
+                            fraction=COMPLETENESS_RATE_FRACTION,
+                            min_seconds=COMPLETENESS_MIN_SECONDS):
+    """Indexes whose word rate is below ``fraction`` × median of the set.
+
+    Needs at least two parts long enough to compare; short crumbs and
+    single-part jobs are never flagged (nothing to compare against).
+    """
+    texts = list(texts or [])
+    seconds_list = list(seconds_list or [])
+    n = min(len(texts), len(seconds_list))
+    rates = []
+    for i in range(n):
+        sec = float(seconds_list[i] or 0)
+        if sec < min_seconds:
+            rates.append(None)
+            continue
+        rates.append(part_word_rate(texts[i], sec))
+    comparable = [r for r in rates if r is not None]
+    if len(comparable) < 2:
+        return []
+    median = statistics.median(comparable)
+    if median <= 0:
+        return []
+    threshold = fraction * median
+    return [i for i, r in enumerate(rates)
+            if r is not None and r < threshold]
 
 
 def job_funding(key_source, trial_seconds, paid_seconds):

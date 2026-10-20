@@ -16315,12 +16315,15 @@ FIXTURE_ALL_TIME_OPENAI_USD = 0.82
 def test_admin_audio_prices_config_matches_spec():
     import admin_costs as AC
     assert AC.OPENAI_AUDIO_USD_PER_MIN['whisper-1'] == 0.006
+    assert AC.OPENAI_AUDIO_USD_PER_MIN['gpt-transcribe'] == 0.0045
     assert AC.OPENAI_AUDIO_USD_PER_MIN['gpt-4o-transcribe'] == 0.006
     assert AC.OPENAI_AUDIO_USD_PER_MIN['gpt-4o-mini-transcribe'] == 0.003
     assert AC.DEFAULT_TRANSCRIPTION_MODEL == 'whisper-1'
     assert AC.estimate_transcription_cost_usd(100 * 60) == pytest.approx(0.60)
     assert AC.estimate_transcription_cost_usd(
         100 * 60, 'gpt-4o-mini-transcribe') == pytest.approx(0.30)
+    assert AC.estimate_transcription_cost_usd(
+        100 * 60, 'gpt-transcribe') == pytest.approx(0.45)
 
 
 def test_admin_task_key_source_classification():
@@ -18814,6 +18817,7 @@ def test_stt_long_segments_are_split_into_short_srt_cues():
 def test_stt_cost_constants_are_internal_and_separate():
     assert STT.cost_usd('together', 60) == pytest.approx(0.0015)
     assert STT.cost_usd('whisper-1', 60) == pytest.approx(0.006)
+    assert STT.cost_usd('gpt-transcribe', 60) == pytest.approx(0.0045)
     # User-facing BYOK copy stays on OpenAI's list price.
     assert A.WHISPER_COST_PER_MINUTE == 0.006
 
@@ -18992,6 +18996,293 @@ def test_stt_gap_retry_over_music_bed_counts_as_recovered():
 def test_stt_gap_retry_must_bring_back_clearly_more_words():
     assert not STT.retry_recovered(' '.join(['a'] * 15), ' '.join(['b'] * 20), 30)
     assert STT.retry_recovered(' '.join(['a'] * 15), ' '.join(['b'] * 30), 30)
+
+
+# -- BYOK transcription model (gpt-transcribe) -----------------------------
+
+def test_byok_model_normalize_and_segment_length():
+    assert STT.normalize_transcription_model(None) == 'whisper-1'
+    assert STT.normalize_transcription_model('') == 'whisper-1'
+    assert STT.normalize_transcription_model('garbage') == 'whisper-1'
+    assert STT.normalize_transcription_model('gpt-transcribe') == 'gpt-transcribe'
+    assert STT.segment_seconds_for_model('whisper-1') is None
+    assert STT.segment_seconds_for_model('gpt-transcribe') == 300
+    assert STT.segment_seconds_for_model(None) is None
+
+
+def test_byok_resolve_model_only_for_own_key():
+    uid = _make_user('byok-resolve@test.com', key='sk-user', limit=600)
+    with A.app.app_context():
+        u = A.db.session.get(A.User, uid)
+        u.transcription_model = 'gpt-transcribe'
+        A.db.session.commit()
+        assert A.resolve_transcription_model(u, 'user') == 'gpt-transcribe'
+        assert A.resolve_transcription_model(u, 'trial') == 'whisper-1'
+        assert A.resolve_transcription_model(None, 'user') == 'whisper-1'
+
+
+def test_stt_own_key_never_routes_to_together_even_with_best_model(together_on):
+    """Together rollout must stay untouched for non-BYOK; BYOK stays on OpenAI."""
+    assert STT.route_job('user', 'en', None, 0) == (STT.PROVIDER_OPENAI, 'own_key')
+    assert STT.route_job('trial', 'en', 600, 0)[0] == STT.PROVIDER_TOGETHER
+
+
+def test_stt_incomplete_part_indexes_flags_thin_neighbours():
+    # Part 0 at 0.6× the others (Car Talk phone-intro shape).
+    good = ' '.join(['word'] * 150)
+    thin = ' '.join(['word'] * 90)
+    flagged = STT.incomplete_part_indexes(
+        [thin, good, good], [300.0, 300.0, 300.0])
+    assert flagged == [0]
+    assert STT.incomplete_part_indexes([good], [300.0]) == []
+    assert STT.incomplete_part_indexes([thin, good], [10.0, 300.0]) == []
+
+
+def test_gpt_transcribe_chunk_sends_languages_and_one_segment(tmp_path, monkeypatch):
+    oa = _ScriptedClient(_result('hello from best'))
+    monkeypatch.setattr(A, 'probe_audio_duration', lambda path: 300.0)
+    job = A.SttJob(STT.PROVIDER_OPENAI, 'own_key', openai_model='gpt-transcribe',
+                   segment_seconds=300)
+    r = A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path), 'no', chunk_seconds=300.0)
+    assert oa.calls[0]['model'] == 'gpt-transcribe'
+    assert oa.calls[0]['languages'] == ['no']
+    assert 'language' not in oa.calls[0]
+    assert oa.calls[0]['response_format'] == 'json'
+    assert r.language is None
+    assert len(r.segments) == 1
+    assert r.segments[0].start == 0.0 and r.segments[0].end == 300.0
+    assert job.provider_label() == 'gpt-transcribe'
+    assert job.cost_usd == pytest.approx(5 * 0.0045)
+
+
+def test_gpt_transcribe_completeness_falls_back_to_whisper_on_same_key(
+        tmp_path, monkeypatch):
+    from models import db, TranscriptionTask
+    uid = _make_user('byok-complete@test.com', key='sk-user', limit=3600)
+    chunks = [_chunk(tmp_path, f'g{i}.mp3') for i in range(3)]
+    monkeypatch.setattr(A, 'probe_audio_duration', lambda path: 300.0)
+    # Well under 0.7× neighbour rate (Car Talk was ~0.60×); median of three
+    # keeps the threshold clear of float noise.
+    thin = ' '.join(['w'] * 60)
+    rich = ' '.join(['w'] * 150)
+    # First pass: three gpt-transcribe results; then whisper-1 repair of part 0.
+    oa = _ScriptedClient(
+        _result(thin), _result(rich), _result(rich),
+        _result(rich, [_seg(0, 20, ' ' + rich)]),
+    )
+    with A.app.app_context():
+        db.session.merge(TranscriptionTask(
+            id='byok-complete', user_id=uid, episode_title='x',
+            status='transcribing', chunk_total=3))
+        db.session.commit()
+        job = A.SttJob(STT.PROVIDER_OPENAI, 'own_key', task_id='byok-complete',
+                       openai_model='gpt-transcribe', segment_seconds=300)
+        text, segs = A._transcribe_chunks(
+            chunks, set(chunks), 'byok-complete', oa, 'en', 900.0, stt_job=job)
+    assert job.events['completeness_fallback'] == 1
+    assert [c['model'] for c in oa.calls] == [
+        'gpt-transcribe', 'gpt-transcribe', 'gpt-transcribe', 'whisper-1']
+    assert job.provider_label() == 'mixed'
+    # Repaired part 0 no longer the thin string alone at the start.
+    assert text.startswith(rich)
+    assert segs  # whisper segments shifted
+
+
+def test_transcribe_chunks_skips_subsecond_parts(tmp_path, monkeypatch):
+    from models import db, TranscriptionTask
+    uid = _make_user('byok-skip@test.com', key='sk-user', limit=3600)
+    chunks = [_chunk(tmp_path, 'long.mp3'), _chunk(tmp_path, 'crumb.mp3')]
+    # First part 300 s, second 0.1 s — crumb must not hit the API.
+    durs = {str(chunks[0]): 300.0, str(chunks[1]): 0.1}
+
+    def _dur(path):
+        return durs.get(str(path), 300.0)
+
+    monkeypatch.setattr(A, 'probe_audio_duration', _dur)
+    oa = _ScriptedClient(_result('kept'))
+    with A.app.app_context():
+        db.session.merge(TranscriptionTask(
+            id='byok-skip', user_id=uid, episode_title='x',
+            status='transcribing', chunk_total=2))
+        db.session.commit()
+        job = A.SttJob(STT.PROVIDER_OPENAI, 'own_key', task_id='byok-skip',
+                       openai_model='gpt-transcribe', segment_seconds=300)
+        text, _ = A._transcribe_chunks(
+            chunks, set(chunks), 'byok-skip', oa, 'en', 300.1, stt_job=job)
+    assert len(oa.calls) == 1
+    assert job.events['skipped_short_part'] == 1
+    assert text == 'kept'
+
+
+@pytest.mark.skipif(not __import__('shutil').which('ffmpeg'), reason='needs ffmpeg')
+def test_prepare_audio_uses_per_job_segment_seconds(tmp_path):
+    """Best quality must cut 300 s parts; Standard keeps 900 s."""
+    src = tmp_path / 'ep.mp3'
+    # ~650 s of silence at 16 kHz mono 48 kbps → two 300 s parts, one 900 s part.
+    subprocess = __import__('subprocess')
+    subprocess.run(
+        ['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=16000:cl=mono',
+         '-t', '650', '-b:a', '48k', str(src)],
+        check=True, capture_output=True)
+    parts_best = A.prepare_audio_for_whisper(
+        str(src), segment_seconds=STT.GPT_TRANSCRIBE_SEGMENT_SECONDS)
+    assert len(parts_best) == 3  # 300+300+50
+    for p in parts_best:
+        if os.path.exists(p):
+            os.remove(p)
+    src2 = tmp_path / 'ep2.mp3'
+    subprocess.run(
+        ['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=16000:cl=mono',
+         '-t', '650', '-b:a', '48k', str(src2)],
+        check=True, capture_output=True)
+    parts_std = A.prepare_audio_for_whisper(str(src2), segment_seconds=900)
+    assert len(parts_std) == 1
+    for p in parts_std:
+        if os.path.exists(p):
+            os.remove(p)
+
+
+def test_transcription_model_migration_on_prod_like_schema(trial_on):
+    """Additive users.transcription_model on a schema that lacks the column."""
+    with A.app.app_context():
+        cols_before = A._live_columns('users')
+        assert 'transcription_model' in cols_before  # fresh create_all has it
+        # Rebuild users without the new column (prod-before-this-PR shape).
+        A.db.session.execute(A.text('PRAGMA foreign_keys=OFF'))
+        A.db.session.execute(A.text('ALTER TABLE users RENAME TO users_old'))
+        A.db.session.execute(A.text("""
+            CREATE TABLE users (
+                id INTEGER NOT NULL PRIMARY KEY,
+                email VARCHAR(255) NOT NULL UNIQUE,
+                password_hash VARCHAR(255) NOT NULL,
+                openai_api_key VARCHAR(255),
+                created_at DATETIME,
+                trial_seconds_limit INTEGER,
+                trial_seconds_used INTEGER NOT NULL DEFAULT 0,
+                trial_variant VARCHAR(16),
+                paid_seconds_balance INTEGER NOT NULL DEFAULT 0,
+                api_key_hash VARCHAR(64),
+                api_key_prefix VARCHAR(16),
+                api_key_created_at DATETIME,
+                email_transcript_ready BOOLEAN NOT NULL DEFAULT 1,
+                email_normalized VARCHAR(255),
+                signup_ip_hash VARCHAR(64),
+                signup_device_id VARCHAR(64),
+                trial_denied_reason VARCHAR(32),
+                email_unsubscribed_at DATETIME,
+                session_version INTEGER NOT NULL DEFAULT 0,
+                last_active_day VARCHAR(10)
+            )
+        """))
+        A.db.session.execute(A.text("""
+            INSERT INTO users (
+                id, email, password_hash, openai_api_key, created_at,
+                trial_seconds_limit, trial_seconds_used, trial_variant,
+                paid_seconds_balance, api_key_hash, api_key_prefix,
+                api_key_created_at, email_transcript_ready, email_normalized,
+                signup_ip_hash, signup_device_id, trial_denied_reason,
+                email_unsubscribed_at, session_version, last_active_day
+            )
+            SELECT
+                id, email, password_hash, openai_api_key, created_at,
+                trial_seconds_limit, trial_seconds_used, trial_variant,
+                paid_seconds_balance, api_key_hash, api_key_prefix,
+                api_key_created_at, email_transcript_ready, email_normalized,
+                signup_ip_hash, signup_device_id, trial_denied_reason,
+                email_unsubscribed_at, session_version, last_active_day
+            FROM users_old
+        """))
+        A.db.session.execute(A.text('DROP TABLE users_old'))
+        A.db.session.execute(A.text('PRAGMA foreign_keys=ON'))
+        A.db.session.commit()
+        A.db.session.remove()
+        A.db.engine.dispose()
+        assert 'transcription_model' not in A._live_columns('users')
+        added = A.apply_column_migrations()
+        assert 'users.transcription_model' in added
+        assert 'transcription_model' in A._live_columns('users')
+        # Idempotent.
+        assert A.apply_column_migrations() == []
+
+
+def test_settings_shows_model_picker_only_with_saved_key(monkeypatch):
+    uid = _make_user('byok-ui@test.com', key='sk-' + 'u' * 40)
+    body = _login(uid).get('/settings').data.decode()
+    assert 'Transcription model' in body
+    assert 'name="transcription_model"' in body
+    assert 'gpt-transcribe' in body
+    assert 'Best quality' in body
+    # Without a key the picker is hidden.
+    with A.app.app_context():
+        u = A.db.session.get(A.User, uid)
+        u.openai_api_key = None
+        A.db.session.commit()
+    body2 = _login(uid).get('/settings').data.decode()
+    assert 'Transcription model' not in body2
+
+
+def test_settings_saves_best_model_after_probe(monkeypatch, ph_events):
+    uid = _make_user('byok-save@test.com', key='sk-' + 'v' * 40)
+    monkeypatch.setattr(
+        A, 'verify_transcription_model',
+        lambda key, model: (True, 'Best quality selected.', 'verified'))
+    client = _login(uid)
+    client.post('/settings', data={
+        'form': 'transcription_model',
+        'transcription_model': 'gpt-transcribe',
+    }, follow_redirects=True)
+    with A.app.app_context():
+        u = A.db.session.get(A.User, uid)
+        assert u.transcription_model == 'gpt-transcribe'
+    changed = [e for e in ph_events.events
+               if e['event'] == 'transcription_model_changed']
+    assert changed and changed[0]['properties']['from'] == 'whisper-1'
+    assert changed[0]['properties']['to'] == 'gpt-transcribe'
+    # Switching back stores NULL (default).
+    client.post('/settings', data={
+        'form': 'transcription_model',
+        'transcription_model': 'whisper-1',
+    }, follow_redirects=True)
+    with A.app.app_context():
+        assert A.db.session.get(A.User, uid).transcription_model is None
+
+
+def test_settings_rejects_model_when_probe_fails(monkeypatch):
+    uid = _make_user('byok-badmodel@test.com', key='sk-' + 'w' * 40)
+    monkeypatch.setattr(
+        A, 'verify_transcription_model',
+        lambda key, model: (False, 'Model not available.', 'invalid_key'))
+    _login(uid).post('/settings', data={
+        'form': 'transcription_model',
+        'transcription_model': 'gpt-transcribe',
+    }, follow_redirects=True)
+    with A.app.app_context():
+        assert A.db.session.get(A.User, uid).transcription_model is None
+
+
+def test_remove_key_clears_transcription_model(monkeypatch, ph_events):
+    uid = _make_user('byok-rm@test.com', key='sk-' + 'x' * 40)
+    with A.app.app_context():
+        u = A.db.session.get(A.User, uid)
+        u.transcription_model = 'gpt-transcribe'
+        A.db.session.commit()
+    _login(uid).post('/settings/openai-key/remove', follow_redirects=True)
+    with A.app.app_context():
+        u = A.db.session.get(A.User, uid)
+        assert u.openai_api_key is None
+        assert u.transcription_model is None
+    changed = [e for e in ph_events.events
+               if e['event'] == 'transcription_model_changed']
+    assert any(e['properties'].get('to') == 'whisper-1' for e in changed)
+
+
+def test_stt_analytics_props_include_stt_model():
+    t = type('T', (), {'stt_provider': 'gpt-transcribe', 'stt_cost_usd': 0.01})()
+    props = A._stt_analytics_props(t)
+    assert props['stt_provider'] == 'gpt-transcribe'
+    assert props['stt_model'] == 'gpt-transcribe'
+    assert props['stt_cost_usd'] == 0.01
 
 
 def test_privacy_lists_together_ai_as_processor():

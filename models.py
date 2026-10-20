@@ -18,6 +18,10 @@ class User(UserMixin, db.Model):
     # can gain a password the same way.
     password_hash = db.Column(db.String(255), nullable=False)
     openai_api_key = db.Column(db.String(255), nullable=True)
+    # BYOK-only: which OpenAI transcription model to use. NULL / empty =
+    # whisper-1 (precise timestamps). 'gpt-transcribe' = Best quality
+    # (300 s parts, coarse timestamps). Ignored when the user has no key.
+    transcription_model = db.Column(db.String(32), nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Trial metering. Only ever touched for users transcribing on OUR key --
@@ -214,9 +218,10 @@ class TranscriptionTask(db.Model):
     summary_prompt_tokens = db.Column(db.Integer, nullable=True)
     summary_completion_tokens = db.Column(db.Integer, nullable=True)
     summary_cost_usd_est = db.Column(db.Float, nullable=True)
-    # Which speech-to-text provider ran the job ('whisper-1', 'together' or
-    # 'mixed' after a per-chunk fallback) and what it really cost us in USD,
-    # retries, fallbacks and shadow comparisons included. Internal only.
+    # Which speech-to-text provider/model ran the job ('whisper-1',
+    # 'gpt-transcribe', 'together', or 'mixed' after a per-chunk fallback)
+    # and what it really cost us in USD, retries/fallbacks/shadow included.
+    # Internal only; BYOK jobs still record the model even though we pay $0.
     stt_provider = db.Column(db.String(32), nullable=True)
     stt_cost_usd = db.Column(db.Float, nullable=True)
     # When this row is a read-only copy for a summary-email subscriber, points at
@@ -423,6 +428,7 @@ USER_COLUMN_MIGRATIONS = {
     'email_unsubscribed_at': 'DATETIME',
     'session_version': 'INTEGER NOT NULL DEFAULT 0',
     'last_active_day': 'VARCHAR(10)',
+    'transcription_model': 'VARCHAR(32)',
 }
 
 #: Additive columns for password_reset_tokens. Applied by
