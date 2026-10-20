@@ -2407,15 +2407,20 @@ def _silent_wav_bytes(duration_sec=1.0, sample_rate=16000):
     return buf.getvalue()
 
 
-def _probe_whisper_billing(client):
-    """Minimal Whisper call — models.list() passes for zero-credit accounts."""
+def _probe_whisper_billing(client, model='whisper-1'):
+    """Minimal transcription call — models.list() passes for zero-credit accounts.
+
+    ``model`` is whisper-1 (default) or gpt-transcribe when verifying a BYOK
+    Best-quality pick. gpt-transcribe rejects verbose_json, so use json there.
+    """
     audio = io.BytesIO(_silent_wav_bytes())
     # The SDK reads `.name` for the multipart filename / content type.
     audio.name = 'silence.wav'
-    return client.audio.transcriptions.create(
-        model='whisper-1',
-        file=audio,
-    )
+    model = stt_mod.normalize_transcription_model(model)
+    kwargs = {'model': model, 'file': audio}
+    if model == stt_mod.MODEL_GPT_TRANSCRIBE:
+        kwargs['response_format'] = 'json'
+    return client.audio.transcriptions.create(**kwargs)
 
 
 def _openai_unreachable(exc):
@@ -2490,6 +2495,46 @@ def verify_openai_key(key):
                 product_analytics.openai_fail_reason(e, looks_like_key=True))
 
     return True, 'Key saved and verified for Whisper transcription.', 'verified'
+
+
+def verify_transcription_model(key, model):
+    """Probe a BYOK model pick with the user's key. Returns (ok, message, status).
+
+    Same shape as verify_openai_key. whisper-1 is already covered by the key
+    save probe; gpt-transcribe needs its own tiny call because access can
+    differ per model on the same account.
+    """
+    model = stt_mod.normalize_transcription_model(model)
+    if model == stt_mod.OPENAI_MODEL:
+        return True, 'Standard (whisper-1) selected.', 'verified'
+    if not key:
+        return False, 'Add an OpenAI API key before choosing a transcription model.', 'invalid_key'
+    try:
+        client = OpenAI(api_key=key, timeout=15.0, max_retries=0)
+        _probe_whisper_billing(client, model=model)
+    except Exception as e:
+        if _openai_unreachable(e):
+            return True, ('Model saved, but OpenAI could not be reached to verify it. '
+                          'If transcription fails, try Standard (whisper-1).'), 'unverified_network'
+        status = getattr(e, 'status_code', None)
+        code = product_analytics.openai_error_code(e)
+        if status == 429 or code == 'insufficient_quota':
+            return True, (
+                'Model saved, but your OpenAI account has no credit for it. '
+                'Add credit at platform.openai.com/account/billing before '
+                'transcribing.'
+            ), 'no_billing'
+        return (False, describe_openai_error(e, context='verify'),
+                product_analytics.openai_fail_reason(e, looks_like_key=True))
+    return True, 'Best quality (gpt-transcribe) selected and verified.', 'verified'
+
+
+def resolve_transcription_model(user, key_source):
+    """OpenAI model for this job. Non-BYOK always whisper-1; BYOK may pick Best."""
+    if key_source != 'user':
+        return stt_mod.OPENAI_MODEL
+    raw = getattr(user, 'transcription_model', None) if user is not None else None
+    return stt_mod.normalize_transcription_model(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -3087,8 +3132,12 @@ def trim_audio_file(audio_file, max_seconds):
     return audio_file
 
 
-def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
-    """Re-encode to 16 kHz mono MP3, split into hour-long parts if still large.
+def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES,
+                              segment_seconds=None):
+    """Re-encode to 16 kHz mono MP3, split into fixed-time parts if still large.
+
+    ``segment_seconds`` defaults to SEGMENT_SECONDS (900). BYOK Best quality
+    (gpt-transcribe) passes 300 so parts stay under the ~2k output-token cap.
 
     Returns the parts and removes the source. One ffmpeg pass does both.
 
@@ -3129,6 +3178,9 @@ def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
     # the assumption that the parts are no larger than the source.
     bitrate = min(WHISPER_AUDIO_BITRATE_KBPS,
                   probe_audio_bitrate_kbps(audio_file) or WHISPER_AUDIO_BITRATE_KBPS)
+    part_seconds = int(segment_seconds) if segment_seconds else SEGMENT_SECONDS
+    if part_seconds < 1:
+        part_seconds = SEGMENT_SECONDS
 
     if is_shutting_down():
         raise ServerRestart(auto_resumed=True)
@@ -3142,7 +3194,7 @@ def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
              '-map_metadata', '-1',
              '-vn', '-ac', '1', '-ar', str(WHISPER_SAMPLE_RATE),
              '-b:a', f'{bitrate}k', '-threads', '1',
-             '-f', 'segment', '-segment_time', str(SEGMENT_SECONDS),
+             '-f', 'segment', '-segment_time', str(part_seconds),
              '-segment_format', 'mp3', '-reset_timestamps', '1', pattern],
             capture_output=True, timeout=FFMPEG_TIMEOUT_SECONDS,
         )
@@ -3165,8 +3217,17 @@ def prepare_audio_for_whisper(audio_file, max_bytes=WHISPER_MAX_UPLOAD_BYTES):
 
     # Drop the segmenter's rounding crumb, but never the only part, and never
     # silently: this is the one place content could go missing without an error.
+    # Size floor (~1 s at 48 kbps) plus a duration probe: gpt-transcribe 400s
+    # a 0.1 s tail that still sometimes clears the byte floor at lower bitrates.
     if len(parts) > 1:
-        crumbs = [p for p in parts if os.path.getsize(p) < MIN_PART_BYTES]
+        crumbs = []
+        for p in parts:
+            if os.path.getsize(p) < MIN_PART_BYTES:
+                crumbs.append(p)
+                continue
+            dur = probe_audio_duration(p)
+            if dur is not None and dur < stt_mod.MIN_PART_SECONDS:
+                crumbs.append(p)
         if crumbs:
             app.logger.warning('discarding %s sub-second part(s) from %s',
                                len(crumbs), os.path.basename(audio_file))
@@ -3295,7 +3356,18 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None,
         progress=PHASE_SPANS['splitting'][0],
     ):
         raise TaskAbandoned('Task was cancelled before it could be prepared.')
-    audio_chunks = prepare_audio_for_whisper(audio_file)
+
+    # BYOK model pick (null → whisper-1). Platform jobs always stay on whisper-1
+    # / Together routing; never fall back to the platform key for a BYOK job.
+    owner = None
+    if task_row is not None and task_row.user_id is not None:
+        owner = db.session.get(User, task_row.user_id)
+    openai_model = resolve_transcription_model(owner, key_source)
+    part_seconds = (
+        stt_mod.segment_seconds_for_model(openai_model) or SEGMENT_SECONDS
+    )
+    audio_chunks = prepare_audio_for_whisper(
+        audio_file, segment_seconds=part_seconds)
 
     # prepare_audio_for_whisper() removes the source once it has re-encoded it, so
     # EVERY exit from here on -- the abandonment raise included -- has to go
@@ -3342,8 +3414,12 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None,
 
         upload_start = time.time()
         # Provider for the whole job (per-chunk fallback is inside). An unknown
-        # key_source is treated as the user's own key: whisper-1, their bill.
-        stt_job = _stt_job_for_task(task_id, key_source, language)
+        # key_source is treated as the user's own key: their model, their bill.
+        # Together routing is unchanged for non-BYOK; openai_model only affects
+        # the OpenAI call when the job stays on OpenAI.
+        stt_job = _stt_job_for_task(
+            task_id, key_source, language, openai_model=openai_model,
+            segment_seconds=part_seconds)
         full_text, all_segments = _transcribe_chunks(
             audio_chunks, remaining, task_id, openai_client, language, audio_duration,
             stt_job=stt_job,
@@ -3378,32 +3454,66 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None,
 
 def _whisper_transcribe_chunk(openai_client, chunk_file, language, *,
                               task_id=None, chunk_label=None,
-                              attempts=None):
-    """Call Whisper on one chunk with a bounded retry budget.
+                              attempts=None, model=None, chunk_seconds=None):
+    """Call an OpenAI transcription model on one chunk with a bounded retry budget.
+
+    Default model is whisper-1 (verbose_json + segment timestamps). BYOK Best
+    quality uses gpt-transcribe (json only; we synthesise one segment per part).
+    Pass the user's language as ``languages=[code]`` for gpt-transcribe — never
+    trust or store its own language label (it mislabels Norwegian as Danish).
 
     SDK max_retries is 0; this loop is the only retry path, so a hung request
     cannot stretch past WHISPER_TIMEOUT_SECONDS × attempts via opaque retries.
     Heartbeats between attempts keep the stale sweeper from killing a job that
     is still retrying. Non-transient errors (auth, billing, 4xx) are not retried.
     """
+    import types
     attempts = WHISPER_CHUNK_ATTEMPTS if attempts is None else max(1, int(attempts))
     last_exc = None
     label = chunk_label or os.path.basename(chunk_file)
+    model = stt_mod.normalize_transcription_model(model)
+    use_gpt = model == stt_mod.MODEL_GPT_TRANSCRIBE
 
     for attempt in range(1, attempts + 1):
         try:
             with open(chunk_file, 'rb') as f:
-                create_kwargs = {
-                    'model': 'whisper-1',
-                    'file': f,
-                    'response_format': 'verbose_json',
-                    'timestamp_granularities': ['segment'],
-                }
-                # Omitting `language` entirely is what makes Whisper auto-detect;
-                # passing None or '' is rejected by the API.
-                if language:
-                    create_kwargs['language'] = language
-                return openai_client.audio.transcriptions.create(**create_kwargs)
+                if use_gpt:
+                    create_kwargs = {
+                        'model': stt_mod.MODEL_GPT_TRANSCRIBE,
+                        'file': f,
+                        'response_format': 'json',
+                    }
+                    # gpt-transcribe takes `languages` (plural). Never send
+                    # `language` — the docs reject it for this model.
+                    if language:
+                        create_kwargs['languages'] = [language]
+                else:
+                    create_kwargs = {
+                        'model': 'whisper-1',
+                        'file': f,
+                        'response_format': 'verbose_json',
+                        'timestamp_granularities': ['segment'],
+                    }
+                    # Omitting `language` entirely is what makes Whisper auto-detect;
+                    # passing None or '' is rejected by the API.
+                    if language:
+                        create_kwargs['language'] = language
+                result = openai_client.audio.transcriptions.create(**create_kwargs)
+            if use_gpt:
+                # No timestamps from the API: one segment spanning the part so
+                # SRT / share / MCP offset code keeps working.
+                text = getattr(result, 'text', '') or ''
+                dur = float(chunk_seconds or 0)
+                if dur <= 0:
+                    dur = probe_audio_duration(chunk_file) or 0.0
+                return types.SimpleNamespace(
+                    text=text,
+                    segments=[types.SimpleNamespace(
+                        start=0.0, end=max(dur, 0.0), text=text)],
+                    # Never store the model's language label.
+                    language=None,
+                )
+            return result
         except (APITimeoutError, APIConnectionError) as exc:
             last_exc = exc
             app.logger.warning(
@@ -3446,12 +3556,17 @@ class SttJob:
     """Per-job provider state: who transcribes, what it cost, what happened."""
 
     def __init__(self, provider, reason, *, task_id=None, user_id=None,
-                 together_client=None):
+                 together_client=None, openai_model=None, segment_seconds=None):
         self.provider = provider
         self.reason = reason
         self.task_id = task_id
         self.user_id = user_id
         self.together_client = together_client
+        # OpenAI model when the job stays on OpenAI (BYOK Best → gpt-transcribe).
+        self.openai_model = stt_mod.normalize_transcription_model(openai_model)
+        self.segment_seconds = (
+            int(segment_seconds) if segment_seconds else SEGMENT_SECONDS
+        )
         self.pinned_language = None
         self.cost_usd = 0.0
         self.providers_used = set()
@@ -3466,6 +3581,9 @@ class SttJob:
             return 'mixed'
         if self.providers_used:
             return next(iter(self.providers_used))
+        # Nothing charged yet: preferred OpenAI model for BYOK, else route.
+        if self.provider == stt_mod.PROVIDER_OPENAI:
+            return self.openai_model
         return self.provider
 
 
@@ -3483,7 +3601,8 @@ def build_together_client():
     )
 
 
-def _stt_job_for_task(task_id, key_source, language):
+def _stt_job_for_task(task_id, key_source, language, *, openai_model=None,
+                      segment_seconds=None):
     """Route a job from its key source, funding and language."""
     task = db.session.get(TranscriptionTask, task_id)
     trial_s = int(task.trial_seconds_charged or 0) if task is not None else 0
@@ -3493,9 +3612,15 @@ def _stt_job_for_task(task_id, key_source, language):
     client = build_together_client() if provider == stt_mod.PROVIDER_TOGETHER else None
     if provider == stt_mod.PROVIDER_TOGETHER and client is None:
         provider, reason = stt_mod.PROVIDER_OPENAI, 'no_together_key'
-    app.logger.info('stt route task=%s provider=%s reason=%s', task_id, provider, reason)
+    model = stt_mod.normalize_transcription_model(openai_model)
+    # BYOK Best quality never goes to Together (route_job already keeps own_key
+    # on OpenAI); record the chosen model for logging / stt_provider.
+    app.logger.info(
+        'stt route task=%s provider=%s reason=%s openai_model=%s',
+        task_id, provider, reason, model)
     return SttJob(provider, reason, task_id=task_id, user_id=user_id,
-                  together_client=client)
+                  together_client=client, openai_model=model,
+                  segment_seconds=segment_seconds)
 
 
 def _together_retryable(exc):
@@ -3672,15 +3797,27 @@ def _start_shadow_comparison(job, openai_client, chunk_file, language, together_
 
 
 def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
-                             task_id=None, chunk_label=None, chunk_seconds=0.0):
-    """Transcribe one chunk on the job's provider, falling back to whisper-1."""
-    def whisper():
-        job.charge(stt_mod.PROVIDER_OPENAI, chunk_seconds)
-        return _whisper_transcribe_chunk(openai_client, chunk_file, language,
-                                         task_id=task_id, chunk_label=chunk_label)
+                             task_id=None, chunk_label=None, chunk_seconds=0.0,
+                             openai_model=None):
+    """Transcribe one chunk on the job's provider, falling back to whisper-1.
+
+    ``openai_model`` overrides the job's preferred OpenAI model for this call
+    (used by the gpt-transcribe completeness guard to force whisper-1 on the
+    same user key — never Together or the platform key).
+    """
+    model = stt_mod.normalize_transcription_model(
+        openai_model if openai_model is not None else job.openai_model)
+
+    def openai_call(charge_as=None):
+        charge_as = charge_as or model
+        job.charge(charge_as, chunk_seconds)
+        return _whisper_transcribe_chunk(
+            openai_client, chunk_file, language,
+            task_id=task_id, chunk_label=chunk_label,
+            model=model, chunk_seconds=chunk_seconds)
 
     if job.provider != stt_mod.PROVIDER_TOGETHER or job.together_client is None:
-        return whisper()
+        return openai_call()
 
     label = chunk_label or os.path.basename(chunk_file)
     try:
@@ -3691,7 +3828,7 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
         job.events['fallback_error'] += 1
         app.logger.warning('stt fallback to whisper-1 for %s: %s %s', label,
                            type(exc).__name__, getattr(exc, 'status_code', ''))
-        return whisper()
+        return openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
 
     if not language:
         detected = normalize_language_code(result.language)
@@ -3702,7 +3839,8 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
             app.logger.info('stt language %r not on Together; whisper-1 for the '
                             'rest of task %s', detected, task_id)
             job.provider = stt_mod.PROVIDER_OPENAI
-            return whisper()
+            job.openai_model = stt_mod.OPENAI_MODEL
+            return openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
         job.pinned_language = detected
         language = detected
 
@@ -3710,7 +3848,7 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
                                    chunk_seconds):
         job.events['fallback_gap'] += 1
         app.logger.info('stt dropped window not repaired; whisper-1 for %s', label)
-        return whisper()
+        return openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
 
     if stt_mod.shadow_rate() > 0 and secrets.randbelow(10_000) < int(
             stt_mod.shadow_rate() * 10_000):
@@ -3721,33 +3859,41 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
 
 
 def _stt_analytics_props(task):
-    """Provider and real cost for transcript_completed (no text, no keys)."""
+    """Provider/model and real cost for transcript_* events (no text, no keys)."""
+    provider = getattr(task, 'stt_provider', None)
     return {
-        'stt_provider': getattr(task, 'stt_provider', None),
+        'stt_provider': provider,
         'stt_cost_usd': getattr(task, 'stt_cost_usd', None),
+        # Same value today (whisper-1 / gpt-transcribe / together / mixed);
+        # kept as a dedicated property so funnels can filter without parsing
+        # funding labels.
+        'stt_model': provider,
     }
 
 
-def _chunk_audio_seconds(chunk_file, *, index, total, audio_duration):
+def _chunk_audio_seconds(chunk_file, *, index, total, audio_duration,
+                         segment_seconds=None):
     """Duration of one prepared Whisper part, for offsets and gap checks.
 
-    ffmpeg cuts fixed ``SEGMENT_SECONDS`` parts (last one shorter). Prefer the
-    measured length of the part file: packet boundaries can leave a part a
-    fraction of a second off the nominal cut. Never use
-    ``audio_duration / total`` — that is not how the segmenter cuts, and it
-    shifts every segment after chunk 1 earlier (overlapping captions / seek).
+    ffmpeg cuts fixed ``segment_seconds`` parts (last one shorter; default
+    SEGMENT_SECONDS). Prefer the measured length of the part file: packet
+    boundaries can leave a part a fraction of a second off the nominal cut.
+    Never use ``audio_duration / total`` — that is not how the segmenter
+    cuts, and it shifts every segment after chunk 1 earlier (overlapping
+    captions / seek).
     """
+    part_len = float(segment_seconds) if segment_seconds else float(SEGMENT_SECONDS)
     measured = probe_audio_duration(chunk_file)
     if measured is not None and measured > 0:
         return float(measured)
     if total <= 0:
         return 0.0
     if index < total - 1:
-        return float(SEGMENT_SECONDS)
-    remainder = float(audio_duration or 0) - (total - 1) * float(SEGMENT_SECONDS)
+        return part_len
+    remainder = float(audio_duration or 0) - (total - 1) * part_len
     if remainder > 0:
         return remainder
-    return float(SEGMENT_SECONDS)
+    return part_len
 
 
 def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language,
@@ -3760,6 +3906,10 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
     Mid-chunk resume is not attempted here: part files live only for the life
     of the thread. Process death is recovered at boot by re-queuing the whole
     task (re-download + re-encode) via ``resume_interrupted_tasks``.
+
+    For BYOK gpt-transcribe: parts under ~1 s are skipped (API 400s them), and
+    after all parts land a completeness guard re-runs thin parts on whisper-1
+    with the same user key (never Together / platform key).
     """
     all_segments = []
     full_text = ""
@@ -3769,6 +3919,11 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
     chunk_offset = 0.0
     if stt_job is None:
         stt_job = SttJob(stt_mod.PROVIDER_OPENAI, 'unrouted', task_id=task_id)
+    part_seconds = stt_job.segment_seconds or SEGMENT_SECONDS
+    use_gpt = stt_job.openai_model == stt_mod.MODEL_GPT_TRANSCRIBE
+    # Keep gpt-transcribe part files until the completeness pass; whisper-1 /
+    # Together still delete as they go.
+    part_results = []  # {file, seconds, offset, text, segments, skipped}
 
     for i, chunk_file in enumerate(audio_chunks):
         if is_shutting_down():
@@ -3806,7 +3961,26 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
         # and refunds unspent trial minutes.
         chunk_seconds = _chunk_audio_seconds(
             chunk_file, index=i, total=total, audio_duration=audio_duration,
+            segment_seconds=part_seconds,
         )
+        # Skip crumbs under ~1 s: gpt-transcribe returns 400; whisper-1 is
+        # wasteful. Never the only part (prepare_audio already keeps that).
+        if chunk_seconds < stt_mod.MIN_PART_SECONDS and total > 1:
+            app.logger.warning(
+                'stt skipping %.2fs part %s/%s (under %.1fs floor)',
+                chunk_seconds, i + 1, total, stt_mod.MIN_PART_SECONDS)
+            stt_job.events['skipped_short_part'] += 1
+            part_results.append({
+                'file': chunk_file, 'seconds': chunk_seconds,
+                'offset': chunk_offset, 'text': '', 'segments': [],
+                'skipped': True,
+            })
+            chunk_offset += chunk_seconds
+            if not use_gpt:
+                os.remove(chunk_file)
+                remaining.discard(chunk_file)
+            continue
+
         chunk_transcript = _transcribe_chunk_routed(
             stt_job, openai_client, chunk_file, language,
             task_id=task_id,
@@ -3818,39 +3992,112 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
         if not language and stt_job.pinned_language:
             language = stt_job.pinned_language
 
-        full_text += chunk_transcript.text + " "
-
+        segs = []
         if hasattr(chunk_transcript, 'segments') and chunk_transcript.segments:
-            offset = chunk_offset
             for seg in chunk_transcript.segments:
-                all_segments.append({
-                    'start': seg.start + offset,
-                    'end': seg.end + offset,
-                    'text': seg.text
+                segs.append({
+                    'start': seg.start + chunk_offset,
+                    'end': seg.end + chunk_offset,
+                    'text': seg.text,
                 })
 
+        part_results.append({
+            'file': chunk_file, 'seconds': chunk_seconds,
+            'offset': chunk_offset,
+            'text': getattr(chunk_transcript, 'text', '') or '',
+            'segments': segs, 'skipped': False,
+        })
         chunk_offset += chunk_seconds
 
-        detected = getattr(chunk_transcript, 'language', None)
+        # gpt-transcribe: never store its language label (Norwegian→Danish).
+        detected = None if use_gpt else getattr(chunk_transcript, 'language', None)
         # Store ISO codes only. Whisper returns names like 'english'; the
         # picker sends 'en'. normalize_language_code maps both; unknown → auto.
         stored_lang = normalize_language_code(language or detected) or None
+        provisional = ' '.join(
+            p['text'] for p in part_results if p['text']).strip()
         # Publish the text we have so far so the page can show it streaming in
         # instead of an empty box. History only lists completed tasks, so a
         # partial write here is never user-visible as a finished transcript.
         _update_task(
             task_id,
-            transcript_text=full_text.strip(),
+            transcript_text=provisional,
             progress=_transcribe_checkpoint(i + 1, total),
             language=stored_lang,
             stt_provider=stt_job.provider_label(),
             stt_cost_usd=round(stt_job.cost_usd, 5),
         )
 
-        os.remove(chunk_file)
-        remaining.discard(chunk_file)
+        if not use_gpt:
+            os.remove(chunk_file)
+            remaining.discard(chunk_file)
+
+    if use_gpt:
+        _gpt_transcribe_completeness_fallback(
+            stt_job, openai_client, part_results, language, task_id=task_id)
+        for p in part_results:
+            if p['file'] in remaining and os.path.exists(p['file']):
+                try:
+                    os.remove(p['file'])
+                except OSError:
+                    pass
+            remaining.discard(p['file'])
+
+    for p in part_results:
+        if p['text']:
+            full_text += p['text'] + ' '
+        all_segments.extend(p['segments'])
 
     return full_text.strip(), all_segments
+
+
+def _gpt_transcribe_completeness_fallback(stt_job, openai_client, part_results,
+                                          language, *, task_id=None):
+    """Re-run thin gpt-transcribe parts on whisper-1 with the same user key.
+
+    A part whose words/sec is below ~0.7× the median of neighbouring parts is
+    treated as dropped speech (Car Talk phone intro in the Oct 2026 test).
+    Never falls back to Together or the platform key.
+    """
+    texts = [p['text'] for p in part_results]
+    seconds = [p['seconds'] for p in part_results]
+    thin = stt_mod.incomplete_part_indexes(texts, seconds)
+    if not thin:
+        return
+    for idx in thin:
+        part = part_results[idx]
+        if part.get('skipped') or not os.path.exists(part['file']):
+            continue
+        stt_job.events['completeness_fallback'] += 1
+        app.logger.info(
+            'stt gpt-transcribe completeness: re-running part %s on whisper-1 '
+            '(%.2f s, %d words)',
+            idx + 1, part['seconds'], len((part['text'] or '').split()))
+        retry = _transcribe_chunk_routed(
+            stt_job, openai_client, part['file'], language,
+            task_id=task_id,
+            chunk_label=f'completeness {idx + 1}',
+            chunk_seconds=part['seconds'],
+            openai_model=stt_mod.OPENAI_MODEL,
+        )
+        text = getattr(retry, 'text', '') or ''
+        segs = []
+        offset = part['offset']
+        if hasattr(retry, 'segments') and retry.segments:
+            for seg in retry.segments:
+                segs.append({
+                    'start': seg.start + offset,
+                    'end': seg.end + offset,
+                    'text': seg.text,
+                })
+        else:
+            segs = [{
+                'start': offset,
+                'end': offset + part['seconds'],
+                'text': text,
+            }]
+        part['text'] = text
+        part['segments'] = segs
 
 
 def _transcribe_checkpoint(chunks_done, chunk_total):
@@ -5986,6 +6233,43 @@ def settings():
             flash('Email preferences saved.', 'success')
             return redirect(url_for('settings') + '#email')
 
+        # BYOK transcription model (only meaningful with a saved key).
+        if request.form.get('form') == 'transcription_model':
+            if not current_user.openai_api_key:
+                flash('Add an OpenAI API key before choosing a transcription model.',
+                      'error')
+                return redirect(url_for('settings') + '#openai')
+            raw = (request.form.get('transcription_model') or '').strip()
+            model = stt_mod.normalize_transcription_model(raw)
+            if raw and raw not in stt_mod.ALLOWED_BYOK_MODELS:
+                flash('Unknown transcription model.', 'error')
+                return redirect(url_for('settings') + '#openai')
+            previous = stt_mod.normalize_transcription_model(
+                current_user.transcription_model)
+            ok, message, status = verify_transcription_model(
+                current_user.openai_api_key, model)
+            caveat = ok and status != 'verified'
+            if not ok:
+                product_analytics.capture(
+                    'transcription_model_validation_failed',
+                    current_user.id,
+                    {'reason': status or 'other', 'model': model},
+                )
+                flash(message, 'error')
+                return redirect(url_for('settings') + '#openai')
+            # Persist null for the default so existing rows stay meaningful.
+            current_user.transcription_model = (
+                None if model == stt_mod.OPENAI_MODEL else model)
+            db.session.commit()
+            if previous != model:
+                product_analytics.capture(
+                    'transcription_model_changed',
+                    current_user.id,
+                    {'from': previous, 'to': model},
+                )
+            flash(message, 'warning' if caveat else 'success')
+            return redirect(url_for('settings') + '#openai')
+
         api_key = request.form.get('openai_api_key', '').strip()
 
         # Empty field means "leave the saved key alone". Clearing used to be the
@@ -6020,7 +6304,7 @@ def settings():
         else:
             session.pop('openai_key_no_billing', None)
         flash(message, 'warning' if caveat else 'success')
-        return redirect(url_for('settings'))
+        return redirect(url_for('settings') + '#openai')
 
     # One-shot plaintext after generate (session, not DB).
     new_api_key = session.pop('new_api_key', None)
@@ -6032,6 +6316,8 @@ def settings():
     connected_apps = []
     if oauth_server_mod.mcp_oauth_enabled():
         connected_apps = oauth_server_mod.list_connected_apps(current_user.id)
+    current_model = stt_mod.normalize_transcription_model(
+        current_user.transcription_model)
     return render_template(
         'settings.html',
         trial=trial_ctx,
@@ -6041,6 +6327,7 @@ def settings():
         no_billing_warning=no_billing_warning,
         mcp_oauth_enabled=oauth_server_mod.mcp_oauth_enabled(),
         connected_apps=connected_apps,
+        transcription_model=current_model,
     )
 
 
@@ -6485,8 +6772,18 @@ def settings_remove_openai_key():
     if not current_user.openai_api_key:
         flash('No OpenAI API key to remove.', 'info')
         return redirect(url_for('settings'))
+    previous = stt_mod.normalize_transcription_model(
+        current_user.transcription_model)
     current_user.openai_api_key = None
+    # Model pick only applies with a key; reset so a later key starts on Standard.
+    current_user.transcription_model = None
     db.session.commit()
+    if previous != stt_mod.OPENAI_MODEL:
+        product_analytics.capture(
+            'transcription_model_changed',
+            current_user.id,
+            {'from': previous, 'to': stt_mod.OPENAI_MODEL},
+        )
     flash('API key removed.', 'success')
     return redirect(url_for('settings'))
 
@@ -7671,10 +7968,12 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
                                     e, key_source=key_source)
                             else:
                                 reason = 'other'
+                            fail_props = {**ph_props, 'reason': reason}
+                            fail_props.update(_stt_analytics_props(failed))
                             product_analytics.capture(
                                 'transcript_failed',
                                 failed.user_id,
-                                {**ph_props, 'reason': reason},
+                                fail_props,
                             )
                         # After the refund, and it cannot raise: reporting must
                         # never cost a user the allowance they are owed.
@@ -8232,13 +8531,15 @@ def _spawn_worker_for_existing_task(task):
                         elif _is_openai_error(e):
                             reason = product_analytics.openai_fail_reason(
                                 e, key_source=key_source)
-                        product_analytics.capture(
-                            'transcript_failed',
-                            failed.user_id,
-                            {**ph_props, 'reason': reason},
-                        )
-                    if isinstance(e, SourceAudioUnavailable):
-                        app.logger.warning(
+                            fail_props = {**ph_props, 'reason': reason}
+                            fail_props.update(_stt_analytics_props(failed))
+                            product_analytics.capture(
+                                'transcript_failed',
+                                failed.user_id,
+                                fail_props,
+                            )
+                        if isinstance(e, SourceAudioUnavailable):
+                            app.logger.warning(
                             'Source audio unavailable for resumed task %s: %s',
                             task_id, e.reason)
                     elif reason in ('own_key_no_credit', 'own_key_invalid'):

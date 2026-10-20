@@ -25,6 +25,7 @@ from sqlalchemy import text
 # ---------------------------------------------------------------------------
 OPENAI_AUDIO_USD_PER_MIN = {
     'whisper-1': 0.006,                 # https://openai.com/api/pricing/
+    'gpt-transcribe': 0.0045,           # https://openai.com/api/pricing/
     'gpt-4o-transcribe': 0.006,         # https://openai.com/api/pricing/
     'gpt-4o-mini-transcribe': 0.003,    # https://openai.com/api/pricing/
 }

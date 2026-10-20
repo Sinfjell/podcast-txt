@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "byok-transcription-model-picker",
+      "date": "2026-10-20",
+      "title": "Choose your OpenAI transcription model",
+      "summary": "If you use your own OpenAI key, Settings now lets you pick Standard (whisper-1, precise timestamps) or Best quality (gpt-transcribe — better text, coarser timestamps every five minutes)."
+    },
+    {
       "id": "fix-multi-chunk-segment-timestamps",
       "date": "2026-10-19",
       "title": "Timestamps stay aligned on long episodes",

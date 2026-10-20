@@ -32,6 +32,11 @@
     .check-row input { width: 20px; height: 20px; margin-top: 2px; flex-shrink: 0; accent-color: var(--accent); }
     .settings code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; background: var(--surface); padding: 2px 6px; border-radius: var(--radius-sm); }
     .settings .alert { display: block; }
+    .settings-model { margin-top: 24px; }
+    .settings-model fieldset { border: 0; padding: 0; margin: 0; }
+    .settings-model legend { padding: 0; }
+    .settings-model .form-hint--tight { margin-top: 0; }
+    .check-row .form-hint { display: block; margin-top: 4px; }
 </style>
 <div class="settings">
     <h1 class="settings-title">Settings</h1>
@@ -196,6 +201,39 @@
                 </div>
                 <button type="submit" class="btn btn-secondary">Save</button>
             </form>
+            {% if current_user.openai_api_key %}
+            <form method="POST" class="settings-model">
+                <input type="hidden" name="form" value="transcription_model">
+                <fieldset class="form-group">
+                    <legend class="form-label">Transcription model</legend>
+                    <p class="form-hint form-hint--tight">
+                        Only used with your own OpenAI key. Trial and paid minutes stay on our Standard model.
+                    </p>
+                    <label class="check-row">
+                        <input type="radio" name="transcription_model" value="whisper-1"
+                               {% if transcription_model != 'gpt-transcribe' %}checked{% endif %}>
+                        <span>
+                            <strong>Standard (whisper-1)</strong>
+                            <span class="form-hint">
+                                Precise timestamps — best when you need fine-grained SRT or click-to-seek.
+                            </span>
+                        </span>
+                    </label>
+                    <label class="check-row">
+                        <input type="radio" name="transcription_model" value="gpt-transcribe"
+                               {% if transcription_model == 'gpt-transcribe' %}checked{% endif %}>
+                        <span>
+                            <strong>Best quality (gpt-transcribe)</strong>
+                            <span class="form-hint">
+                                Better punctuation and spelling, usually cheaper. Timestamps are coarse
+                                (one every 5 minutes), so SRT cues are less precise.
+                            </span>
+                        </span>
+                    </label>
+                </fieldset>
+                <button type="submit" class="btn btn-secondary">Save model</button>
+            </form>
+            {% endif %}
             {% if no_billing_warning and stripe_buy_enabled %}
             <div id="openai-no-billing" class="alert alert-warning" style="margin-top: 16px;">
                 <p style="margin: 0 0 12px;">
