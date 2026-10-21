@@ -74,6 +74,7 @@ import analytics as product_analytics
 from site_standards import init_site_standards
 import email_notify
 import lifecycle_emails
+import checkout_recovery
 import mail as mailer
 import stt as stt_mod
 import summary as summary_mod
@@ -1026,9 +1027,13 @@ CHECKOUT_EXPIRES_HOURS = _env_hours('CHECKOUT_EXPIRES_HOURS', 2)
 #: Abandoned Checkout recovery (Stripe emails a resume link after expiry).
 #: Off by default: recovery emails require consent_collection.promotions,
 #: which Stripe rejects for Norway (and some other) account countries.
+#: Prefer CHECKOUT_RECOVERY_EMAIL_ENABLED (our Mailgun email) instead.
 CHECKOUT_RECOVERY_ENABLED = os.getenv(
     'CHECKOUT_RECOVERY_ENABLED', '0').strip().lower() not in (
         '0', 'false', 'no', 'off')
+#: Our own abandoned-checkout recovery email (Mailgun). Off by default.
+#: Fires from the checkout.session.expired webhook — see checkout_recovery.py.
+CHECKOUT_RECOVERY_EMAIL_ENABLED = checkout_recovery.recovery_email_enabled()
 
 if stripe is not None and STRIPE_API_VERSION:
     stripe.api_version = STRIPE_API_VERSION
@@ -6163,7 +6168,8 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
     location = (metadata.get('location') or metadata.get('source') or '')[:64] or None
     ph_sid = (metadata.get('ph_sid') or '')[:128] or None
     email_campaign = metadata.get('email_campaign') or None
-    if email_campaign not in lifecycle_emails.CAMPAIGNS:
+    if email_campaign not in lifecycle_emails.CAMPAIGNS and (
+            email_campaign != checkout_recovery.CAMPAIGN):
         email_campaign = None
 
     prior_credited = CreditPurchase.query.filter_by(
@@ -6588,7 +6594,7 @@ def settings():
 
 
 def _checkout_email_campaign():
-    """Lifecycle campaign to credit this checkout to, or None.
+    """Lifecycle / recovery campaign to credit this checkout to, or None.
 
     Only from a signed email click stashed on this session in the last
     week (lifecycle_emails.SESSION_CAMPAIGN_KEY), for the same user.
@@ -6602,7 +6608,8 @@ def _checkout_email_campaign():
         uid = int(stash.get('u') or 0)
     except (TypeError, ValueError):
         return None
-    if campaign not in lifecycle_emails.CAMPAIGNS:
+    allowed = lifecycle_emails.CAMPAIGNS + (checkout_recovery.CAMPAIGN,)
+    if campaign not in allowed:
         return None
     if uid != current_user.id:
         return None
@@ -6994,6 +7001,16 @@ def stripe_webhook():
             fulfill_checkout(obj_id, event_id=event.id)
         elif etype == 'checkout.session.expired':
             _capture_checkout_expired(obj)
+            # Our Mailgun recovery email (flagged separately from Stripe's
+            # after_expiration.recovery). Never fail the webhook on it.
+            try:
+                outcome = checkout_recovery.handle_expired_session(obj)
+                if outcome not in ('disabled', 'mail_not_ready'):
+                    app.logger.info(
+                        'checkout recovery %s for %s', outcome, obj_id)
+            except Exception:  # noqa: BLE001
+                app.logger.exception(
+                    'checkout recovery failed for %s', obj_id)
         elif etype == 'checkout.session.async_payment_failed':
             app.logger.warning('Async payment failed for %s', obj_id)
             _capture_purchase_failed(
@@ -7162,6 +7179,74 @@ def _finalize_global_unsubscribe(user):
 def _is_rfc8058_one_click_unsubscribe() -> bool:
     """True for List-Unsubscribe-Post bodies (RFC 8058), not the confirm form."""
     return (request.form.get('List-Unsubscribe') or '').strip() == 'One-Click'
+
+
+@app.route('/r/<token>')
+def checkout_recovery_click(token):
+    """Signed abandoned-checkout recovery link: click → fresh Checkout Session.
+
+    Same pattern as /e/<token>: never logs anyone in; unsigned visitors go
+    through /login. Renders email_go.html which POSTs to /billing/checkout
+    with the same minutes and price_source as the expired session.
+    """
+    data = checkout_recovery.parse_click_token(app.secret_key, token)
+    if data is None:
+        return redirect(url_for('index'))
+    uid = data['u']
+    if request.args.get('r') != '1':
+        product_analytics.capture('checkout_recovery_clicked', uid, {
+            'campaign': checkout_recovery.CAMPAIGN,
+            'minutes': data['m'],
+            'price_source': data['ps'],
+            'expired_session_id': data.get('cs') or None,
+            'signed_in': bool(current_user.is_authenticated),
+        })
+    if not current_user.is_authenticated:
+        back = request.full_path if request.query_string else request.path
+        sep = '&' if '?' in back else '?'
+        return redirect(url_for('login', next=f'{back}{sep}r=1'))
+    if current_user.id != uid:
+        return redirect(url_for('index'))
+    if current_user.openai_api_key:
+        flash('You are on your own OpenAI key — paid minutes are not needed.',
+              'info')
+        return redirect(url_for('settings'))
+    if not stripe_checkout_enabled():
+        flash('Card payments are not available right now.', 'error')
+        return redirect(url_for('settings') + '#credits')
+
+    session[lifecycle_emails.SESSION_CAMPAIGN_KEY] = {
+        'c': checkout_recovery.CAMPAIGN, 'u': uid, 'at': time.time()}
+    session.modified = True
+
+    minutes = data['m']
+    price_source = data['ps']
+    if VOLUME_PRICING_ENABLED:
+        price = pricing_volume.format_usd(pricing_volume.price_cents(minutes))
+        what = f'{minutes} minutes for {price}'
+    else:
+        minutes = CREDIT_PACK_MINUTES
+        price_source = 'default'
+        price = DEFAULT_PACK_PRICE
+        what = f'{CREDIT_PACK_MINUTES} minutes for {price}'
+
+    return_to = safe_return_to(data.get('rt') or '') or url_for('index')
+    fields = {
+        'source': f'email_{checkout_recovery.CAMPAIGN}'[:64],
+        'return_to': return_to,
+    }
+    if VOLUME_PRICING_ENABLED:
+        fields['minutes'] = minutes
+        fields['price_source'] = price_source
+
+    return render_template(
+        'email_go.html',
+        heading=f'Complete your purchase',
+        lede=f'{what}. Taking you to checkout\u2026',
+        button_label=f'Continue to checkout ({price})',
+        action_url=url_for('billing_checkout'),
+        fields=fields,
+    )
 
 
 @app.route('/e/<token>')

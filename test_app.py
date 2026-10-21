@@ -9407,50 +9407,43 @@ def test_privacy_page_mentions_posthog():
 
 
 def test_whats_new_page_renders_changelog_entries(trial_on):
-    """Public /whats-new lists curated entries from changelog.json, newest first."""
+    """Public /whats-new lists curated entries from changelog.json, newest first.
+
+    Landmark ids must remain present; do not assert fixed positions — every
+    user-facing PR prepends a new entry and that must not break this test.
+    Ordering by date is covered by test_changelog_json_is_well_formed.
+    """
     import html as _html
     entries = A.load_changelog_entries()
     assert entries, 'changelog.json must have at least one curated entry'
-    assert entries[0]['id'] == 'byok-transcription-model-picker'
-    assert entries[1]['id'] == 'fix-multi-chunk-segment-timestamps'
-    assert entries[2]['id'] == 'long-episodes-up-to-six-hours'
-    assert entries[3]['id'] == 'pay-per-minute-launch-pricing'
-    entries = entries[4:]
-    assert entries[0]['id'] == 'new-home-and-header'
-    assert entries[1]['id'] == 'ai-what-you-can-ask'
-    assert entries[2]['id'] == 'mcp-list-my-transcripts'
-    assert entries[3]['id'] == 'history-in-progress'
-    assert entries[4]['id'] == 'mcp-chat-example'
-    assert entries[5]['id'] == 'mcp-visual-setup-guides'
-    assert entries[6]['id'] == 'history-via-mcp'
-    assert entries[7]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[8]['id'] == 'new-signup-120-min-trial'
-    assert entries[9]['id'] == 'new-look'
-    assert entries[10]['id'] == 'forgot-password'
-    assert entries[11]['id'] == 'share-listen-links'
-    assert entries[12]['id'] == 'keyboard-and-faster-loading'
+    by_id = {e['id']: e for e in entries}
+    # A few durable, user-facing landmarks (existence, not position).
+    for landmark in (
+        'byok-transcription-model-picker',
+        'pay-per-minute-launch-pricing',
+        'share-listen-links',
+        'new-home-and-header',
+        'forgot-password',
+        'public-share-links',
+        'partial-trial-preview',
+        'no-double-charge-restart',
+    ):
+        assert landmark in by_id, f'missing changelog landmark: {landmark}'
     # Internal / auth fixes never ship as user-facing changelog entries.
-    assert all(e['id'] != 'chatgpt-oauth-private-key-jwt' for e in entries)
-    assert entries[13]['id'] == 'show-landing-pages'
-    assert entries[14]['id'] == 'public-share-links'
-    assert entries[15]['id'] == 'unsubscribe-confirm-click'
-    assert entries[16]['id'] == 'partial-preview-minutes-wording'
-    assert entries[17]['id'] == 'partial-trial-preview'
-    assert entries[18]['id'] == 'own-key-billing-clarity'
-    assert entries[19]['id'] == 'clearer-missing-episode-audio'
-    assert entries[20]['id'] == 'new-signup-60-min-trial'
-    assert entries[21]['id'] == 'spotify-paste-robustness'
-    assert entries[22]['id'] == 'no-double-charge-restart'
+    assert 'chatgpt-oauth-private-key-jwt' not in by_id
+
     resp = A.app.test_client().get('/whats-new')
     assert resp.status_code == 200
-    body = _html.unescape(resp.data.decode())
-    assert f'id="{entries[0]["id"]}"' in resp.data.decode()
+    raw = resp.data.decode()
+    body = _html.unescape(raw)
+    # Newest and next-newest both render with anchor + title + summary.
+    assert f'id="{entries[0]["id"]}"' in raw
     assert entries[0]['title'] in body
     assert entries[0]['summary'] in body
-    assert f'id="{entries[1]["id"]}"' in resp.data.decode()
+    assert f'id="{entries[1]["id"]}"' in raw
     assert entries[1]['title'] in body
     assert entries[1]['summary'] in body
-    # Newest-first: the first entry's title appears before the last one's.
+    # Newest-first on the page: first entry's title before the next and last.
     assert body.index(entries[0]['title']) < body.index(entries[1]['title'])
     assert body.index(entries[0]['title']) < body.index(entries[-1]['title'])
     # Footer link + toast markup on other public pages.
@@ -14378,23 +14371,12 @@ def test_result_page_and_status_expose_listen_links(trial_on, monkeypatch):
 
 
 def test_changelog_has_share_listen_links_entry():
+    """Share/listen links shipped as a curated What's new entry (id stable)."""
     entries = A.load_changelog_entries()
-    assert any(e['id'] == 'share-listen-links' for e in entries)
-    assert entries[0]['id'] == 'byok-transcription-model-picker'
-    assert entries[1]['id'] == 'fix-multi-chunk-segment-timestamps'
-    assert entries[2]['id'] == 'long-episodes-up-to-six-hours'
-    assert entries[3]['id'] == 'pay-per-minute-launch-pricing'
-    entries = entries[4:]
-    assert entries[0]['id'] == 'new-home-and-header'
-    assert entries[1]['id'] == 'ai-what-you-can-ask'
-    assert entries[2]['id'] == 'mcp-list-my-transcripts'
-    assert entries[3]['id'] == 'history-in-progress'
-    assert entries[4]['id'] == 'mcp-chat-example'
-    assert entries[5]['id'] == 'mcp-visual-setup-guides'
-    assert entries[6]['id'] == 'history-via-mcp'
-    assert entries[7]['id'] == 'use-in-chatgpt-claude-cursor'
-    assert entries[8]['id'] == 'new-signup-120-min-trial'
-    assert entries[9]['id'] == 'new-look'
+    match = [e for e in entries if e['id'] == 'share-listen-links']
+    assert len(match) == 1
+    assert match[0]['title']
+    assert match[0]['summary']
 
 
 # --------------------------------------------------------------------------
