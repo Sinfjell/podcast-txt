@@ -428,6 +428,43 @@ Before enabling in production: in Together **Organization Settings → Privacy**
 prompts and model responses" to **No** (zero data retention; serverless runs in
 the US), then add `TOGETHER_API_KEY` and `STT_PROVIDER=together` to `.env`.
 
+## Speech-to-text provider (ElevenLabs Scribe v2)
+
+Platform-funded jobs can run on ElevenLabs `scribe_v2` ($0.00366/min billed in
+the 2026-10-21 offline test, vs whisper-1 $0.006/min). Off by default; rules in
+`stt.py`, calls in `app._transcribe_chunk_routed` / `_scribe_transcribe`. BYOK
+users stay on OpenAI; Scribe is not in the BYOK model picker. Chunking stays
+on the existing ~900 s parts (Scribe accepts much longer files; whole-episode
+upload is a later option).
+
+| Var | Default | Notes |
+| --- | --- | --- |
+| `STT_PROVIDER` | `whisper-1` | `scribe` serves Scribe for matching funding. **Rollback:** `whisper-1` (or delete) + restart. |
+| `ELEVENLABS_API_KEY` | unset | Required for serve or shadow. **Never log or surface it.** |
+| `STT_SCRIBE_FUNDING` | `paid` | `paid` = credit-pack jobs only; `all` = trial + paid; `trial` = free-trial only. |
+| `STT_SCRIBE_LANGUAGES` | empty (= all) | Comma list to restrict; empty allows every language. Auto-detect outside the list falls back to whisper-1 for the rest of the job. |
+| `SCRIBE_SHADOW_PCT` | `0` | 0–100. Share of **non-Scribe** platform chunks also sent to Scribe in the background. PostHog `stt_scribe_shadow_compared` (similarity, length ratio, coverage gaps, latency, cost, detected language; **no transcript text**). Failures never affect the user job. `0` = off. |
+| `STT_SCRIBE_USD_PER_MIN` | `0.00366` | Internal cost estimate when the response has no `fiat-cost-before-overages` header. |
+| `STT_SCRIBE_NO_VERBATIM` | `true` | Product default from the offline test (drops fillers / false starts). |
+
+Recommended rollout:
+
+1. Set `ELEVENLABS_API_KEY` and `SCRIBE_SHADOW_PCT=5` (keep current `STT_PROVIDER`). Watch PostHog `stt_scribe_shadow_compared` for ~a week.
+2. `STT_PROVIDER=scribe` + `STT_SCRIBE_FUNDING=paid` (credit minutes on Scribe; trial stays on whisper-1 / Together depending on `STT_PROVIDER` before the switch — with `scribe`, trial falls back to whisper-1 unless funding is `all`).
+3. Optionally `STT_SCRIBE_FUNDING=all` once margin and quality look good.
+
+Per chunk, Scribe failures fall back to whisper-1 on the platform key: HTTP
+429/5xx/timeouts are retried 3 times first; empty or near-empty coverage
+(&lt; 0.4 words/s on a ≥30 s part) falls back immediately. Always send
+`language_code` when the user/feed language is known. Billing never changes:
+users pay reserved audio minutes; `stt_provider` / `stt_cost_usd` record what
+we paid (including shadow) and /admin costs use `stt_cost_usd` when present.
+
+Before enabling in production: confirm the ElevenLabs account has training /
+data-use settings appropriate for customer audio (zero-retention is
+Enterprise-only), pick a plan that can cover expected minutes (Starter’s hard
+cap cannot carry prod volume), then add the env vars and restart.
+
 ## Free-trial budget env vars
 
 | Var | Default | Notes |
