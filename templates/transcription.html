@@ -339,12 +339,25 @@
 
     var el = function(id) { return document.getElementById(id); };
 
-    function phCapture(event, props) {
+    function phCapture(event, props, opts) {
         try {
             if (!window.posthog || !event) return;
             // Never pass keys or transcript text — only coarse metadata.
-            posthog.capture(event, props || {});
+            posthog.capture(event, props || {}, opts || undefined);
         } catch (e) { /* ignore */ }
+    }
+
+    // Clicks that immediately navigate (Stripe / full-episode start) must flush
+    // now; cookieless visitors never get the unload batch flush.
+    function leaveSafeOpts() {
+        if (typeof window.podskriftLeaveSafeCaptureOpts === 'function') {
+            return window.podskriftLeaveSafeCaptureOpts();
+        }
+        var opts = {send_instantly: true};
+        if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+            opts.transport = 'sendBeacon';
+        }
+        return opts;
     }
 
     function fireResultViewed(completed) {
@@ -433,7 +446,7 @@
                     partial_minutes: d.partial_minutes,
                     episode_minutes: d.episode_minutes,
                     paid_remaining_min: d.paid_remaining_min,
-                });
+                }, leaveSafeOpts());
                 finishFullEpisode(d.finish, d);
             });
             actions.appendChild(finishBtn);
@@ -449,7 +462,7 @@
                     partial_minutes: d.partial_minutes,
                     episode_minutes: d.episode_minutes,
                     action: 'buy',
-                });
+                }, leaveSafeOpts());
                 if (typeof window.podskriftPaywallBuyClicked === 'function') {
                     window.podskriftPaywallBuyClicked('partial_preview', 'partial');
                 }
@@ -485,10 +498,12 @@
         if (buyBtn && !buyBtn._bound) {
             buyBtn._bound = true;
             buyBtn.addEventListener('click', function() {
+                // Modal path stays on-page (batch OK); checkout path navigates.
+                var leave = !(d.volume_pricing && typeof window.openBuyModal === 'function');
                 phCapture('result_offer_clicked', {
                     task_id: taskId,
                     location: 'result',
-                });
+                }, leave ? leaveSafeOpts() : undefined);
                 if (typeof window.podskriftPaywallBuyClicked === 'function') {
                     window.podskriftPaywallBuyClicked('result_offer', 'result');
                 }

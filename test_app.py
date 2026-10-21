@@ -12306,6 +12306,38 @@ def test_paywall_buy_clicked_fires_on_every_checkout_submit(stripe_on, monkeypat
             'else form.submit();', '')
 
 
+def test_buy_click_captures_send_instantly_for_cookieless_redirect(
+        stripe_on, monkeypatch):
+    """Checkout / BYOK / finish-episode captures flush before navigation.
+
+    Without send_instantly, cookieless visitors lose the batch on the Stripe
+    redirect (no unload flush). Capture must stay sync and non-blocking.
+    """
+    monkeypatch.setenv('PODSKRIFT_ENV', 'production')
+    monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
+    body = A.app.test_client().get('/').data.decode()
+    assert 'send_instantly: true' in body
+    assert 'leaveSafeCaptureOpts' in body
+    handler = body[body.index("document.addEventListener('submit'"):]
+    handler = handler[:handler.index('}, true);')]
+    assert 'leaveSafeCaptureOpts()' in handler
+    assert "posthog.capture('buy_clicked'" in handler
+    assert "posthog.capture('paywall_buy_clicked'" in handler
+    # Must not await / block the form submit.
+    assert 'await ' not in handler
+    assert 'preventDefault' not in handler
+    byok = body[body.index("document.addEventListener('click'"):]
+    byok = byok[:byok.index('}, true);')]
+    assert "posthog.capture('paywall_byok_clicked'" in byok
+    assert 'leaveSafeCaptureOpts()' in byok
+    import pathlib
+    tx = (pathlib.Path(A.__file__).parent / 'templates' / 'transcription.html'
+          ).read_text()
+    assert 'send_instantly: true' in tx
+    assert "phCapture('finish_episode_clicked'" in tx
+    assert 'leaveSafeOpts()' in tx
+
+
 def test_analytics_helpers_for_paywall_ctas_in_base(stripe_on, monkeypatch):
     monkeypatch.setenv('PODSKRIFT_ENV', 'production')
     monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
@@ -15184,7 +15216,10 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
     import admin_dashboard as AD
     import uuid as _uuid
 
-    monkeypatch.setenv('ADMIN_EMAILS', 'kpi-admin@test.com')
+    monkeypatch.setenv('ADMIN_EMAILS', 'kpi-admin@gmail.com')
+    # Production excluded ids collide with autoincrement test users.
+    monkeypatch.setattr('lifecycle_emails.DEFAULT_EXCLUDED_USER_IDS', frozenset())
+    monkeypatch.setenv('LIFECYCLE_EXCLUDE_USER_IDS', '')
     monkeypatch.setattr(A, 'TRIAL_DAILY_SECONDS', 750 * 60)
     prefix = 'kpi-fix-%s' % _uuid.uuid4().hex[:8]
 
@@ -15205,7 +15240,7 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
             dict(trial_seconds_used=120, openai_api_key='sk-test-byok'),
             dict(trial_seconds_used=0, openai_api_key=None),
         ]):
-            u = User(email=f'{prefix}-{i}@test.com',
+            u = User(email=f'{prefix}-{i}@gmail.com',
                      trial_seconds_limit=3600, **extra)
             u.set_password('password123')
             u.created_at = now - timedelta(hours=1)
@@ -15265,6 +15300,8 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
     assert after['purchase_count'] == before['purchase_count'] + 1
     assert after['purchase_revenue_usd'] == pytest.approx(
         before['purchase_revenue_usd'] + 5.0, abs=0.01)
+    assert after['purchase_ex_vat_usd'] == pytest.approx(
+        before.get('purchase_ex_vat_usd', 0) + 5.0, abs=0.01)
     assert after['trial_daily_used_minutes'] == pytest.approx(
         before['trial_daily_used_minutes'] + 12.0, abs=0.1)
     assert after['trial_daily_limit_minutes'] == 750
@@ -15275,20 +15312,22 @@ def test_admin_kpis_match_fixture_data(monkeypatch):
     assert 'stale' in charts['failures']['labels']
 
     # HTML surface for the admin still renders after fixture seed.
-    client, _ = _admin_login('kpi-admin@test.com')
+    client, _ = _admin_login('kpi-admin@gmail.com')
     body = client.get('/admin').data.decode()
     assert 'data-kpi="total_users"' in body
     assert 'data-kpi="activated_users"' in body
     assert 'data-kpi="trial_daily_used_minutes"' in body
     assert 'Free pool left' in body
+    assert 'paid incl. VAT' in body
+    assert 'ex VAT' in body
     assert 'chartSignups' in body
     assert 'data-ds-tab="admin-overview"' in body
     assert '/admin/api/series' in body or 'admin/api/series' in body or 'loadSeries' in body
     # User detail lists tasks / purchases
     with A.app.app_context():
-        uid0 = User.query.filter_by(email=f'{prefix}-0@test.com').one().id
+        uid0 = User.query.filter_by(email=f'{prefix}-0@gmail.com').one().id
     detail = client.get(f'/admin/users/{uid0}').data.decode()
-    assert f'{prefix}-0@test.com' in detail
+    assert f'{prefix}-0@gmail.com' in detail
     assert 'Ep 1' in detail
     assert 'Followed feeds' not in detail
     assert '$5.00' in detail

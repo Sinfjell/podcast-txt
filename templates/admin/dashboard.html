@@ -382,8 +382,11 @@
             <div class="kpi">
                 <div class="kpi-label">Purchases</div>
                 <div class="kpi-value" data-kpi="purchase_count">{{ kpis.purchase_count }}</div>
-                <div class="kpi-sub" data-kpi="purchase_gross">${{ '%.2f'|format(kpis.purchase_gross_usd) }} gross paid (list price)</div>
+                <div class="kpi-sub" data-kpi="purchase_gross">${{ '%.2f'|format(kpis.purchase_gross_usd) }} paid incl. VAT · ${{ '%.2f'|format(kpis.purchase_ex_vat_usd) }} ex VAT</div>
                 <div class="kpi-sub" data-kpi="purchase_net">{% if kpis.purchase_net_usd is not none %}${{ '%.2f'|format(kpis.purchase_net_usd) }} net after Stripe fees, tax &amp; refunds{% else %}net: Stripe unavailable{% endif %}</div>
+                {% if kpis.purchase_refund_count or kpis.purchase_dispute_count %}
+                <div class="kpi-sub" data-kpi="purchase_refunds">{{ kpis.purchase_refund_count }} refund{{ '' if kpis.purchase_refund_count == 1 else 's' }}{% if kpis.purchase_dispute_count %}, {{ kpis.purchase_dispute_count }} dispute{{ '' if kpis.purchase_dispute_count == 1 else 's' }}{% endif %} · ${{ '%.2f'|format(kpis.purchase_refunds_disputes_usd) }} (not in count)</div>
+                {% endif %}
             </div>
             <div class="kpi">
                 <div class="kpi-label">BYOK</div>
@@ -724,18 +727,23 @@
         <h2>Contribution margin per plan</h2>
         {% set c = mg.contribution %}
         <p class="costs-note">
-            Purchases made in the period. Fees and tax are the real Stripe figures for each payment.
+            Counted purchases only (completed, not refunded or disputed; internal/test users excluded).
+            Gross is price paid incl. VAT; ex VAT is shown under each gross figure.
+            Fees and tax are the real Stripe figures for each payment.
             Cost = minutes × ${{ '%.4f'|format(mg.cost_per_min_usd) }}/min (actual cost ÷ minutes transcribed in the period).
             "All used" assumes every sold minute gets transcribed; "used so far" uses each buyer's share of
             paid minutes already spent. Contribution % is of gross.
+            {% if c.totals.refund_count or c.totals.dispute_count %}
+            Refunds/disputes in period (not in totals): {{ c.totals.refund_count }} refund{{ '' if c.totals.refund_count == 1 else 's' }}{% if c.totals.dispute_count %}, {{ c.totals.dispute_count }} dispute{{ '' if c.totals.dispute_count == 1 else 's' }}{% endif %} · ${{ '%.2f'|format(c.totals.refunds_disputes_usd) }}.
+            {% endif %}
         </p>
         <div class="actual-table-wrap">
             <table class="actual-table" data-costs="contribution-table">
-                <thead><tr><th>Plan</th><th>Buys</th><th>Gross</th><th>Fees + tax</th><th>Net</th><th>Min sold</th><th>Cost (all used)</th><th>Contribution (all used)</th><th>Min used</th><th>Cost (so far)</th><th>Contribution (so far)</th></tr></thead>
+                <thead><tr><th>Plan</th><th>Buys</th><th>Gross (incl. VAT)</th><th>Fees + tax</th><th>Net</th><th>Min sold</th><th>Cost (all used)</th><th>Contribution (all used)</th><th>Min used</th><th>Cost (so far)</th><th>Contribution (so far)</th></tr></thead>
                 <tbody>
                 {% for g in c.plans %}
                 <tr data-plan="{{ g.plan }}"><td>{{ g.label }}</td><td>{{ g.count }}</td>
-                    <td>${{ '%.2f'|format(g.gross_usd) }}</td>
+                    <td>${{ '%.2f'|format(g.gross_usd) }}<br><span class="money-muted">${{ '%.2f'|format(g.ex_vat_usd) }} ex VAT</span></td>
                     <td>${{ '%.2f'|format(g.fees_usd + g.tax_usd) }}</td>
                     <td>${{ '%.2f'|format(g.net_usd) }}</td>
                     <td>{{ '%.0f'|format(g.minutes_sold) }}</td>
@@ -750,7 +758,7 @@
                 <tr data-plan="trial"><td>{{ c.trial.label }}</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>
                     <td>{{ '%.0f'|format(c.trial.minutes_used) }}</td><td>${{ '%.2f'|format(c.trial.cost_usd) }}</td><td>−${{ '%.2f'|format(c.trial.cost_usd) }}</td></tr>
                 <tr class="contrib-total"><td><strong>Total</strong></td><td>{{ c.totals.count|int }}</td>
-                    <td>${{ '%.2f'|format(c.totals.gross_usd) }}</td><td>${{ '%.2f'|format(c.totals.fees_usd + c.totals.tax_usd) }}</td>
+                    <td>${{ '%.2f'|format(c.totals.gross_usd) }}<br><span class="money-muted">${{ '%.2f'|format(c.totals.ex_vat_usd) }} ex VAT</span></td><td>${{ '%.2f'|format(c.totals.fees_usd + c.totals.tax_usd) }}</td>
                     <td>${{ '%.2f'|format(c.totals.net_usd) }}</td><td></td><td>${{ '%.2f'|format(c.totals.cost_all_used_usd) }}</td>
                     <td>{{ '%+.2f'|format(c.totals.db_all_used_usd) }}</td><td></td><td>${{ '%.2f'|format(c.totals.cost_used_so_far_usd) }}</td>
                     <td>{{ '%+.2f'|format(c.totals.db_used_so_far_usd) }}<br><span class="money-muted">after trial: {{ '%+.2f'|format(c.totals.db_after_trial_usd) }}</span></td></tr>

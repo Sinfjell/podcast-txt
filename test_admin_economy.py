@@ -58,9 +58,14 @@ def _task(uid, tid, day, *, trial=0, paid=0, minutes=0):
 def seeded(monkeypatch):
     monkeypatch.setenv('COST_FIXED_MONTHLY_USD', '31')
     monkeypatch.delenv('COST_FIXED_MONTHLY_BREAKDOWN', raising=False)
+    # Production excluded ids (1, 40, …) collide with autoincrement test users.
+    monkeypatch.setattr('lifecycle_emails.DEFAULT_EXCLUDED_USER_IDS', frozenset())
+    monkeypatch.setenv('LIFECYCLE_EXCLUDE_USER_IDS', '')
     with A.app.app_context():
-        payer = _user('eco-payer@example.com', 10)
-        other = _user('eco-other@example.com', 11)
+        # Real-looking domains: example.com is treated as an internal/test
+        # address and would be excluded from counted purchases.
+        payer = _user('eco-payer@gmail.com', 10)
+        other = _user('eco-other@gmail.com', 11)
         _purchase(payer, 'eco-s1', 12, pi='pi_eco1')
         _task(payer, 'eco-t1', 12, trial=3600, minutes=60)
         _task(payer, 'eco-t2', 12, paid=1800, minutes=30)
@@ -73,7 +78,9 @@ def seeded(monkeypatch):
             CreditPurchase.stripe_session_id.like('eco-%')).delete(synchronize_session=False)
         db.session.query(TranscriptionTask).filter(
             TranscriptionTask.id.like('eco-%')).delete(synchronize_session=False)
-        db.session.query(User).filter(User.email.like('eco-%')).delete(synchronize_session=False)
+        db.session.query(User).filter(
+            User.email.in_(['eco-payer@gmail.com', 'eco-other@gmail.com'])
+        ).delete(synchronize_session=False)
         db.session.commit()
 
 
@@ -94,7 +101,9 @@ def test_money_per_day_with_actual_cost(seeded):
     s = out['series']
     assert s['gross'][i] == pytest.approx(5.0)
     assert s['vat'][i] == pytest.approx(1.0)
-    assert s['revenue'][i] == pytest.approx(4.0)
+    assert s['ex_vat'][i] == pytest.approx(4.0)
+    # Canonical revenue = price paid incl. VAT.
+    assert s['revenue'][i] == pytest.approx(5.0)
     fee = 0.30 + 5.0 * 0.064  # no Stripe row: the model in pricing_volume
     assert s['fees'][i] == pytest.approx(fee)
     assert s['income'][i] == pytest.approx(4.0 - fee)
@@ -134,16 +143,19 @@ def test_stripe_fee_used_when_balance_transaction_matches(seeded):
     assert out['sources']['fees'] == 'stripe'
 
 
-def test_refund_reduces_revenue_pro_rata(seeded):
+def test_refund_excluded_from_purchase_count_and_revenue(seeded):
     with A.app.app_context():
-        _purchase(seeded['other'], 'eco-s2', 13, total=1000, tax=200, refunded=500,
+        _purchase(seeded['other'], 'eco-s2', 13, total=1000, tax=200, refunded=1000,
                   status='refunded')
         out = E.collect_economy(db, {'ok': False}, start=START, end=END,
                                 today=END, actual_fetcher=_no_actual)
     j = out['days'].index('2024-03-13')
-    # $10 paid, $2 VAT, half refunded: $8 ex VAT, $4 kept, $4 refunded.
-    assert out['series']['revenue'][j] == pytest.approx(4.0)
-    assert out['series']['refunds'][j] == pytest.approx(4.0)
+    # Refunded buys are not purchases and not revenue; reported separately.
+    assert out['series']['purchases'][j] == 0
+    assert out['series']['revenue'][j] == pytest.approx(0.0)
+    assert out['series']['refunds'][j] == pytest.approx(10.0)
+    assert out['sources']['refund_dispute_count'] == 1
+    assert out['sources']['refunds_disputes_usd'] == pytest.approx(10.0)
 
 
 def test_first_purchase_flag_and_plan(seeded):
@@ -176,14 +188,15 @@ def test_payers_list_has_net_paid_and_usage(seeded):
     with A.app.app_context():
         out = E.collect_economy(db, {'ok': False}, start=START, end=END,
                                 today=END, actual_fetcher=_no_actual)
-    row = [p for p in out['payers'] if p['email'] == 'eco-payer@example.com'][0]
-    assert row['purchases'] == 1 and row['paid_usd'] == pytest.approx(4.0)
+    row = [p for p in out['payers'] if p['email'] == 'eco-payer@gmail.com'][0]
+    assert row['purchases'] == 1 and row['paid_usd'] == pytest.approx(5.0)
+    assert row['ex_vat_usd'] == pytest.approx(4.0)
     assert row['minutes_bought'] == 300 and row['transcripts'] == 2
-    assert not [p for p in out['payers'] if p['email'] == 'eco-other@example.com']
+    assert not [p for p in out['payers'] if p['email'] == 'eco-other@gmail.com']
 
 
 def test_economy_page_admin_only(seeded, monkeypatch):
-    monkeypatch.setenv('ADMIN_EMAILS', 'eco-payer@example.com')
+    monkeypatch.setenv('ADMIN_EMAILS', 'eco-payer@gmail.com')
     anon = A.app.test_client()
     assert anon.get('/admin/economy').status_code == 404
     with A.app.test_client() as c:
@@ -197,10 +210,11 @@ def test_economy_page_admin_only(seeded, monkeypatch):
         assert 'noindex' in body
         assert 'id="econResultChart"' in body
         assert 'id="payers"' in body and 'href="#payers"' in body
-        assert 'eco-payer@example.com' in body
+        assert 'eco-payer@gmail.com' in body
+        assert 'including VAT' in body
         assert c.get('/admin').status_code == 200
         assert 'href="/admin/economy"' in c.get('/admin').data.decode()
-    monkeypatch.setenv('ADMIN_EMAILS', 'someone-else@example.com')
+    monkeypatch.setenv('ADMIN_EMAILS', 'someone-else@gmail.com')
     with A.app.test_client() as c:
         with c.session_transaction() as sess:
             sess['_user_id'] = str(seeded['other'])

@@ -350,14 +350,8 @@ def collect_kpis(db, trial_global_seconds, trial_daily_seconds=None):
         'SELECT COALESCE(seconds_used, 0) FROM trial_budget_days WHERE day = :day'
     ), {'day': today_oslo}).scalar() or 0
 
-    purchases = db.session.execute(text("""
-        SELECT COUNT(*),
-               COALESCE(SUM(COALESCE(amount_total_cents, amount_cents)), 0)
-          FROM credit_purchases
-         WHERE status = 'credited'
-    """)).fetchone()
-    purchase_count = int(purchases[0] or 0) if purchases else 0
-    purchase_revenue_cents = int(purchases[1] or 0) if purchases else 0
+    from admin_purchases import purchase_totals_all_time
+    purchase_money = purchase_totals_all_time(db)
 
     byok_users = db.session.execute(text("""
         SELECT COUNT(*) FROM users
@@ -379,9 +373,14 @@ def collect_kpis(db, trial_global_seconds, trial_daily_seconds=None):
         # Kept for older templates / tests reading the lifetime names.
         'trial_used_minutes': round(int(trial_daily_used_seconds) / 60.0, 1),
         'trial_global_minutes': int(trial_daily_seconds or 0) // 60,
-        'purchase_count': purchase_count,
-        'purchase_gross_usd': round(purchase_revenue_cents / 100.0, 2),
-        'purchase_revenue_usd': round(purchase_revenue_cents / 100.0, 2),
+        'purchase_count': purchase_money['purchase_count'],
+        # Revenue = price paid incl. VAT; ex-VAT shown alongside on the KPI.
+        'purchase_gross_usd': purchase_money['revenue_usd'],
+        'purchase_revenue_usd': purchase_money['revenue_usd'],
+        'purchase_ex_vat_usd': purchase_money['ex_vat_usd'],
+        'purchase_refund_count': purchase_money['refund_count'],
+        'purchase_dispute_count': purchase_money['dispute_count'],
+        'purchase_refunds_disputes_usd': purchase_money['refunds_disputes_usd'],
         'byok_users': int(byok_users),
     }
 
@@ -745,15 +744,19 @@ def collect_series(db, metric, days=30):
         }
 
     if metric == 'income':
-        pairs = [
-            (row[0], (row[1] or 0) / 100.0)
-            for row in db.session.execute(text("""
-                SELECT created_at,
-                       COALESCE(amount_total_cents, amount_cents, 0)
-                  FROM credit_purchases
-                 WHERE status = 'credited' AND created_at >= :since
-            """), {'since': since})
-        ]
+        from admin_purchases import is_internal_or_test_user
+        pairs = []
+        for row in db.session.execute(text("""
+            SELECT cp.created_at,
+                   COALESCE(cp.amount_total_cents, cp.amount_cents, 0),
+                   cp.user_id, u.email
+              FROM credit_purchases cp
+              LEFT JOIN users u ON u.id = cp.user_id
+             WHERE cp.status = 'credited' AND cp.created_at >= :since
+        """), {'since': since}):
+            if is_internal_or_test_user(row[2], row[3]):
+                continue
+            pairs.append((row[0], (row[1] or 0) / 100.0))
         lab, vals = _bucket_daily_sum(pairs, days)
         return {
             'metric': metric, 'days': days, 'labels': lab, 'values': vals,

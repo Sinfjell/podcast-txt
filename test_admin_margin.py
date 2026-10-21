@@ -69,16 +69,21 @@ def test_daily_margin_marks_today_and_sums():
 
 def test_contribution_by_plan_all_used_vs_so_far():
     by = M.stripe_usd_by_payment_intent(BTS)
+    # Counted purchases only — refunded buys are passed via refund_rows.
     purchases = [
-        {'user_id': 1, 'minutes': 1200, 'cents': 1100, 'price_source': 'slider',
-         'pricing_version': 'vol_v1', 'pi': 'pi_a', 'clawed': 0},
-        {'user_id': 2, 'minutes': 300, 'cents': 500, 'price_source': None,
-         'pricing_version': None, 'pi': 'pi_b', 'clawed': 300 * 60},  # refunded
-        {'user_id': 3, 'minutes': 90, 'cents': 194, 'price_source': 'episode',
-         'pricing_version': 'vol_v1', 'pi': 'pi_missing', 'clawed': 0},
+        {'user_id': 1, 'minutes': 1200, 'cents': 1100, 'tax_cents': 0,
+         'price_source': 'slider', 'pricing_version': 'vol_v1', 'pi': 'pi_a',
+         'clawed': 0},
+        {'user_id': 3, 'minutes': 90, 'cents': 194, 'tax_cents': 0,
+         'price_source': 'episode', 'pricing_version': 'vol_v1',
+         'pi': 'pi_missing', 'clawed': 0},
     ]
+    refund_rows = [{
+        'user_id': 2, 'gross_cents': 500, 'refunded_cents': 500,
+        'status': 'refunded', 'email': 'buyer@example.com',
+    }]
     out = M.contribution_by_plan(purchases, by, 0.01, {1: 0.25, 3: 1.0},
-                                 trial_minutes=100)
+                                 trial_minutes=100, refund_rows=refund_rows)
     p = {g['plan']: g for g in out['plans']}
     v = p['vol_1200']
     assert v['count'] == 1 and v['minutes_sold'] == 1200
@@ -89,17 +94,17 @@ def test_contribution_by_plan_all_used_vs_so_far():
     assert v['db_used_so_far_usd'] == pytest.approx(v['net_usd'] - 3.0, abs=1e-3)
     assert v['db_pct_all_used'] == pytest.approx(
         round(100 * v['db_all_used_usd'] / v['gross_usd'], 1))
-    leg = p['legacy']
-    assert leg['minutes_sold'] == 0 and leg['cost_all_used_usd'] == 0  # clawed back
-    assert leg['refunds_usd'] == pytest.approx(5.0, abs=0.01)
+    assert 'legacy' not in p  # refunded legacy pack not in counted purchases
     ep = p['episode']
     assert ep['stripe_matched'] == 0 and ep['net_usd'] == pytest.approx(1.94)
     assert out['trial']['cost_usd'] == pytest.approx(1.0)
     assert out['trial']['cost_list_usd'] == pytest.approx(0.6)
     t = out['totals']
-    assert t['count'] == 3
+    assert t['count'] == 2
+    assert t['refund_count'] == 1 and t['dispute_count'] == 0
+    assert t['refunds_disputes_usd'] == pytest.approx(5.0)
     assert t['db_after_trial_usd'] == pytest.approx(t['db_used_so_far_usd'] - 1.0)
-    assert [g['plan'] for g in out['plans']] == ['vol_1200', 'episode', 'legacy']
+    assert [g['plan'] for g in out['plans']] == ['vol_1200', 'episode']
 
 
 def test_theoretical_table_covers_every_anchor():
@@ -124,7 +129,8 @@ def test_admin_page_renders_margin_panels_and_purchase_wording(monkeypatch):
     assert 'Contribution margin per plan' in body
     assert 'Margin unavailable' not in body
     assert 'Per price point (vol_v1' in body
-    assert 'gross paid (list price)' in body
+    assert 'paid incl. VAT' in body
+    assert 'ex VAT' in body
     assert ' credited</div>' not in body
     assert 'UTC' in body and 'partial' in body
 
