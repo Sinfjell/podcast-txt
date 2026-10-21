@@ -18859,6 +18859,7 @@ def test_stt_cost_constants_are_internal_and_separate():
     assert STT.cost_usd('together', 60) == pytest.approx(0.0015)
     assert STT.cost_usd('whisper-1', 60) == pytest.approx(0.006)
     assert STT.cost_usd('gpt-transcribe', 60) == pytest.approx(0.0045)
+    assert STT.cost_usd('scribe', 60) == pytest.approx(0.00366)
     # User-facing BYOK copy stays on OpenAI's list price.
     assert A.WHISPER_COST_PER_MINUTE == 0.006
 
@@ -19037,6 +19038,308 @@ def test_stt_gap_retry_over_music_bed_counts_as_recovered():
 def test_stt_gap_retry_must_bring_back_clearly_more_words():
     assert not STT.retry_recovered(' '.join(['a'] * 15), ' '.join(['b'] * 20), 30)
     assert STT.retry_recovered(' '.join(['a'] * 15), ' '.join(['b'] * 30), 30)
+
+
+# --------------------------------------------------------------------------
+# ElevenLabs Scribe v2 (STT_PROVIDER=scribe + SCRIBE_SHADOW_PCT)
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def scribe_on(monkeypatch):
+    """STT_PROVIDER=scribe with a fake key; paid+trial rolled out; no shadow."""
+    monkeypatch.setenv('STT_PROVIDER', 'scribe')
+    monkeypatch.setenv('ELEVENLABS_API_KEY', 'el-test-not-a-real-key')
+    monkeypatch.setenv('STT_SCRIBE_FUNDING', 'all')
+    monkeypatch.setenv('STT_SCRIBE_LANGUAGES', '')
+    monkeypatch.setenv('SCRIBE_SHADOW_PCT', '0')
+    monkeypatch.setenv('STT_SHADOW_RATE', '0')
+    monkeypatch.setattr(A.time, 'sleep', lambda *_: None)
+    return True
+
+
+def _scribe_payload(text, *, language='en', probability=0.99, words=None):
+    tokens = text.split()
+    if words is None:
+        words = []
+        t = 0.0
+        for tok in tokens:
+            words.append({
+                'text': tok, 'type': 'word', 'start': t, 'end': t + 0.4,
+                'logprob': -0.1,
+            })
+            t += 0.5
+    return {
+        'language_code': language,
+        'language_probability': probability,
+        'text': text,
+        'words': words,
+    }
+
+
+class _FakeHttpxResp:
+    def __init__(self, status_code, payload=None, headers=None):
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.headers = headers or {}
+
+    def json(self):
+        return self._payload
+
+
+def test_stt_scribe_default_off_without_provider(monkeypatch):
+    monkeypatch.delenv('STT_PROVIDER', raising=False)
+    monkeypatch.setenv('ELEVENLABS_API_KEY', 'el-test-not-a-real-key')
+    assert STT.route_job('trial', 'en', 0, 600)[0] == STT.PROVIDER_OPENAI
+
+
+def test_stt_scribe_own_key_never_routed(scribe_on):
+    assert STT.route_job('user', 'en', 0, 600) == (STT.PROVIDER_OPENAI, 'own_key')
+
+
+def test_stt_scribe_no_key_stays_on_whisper1(scribe_on, monkeypatch):
+    monkeypatch.delenv('ELEVENLABS_API_KEY')
+    assert STT.route_job('trial', 'en', 0, 600) == (STT.PROVIDER_OPENAI, 'no_scribe_key')
+
+
+def test_stt_scribe_funding_stages(scribe_on, monkeypatch):
+    monkeypatch.setenv('STT_SCRIBE_FUNDING', 'paid')
+    assert STT.route_job('trial', 'en', 0, 600)[0] == STT.PROVIDER_SCRIBE
+    assert STT.route_job('trial', 'en', 600, 0) == (
+        STT.PROVIDER_OPENAI, 'funding_not_rolled_out')
+    monkeypatch.setenv('STT_SCRIBE_FUNDING', 'all')
+    assert STT.route_job('trial', 'en', 600, 0)[0] == STT.PROVIDER_SCRIBE
+    monkeypatch.setenv('STT_SCRIBE_FUNDING', 'trial')
+    assert STT.route_job('trial', 'en', 600, 0)[0] == STT.PROVIDER_SCRIBE
+    assert STT.route_job('trial', 'en', 0, 600) == (
+        STT.PROVIDER_OPENAI, 'funding_not_rolled_out')
+
+
+def test_stt_scribe_language_gate(scribe_on, monkeypatch):
+    monkeypatch.setenv('STT_SCRIBE_LANGUAGES', 'en,no')
+    assert STT.route_job('trial', 'no', 0, 600)[0] == STT.PROVIDER_SCRIBE
+    assert STT.route_job('trial', 'sv', 0, 600) == (
+        STT.PROVIDER_OPENAI, 'language_not_rolled_out')
+    assert STT.route_job('trial', '', 0, 600)[0] == STT.PROVIDER_SCRIBE
+
+
+def test_stt_scribe_normalize_language_iso639():
+    assert STT.normalize_scribe_language('eng') == 'en'
+    assert STT.normalize_scribe_language('nor') == 'no'
+    assert STT.normalize_scribe_language('no') == 'no'
+    assert STT.normalize_scribe_language('en-US') == 'en'
+    assert STT.normalize_scribe_language('') == ''
+
+
+def test_stt_scribe_words_to_segments_and_gaps():
+    words = [
+        {'text': 'Hello', 'type': 'word', 'start': 0.0, 'end': 0.4},
+        {'text': ' ', 'type': 'spacing', 'start': 0.4, 'end': 0.5},
+        {'text': 'world', 'type': 'word', 'start': 0.5, 'end': 0.9},
+        {'text': 'later', 'type': 'word', 'start': 12.0, 'end': 12.4},
+    ]
+    segs = STT.scribe_words_to_segments(words, max_seconds=7.0)
+    assert len(segs) >= 1
+    assert 'Hello' in segs[0]['text'] and 'world' in segs[0]['text']
+    gaps = STT.word_timeline_gaps(words, min_gap=8.0)
+    assert gaps and gaps[0] == pytest.approx(11.1)
+
+
+def test_stt_scribe_output_suspicious():
+    assert STT.scribe_output_suspicious('', 60)
+    assert STT.scribe_output_suspicious('few words only here', 60)
+    assert not STT.scribe_output_suspicious(' '.join(['w'] * 40), 60)
+    assert not STT.scribe_output_suspicious('hi', 5)  # short crumb: not flagged
+
+
+def test_stt_scribe_parse_fiat_cost():
+    assert STT.parse_scribe_fiat_cost({'fiat-cost-before-overages': '0.0366'}) == 0.0366
+    assert STT.parse_scribe_fiat_cost({}) is None
+    assert STT.parse_scribe_fiat_cost({'fiat-cost-before-overages': 'x'}) is None
+
+
+def test_stt_scribe_success_sends_language_and_costs(
+        tmp_path, scribe_on, monkeypatch):
+    calls = []
+
+    def fake_post(url, **kw):
+        calls.append({'url': url, 'data': kw.get('data'), 'headers': kw.get('headers')})
+        assert 'xi-api-key' in kw['headers']
+        assert kw['headers']['xi-api-key'] == 'el-test-not-a-real-key'
+        assert kw['data']['model_id'] == STT.SCRIBE_MODEL
+        assert kw['data']['no_verbatim'] == 'true'
+        assert kw['data']['language_code'] == 'no'
+        return _FakeHttpxResp(
+            200, _scribe_payload(_GOOD, language='nor'),
+            headers={'fiat-cost-before-overages': '0.0366'})
+
+    monkeypatch.setattr(A.httpx, 'post', fake_post)
+    oa = _ScriptedClient()
+    job = A.SttJob(STT.PROVIDER_SCRIBE, 'test', task_id='scribe-t')
+    # 40 words / 60 s ≈ 0.67 w/s — above the coverage floor.
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'no', chunk_seconds=60)
+    assert r.text == _GOOD
+    assert oa.calls == []
+    assert job.cost_usd == pytest.approx(0.0366)  # billed header wins
+    assert job.provider_label() == STT.PROVIDER_SCRIBE
+    assert calls and calls[0]['data']['language_code'] == 'no'
+
+
+def test_stt_scribe_http_error_falls_back_to_whisper1(
+        tmp_path, scribe_on, monkeypatch):
+    monkeypatch.setattr(
+        A.httpx, 'post',
+        lambda *a, **k: _FakeHttpxResp(503, {'detail': 'nope'}))
+    oa = _ScriptedClient()
+    job = A.SttJob(STT.PROVIDER_SCRIBE, 'test')
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'en', chunk_seconds=60)
+    assert r.text == 'whisper default'
+    assert len(oa.calls) == 1
+    assert job.events['fallback_error'] == 1
+    assert job.cost_usd == pytest.approx(0.006)
+
+
+def test_stt_scribe_empty_coverage_falls_back(
+        tmp_path, scribe_on, monkeypatch):
+    monkeypatch.setattr(
+        A.httpx, 'post',
+        lambda *a, **k: _FakeHttpxResp(200, _scribe_payload('hmm', language='en')))
+    oa = _ScriptedClient()
+    job = A.SttJob(STT.PROVIDER_SCRIBE, 'test')
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'en', chunk_seconds=60)
+    assert r.text == 'whisper default'
+    assert job.events['fallback_coverage'] == 1
+
+
+def test_stt_scribe_unrolled_language_reruns_on_whisper1(
+        tmp_path, scribe_on, monkeypatch):
+    monkeypatch.setenv('STT_SCRIBE_LANGUAGES', 'en,no')
+
+    def fake_post(*a, **k):
+        return _FakeHttpxResp(200, _scribe_payload(_GOOD, language='sw'))
+
+    monkeypatch.setattr(A.httpx, 'post', fake_post)
+    oa = _ScriptedClient()
+    job = A.SttJob(STT.PROVIDER_SCRIBE, 'rollout')
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), '', chunk_seconds=60)
+    assert r.text == 'whisper default'
+    assert job.provider == STT.PROVIDER_OPENAI
+    assert job.events['fallback_language'] == 1
+
+
+def test_stt_scribe_shadow_compares_and_never_surfaces(
+        tmp_path, together_on, monkeypatch, ph_events):
+    monkeypatch.setenv('ELEVENLABS_API_KEY', 'el-test-not-a-real-key')
+    monkeypatch.setenv('SCRIBE_SHADOW_PCT', '100')
+    threads = []
+    real_thread = A.threading.Thread
+
+    def capture_thread(*a, **kw):
+        t = real_thread(*a, **kw)
+        threads.append(t)
+        return t
+
+    monkeypatch.setattr(A.threading, 'Thread', capture_thread)
+
+    def fake_post(*a, **k):
+        return _FakeHttpxResp(
+            200,
+            _scribe_payload('hello there world', language='en'),
+            headers={'fiat-cost-before-overages': '0.00366'})
+
+    monkeypatch.setattr(A.httpx, 'post', fake_post)
+    tg = _ScriptedClient(_result('hello there big world',
+                                 [_seg(0, 5, ' hello there big world')]))
+    oa = _ScriptedClient()
+    chunk = _chunk(tmp_path)
+    job = _job(tg)
+    job.user_id = 7777
+    A._transcribe_chunk_routed(job, oa, chunk, 'en', chunk_seconds=60)
+    for t in threads:
+        t.join(5)
+    # Served text is Together's; Scribe never replaces it.
+    assert oa.calls == []
+    ev = [e for e in ph_events.events if e['event'] == 'stt_scribe_shadow_compared']
+    assert len(ev) == 1
+    props = ev[0]['properties']
+    assert props['served_provider'] == 'together'
+    assert props['scribe_words'] == 3 and props['served_words'] == 4
+    assert 0 < props['similarity'] < 1
+    assert props.get('error') is None
+    assert 'text' not in props and 'transcript' not in props
+    assert not os.path.exists(chunk + '.scribe-shadow.mp3')
+    # Shadow spend is real spend (Together + Scribe estimate).
+    assert job.cost_usd == pytest.approx(0.0015 + 0.00366)
+
+
+def test_stt_scribe_shadow_failure_does_not_fail_job(
+        tmp_path, together_on, monkeypatch, ph_events):
+    monkeypatch.setenv('ELEVENLABS_API_KEY', 'el-test-not-a-real-key')
+    monkeypatch.setenv('SCRIBE_SHADOW_PCT', '100')
+    threads = []
+    real_thread = A.threading.Thread
+
+    def capture_thread(*a, **kw):
+        t = real_thread(*a, **kw)
+        threads.append(t)
+        return t
+
+    monkeypatch.setattr(A.threading, 'Thread', capture_thread)
+    def boom(*a, **k):
+        raise A.ScribeApiError(401)
+
+    monkeypatch.setattr(A.httpx, 'post', boom)
+    tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)]))
+    job = _job(tg)
+    job.user_id = 8888
+    r = A._transcribe_chunk_routed(job, _ScriptedClient(), _chunk(tmp_path),
+                                   'en', chunk_seconds=60)
+    for t in threads:
+        t.join(5)
+    assert r.text == _GOOD
+    ev = [e for e in ph_events.events if e['event'] == 'stt_scribe_shadow_compared']
+    assert len(ev) == 1 and ev[0]['properties']['error'] == 'ScribeApiError'
+
+
+def test_stt_scribe_shadow_off_at_zero(tmp_path, together_on, monkeypatch):
+    monkeypatch.setenv('ELEVENLABS_API_KEY', 'el-test-not-a-real-key')
+    monkeypatch.setenv('SCRIBE_SHADOW_PCT', '0')
+    posted = []
+    monkeypatch.setattr(
+        A.httpx, 'post',
+        lambda *a, **k: posted.append(1) or _FakeHttpxResp(200, _scribe_payload(_GOOD)))
+    tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)]))
+    A._transcribe_chunk_routed(_job(tg), _ScriptedClient(), _chunk(tmp_path),
+                               'en', chunk_seconds=60)
+    assert posted == []
+
+
+def test_stt_scribe_not_in_byok_picker():
+    assert 'scribe' not in STT.ALLOWED_BYOK_MODELS
+    assert STT.normalize_transcription_model('scribe') == 'whisper-1'
+    assert STT.normalize_transcription_model('scribe_v2') == 'whisper-1'
+
+
+def test_stt_scribe_admin_costs_use_stt_cost_usd():
+    import admin_costs
+    from models import db, TranscriptionTask
+    uid = _make_user('scribe-admin@test.com', limit=3600)
+    with A.app.app_context():
+        for tid in ('scribe-admin-a',):
+            old = db.session.get(TranscriptionTask, tid)
+            if old:
+                db.session.delete(old)
+        db.session.commit()
+        before = admin_costs.collect_costs(db)['windows']['all']
+        db.session.add(TranscriptionTask(
+            id='scribe-admin-a', user_id=uid, episode_title='x', status='completed',
+            trial_seconds_charged=0, paid_seconds_charged=600,
+            stt_provider='scribe', stt_cost_usd=0.0366,
+            completed_at=datetime.now(timezone.utc).replace(tzinfo=None)))
+        db.session.commit()
+        after = admin_costs.collect_costs(db)['windows']['all']
+    assert after['openai_paid_usd'] - before['openai_paid_usd'] == pytest.approx(0.0366)
+    # Paid Scribe minutes must not inflate the trial bucket.
+    assert after['openai_trial_usd'] - before['openai_trial_usd'] == pytest.approx(0.0)
 
 
 # -- BYOK transcription model (gpt-transcribe) -----------------------------

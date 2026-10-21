@@ -3539,17 +3539,23 @@ def _whisper_transcribe_chunk(openai_client, chunk_file, language, *,
 # ---------------------------------------------------------------------------
 #
 # STT_PROVIDER=together sends platform-funded chunks (trial, and paid once
-# STT_TOGETHER_FUNDING=all) to Together AI whisper-large-v3. Every failure mode
-# found in the 2026-10-18 test falls back to whisper-1 for that chunk, on the
-# same platform OpenAI client the job would have used anyway:
+# STT_TOGETHER_FUNDING=all) to Together AI whisper-large-v3. STT_PROVIDER=scribe
+# sends matching jobs (STT_SCRIBE_FUNDING, default paid) to ElevenLabs scribe_v2.
+# Every failure mode falls back to whisper-1 for that chunk on the platform
+# OpenAI client:
 #   429/5xx/dropped connection -> retried, then whisper-1
 #   auto-detected language outside the rollout list (or wrong) -> whisper-1
-#   dropped 30 s window / "Teksting av ..." -> +-2 s window re-sent, then whisper-1
+#   Together: dropped 30 s window / "Teksting av ..." -> +-2 s window, else whisper-1
+#   Scribe: empty or near-empty coverage -> whisper-1
+# SCRIBE_SHADOW_PCT runs Scribe in parallel on a sample of non-Scribe chunks;
+# shadow never reaches the user and never fails the job.
 # None of this changes what the user is charged: billing is still the measured
 # audio reserved before the first chunk. stt_cost_usd records what WE paid.
 
 TOGETHER_CHUNK_ATTEMPTS = 3
 TOGETHER_TIMEOUT_SECONDS = 300.0
+SCRIBE_CHUNK_ATTEMPTS = 3
+SCRIBE_TIMEOUT_SECONDS = 600.0
 
 
 class SttJob:
@@ -3572,8 +3578,11 @@ class SttJob:
         self.providers_used = set()
         self.events = collections.Counter()
 
-    def charge(self, provider, seconds):
-        self.cost_usd += stt_mod.cost_usd(provider, seconds)
+    def charge(self, provider, seconds, *, exact_usd=None):
+        if exact_usd is not None:
+            self.cost_usd += max(0.0, float(exact_usd))
+        else:
+            self.cost_usd += stt_mod.cost_usd(provider, seconds)
         self.providers_used.add(provider)
 
     def provider_label(self):
@@ -3612,9 +3621,11 @@ def _stt_job_for_task(task_id, key_source, language, *, openai_model=None,
     client = build_together_client() if provider == stt_mod.PROVIDER_TOGETHER else None
     if provider == stt_mod.PROVIDER_TOGETHER and client is None:
         provider, reason = stt_mod.PROVIDER_OPENAI, 'no_together_key'
+    if provider == stt_mod.PROVIDER_SCRIBE and not stt_mod.elevenlabs_api_key():
+        provider, reason = stt_mod.PROVIDER_OPENAI, 'no_scribe_key'
     model = stt_mod.normalize_transcription_model(openai_model)
-    # BYOK Best quality never goes to Together (route_job already keeps own_key
-    # on OpenAI); record the chosen model for logging / stt_provider.
+    # BYOK Best quality never goes to Together/Scribe (route_job already keeps
+    # own_key on OpenAI); record the chosen model for logging / stt_provider.
     app.logger.info(
         'stt route task=%s provider=%s reason=%s openai_model=%s',
         task_id, provider, reason, model)
@@ -3667,6 +3678,113 @@ def _together_transcribe(client, path, language, *, label=''):
                                attempt, TOGETHER_CHUNK_ATTEMPTS, type(exc).__name__,
                                getattr(exc, 'status_code', ''))
             if not _together_retryable(exc) or attempt >= TOGETHER_CHUNK_ATTEMPTS:
+                break
+            time.sleep(min(2 ** (attempt - 1), 8))
+    raise last_exc
+
+
+def _scribe_retryable(exc):
+    """429/5xx/timeouts/connection errors. Auth and most 4xx are not retried."""
+    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+        return True
+    status = getattr(exc, 'status_code', None) or getattr(exc, 'response', None)
+    if hasattr(status, 'status_code'):
+        status = status.status_code
+    if status == 429:
+        return True
+    return status is not None and (status >= 500 or status == 408)
+
+
+class ScribeApiError(Exception):
+    """ElevenLabs STT failure without echoing response bodies (keys)."""
+
+    def __init__(self, status_code, message=''):
+        self.status_code = status_code
+        super().__init__(message or f'scribe_http_{status_code}')
+
+
+def _scribe_transcribe(path, language, *, label=''):
+    """One ElevenLabs Scribe v2 call. Returns a whisper-1-shaped result + meta.
+
+    Result namespace: text, segments, language, words, language_probability,
+    billed_usd, latency_ms. Raises ScribeApiError / httpx errors when attempts
+    run out. Never logs ELEVENLABS_API_KEY or response bodies.
+    """
+    import types
+    key = stt_mod.elevenlabs_api_key()
+    if not key:
+        raise ScribeApiError(0, 'no_scribe_key')
+    url = os.getenv('ELEVENLABS_STT_URL') or stt_mod.SCRIBE_API_URL
+    last_exc = None
+    for attempt in range(1, SCRIBE_CHUNK_ATTEMPTS + 1):
+        started = time.monotonic()
+        try:
+            data = {
+                'model_id': stt_mod.SCRIBE_MODEL,
+                'tag_audio_events': 'false',
+                'diarize': 'false',
+                'timestamps_granularity': 'word',
+            }
+            if stt_mod.scribe_no_verbatim():
+                data['no_verbatim'] = 'true'
+            if language:
+                # Always send when known — Norwegian auto-detect confidence is low.
+                data['language_code'] = language
+            with open(path, 'rb') as f:
+                files = {'file': (os.path.basename(path) or 'audio.mp3', f,
+                                  'audio/mpeg')}
+                resp = httpx.post(
+                    url,
+                    headers={'xi-api-key': key},
+                    data=data,
+                    files=files,
+                    timeout=httpx.Timeout(
+                        connect=30.0, read=SCRIBE_TIMEOUT_SECONDS,
+                        write=SCRIBE_TIMEOUT_SECONDS, pool=30.0),
+                )
+            latency_ms = int((time.monotonic() - started) * 1000)
+            if resp.status_code >= 400:
+                err = ScribeApiError(resp.status_code)
+                if not _scribe_retryable(err) or attempt >= SCRIBE_CHUNK_ATTEMPTS:
+                    raise err
+                last_exc = err
+                app.logger.warning(
+                    'Scribe %s attempt %s/%s failed (%s %s)', label,
+                    attempt, SCRIBE_CHUNK_ATTEMPTS, type(err).__name__,
+                    resp.status_code)
+                time.sleep(min(2 ** (attempt - 1), 8))
+                continue
+            payload = resp.json()
+            text = (payload.get('text') or '').strip()
+            words = payload.get('words') or []
+            seg_dicts = stt_mod.scribe_words_to_segments(words)
+            segs = [types.SimpleNamespace(start=s['start'], end=s['end'],
+                                          text=s['text'])
+                    for s in seg_dicts]
+            # Fallback: one segment covering the whole chunk text if no words.
+            if not segs and text:
+                segs = [types.SimpleNamespace(start=0.0, end=0.0, text=' ' + text)]
+            lang = stt_mod.normalize_scribe_language(payload.get('language_code'))
+            billed = stt_mod.parse_scribe_fiat_cost(resp.headers)
+            return types.SimpleNamespace(
+                text=text,
+                segments=segs,
+                language=lang or None,
+                words=words,
+                language_probability=payload.get('language_probability'),
+                billed_usd=billed,
+                latency_ms=latency_ms,
+            )
+        except ScribeApiError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - classified below
+            last_exc = exc
+            status = getattr(exc, 'status_code', '') or getattr(
+                getattr(exc, 'response', None), 'status_code', '')
+            app.logger.warning('Scribe %s attempt %s/%s failed (%s %s)', label,
+                               attempt, SCRIBE_CHUNK_ATTEMPTS, type(exc).__name__,
+                               status)
+            if not _scribe_retryable(exc) or attempt >= SCRIBE_CHUNK_ATTEMPTS:
                 break
             time.sleep(min(2 ** (attempt - 1), 8))
     raise last_exc
@@ -3796,6 +3914,97 @@ def _start_shadow_comparison(job, openai_client, chunk_file, language, together_
     return t
 
 
+def _start_scribe_shadow_comparison(job, chunk_file, language, served_text,
+                                    chunk_seconds, *, served_provider):
+    """Run Scribe in the background on a copy; never surfaces to the user.
+
+    Logs PostHog ``stt_scribe_shadow_compared`` (similarity, coverage gaps,
+    latency, cost, detected language; no transcript text). Failures are
+    swallowed. Shadow spend is charged onto the job's stt_cost_usd.
+    """
+    if not stt_mod.elevenlabs_api_key():
+        return None
+    shadow_path = f'{chunk_file}.scribe-shadow.mp3'
+    try:
+        shutil.copyfile(chunk_file, shadow_path)
+    except OSError:
+        return None
+    # Charge list-price estimate on the job (same pattern as Together→whisper
+    # shadow). Billed fiat from the response header is reported to PostHog only
+    # — never mutate job.cost_usd from the background thread.
+    job.charge(stt_mod.PROVIDER_SCRIBE, chunk_seconds)
+    user_id, task_id = job.user_id, job.task_id
+    estimate = stt_mod.cost_usd(stt_mod.PROVIDER_SCRIBE, chunk_seconds)
+
+    def run():
+        props = {
+            'task_id': task_id,
+            'served_provider': served_provider,
+            'chunk_seconds': round(float(chunk_seconds or 0), 1),
+            'served_words': len((served_text or '').split()),
+            'language_sent': language or None,
+            'cost_usd_est': round(estimate, 5),
+        }
+        try:
+            result = _scribe_transcribe(shadow_path, language,
+                                        label='scribe-shadow')
+            scribe_text = getattr(result, 'text', '') or ''
+            gaps = stt_mod.word_timeline_gaps(getattr(result, 'words', None) or [])
+            billed = getattr(result, 'billed_usd', None)
+            props.update({
+                'similarity': stt_mod.similarity(served_text, scribe_text),
+                'length_ratio': round(
+                    len(scribe_text.split()) / max(1, len((served_text or '').split())),
+                    3),
+                'scribe_words': len(scribe_text.split()),
+                'coverage_gap_count': len(gaps),
+                'coverage_gap_seconds': round(sum(gaps), 1) if gaps else 0.0,
+                'latency_ms': getattr(result, 'latency_ms', None),
+                'cost_usd': round(float(billed if billed is not None else estimate), 5),
+                'detected_language': getattr(result, 'language', None),
+                'language_probability': getattr(result, 'language_probability', None),
+                'error': None,
+            })
+            app.logger.info('stt scribe shadow %s', {
+                k: props[k] for k in props if k != 'task_id'
+            })
+            product_analytics.capture('stt_scribe_shadow_compared', user_id, props)
+        except Exception as exc:  # noqa: BLE001 - shadow must never hurt the job
+            props['error'] = type(exc).__name__
+            props['status_code'] = getattr(exc, 'status_code', None)
+            app.logger.warning('stt scribe shadow failed (%s)', type(exc).__name__)
+            try:
+                product_analytics.capture('stt_scribe_shadow_compared', user_id, props)
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            if os.path.exists(shadow_path):
+                os.remove(shadow_path)
+
+    t = threading.Thread(target=run, daemon=True, name='stt-scribe-shadow')
+    t.start()
+    return t
+
+
+def _maybe_scribe_shadow(job, chunk_file, language, served_text, chunk_seconds,
+                         *, served_provider):
+    """Sample SCRIBE_SHADOW_PCT of non-Scribe platform chunks for comparison.
+
+    Never runs for BYOK (own_key) or when Scribe is already the served provider.
+    """
+    if job.provider == stt_mod.PROVIDER_SCRIBE or job.reason == 'own_key':
+        return
+    rate = stt_mod.scribe_shadow_rate()
+    if rate <= 0 or not stt_mod.elevenlabs_api_key():
+        return
+    if secrets.randbelow(10_000) >= int(rate * 10_000):
+        return
+    job.events['scribe_shadow'] += 1
+    _start_scribe_shadow_comparison(
+        job, chunk_file, language, served_text, chunk_seconds,
+        served_provider=served_provider)
+
+
 def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
                              task_id=None, chunk_label=None, chunk_seconds=0.0,
                              openai_model=None):
@@ -3803,7 +4012,7 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
 
     ``openai_model`` overrides the job's preferred OpenAI model for this call
     (used by the gpt-transcribe completeness guard to force whisper-1 on the
-    same user key — never Together or the platform key).
+    same user key — never Together/Scribe or the platform key).
     """
     model = stt_mod.normalize_transcription_model(
         openai_model if openai_model is not None else job.openai_model)
@@ -3816,10 +4025,53 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
             task_id=task_id, chunk_label=chunk_label,
             model=model, chunk_seconds=chunk_seconds)
 
-    if job.provider != stt_mod.PROVIDER_TOGETHER or job.together_client is None:
-        return openai_call()
-
     label = chunk_label or os.path.basename(chunk_file)
+
+    # --- ElevenLabs Scribe v2 -------------------------------------------------
+    if job.provider == stt_mod.PROVIDER_SCRIBE:
+        try:
+            result = _scribe_transcribe(chunk_file, language, label=label)
+            billed = getattr(result, 'billed_usd', None)
+            job.charge(stt_mod.PROVIDER_SCRIBE, chunk_seconds, exact_usd=billed)
+        except Exception as exc:  # noqa: BLE001
+            job.events['fallback_error'] += 1
+            app.logger.warning('stt scribe fallback to whisper-1 for %s: %s %s',
+                               label, type(exc).__name__,
+                               getattr(exc, 'status_code', ''))
+            return openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
+
+        if stt_mod.scribe_output_suspicious(result.text, chunk_seconds):
+            job.events['fallback_coverage'] += 1
+            app.logger.info('stt scribe coverage suspicious; whisper-1 for %s',
+                            label)
+            return openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
+
+        if not language:
+            detected = stt_mod.normalize_scribe_language(result.language)
+            if not stt_mod.scribe_language_allowed(detected):
+                job.events['fallback_language'] += 1
+                app.logger.info(
+                    'stt language %r not on Scribe; whisper-1 for the rest of '
+                    'task %s', detected, task_id)
+                job.provider = stt_mod.PROVIDER_OPENAI
+                job.openai_model = stt_mod.OPENAI_MODEL
+                return openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
+            job.pinned_language = detected
+            language = detected
+        return result
+
+    # --- Together whisper-large-v3 -------------------------------------------
+    if job.provider != stt_mod.PROVIDER_TOGETHER or job.together_client is None:
+        result = openai_call()
+        # Platform whisper-1 (not BYOK gpt-transcribe fallback): optional shadow.
+        if (job.provider == stt_mod.PROVIDER_OPENAI
+                and model == stt_mod.OPENAI_MODEL
+                and job.reason != 'own_key'):
+            _maybe_scribe_shadow(
+                job, chunk_file, language, getattr(result, 'text', '') or '',
+                chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
+        return result
+
     try:
         result = _together_transcribe(job.together_client, chunk_file, language,
                                       label=label)
@@ -3855,6 +4107,10 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
         job.events['shadow'] += 1
         _start_shadow_comparison(job, openai_client, chunk_file, language,
                                  result.text, chunk_seconds)
+
+    _maybe_scribe_shadow(
+        job, chunk_file, language, result.text, chunk_seconds,
+        served_provider=stt_mod.PROVIDER_TOGETHER)
     return result
 
 

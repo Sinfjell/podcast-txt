@@ -219,9 +219,10 @@ class TranscriptionTask(db.Model):
     summary_completion_tokens = db.Column(db.Integer, nullable=True)
     summary_cost_usd_est = db.Column(db.Float, nullable=True)
     # Which speech-to-text provider/model ran the job ('whisper-1',
-    # 'gpt-transcribe', 'together', or 'mixed' after a per-chunk fallback)
-    # and what it really cost us in USD, retries/fallbacks/shadow included.
-    # Internal only; BYOK jobs still record the model even though we pay $0.
+    # 'gpt-transcribe', 'together', 'scribe', or 'mixed' after a per-chunk
+    # fallback) and what it really cost us in USD, retries/fallbacks/shadow
+    # included. Internal only; BYOK jobs still record the model even though
+    # we pay $0.
     stt_provider = db.Column(db.String(32), nullable=True)
     stt_cost_usd = db.Column(db.Float, nullable=True)
     # When this row is a read-only copy for a summary-email subscriber, points at
