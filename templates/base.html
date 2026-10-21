@@ -1680,13 +1680,25 @@
             } catch (e) { /* ignore */ }
         };
 
+        // Events fired immediately before a navigation (Stripe Checkout, BYOK
+        // settings link) must flush now: transport alone does not bypass the
+        // batch queue, and cookieless visitors never get the unload flush.
+        function leaveSafeCaptureOpts() {
+            var opts = {send_instantly: true};
+            if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+                opts.transport = 'sendBeacon';
+            }
+            return opts;
+        }
+        window.podskriftLeaveSafeCaptureOpts = leaveSafeCaptureOpts;
+
         window.podskriftPaywallByokClicked = function (location, reason) {
             try {
                 if (!window.posthog || !location) return;
                 posthog.capture('paywall_byok_clicked', {
                     location: location,
                     reason: reason || ''
-                });
+                }, leaveSafeCaptureOpts());
             } catch (e) { /* ignore */ }
         };
 
@@ -1732,10 +1744,9 @@
                 if (!window.posthog) return;
                 var sourceEl = form.querySelector('input[name="source"]');
                 var loc = sourceEl ? sourceEl.value : '';
-                var opts = {};
-                if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
-                    opts.transport = 'sendBeacon';
-                }
+                // Capture is sync and sendBeacon does not wait on a response —
+                // never delay or block the checkout redirect.
+                var opts = leaveSafeCaptureOpts();
                 posthog.capture('buy_clicked', {location: loc, transport: 'sendBeacon'}, opts);
                 var minEl = form.querySelector('input[name="minutes"]');
                 var psEl = form.querySelector('input[name="price_source"]');
@@ -1765,7 +1776,7 @@
                 posthog.capture('paywall_byok_clicked', {
                     location: byok.getAttribute('data-paywall-byok') || '',
                     reason: ''
-                });
+                }, leaveSafeCaptureOpts());
             } catch (e) { /* ignore */ }
         }, true);
         // buy_clicked fires only on checkout form submit — opening the Buy

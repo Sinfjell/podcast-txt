@@ -300,12 +300,19 @@ def collect_costs(db, *, chart_days=30, model=None):
            AND (summary_source_task_id IS NULL OR summary_source_task_id = '')
     """)))
 
-    purchases = list(db.session.execute(text("""
-        SELECT user_id, created_at,
-               COALESCE(amount_total_cents, amount_cents, 0) AS cents
-          FROM credit_purchases
-         WHERE status = 'credited'
-    """)))
+    from admin_purchases import is_internal_or_test_user
+    purchases = [
+        (uid, created, cents)
+        for uid, created, cents, email in db.session.execute(text("""
+            SELECT cp.user_id, cp.created_at,
+                   COALESCE(cp.amount_total_cents, cp.amount_cents, 0) AS cents,
+                   u.email
+              FROM credit_purchases cp
+              LEFT JOIN users u ON u.id = cp.user_id
+             WHERE cp.status = 'credited'
+        """))
+        if not is_internal_or_test_user(uid, email)
+    ]
 
     # Earliest activity for all-time fixed-cost span.
     first_ts = db.session.execute(text("""

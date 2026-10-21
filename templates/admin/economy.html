@@ -93,7 +93,7 @@
 
     {% call section(title="Users who have paid", variant='bordered', attrs='id="payers"') %}
     {% if eco.payers %}
-    <p class="econ-lede">{{ eco.paying_users }} paying user{{ '' if eco.paying_users == 1 else 's' }}. Paid is revenue after VAT and refunds.</p>
+    <p class="econ-lede">{{ eco.paying_users }} paying user{{ '' if eco.paying_users == 1 else 's' }}. Paid is price incl. VAT (ex VAT shown in the Paid column subtitle where present). Refunded and disputed buys are excluded.</p>
     <div class="econ-table-wrap">
         <table class="econ-table">
             <thead><tr>
@@ -107,7 +107,7 @@
                     <td><a href="{{ url_for('admin.user_page', user_id=p.id) }}">{{ p.email }}</a></td>
                     <td>{{ p.signed_up }}</td><td>{{ p.first_purchase }}</td><td>{{ p.last_purchase }}</td>
                     <td class="num">{{ p.purchases }}</td>
-                    <td class="num">${{ '%.2f'|format(p.paid_usd) }}</td>
+                    <td class="num">${{ '%.2f'|format(p.paid_usd) }}{% if p.ex_vat_usd is defined %}<br><span class="money-muted">${{ '%.2f'|format(p.ex_vat_usd) }} ex VAT</span>{% endif %}</td>
                     <td class="num">{{ p.minutes_bought }}</td>
                     <td class="num">{{ p.used_pct|int }} %</td>
                     <td class="num">{{ p.transcripts }}</td>
@@ -126,7 +126,8 @@
         <table class="econ-table">
             <thead><tr><th>Number</th><th>Status</th><th>Source</th></tr></thead>
             <tbody>
-                <tr><td>Revenue</td><td>{{ chip("Measured", "muted") }}</td><td>Credit purchases in the database: amount paid minus VAT minus refunded money. Not reconciled against payouts.</td></tr>
+                <tr><td>Revenue</td><td>{{ chip("Measured", "muted") }}</td><td>Counted credit purchases only (completed, not refunded/disputed; internal/test users excluded): price paid including VAT. Ex-VAT is shown on the revenue card. Not reconciled against payouts.</td></tr>
+                <tr><td>Refunds &amp; disputes</td><td>{{ chip("Measured", "muted") }}</td><td>{% if src.refund_dispute_count %}{{ src.refund_dispute_count }} refund/dispute row{{ '' if src.refund_dispute_count == 1 else 's' }} · ${{ '%.2f'|format(src.refunds_disputes_usd) }} (not in purchase count or revenue).{% else %}None in this window.{% endif %}</td></tr>
                 <tr><td>Stripe fees</td><td>
                     {% if src.fees == 'stripe' %}{{ chip("Measured", "muted") }}
                     {% elif src.fees == 'mixed' %}{{ chip("Partly estimated", "warning") }}
@@ -143,10 +144,13 @@
 
     <script type="application/json" id="econData">{{ {
         'days': eco.days, 'series': eco.series, 'purchases': eco.purchases,
+        'refunds_disputes': eco.refunds_disputes,
         'activity': eco.activity, 'today': eco.today,
         'unused_paid_minutes': eco.unused_paid_minutes,
         'unused_paid_cost_usd': eco.unused_paid_cost_usd,
         'cost_source': src.cost, 'plan_labels': plan_labels,
+        'refund_dispute_count': src.refund_dispute_count,
+        'refunds_disputes_usd': src.refunds_disputes_usd,
     } | tojson }}</script>
     <script src="{{ url_for('static', filename='vendor/chart-4.4.7.umd.min.js') }}"></script>
     <script src="{{ url_for('static', filename='admin-economy.js') }}"></script>

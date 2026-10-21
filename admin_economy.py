@@ -3,12 +3,17 @@
 Read-only reporting over SQLite, plus Stripe and the OpenAI Costs API when they
 answer. Nothing here touches reservation, refund or trial logic.
 
-Definitions (USD, UTC days, so Stripe and OpenAI buckets line up):
+Definitions (USD, UTC days, so Stripe and OpenAI buckets line up) — purchase
+counting follows ``admin_purchases`` (credited, not refunded/disputed, exclude
+internal/test users):
 
-* revenue  = what customers paid, minus VAT, minus refunded money
+* revenue  = price paid including VAT (counted purchases only)
+* ex_vat   = revenue minus VAT (shown alongside revenue)
 * fees     = Stripe's fee (from the balance transaction when Stripe is
              reachable, otherwise the model in ``pricing_volume``)
-* income   = revenue - fees, the money that actually lands with us
+* income   = ex_vat - fees, the money that actually lands with us
+* refunds  = refunded / disputed amounts (reported separately; not in
+             purchase count or revenue)
 * cost     = OpenAI cost (actual from the Costs API when an admin key exists,
              otherwise list price x settled minutes) + prorated fixed costs
 * result   = income - cost
@@ -23,7 +28,14 @@ from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import text
 
-PAID_STATUSES = ('credited', 'refunded', 'disputed')
+from admin_purchases import (
+    COUNTED_STATUS,
+    counted_purchases,
+    fetch_purchase_rows,
+    is_internal_or_test_user,
+    refund_dispute_purchases,
+)
+
 MAX_DAYS = 180
 PAYERS_LIMIT = 200
 
@@ -64,60 +76,67 @@ def _model_fee_usd(gross_usd):
     return (PV.STRIPE_FEE_FIXED_CENTS / 100.0) + gross_usd * PV.STRIPE_FEE_PCT
 
 
+def _first_counted_purchase_ids(db):
+    """user_id → id of that user's first counted (credited, non-internal) buy."""
+    rows = fetch_purchase_rows(db, statuses=(COUNTED_STATUS,))
+    first = {}
+    for r in counted_purchases(rows):
+        uid = r.get('user_id')
+        if uid is None or uid in first:
+            continue
+        first[uid] = r['id']
+    return first
+
+
 def collect_purchases(db, start, end, stripe_by_pi):
-    """One dict per purchase in [start, end], money in USD."""
+    """Counted purchases in [start, end] plus separate refund/dispute rows."""
     from admin_margin import plan_key
-    lo = datetime(start.year, start.month, start.day)
-    hi = datetime(end.year, end.month, end.day) + timedelta(days=1)
-    first_ids = {
-        r[0]: r[1] for r in db.session.execute(text(f"""
-            SELECT user_id, MIN(id) FROM credit_purchases
-             WHERE status IN {PAID_STATUSES} AND user_id IS NOT NULL
-             GROUP BY user_id
-        """))
-    }
-    rows = db.session.execute(text(f"""
-        SELECT id, user_id, created_at, minutes,
-               COALESCE(amount_total_cents, amount_cents) AS gross,
-               COALESCE(amount_tax_cents, 0) AS tax,
-               COALESCE(amount_refunded_cents, 0) AS refunded,
-               customer_country, price_source, pricing_version,
-               stripe_payment_intent_id
-          FROM credit_purchases
-         WHERE status IN {PAID_STATUSES}
-           AND created_at >= :lo AND created_at < :hi
-         ORDER BY created_at, id
-    """), {'lo': lo, 'hi': hi}).fetchall()
-    out = []
-    for (pid, uid, created, minutes, gross, tax, refunded, country, src,
-         version, pi) in rows:
-        day = _utc_day(created)
+    first_ids = _first_counted_purchase_ids(db)
+    rows = fetch_purchase_rows(db, start=start, end=end)
+    purchases = []
+    for r in counted_purchases(rows):
+        day = _utc_day(r.get('created_at'))
         if day is None:
             continue
-        gross_usd = int(gross or 0) / 100.0
-        vat_usd = min(int(tax or 0) / 100.0, gross_usd)
+        gross_usd = int(r.get('gross_cents') or 0) / 100.0
+        vat_usd = min(int(r.get('tax_cents') or 0) / 100.0, gross_usd)
         ex_vat = gross_usd - vat_usd
-        refund_share = min(1.0, int(refunded or 0) / (gross or 1)) if gross else 0.0
-        stripe = stripe_by_pi.get(pi or '')
+        pi = r.get('pi') or ''
+        stripe = stripe_by_pi.get(pi)
         if stripe:
             fee_usd, fee_src = stripe['fees'], 'stripe'
         else:
             fee_usd, fee_src = _model_fee_usd(gross_usd), 'model'
-        out.append({
+        purchases.append({
             'd': day,
-            'minutes': int(minutes or 0),
+            'minutes': int(r.get('minutes') or 0),
             'gross': round(gross_usd, 4),
             'vat': round(vat_usd, 4),
-            'refunds': round(ex_vat * refund_share, 4),
-            'revenue': round(ex_vat * (1 - refund_share), 4),
+            'ex_vat': round(ex_vat, 4),
+            # Canonical revenue: price paid incl. VAT.
+            'revenue': round(gross_usd, 4),
             'fee': round(fee_usd, 4),
             'fee_src': fee_src,
-            'country': (country or '').upper() or None,
-            'plan': plan_key(minutes, src, version),
-            'new': first_ids.get(uid) == pid,
-            'src': src or None,
+            'country': (r.get('customer_country') or '').upper() or None,
+            'plan': plan_key(r.get('minutes'), r.get('price_source'),
+                            r.get('pricing_version')),
+            'new': first_ids.get(r.get('user_id')) == r.get('id'),
+            'src': r.get('price_source') or None,
         })
-    return out
+    refunds = []
+    for r in refund_dispute_purchases(rows):
+        day = _utc_day(r.get('created_at'))
+        if day is None:
+            continue
+        gross_usd = int(r.get('gross_cents') or 0) / 100.0
+        refunded = int(r.get('refunded_cents') or 0) / 100.0
+        amount = refunded if refunded > 0 else gross_usd
+        refunds.append({
+            'd': day,
+            'amount': round(amount, 4),
+            'status': r.get('status') or '',
+        })
+    return purchases, refunds
 
 
 def minutes_by_day(db, start, end):
@@ -141,25 +160,30 @@ def minutes_by_day(db, start, end):
     return out
 
 
-def build_series(days, purchases, minutes, api_cost_by_day, fixed_monthly):
+def build_series(days, purchases, refunds, minutes, api_cost_by_day,
+                 fixed_monthly):
     """Per-day money arrays aligned with *days*."""
     from admin_costs import fixed_daily_usd
     n = len(days)
     idx = {d: i for i, d in enumerate(days)}
     s = {k: _zeros(n) for k in (
-        'gross', 'vat', 'refunds', 'revenue', 'fees', 'income', 'purchases',
-        'trial_min', 'paid_min', 'cost_trial', 'cost_paid', 'cost_fixed',
-        'cost', 'result')}
+        'gross', 'vat', 'ex_vat', 'refunds', 'revenue', 'fees', 'income',
+        'purchases', 'trial_min', 'paid_min', 'cost_trial', 'cost_paid',
+        'cost_fixed', 'cost', 'result')}
     for p in purchases:
         i = idx.get(p['d'])
         if i is None:
             continue
         s['gross'][i] += p['gross']
         s['vat'][i] += p['vat']
-        s['refunds'][i] += p['refunds']
+        s['ex_vat'][i] += p['ex_vat']
         s['revenue'][i] += p['revenue']
         s['fees'][i] += p['fee']
         s['purchases'][i] += 1
+    for r in refunds:
+        i = idx.get(r['d'])
+        if i is not None:
+            s['refunds'][i] += r['amount']
     for d, (t, p) in minutes.items():
         i = idx.get(d)
         if i is not None:
@@ -172,17 +196,17 @@ def build_series(days, purchases, minutes, api_cost_by_day, fixed_monthly):
         s['cost_paid'][i] = api - api * share_t
         s['cost_fixed'][i] = fixed_daily_usd(
             fixed_monthly, on_date=date.fromisoformat(d))
-        s['income'][i] = s['revenue'][i] - s['fees'][i]
+        # Income is what lands with us: ex-VAT minus Stripe fees.
+        s['income'][i] = s['ex_vat'][i] - s['fees'][i]
         s['cost'][i] = api + s['cost_fixed'][i]
         s['result'][i] = s['income'][i] - s['cost'][i]
     return {k: [round(v, 4) for v in vals] for k, vals in s.items()}
 
 
 def paying_user_ids(db):
-    return {r[0] for r in db.session.execute(text(f"""
-        SELECT DISTINCT user_id FROM credit_purchases
-         WHERE status IN {PAID_STATUSES} AND user_id IS NOT NULL
-    """))}
+    """Users with at least one counted purchase (external buyers only)."""
+    rows = fetch_purchase_rows(db, statuses=(COUNTED_STATUS,))
+    return {r['user_id'] for r in counted_purchases(rows) if r.get('user_id')}
 
 
 def collect_activity(db, days, payer_ids, purchases_first_days):
@@ -226,13 +250,15 @@ def collect_activity(db, days, payer_ids, purchases_first_days):
 
 
 def first_purchase_days(db):
-    """Day of each paying user's first purchase (all time)."""
+    """Day of each paying user's first counted purchase (all time)."""
+    first = _first_counted_purchase_ids(db)
+    if not first:
+        return []
+    id_list = ','.join(str(int(i)) for i in first.values())
     out = []
-    for (created,) in db.session.execute(text(f"""
-        SELECT MIN(created_at) FROM credit_purchases
-         WHERE status IN {PAID_STATUSES} AND user_id IS NOT NULL
-         GROUP BY user_id
-    """)):
+    for (created,) in db.session.execute(text(
+            f'SELECT created_at FROM credit_purchases WHERE id IN ({id_list})'
+    )):
         d = _utc_day(created)
         if d:
             out.append(d)
@@ -240,40 +266,48 @@ def first_purchase_days(db):
 
 
 def list_payers(db, limit=PAYERS_LIMIT):
-    """Users who have bought minutes, latest buyer first."""
-    rows = db.session.execute(text(f"""
+    """Users who have a counted purchase, latest buyer first."""
+    rows = db.session.execute(text("""
         SELECT u.id, u.email, u.created_at,
                COUNT(cp.id), MIN(cp.created_at), MAX(cp.created_at),
-               SUM(COALESCE(cp.amount_total_cents, cp.amount_cents)
-                   - COALESCE(cp.amount_tax_cents, 0)
-                   - COALESCE(cp.amount_refunded_cents, 0)),
+               SUM(COALESCE(cp.amount_total_cents, cp.amount_cents)),
+               SUM(COALESCE(cp.amount_tax_cents, 0)),
                SUM(cp.minutes), COALESCE(u.paid_seconds_balance, 0),
                (SELECT COUNT(*) FROM transcription_tasks t
                  WHERE t.user_id = u.id AND t.status = 'completed')
           FROM credit_purchases cp
           JOIN users u ON u.id = cp.user_id
-         WHERE cp.status IN {PAID_STATUSES}
+         WHERE cp.status = :status
          GROUP BY u.id
          ORDER BY MAX(cp.created_at) DESC
          LIMIT :limit
-    """), {'limit': int(limit)}).fetchall()
+    """), {'status': COUNTED_STATUS, 'limit': int(limit) * 3}).fetchall()
     from admin_dashboard import format_oslo
     out = []
-    for (uid, email, created, n, first, last, cents, minutes, bal, tx) in rows:
+    for (uid, email, created, n, first, last, gross, tax, minutes, bal,
+         tx) in rows:
+        if is_internal_or_test_user(uid, email):
+            continue
         bought = float(minutes or 0)
         left = max(0.0, float(bal or 0) / 60.0)
+        gross_usd = float(gross or 0) / 100.0
+        tax_usd = min(float(tax or 0) / 100.0, gross_usd)
         out.append({
             'id': uid, 'email': email,
             'signed_up': format_oslo(created, '%Y-%m-%d'),
             'first_purchase': format_oslo(first, '%Y-%m-%d'),
             'last_purchase': format_oslo(last, '%Y-%m-%d'),
             'purchases': int(n or 0),
-            'paid_usd': round(float(cents or 0) / 100.0, 2),
+            # Paid = revenue incl. VAT; ex_vat kept for the table subtitle.
+            'paid_usd': round(gross_usd, 2),
+            'ex_vat_usd': round(gross_usd - tax_usd, 2),
             'minutes_bought': int(bought),
             'minutes_left': round(left, 1),
             'used_pct': round(100 * min(1.0, max(0.0, 1 - left / bought)), 0) if bought else 0,
             'transcripts': int(tx or 0),
         })
+        if len(out) >= int(limit):
+            break
     return out
 
 
@@ -292,7 +326,7 @@ def collect_economy(db, stripe_revenue, *, start=None, end=None, today=None,
     stripe_ok = bool((stripe_revenue or {}).get('ok'))
     bts = (stripe_revenue or {}).get('bts_norm') or [] if stripe_ok else []
     by_pi = stripe_usd_by_payment_intent(bts)
-    purchases = collect_purchases(db, start, end, by_pi)
+    purchases, refunds = collect_purchases(db, start, end, by_pi)
 
     actual = (actual_fetcher or fetch_actual_costs)(start, end)
     cost_ok = bool(actual.get('ok'))
@@ -304,7 +338,8 @@ def collect_economy(db, stripe_revenue, *, start=None, end=None, today=None,
 
     minutes = minutes_by_day(db, start, end)
     fixed_monthly, _fixed_items = fixed_monthly_costs_from_env()
-    series = build_series(days, purchases, minutes, api_by_day, fixed_monthly)
+    series = build_series(days, purchases, refunds, minutes, api_by_day,
+                          fixed_monthly)
 
     trial_min = sum(series['trial_min'])
     paid_min = sum(series['paid_min'])
@@ -317,6 +352,7 @@ def collect_economy(db, stripe_revenue, *, start=None, end=None, today=None,
     payer_ids = paying_user_ids(db)
     activity = collect_activity(db, days, payer_ids, first_purchase_days(db))
     n_stripe = sum(1 for p in purchases if p['fee_src'] == 'stripe')
+    refund_usd = round(sum(r['amount'] for r in refunds), 2)
     return {
         'start': start.isoformat(),
         'end': end.isoformat(),
@@ -324,6 +360,7 @@ def collect_economy(db, stripe_revenue, *, start=None, end=None, today=None,
         'days': days,
         'series': series,
         'purchases': purchases,
+        'refunds_disputes': refunds,
         'activity': activity,
         'payers': list_payers(db),
         'paying_users': len(payer_ids),
@@ -336,6 +373,8 @@ def collect_economy(db, stripe_revenue, *, start=None, end=None, today=None,
                      else 'mixed' if n_stripe else 'model'),
             'fees_stripe_count': n_stripe,
             'purchase_count': len(purchases),
+            'refund_dispute_count': len(refunds),
+            'refunds_disputes_usd': refund_usd,
             'cost': 'actual' if cost_ok else 'estimate',
             'cost_error': actual.get('error'),
             'cost_per_min_source': cpm_source,

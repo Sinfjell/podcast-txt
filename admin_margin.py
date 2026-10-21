@@ -160,28 +160,50 @@ def transcribed_minutes(db, start, end):
 
 
 def purchase_rows(db, start, end):
-    lo, hi = _utc_naive_bounds(start, end)
-    return [dict(r._mapping) for r in db.session.execute(text("""
-        SELECT id, user_id, minutes, COALESCE(amount_total_cents, amount_cents) AS cents,
-               status, price_source, pricing_version, stripe_payment_intent_id AS pi,
-               COALESCE(seconds_clawed_back, 0) AS clawed
-          FROM credit_purchases
-         WHERE status IN ('credited', 'refunded', 'disputed')
-           AND created_at >= :lo AND created_at < :hi
-    """), {'lo': lo, 'hi': hi})]
+    """Counted purchases only (credited, non-internal) for contribution margin."""
+    from admin_purchases import COUNTED_STATUS, counted_purchases, fetch_purchase_rows
+    rows = fetch_purchase_rows(db, start=start, end=end, statuses=(COUNTED_STATUS,))
+    out = []
+    for r in counted_purchases(rows):
+        out.append({
+            'id': r['id'],
+            'user_id': r['user_id'],
+            'minutes': r.get('minutes'),
+            'cents': r.get('gross_cents'),
+            'tax_cents': r.get('tax_cents'),
+            'status': r.get('status'),
+            'price_source': r.get('price_source'),
+            'pricing_version': r.get('pricing_version'),
+            'pi': r.get('pi'),
+            'clawed': r.get('clawed') or 0,
+        })
+    return out
+
+
+def refund_dispute_rows(db, start, end):
+    """Refunded / disputed purchases (external buyers) for the separate report."""
+    from admin_purchases import (
+        REFUND_DISPUTE_STATUSES, fetch_purchase_rows, refund_dispute_purchases,
+    )
+    rows = fetch_purchase_rows(
+        db, start=start, end=end, statuses=REFUND_DISPUTE_STATUSES)
+    return refund_dispute_purchases(rows)
 
 
 def user_used_fraction(db):
     """{user_id: share of all purchased paid minutes already used (0..1)}."""
+    from admin_purchases import COUNTED_STATUS, is_internal_or_test_user
     rows = db.session.execute(text("""
-        SELECT u.id, COALESCE(u.paid_seconds_balance, 0),
+        SELECT u.id, u.email, COALESCE(u.paid_seconds_balance, 0),
                (SELECT COALESCE(SUM(cp.minutes * 60 - COALESCE(cp.seconds_clawed_back, 0)), 0)
                   FROM credit_purchases cp
-                 WHERE cp.user_id = u.id AND cp.status IN ('credited', 'refunded', 'disputed'))
+                 WHERE cp.user_id = u.id AND cp.status = :status)
           FROM users u
-    """))
+    """), {'status': COUNTED_STATUS})
     out = {}
-    for uid, bal, bought in rows:
+    for uid, email, bal, bought in rows:
+        if is_internal_or_test_user(uid, email):
+            continue
         bought = float(bought or 0)
         if bought <= 0:
             continue
@@ -190,14 +212,20 @@ def user_used_fraction(db):
 
 
 def contribution_by_plan(purchases, stripe_by_pi, cost_per_min, used_frac,
-                         trial_minutes=0.0):
-    """Contribution margin per plan, 'all minutes used' and 'used so far'."""
+                         trial_minutes=0.0, refund_rows=None):
+    """Contribution margin per plan, 'all minutes used' and 'used so far'.
+
+    ``purchases`` must already be counted-only (credited, non-internal).
+    ``refund_rows`` (optional) are reported separately and never add to
+    ``totals.count`` / ``gross_usd``.
+    """
     plans = {}
     for p in purchases:
         k = plan_key(p['minutes'], p['price_source'], p['pricing_version'])
         g = plans.setdefault(k, {'plan': k, 'label': PLAN_LABELS[k], 'count': 0,
                                  'minutes_sold': 0.0, 'minutes_used': 0.0,
-                                 'gross_usd': 0.0, 'fees_usd': 0.0, 'tax_usd': 0.0,
+                                 'gross_usd': 0.0, 'ex_vat_usd': 0.0,
+                                 'fees_usd': 0.0, 'tax_usd': 0.0,
                                  'refunds_usd': 0.0, 'net_usd': 0.0,
                                  'stripe_matched': 0})
         g['count'] += 1
@@ -210,11 +238,15 @@ def contribution_by_plan(purchases, stripe_by_pi, cost_per_min, used_frac,
             g['gross_usd'] += s['gross']
             g['fees_usd'] += s['fees']
             g['tax_usd'] += s['tax']
-            g['refunds_usd'] += s['refunds']
+            g['ex_vat_usd'] += s['gross'] - s['tax']
             g['net_usd'] += s['net']
         else:  # no Stripe row: list price, fees unknown (flagged by stripe_matched)
-            g['gross_usd'] += int(p['cents'] or 0) / 100.0
-            g['net_usd'] += int(p['cents'] or 0) / 100.0
+            cents = int(p['cents'] or 0) / 100.0
+            tax = min(int(p.get('tax_cents') or 0) / 100.0, cents)
+            g['gross_usd'] += cents
+            g['tax_usd'] += tax
+            g['ex_vat_usd'] += cents - tax
+            g['net_usd'] += cents
     out = []
     for k in PLAN_ORDER:
         g = plans.get(k)
@@ -239,10 +271,25 @@ def contribution_by_plan(purchases, stripe_by_pi, cost_per_min, used_frac,
              'cost_usd': round(trial_minutes * cost_per_min, 4),
              'cost_list_usd': round(trial_minutes * WHISPER_LIST_USD_PER_MIN, 4)}
     totals = {k: round(sum(g[k] for g in out), 4) for k in (
-        'count', 'gross_usd', 'fees_usd', 'tax_usd', 'net_usd',
+        'count', 'gross_usd', 'ex_vat_usd', 'fees_usd', 'tax_usd', 'net_usd',
         'cost_all_used_usd', 'cost_used_so_far_usd', 'db_all_used_usd',
         'db_used_so_far_usd')}
     totals['db_after_trial_usd'] = round(totals['db_used_so_far_usd'] - trial['cost_usd'], 4)
+    refund_rows = refund_rows or []
+    refund_usd = 0.0
+    refund_count = 0
+    dispute_count = 0
+    for r in refund_rows:
+        gross = int(r.get('gross_cents') or 0) / 100.0
+        refunded = int(r.get('refunded_cents') or 0) / 100.0
+        refund_usd += refunded if refunded > 0 else gross
+        if (r.get('status') or '') == 'disputed':
+            dispute_count += 1
+        else:
+            refund_count += 1
+    totals['refund_count'] = refund_count
+    totals['dispute_count'] = dispute_count
+    totals['refunds_disputes_usd'] = round(refund_usd, 2)
     return {'plans': out, 'trial': trial, 'totals': totals}
 
 
@@ -294,8 +341,10 @@ def collect_margin(db, stripe_revenue, start, end, *, actual_fetcher=None,
     cpm, cpm_source = cost_per_minute(sum(cost_by_day.values()), trial_min,
                                       paid_min, cost_ok)
     by_pi = stripe_usd_by_payment_intent(bts)
-    contrib = contribution_by_plan(purchase_rows(db, start, end), by_pi, cpm,
-                                   user_used_fraction(db), trial_minutes=trial_min)
+    contrib = contribution_by_plan(
+        purchase_rows(db, start, end), by_pi, cpm,
+        user_used_fraction(db), trial_minutes=trial_min,
+        refund_rows=refund_dispute_rows(db, start, end))
     gross = contrib['totals']['gross_usd']
     fee_pct = ((contrib['totals']['fees_usd'] + contrib['totals']['tax_usd']) / gross
                if gross else None)

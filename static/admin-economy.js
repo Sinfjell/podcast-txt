@@ -44,8 +44,8 @@
     function label(d) { var p = d.split('-'); return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][+p[1] - 1] + ' ' + (+p[2]); }
 
     var KPI = [
-        { k: 'revenue', name: 'Revenue', hint: 'after VAT and refunds' },
-        { k: 'income', name: 'Income', hint: 'after Stripe fees' },
+        { k: 'revenue', name: 'Revenue', hint: 'paid incl. VAT' },
+        { k: 'income', name: 'Income', hint: 'ex VAT, after Stripe fees' },
         { k: 'cost', name: 'Cost', hint: 'OpenAI and fixed costs' },
         { k: 'result', name: 'Result', hint: 'income minus cost' },
     ];
@@ -55,9 +55,16 @@
     function renderKpis(r) {
         var i0 = r[0], i1 = r[1], empty = i1 < i0, h = '';
         var cnt = empty ? 0 : sum(S.purchases, i0, i1);
+        var exVat = empty ? 0 : sum(S.ex_vat || S.revenue, i0, i1);
+        var rf = empty ? 0 : sum(S.refunds, i0, i1);
         KPI.forEach(function (m) {
             var v = empty ? 0 : sum(S[m.k], i0, i1), sub = '';
-            if (m.k === 'revenue') sub = cnt + ' purchase' + (cnt === 1 ? '' : 's') + (cnt ? ', ' + money(v / cnt) + ' each' : '');
+            if (m.k === 'revenue') {
+                sub = cnt + ' purchase' + (cnt === 1 ? '' : 's')
+                    + (cnt ? ', ' + money(v / cnt) + ' each' : '')
+                    + ' · ' + money(exVat) + ' ex VAT'
+                    + (rf ? ' · ' + money(rf) + ' refunds/disputes (not counted)' : '');
+            }
             if (m.k === 'income') sub = empty ? '' : money(sum(S.fees, i0, i1)) + ' in Stripe fees';
             if (m.k === 'cost') { var tr = sum(S.cost_trial, i0, i1); sub = v > 0 ? pct(tr / v) + ' is free trial minutes' : ''; }
             if (m.k === 'result') sub = v < 0 ? 'We lose ' + money(-v) + ' in the period' : 'We make ' + money(v) + ' in the period';
@@ -107,8 +114,8 @@
             context: [{ label: 'Income', color: C.accentHover, vals: S.income }, { label: 'Cost', color: C.muted, vals: S.cost }] };
     }
     var TITLES = {
-        revenue: ['Revenue: how it breaks down', 'What customers paid, minus VAT and refunds. VAT goes to the state and is not our revenue.'],
-        income: ['Income: what is left of the payment', 'Revenue minus Stripe fees. This is the money that lands with us.'],
+        revenue: ['Revenue: how it breaks down', 'Price paid including VAT on counted purchases (completed, not refunded/disputed; internal/test users excluded). Ex-VAT and refunds/disputes are shown separately.'],
+        income: ['Income: what is left of the payment', 'Ex-VAT revenue minus Stripe fees. This is the money that lands with us.'],
         cost: ['Cost: where the money goes', 'OpenAI cost on the minutes we transcribe, plus fixed costs. Free trial minutes are usually the biggest item.'],
         result: ['Result: how much we lose or make', 'Income minus cost. Below zero means customers so far have cost more than they have paid.'],
     };
@@ -196,17 +203,20 @@
     function breakdown(k, i0, i1) {
         var list = periodPurchases(i0, i1), h = '';
         if (k === 'revenue' || k === 'income') {
-            var f = k === 'revenue' ? function (p) { return p.revenue; } : function (p) { return p.revenue - p.fee; };
+            var f = k === 'revenue' ? function (p) { return p.revenue; } : function (p) { return (p.ex_vat != null ? p.ex_vat : p.revenue) - p.fee; };
             var fmt = function (r) { return money(r.v) + ' <span>· ' + r.n + '</span>'; };
             h += block('By pack', bars(rows(group(list, function (p) { return p.plan; }, f), function (x) { return D.plan_labels[x] || x; }), '', fmt));
             h += block('By country', bars(rows(group(list, function (p) { return p.country || 'Unknown'; }, f), function (x) { return x; }), '', fmt));
             var nr = rows(group(list, function (p) { return p.new ? 'new' : 'repeat'; }, f), function (x) { return x === 'new' ? 'First purchase' : 'Repeat purchase'; });
             var rep = nr.filter(function (r) { return r.k === 'Repeat purchase'; })[0];
             h += block('First purchase and repeat', bars(nr, '', fmt) + '<p class="econ-note">' + (rep ? rep.n : 0) + ' of ' + list.length + ' purchases are repeats.</p>');
-            if (k === 'revenue') h += block('By how the amount was chosen', bars(rows(group(list, function (p) { return p.src || 'fixed pack'; }, f), function (x) { return x; }), '', fmt));
-            else {
-                var g = sum(S.gross, i0, i1), v = sum(S.vat, i0, i1), rf = sum(S.refunds, i0, i1), fe = sum(S.fees, i0, i1);
-                h += block('From payment to income', '<div class="econ-bars">' + [['Customers paid', g], ['VAT', -v], ['Refunds', -rf], ['Stripe fees', -fe], ['Income', g - v - rf - fe]].map(function (x) { return '<div class="econ-bar"><span class="econ-bar__name">' + x[0] + '</span><span></span><span class="econ-bar__value">' + money(x[1]) + '</span></div>'; }).join('') + '</div>');
+            if (k === 'revenue') {
+                h += block('By how the amount was chosen', bars(rows(group(list, function (p) { return p.src || 'fixed pack'; }, f), function (x) { return x; }), '', fmt));
+                var gR = sum(S.gross, i0, i1), vR = sum(S.vat, i0, i1), rfR = sum(S.refunds, i0, i1);
+                h += block('Paid vs ex VAT vs refunds', '<div class="econ-bars">' + [['Revenue (incl. VAT)', gR], ['VAT', -vR], ['Ex VAT', gR - vR], ['Refunds/disputes (not counted)', -rfR]].map(function (x) { return '<div class="econ-bar"><span class="econ-bar__name">' + x[0] + '</span><span></span><span class="econ-bar__value">' + money(x[1]) + '</span></div>'; }).join('') + '</div>');
+            } else {
+                var g = sum(S.gross, i0, i1), v = sum(S.vat, i0, i1), fe = sum(S.fees, i0, i1);
+                h += block('From payment to income', '<div class="econ-bars">' + [['Customers paid', g], ['VAT', -v], ['Stripe fees', -fe], ['Income', g - v - fe]].map(function (x) { return '<div class="econ-bar"><span class="econ-bar__name">' + x[0] + '</span><span></span><span class="econ-bar__value">' + money(x[1]) + '</span></div>'; }).join('') + '</div>');
             }
         } else if (k === 'cost') {
             var t = sum(S.cost_trial, i0, i1), p = sum(S.cost_paid, i0, i1), fx = sum(S.cost_fixed, i0, i1), tot = t + p + fx;
