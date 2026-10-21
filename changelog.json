@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "checkout-recovery-email",
+      "date": "2026-10-21",
+      "title": "A nudge if you leave checkout unfinished",
+      "summary": "If you start buying minutes and the checkout window closes before you pay, Podskrift can email you a link to pick up the same purchase — no discount, same price."
+    },
+    {
       "id": "byok-transcription-model-picker",
       "date": "2026-10-20",
       "title": "Choose your OpenAI transcription model",

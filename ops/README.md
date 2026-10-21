@@ -477,7 +477,8 @@ cap cannot carry prod volume), then add the env vars and restart.
 | `TRIAL_SPLIT_VARIANTS` | `60,120` | Comma-separated minute labels for the split (equal buckets). |
 | `TRIAL_ENABLED` | on | Kill switch for handing out the platform key. |
 | `CHECKOUT_EXPIRES_HOURS` | `2` | Stripe Checkout Session TTL (1–24). Shorter than Stripe’s 24h default so abandoned-checkout recovery can email the same day. |
-| `CHECKOUT_RECOVERY_ENABLED` | off | When on, sets `after_expiration.recovery.enabled` only (no `consent_collection.promotions`, no `allow_promotion_codes` — Norway rejects promotions consent; promo codes would pay without credit). Dashboard must also enable recovery emails and the `checkout.session.expired` webhook. Off by default. |
+| `CHECKOUT_RECOVERY_ENABLED` | off | Stripe’s own recovery emails (`after_expiration.recovery.enabled`). Leave off — Norway rejects promotions consent, and we send our own mail instead. |
+| `CHECKOUT_RECOVERY_EMAIL_ENABLED` | off | Our Mailgun abandoned-checkout email on `checkout.session.expired`. Requires `EMAIL_ENABLED` + Mailgun. At most one per user per 7 days; skips buyers, internal/test, unsubscribed, and sessions with no email. Dashboard must subscribe the webhook to `checkout.session.expired` (already needed for analytics). |
 
 `/health` exposes `trial_available` (today's budget still has room) plus
 `trial_daily_used` / `trial_daily_limit` in minutes.
