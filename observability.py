@@ -107,9 +107,15 @@ def scrub_log(log, hint):
     logger_name = str(attributes.get('logger.name') or '')
     if logger_name.split('.')[0] in _DROPPED_LOGGERS:
         return None
+    body = log.get('body')
+    body_text = body if isinstance(body, str) else repr(body)
+    # Expected when the sending key cannot GET suppression lists — journal
+    # only; do not ship to Sentry Logs (see mail.suppression_status cache).
+    if 'mailgun suppression lists not readable' in body_text:
+        return None
     # A record that quotes an OpenAI auth error may echo whatever was pasted
     # as the key, in wording no pattern can predict. Keep only that it happened.
-    if _API_KEY_ECHO.search(repr(log.get('body'))) or _API_KEY_ECHO.search(repr(attributes)):
+    if _API_KEY_ECHO.search(body_text) or _API_KEY_ECHO.search(repr(attributes)):
         log['body'] = REDACTED_OPENAI
         attributes = {k: v for k, v in attributes.items()
                       if not k.startswith('sentry.message.')}

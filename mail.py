@@ -262,9 +262,20 @@ SUPPRESSION_SUPPRESSED = 'suppressed'
 SUPPRESSION_UNKNOWN = 'unknown'
 #: The key may send but not read suppression lists (401/403). Mailgun still
 #: drops mail to bounced, complained and unsubscribed addresses itself, so the
-#: caller may send; it logs once per sweep instead of once per address.
+#: caller may send; we cache that outcome and log locally (not Sentry).
 SUPPRESSION_NO_ACCESS = 'no_access'
 _SUPPRESSION_LISTS = ('bounces', 'complaints', 'unsubscribes')
+#: Sending keys often cannot GET suppression lists. Re-check at most once an
+#: hour per process so a 401/403 does not hit Mailgun (or the journal) per
+#: address. monotonic deadline; 0 means "not cached".
+_SUPPRESSION_NO_ACCESS_TTL_SEC = 3600.0
+_suppression_no_access_until: float = 0.0
+
+
+def reset_suppression_cache_for_tests():
+    """Test helper: clear the process-level 401/403 cache."""
+    global _suppression_no_access_until
+    _suppression_no_access_until = 0.0
 
 
 def suppression_status(address: str, *, timeout: float = 6.0) -> str:
@@ -273,12 +284,17 @@ def suppression_status(address: str, *, timeout: float = 6.0) -> str:
     For opt-out-able mail (lifecycle) only. Returns SUPPRESSION_CLEAR when
     every list answers 404, SUPPRESSION_SUPPRESSED when any answers 200,
     SUPPRESSION_NO_ACCESS when the key is not allowed to read the lists
-    (401/403; not logged here, the caller logs once), and SUPPRESSION_UNKNOWN
-    on anything else (disabled, timeouts, 5xx, 429) so the caller can skip
-    this round rather than guess. Never raises; never logs the address.
+    (401/403; cached ~1 h per process; logged at INFO without Sentry), and
+    SUPPRESSION_UNKNOWN on anything else (disabled, timeouts, 5xx, 429) so
+    the caller can skip this round rather than guess. Never raises; never
+    logs the address.
     """
+    global _suppression_no_access_until
     if not address or not mail_ready():
         return SUPPRESSION_UNKNOWN
+    now = time.monotonic()
+    if now < _suppression_no_access_until:
+        return SUPPRESSION_NO_ACCESS
     from urllib.parse import quote
     base = f'{mailgun_base_url()}/v3/{mailgun_domain()}'
     auth = ('api', mailgun_api_key())
@@ -294,6 +310,14 @@ def suppression_status(address: str, *, timeout: float = 6.0) -> str:
         if resp.status_code == 200:
             return SUPPRESSION_SUPPRESSED
         if resp.status_code in (401, 403):
+            _suppression_no_access_until = now + _SUPPRESSION_NO_ACCESS_TTL_SEC
+            # INFO so the journal still sees it; never _report_once / Sentry —
+            # the sending key is not meant to read these lists.
+            logger.info(
+                'mailgun suppression lists not readable (%s); caching for %ss; '
+                'Mailgun still drops suppressed addresses',
+                resp.status_code, int(_SUPPRESSION_NO_ACCESS_TTL_SEC),
+            )
             return SUPPRESSION_NO_ACCESS
         if resp.status_code != 404:
             logger.warning('mailgun suppression check %s returned %s',
