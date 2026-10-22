@@ -65,6 +65,7 @@ PODSKRIFT_EVENTS = (
     'paywall_shown',
     'paywall_buy_clicked',
     'paywall_byok_clicked',
+    'partial_preview_ready',
     'result_offer_clicked',
     'result_offer_shown',
     'email_offer_clicked',

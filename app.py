@@ -451,6 +451,33 @@ def partial_transcript_note(meta):
     return f'Free preview: first {n} minutes of {m} minutes.'
 
 
+def partial_preview_ready_props(task, user_id):
+    """PostHog properties for ``partial_preview_ready`` (or None if not partial).
+
+    Minutes + offered price only — no other revenue fields. ``user_id`` is both
+    the capture distinct_id and a property (admin funnel joins).
+    """
+    meta = task_partial_meta(task)
+    if meta is None:
+        return None
+    n_min, m_min = partial_minutes_pair(meta)
+    props = {
+        'task_id': getattr(task, 'id', None),
+        'preview_minutes': n_min,
+        'partial_minutes': n_min,
+        'episode_minutes': m_min,
+        'minutes_missing': max(0, m_min - n_min),
+        'user_id': user_id,
+    }
+    if stripe_checkout_enabled():
+        trial_left, paid_left = _platform_remaining_seconds(user_id)
+        offer = episode_offer(m_min, (trial_left + paid_left) // 60)
+        if offer:
+            props['offered_price'] = offer['price']
+            props['offered_minutes'] = offer['minutes']
+    return props
+
+
 def episode_needs_own_key(duration_min, remaining_minutes, paid_minutes=0):
     """True when a platform user cannot start this episode without buying/BYOK.
 
@@ -8369,6 +8396,12 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
                                     done_props['episode_minutes'] = m_min
                             product_analytics.capture(
                                 'transcript_completed', user_id, done_props)
+                            if finished is not None and task_is_partial(finished):
+                                ready = partial_preview_ready_props(
+                                    finished, user_id)
+                                if ready:
+                                    product_analytics.capture(
+                                        'partial_preview_ready', user_id, ready)
                             # Transcript-ready email off the critical path so
                             # Mailgun latency / retries cannot hold the worker.
                             if finished is not None:

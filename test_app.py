@@ -14450,6 +14450,16 @@ def test_partial_preview_trims_and_charges_remaining_trial(
     assert started[0]['properties']['partial_minutes'] == 60
     assert started[0]['properties']['episode_minutes'] == 90
     assert done and done[0]['properties'].get('partial') is True
+    ready = [e for e in ph_events.events if e['event'] == 'partial_preview_ready']
+    assert len(ready) == 1
+    assert ready[0]['distinct_id'] == str(uid)
+    rprops = ready[0]['properties']
+    assert rprops['task_id'] == payload['task_id']
+    assert rprops['user_id'] == uid
+    assert rprops['preview_minutes'] == 60
+    assert rprops['partial_minutes'] == 60
+    assert rprops['episode_minutes'] == 90
+    assert rprops['minutes_missing'] == 30
 
 
 def test_partial_preview_not_used_when_paid_covers_full(monkeypatch, trial_on):
@@ -14590,6 +14600,186 @@ def test_partial_download_and_status_include_preview_note(monkeypatch, trial_on)
     srt = client.get('/download/partial-dl-1/srt')
     assert srt.status_code == 200
     assert 'Free preview: first 60 minutes of 90 minutes.' in srt.data.decode()
+
+
+def test_partial_preview_ready_props_include_offer(volume_on):
+    """Server event carries minutes + offered price (no other revenue fields)."""
+    from models import TranscriptionTask
+
+    uid = _make_user('pp-ready@test.com', limit=0, used=0)
+    task = TranscriptionTask(
+        id='pp-ready-1',
+        user_id=uid,
+        episode_title='Long',
+        status='completed',
+        phase='completed',
+        partial_meta=A.encode_partial_task_meta(60 * 60, 67 * 60),
+        source_audio_url='https://cdn.example.com/long.mp3',
+    )
+    with A.app.app_context():
+        props = A.partial_preview_ready_props(task, uid)
+    assert props is not None
+    assert props['task_id'] == 'pp-ready-1'
+    assert props['user_id'] == uid
+    assert props['preview_minutes'] == 60
+    assert props['episode_minutes'] == 67
+    assert props['minutes_missing'] == 7
+    offer = A.episode_offer(67, 0)
+    assert props['offered_price'] == offer['price']
+    assert props['offered_minutes'] == offer['minutes']
+    # No revenue fields beyond the offered price already used elsewhere.
+    for banned in ('amount_cents', 'revenue', 'mrr', 'ltv', 'gross'):
+        assert banned not in props
+
+
+def test_status_partial_finish_fields_match_email_checkout_stash(stripe_on):
+    """B2: /status for a completed partial returns finish.* the card posts to checkout.
+
+    Same episode fields the lifecycle email finish CTA posts (audio_url,
+    duration_min, title, show meta, language). Template string-match alone
+    does not prove the JSON the JS reads.
+    """
+    from models import db, TranscriptionTask
+
+    uid = _make_user('pp-finish-status@test.com', limit=600, used=600)
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='pp-finish-1',
+            user_id=uid,
+            episode_title='Sixty-Seven Minute Ep',
+            podcast_name='The Show',
+            status='completed',
+            phase='completed',
+            transcript_text='preview body',
+            source_audio_url='https://cdn.example.com/ep67.mp3',
+            rss_url='https://cdn.example.com/feed.xml',
+            artwork_url='https://cdn.example.com/art.jpg',
+            episode_published='2026-03-01',
+            language='en',
+            trial_seconds_charged=60 * 60,
+            partial_meta=A.encode_partial_task_meta(60 * 60, 67 * 60),
+        ))
+        db.session.commit()
+
+    status = _login(uid).get('/status/pp-finish-1').get_json()
+    assert status['partial'] is True
+    assert status['partial_minutes'] == 60
+    assert status['episode_minutes'] == 67
+    finish = status.get('finish')
+    assert isinstance(finish, dict)
+    assert finish == {
+        'audio_url': 'https://cdn.example.com/ep67.mp3',
+        'episode_title': 'Sixty-Seven Minute Ep',
+        'podcast_name': 'The Show',
+        'artwork': 'https://cdn.example.com/art.jpg',
+        'published': '2026-03-01',
+        'rss_url': 'https://cdn.example.com/feed.xml',
+        'duration_min': '67',
+        'language': 'en',
+    }
+    # Buy path needs these to stash; empty audio_url would skip autostart.
+    assert finish['audio_url']
+    assert finish['duration_min']
+    assert finish['episode_title']
+
+
+def test_partial_preview_card_js_fires_paywall_shown_and_stashes_episode():
+    """Client: card render → paywall_shown; buy click → episode fields on checkout."""
+    import pathlib
+    tx = (pathlib.Path(A.__file__).parent / 'templates' / 'transcription.html'
+          ).read_text()
+    assert "podskriftPaywallShown('partial_preview', 'partial'" in tx
+    assert "surface: 'partial_preview'" in tx
+    assert 'preview_minutes:' in tx
+    assert 'minutes_missing:' in tx
+    assert 'offered_price:' in tx
+    assert 'offered_minutes:' in tx
+    assert 'task_id: taskId' in tx
+    assert 'buyExtra.audio_url = fin.audio_url' in tx
+    assert 'buyExtra.duration_min = fin.duration_min' in tx
+    assert "postBuyForm('partial_preview'" in tx
+    base = (pathlib.Path(A.__file__).parent / 'templates' / 'base.html').read_text()
+    assert "'surface'" in base
+    assert "'preview_minutes'" in base
+    assert "'offered_price'" in base
+
+
+def test_partial_preview_checkout_stashes_episode_and_autostarts_once(
+        volume_on, monkeypatch):
+    """Partial-preview buy uses the same stash + success autostart as email finish.
+
+    Checkout must carry the episode into the session; after payment the full job
+    starts exactly once (webhook replay + success refresh must not double-queue).
+    """
+    offer = A.episode_offer(67, 0)
+    assert offer is not None
+    uid = _make_user('pp-buy-auto@test.com', limit=0, used=0)
+    _set_paid(uid, 0)
+    session_id = 'cs_pp_autostart'
+    minutes = offer['minutes']
+    amount = offer['amount_cents']
+    sess_dict = _volume_session(
+        uid, minutes, amount, session_id=session_id, price_source='episode')
+    volume_on['sessions'][session_id] = sess_dict
+
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    calls = []
+
+    def fake_enqueue(user, meta, rss_url=None, language='', source='web'):
+        calls.append({'meta': meta, 'rss_url': rss_url, 'language': language})
+        return {'task_id': 'task-pp-full'}, 200
+
+    monkeypatch.setattr(A, 'enqueue_transcription', fake_enqueue)
+
+    client, token = _vol_csrf_client(uid)
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token,
+        'source': 'partial_preview',
+        'minutes': str(offer['minutes']),
+        'price_source': 'episode',
+        'audio_url': 'https://cdn.example.com/ep67.mp3',
+        'rss_url': 'https://cdn.example.com/feed.xml',
+        'episode_title': 'Long Ep',
+        'podcast_name': 'Show',
+        'duration_min': '67',
+        'language': 'en',
+        'return_to': '/transcription/partial-job-1',
+    })
+    assert resp.status_code == 303
+    meta = volume_on['last_create_params']['metadata']
+    assert meta['source'] == 'partial_preview'
+    assert meta['location'] == 'partial_preview'
+    assert meta['minutes'] == str(offer['minutes'])
+    assert meta['price_source'] == 'episode'
+    with client.session_transaction() as s_:
+        pending = s_[A.PENDING_TRANSCRIPTION_KEY]
+        assert pending['audio_url'] == 'https://cdn.example.com/ep67.mp3'
+        assert pending['duration_min'] == 67.0
+        assert pending['title'] == 'Long Ep'
+        assert pending['podcast_name'] == 'Show'
+        assert pending['rss_url'] == 'https://cdn.example.com/feed.xml'
+
+    # Webhook credits first (idempotent on retries); success page then starts once.
+    _register_and_post(volume_on, sess_dict)
+    assert _paid(uid) == minutes * 60
+    _register_and_post(volume_on, sess_dict)  # replay must not double-credit
+    assert _paid(uid) == minutes * 60
+
+    success = client.get(f'/billing/success?session_id={session_id}')
+    assert success.status_code == 302
+    assert success.headers['Location'].endswith('/transcription/task-pp-full')
+    assert len(calls) == 1
+    assert calls[0]['meta']['audio_url'] == 'https://cdn.example.com/ep67.mp3'
+    claimed, task_id = _purchase(session_id)
+    assert claimed is not None and task_id == 'task-pp-full'
+    with client.session_transaction() as s_:
+        assert A.PENDING_TRANSCRIPTION_KEY not in s_
+
+    # Success-page reload returns to the same job; nothing new enqueued.
+    again = client.get(f'/billing/success?session_id={session_id}')
+    assert again.status_code == 302
+    assert again.headers['Location'].endswith('/transcription/task-pp-full')
+    assert len(calls) == 1
 
 
 def test_partial_preview_refund_on_failure_settles_once(
