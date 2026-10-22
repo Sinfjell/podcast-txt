@@ -505,11 +505,13 @@ def test_sweep_clear_lists_add_no_note(trial_on, stripe_on, monkeypatch, caplog)
     assert not [r for r in caplog.records if 'suppression' in r.getMessage()]
 
 
-def test_send_one_without_notes_still_sends_and_warns(trial_on, stripe_on, monkeypatch, caplog):
+def test_send_one_without_notes_still_sends_on_no_access(
+        trial_on, stripe_on, monkeypatch, caplog):
+    """Outside a sweep, 401 still sends; mail.py logs once at INFO (not Sentry)."""
     from models import User
     _enable(monkeypatch)
     a, _b = _two_due_users()
-    with caplog.at_level('WARNING'), \
+    with caplog.at_level('INFO'), \
             mock.patch.object(mailer.requests, 'get', return_value=_ok(401)), \
             mock.patch.object(mailer.requests, 'post', return_value=_ok()) as post:
         with A.app.app_context():
@@ -517,7 +519,9 @@ def test_send_one_without_notes_still_sends_and_warns(trial_on, stripe_on, monke
                              public_base='https://podskrift.com',
                              secret_key=A.app.secret_key)
     assert out == 'sent' and post.call_count == 1
-    assert len([r for r in caplog.records if 'suppression' in r.getMessage()]) == 1
+    infos = [r for r in caplog.records if 'suppression' in r.getMessage()]
+    assert len(infos) == 1 and infos[0].name == 'mail'
+    assert infos[0].levelname == 'INFO'
 
 
 def test_failed_send_releases_the_claim(trial_on, stripe_on, monkeypatch):
