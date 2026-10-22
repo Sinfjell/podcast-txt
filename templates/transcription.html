@@ -330,6 +330,7 @@
     var SHARE_REVOKE_URL = {{ url_for('transcription_share_revoke', task_id=task_id)|tojson }};
     var resultViewed = false;
     var resultOfferShown = false;
+    var partialPreviewShown = false;
     var nextStepsLoaded = false;
     var taskHasRss = false;
     var RELATED_CLIENT_TIMEOUT_MS = 10000;
@@ -466,11 +467,27 @@
                 if (typeof window.podskriftPaywallBuyClicked === 'function') {
                     window.podskriftPaywallBuyClicked('partial_preview', 'partial');
                 }
+                // Same episode fields as the lifecycle email finish CTA so
+                // /billing/checkout stashes PENDING_TRANSCRIPTION and
+                // /billing/success auto-starts the full episode once paid.
+                var buyExtra = {};
+                if (d.episode_offer) {
+                    buyExtra.minutes = d.episode_offer.minutes;
+                    buyExtra.price_source = 'episode';
+                }
+                var fin = d.finish || {};
+                if (fin.audio_url) {
+                    buyExtra.audio_url = fin.audio_url;
+                    if (fin.rss_url) buyExtra.rss_url = fin.rss_url;
+                    if (fin.episode_title) buyExtra.episode_title = fin.episode_title;
+                    if (fin.podcast_name) buyExtra.podcast_name = fin.podcast_name;
+                    if (fin.artwork) buyExtra.artwork = fin.artwork;
+                    if (fin.published) buyExtra.published = fin.published;
+                    if (fin.duration_min) buyExtra.duration_min = fin.duration_min;
+                    if (fin.language) buyExtra.language = fin.language;
+                }
                 postBuyForm('partial_preview', window.location.pathname,
-                    d.episode_offer ? {
-                        minutes: d.episode_offer.minutes,
-                        price_source: 'episode'
-                    } : null);
+                    Object.keys(buyExtra).length ? buyExtra : null);
             });
             actions.appendChild(buyBtn);
         }
@@ -482,6 +499,27 @@
         keyLink.setAttribute('data-paywall-byok', 'partial_preview');
         actions.appendChild(keyLink);
         show(card, true);
+        if (!partialPreviewShown) {
+            partialPreviewShown = true;
+            var offer = d.episode_offer || null;
+            var previewMin = d.partial_minutes != null ? d.partial_minutes : null;
+            var episodeMin = d.episode_minutes != null ? d.episode_minutes : null;
+            var missing = (previewMin != null && episodeMin != null)
+                ? Math.max(0, episodeMin - previewMin) : null;
+            if (typeof window.podskriftPaywallShown === 'function') {
+                window.podskriftPaywallShown('partial_preview', 'partial', {
+                    surface: 'partial_preview',
+                    task_id: taskId,
+                    episode_minutes: episodeMin,
+                    preview_minutes: previewMin,
+                    minutes_missing: missing,
+                    offered_price: offer ? offer.price : null,
+                    offered_minutes: offer ? offer.minutes : null,
+                    trial_remaining_min: d.trial_remaining_min,
+                    paid_remaining_min: d.paid_remaining_min
+                });
+            }
+        }
     }
 
     function renderResultOffer(d) {

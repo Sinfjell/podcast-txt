@@ -1661,6 +1661,13 @@
                     trial_remaining_min: p.trial_remaining_min != null ? p.trial_remaining_min : null,
                     paid_remaining_min: p.paid_remaining_min != null ? p.paid_remaining_min : null
                 };
+                // Surface-specific props (e.g. partial_preview paywall).
+                [
+                    'surface', 'task_id', 'episode_minutes', 'preview_minutes',
+                    'minutes_missing', 'offered_price', 'offered_minutes'
+                ].forEach(function (k) {
+                    if (p[k] != null && p[k] !== '') payload[k] = p[k];
+                });
                 if (TRIAL_VARIANT) payload.trial_variant = TRIAL_VARIANT;
                 posthog.capture('paywall_shown', payload);
                 posthog.capture('offer_shown', Object.assign({variant: 'buy_or_key'}, payload));
