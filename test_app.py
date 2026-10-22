@@ -19485,6 +19485,175 @@ def test_stt_scribe_shadow_off_at_zero(tmp_path, together_on, monkeypatch):
     assert posted == []
 
 
+@pytest.mark.parametrize('fallback_kind', ['error', 'language', 'gap'])
+def test_stt_together_fallback_still_scribe_shadows_at_100pct(
+        tmp_path, together_on, monkeypatch, ph_events, fallback_kind):
+    """OpenAI fallback returns must still run Scribe shadow (non-English trial)."""
+    monkeypatch.setenv('ELEVENLABS_API_KEY', 'el-test-not-a-real-key')
+    monkeypatch.setenv('SCRIBE_SHADOW_PCT', '100')
+    monkeypatch.setenv('STT_TOGETHER_LANGUAGES', 'en,no')
+    threads = []
+    real_thread = A.threading.Thread
+
+    def capture_thread(*a, **kw):
+        t = real_thread(*a, **kw)
+        threads.append(t)
+        return t
+
+    monkeypatch.setattr(A.threading, 'Thread', capture_thread)
+    monkeypatch.setattr(
+        A.httpx, 'post',
+        lambda *a, **k: _FakeHttpxResp(
+            200, _scribe_payload('hello there world', language='en'),
+            headers={'fiat-cost-before-overages': '0.003'}))
+
+    if fallback_kind == 'error':
+        tg = _ScriptedClient(_openai_exc(503), _openai_exc(503), _openai_exc(503))
+        language = 'no'
+        monkeypatch.setattr(A, '_repair_dropped_windows', lambda *a, **k: True)
+    elif fallback_kind == 'language':
+        tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)], 'sw'))
+        language = ''
+        monkeypatch.setattr(A, '_repair_dropped_windows', lambda *a, **k: True)
+    else:
+        tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)], 'no'))
+        language = 'no'
+        monkeypatch.setattr(A, '_repair_dropped_windows', lambda *a, **k: False)
+
+    oa = _ScriptedClient()
+    job = _job(tg)
+    job.user_id = 4242
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), language,
+                                   chunk_seconds=60)
+    for t in threads:
+        t.join(5)
+    assert r.text == 'whisper default'
+    assert len(oa.calls) == 1
+    assert job.events['scribe_shadow'] == 1
+    ev = [e for e in ph_events.events if e['event'] == 'stt_scribe_shadow_compared']
+    assert len(ev) == 1
+    assert ev[0]['properties']['served_provider'] == STT.PROVIDER_OPENAI
+
+
+def test_stt_together_fallback_never_scribe_shadows_byok(
+        tmp_path, together_on, monkeypatch):
+    monkeypatch.setenv('ELEVENLABS_API_KEY', 'el-test-not-a-real-key')
+    monkeypatch.setenv('SCRIBE_SHADOW_PCT', '100')
+    posted = []
+    monkeypatch.setattr(
+        A.httpx, 'post',
+        lambda *a, **k: posted.append(1) or _FakeHttpxResp(200, _scribe_payload(_GOOD)))
+    tg = _ScriptedClient(_openai_exc(503), _openai_exc(503), _openai_exc(503))
+    job = A.SttJob(STT.PROVIDER_TOGETHER, 'own_key', task_id='byok-fb',
+                   together_client=tg, user_id=99)
+    A._transcribe_chunk_routed(job, _ScriptedClient(), _chunk(tmp_path), 'no',
+                               chunk_seconds=60)
+    assert posted == []
+    assert job.events['scribe_shadow'] == 0
+
+
+def test_stt_job_summary_emitted_once_on_normal_completion(ph_events, monkeypatch):
+    from models import db, TranscriptionTask
+    uid = _make_user('stt-sum@test.com', limit=3600)
+    with A.app.app_context():
+        db.session.merge(TranscriptionTask(
+            id='stt-sum-normal', user_id=uid, episode_title='x',
+            status='transcribing', trial_seconds_charged=600,
+            paid_seconds_charged=0, language='no', audio_duration=600.0,
+            resume_attempts=0))
+        db.session.commit()
+        job = A.SttJob(STT.PROVIDER_OPENAI, 'test', task_id='stt-sum-normal',
+                       user_id=uid)
+        job.events['chunks_whisper-1'] = 2
+        job.events['fallback_error'] = 1
+        job.events['retries'] = 3
+        job.events['scribe_shadow'] = 1
+        job.events['scribe_shadow_ok'] = 1
+        A._emit_stt_job_summary(job, language='no', audio_duration=600.0,
+                                key_source='trial')
+    evs = [e for e in ph_events.events if e['event'] == 'stt_job_summary']
+    assert len(evs) == 1
+    assert evs[0]['distinct_id'] == str(uid)
+    props = evs[0]['properties']
+    assert props['funding_source'] == 'trial'
+    assert props['language'] == 'no'
+    assert props['audio_minutes'] == 10.0
+    assert props['chunks_whisper1'] == 2
+    assert props['fallback_error'] == 1
+    assert props['retries'] == 3
+    assert props['scribe_shadow_attempts'] == 1
+    assert props['scribe_shadow_ok'] == 1
+    assert props['resumed'] is False
+    assert 'transcript' not in props and 'text' not in props
+    assert 'cost_usd' not in props and 'stt_cost_usd' not in props
+    assert 'revenue' not in props
+
+
+def test_stt_job_summary_emitted_once_on_resumed_completion(ph_events, monkeypatch):
+    from models import db, TranscriptionTask
+    uid = _make_user('stt-sum-r@test.com', limit=0)
+    _set_paid(uid, 600)
+    with A.app.app_context():
+        db.session.merge(TranscriptionTask(
+            id='stt-sum-resume', user_id=uid, episode_title='x',
+            status='transcribing', trial_seconds_charged=0,
+            paid_seconds_charged=600, language='en', audio_duration=120.0,
+            resume_attempts=1))
+        db.session.commit()
+        job = A.SttJob(STT.PROVIDER_TOGETHER, 'test', task_id='stt-sum-resume',
+                       user_id=uid)
+        job.events[f'chunks_{STT.PROVIDER_TOGETHER}'] = 1
+        A._emit_stt_job_summary(job, language='en', audio_duration=120.0,
+                                key_source='trial')
+    evs = [e for e in ph_events.events if e['event'] == 'stt_job_summary']
+    assert len(evs) == 1
+    props = evs[0]['properties']
+    assert props['funding_source'] == 'paid'
+    assert props['resumed'] is True
+    assert props['chunks_together'] == 1
+    assert props['audio_minutes'] == 2.0
+
+
+def test_stt_job_summary_after_completion_update(ph_events, monkeypatch, tmp_path):
+    """transcribe_audio completion path fires stt_job_summary exactly once."""
+    from models import db, TranscriptionTask
+    uid = _make_user('stt-sum-path@test.com', limit=3600)
+    audio = tmp_path / 'sum.mp3'
+    audio.write_bytes(b'\0' * 32)
+
+    def fake_prepare(path, segment_seconds=None):
+        part = str(tmp_path / 'sum_chunk_0.mp3')
+        open(part, 'wb').write(b'\0' * 16)
+        if os.path.exists(path):
+            os.remove(path)
+        return [part]
+
+    monkeypatch.setattr(A, 'prepare_audio_for_whisper', fake_prepare)
+    monkeypatch.setattr(A, 'probe_audio_duration', lambda *a, **k: 60.0)
+    monkeypatch.setattr(A, 'estimate_audio_duration', lambda *a, **k: 60.0)
+    monkeypatch.setattr(A, 'trial_reconcile_task', lambda *a, **k: None)
+    monkeypatch.setattr(
+        A, '_transcribe_chunks',
+        lambda chunks, remaining, task_id, oa, language, audio_duration, stt_job=None: (
+            remaining.clear() or ('hello', [])))
+    with A.app.app_context():
+        db.session.merge(TranscriptionTask(
+            id='stt-sum-path', user_id=uid, episode_title='x',
+            status='queued', trial_seconds_charged=60, language='en'))
+        db.session.commit()
+        A.transcribe_audio(str(audio), 'stt-sum-path', _ScriptedClient(),
+                           language='en', key_source='trial')
+    evs = [e for e in ph_events.events if e['event'] == 'stt_job_summary']
+    assert len(evs) == 1
+    assert evs[0]['distinct_id'] == str(uid)
+    assert evs[0]['properties']['funding_source'] == 'trial'
+
+
+def test_app_logger_info_level_is_enabled():
+    import logging
+    assert A.app.logger.level == logging.INFO or A.app.logger.isEnabledFor(logging.INFO)
+
+
 def test_stt_scribe_not_in_byok_picker():
     assert 'scribe' not in STT.ALLOWED_BYOK_MODELS
     assert STT.normalize_transcription_model('scribe') == 'whisper-1'

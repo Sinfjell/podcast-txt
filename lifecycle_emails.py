@@ -778,12 +778,10 @@ def send_one(campaign: str, user, *, public_base: str, secret_key: str,
         suppressed = mailer.suppression_status(to)
         if suppressed == mailer.SUPPRESSION_NO_ACCESS:
             # The key cannot read the lists; Mailgun itself drops mail to
-            # suppressed addresses, so send. Logged once per sweep.
+            # suppressed addresses, so send. mail.suppression_status caches
+            # the 401/403 and logs once per hour at INFO (not Sentry).
             if notes is not None:
                 notes.add(NOTE_SUPPRESSION_NO_ACCESS)
-            else:
-                logger.warning('mailgun suppression lists not readable (401/403); '
-                               'relying on Mailgun to drop suppressed addresses')
         elif suppressed != mailer.SUPPRESSION_CLEAR:
             # 'suppressed' never sends; 'unknown' retries next sweep.
             return f'skipped_{suppressed}'
@@ -872,8 +870,9 @@ def sweep(*, now: Optional[datetime] = None, dry_run: bool = False,
                     result['sent'][campaign] = result['sent'].get(campaign, 0) + 1
         if NOTE_SUPPRESSION_NO_ACCESS in notes:
             result['notes'] = sorted(notes)
-            logger.warning('mailgun suppression lists not readable (401/403) this '
-                           'sweep; sent anyway, Mailgun drops suppressed addresses')
+            # Detail already logged in mail.suppression_status (once/hour).
+            logger.info(
+                'mailgun suppression lists not readable this sweep; sent anyway')
         return result
     except Exception:  # noqa: BLE001
         logger.exception('lifecycle sweep failed')

@@ -18,7 +18,7 @@ import pytest
 # test_app pins DATABASE_URL to a temp file before importing app.
 from test_app import (  # noqa: F401 - fixtures are used by name
     A, _FakePosthog, _login, _make_user, _pack_session, _register_and_post,
-    ph_events, stripe_on, trial_on,
+    ph_events, sentry_events, stripe_on, trial_on,
 )
 import lifecycle_emails as L  # noqa: E402
 import mail as mailer  # noqa: E402
@@ -270,6 +270,7 @@ def _enable(monkeypatch):
     monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
     # Production test-account ids collide with a fresh test database.
     monkeypatch.setattr(L, 'DEFAULT_EXCLUDED_USER_IDS', frozenset())
+    mailer.reset_suppression_cache_for_tests()
 
 
 def _ok(status=200):
@@ -409,13 +410,29 @@ def test_suppression_status_timeout_is_unknown(monkeypatch):
         assert mailer.suppression_status('a@gmail.com') == mailer.SUPPRESSION_UNKNOWN
 
 
-def test_suppression_no_access_is_not_logged_per_address(monkeypatch, caplog):
+def test_suppression_no_access_is_logged_once_and_cached(monkeypatch, caplog):
+    """401/403: one INFO from mail.py, then cached — no per-address spam."""
     _enable(monkeypatch)
-    with caplog.at_level('WARNING', logger='mail'), \
-            mock.patch.object(mailer.requests, 'get', return_value=_ok(401)):
+    mailer.reset_suppression_cache_for_tests()
+    with caplog.at_level('INFO', logger='mail'), \
+            mock.patch.object(mailer.requests, 'get', return_value=_ok(401)) as get:
         for _ in range(3):
-            mailer.suppression_status('a@gmail.com')
-    assert [r for r in caplog.records if r.name == 'mail'] == []
+            assert mailer.suppression_status('a@gmail.com') == mailer.SUPPRESSION_NO_ACCESS
+    infos = [r for r in caplog.records if r.name == 'mail'
+             and 'suppression lists not readable' in r.getMessage()]
+    assert len(infos) == 1
+    assert get.call_count == 1  # subsequent calls hit the process cache
+
+
+def test_suppression_401_does_not_hit_sentry_capture(monkeypatch, sentry_events):
+    """Sending-key 401 must not create a Sentry event (journal INFO only)."""
+    _enable(monkeypatch)
+    mailer.reset_suppression_cache_for_tests()
+    mailer.reset_sentry_kinds_for_tests()
+    with mock.patch.object(mailer.requests, 'get', return_value=_ok(401)):
+        assert mailer.suppression_status('a@gmail.com') == mailer.SUPPRESSION_NO_ACCESS
+        assert mailer.suppression_status('b@gmail.com') == mailer.SUPPRESSION_NO_ACCESS
+    assert sentry_events == []
 
 
 def _two_due_users():
@@ -430,9 +447,10 @@ def _two_due_users():
 def test_sweep_sends_when_suppression_lists_not_readable(
         trial_on, stripe_on, ph_events, monkeypatch, caplog, code):
     _enable(monkeypatch)
+    mailer.reset_suppression_cache_for_tests()
     a, b = _two_due_users()
-    with caplog.at_level('WARNING'), \
-            mock.patch.object(mailer.requests, 'get', return_value=_ok(code)), \
+    with caplog.at_level('INFO'), \
+            mock.patch.object(mailer.requests, 'get', return_value=_ok(code)) as get, \
             mock.patch.object(mailer.requests, 'post', return_value=_ok()) as post:
         with A.app.app_context():
             first = L.sweep(only_user_ids=[a, b])
@@ -444,12 +462,14 @@ def test_sweep_sends_when_suppression_lists_not_readable(
     assert post.call_count == 2
     assert _sent_rows(a) == [f'lifecycle:trial_ended_1h:{a}']
     assert _sent_rows(b) == [f'lifecycle:trial_ended_1h:{b}']
-    # One warning per sweep (the second sweep never reaches the lookup), not
-    # one per user, and nothing from mail.py's per-address logging.
+    # One Mailgun GET (cached), journal INFO from mail + lifecycle — no WARNING.
+    assert get.call_count == 1
     warnings = [r for r in caplog.records if r.levelname == 'WARNING'
                 and 'suppression' in r.getMessage()]
-    assert len(warnings) == 1, [r.getMessage() for r in warnings]
-    assert warnings[0].name == 'lifecycle_emails'
+    assert warnings == []
+    infos = [r for r in caplog.records
+             if 'suppression' in r.getMessage().lower()]
+    assert any(r.name == 'mail' for r in infos)
 
 
 @pytest.mark.parametrize('get_kwargs', [
@@ -485,11 +505,13 @@ def test_sweep_clear_lists_add_no_note(trial_on, stripe_on, monkeypatch, caplog)
     assert not [r for r in caplog.records if 'suppression' in r.getMessage()]
 
 
-def test_send_one_without_notes_still_sends_and_warns(trial_on, stripe_on, monkeypatch, caplog):
+def test_send_one_without_notes_still_sends_on_no_access(
+        trial_on, stripe_on, monkeypatch, caplog):
+    """Outside a sweep, 401 still sends; mail.py logs once at INFO (not Sentry)."""
     from models import User
     _enable(monkeypatch)
     a, _b = _two_due_users()
-    with caplog.at_level('WARNING'), \
+    with caplog.at_level('INFO'), \
             mock.patch.object(mailer.requests, 'get', return_value=_ok(401)), \
             mock.patch.object(mailer.requests, 'post', return_value=_ok()) as post:
         with A.app.app_context():
@@ -497,7 +519,9 @@ def test_send_one_without_notes_still_sends_and_warns(trial_on, stripe_on, monke
                              public_base='https://podskrift.com',
                              secret_key=A.app.secret_key)
     assert out == 'sent' and post.call_count == 1
-    assert len([r for r in caplog.records if 'suppression' in r.getMessage()]) == 1
+    infos = [r for r in caplog.records if 'suppression' in r.getMessage()]
+    assert len(infos) == 1 and infos[0].name == 'mail'
+    assert infos[0].levelname == 'INFO'
 
 
 def test_failed_send_releases_the_claim(trial_on, stripe_on, monkeypatch):

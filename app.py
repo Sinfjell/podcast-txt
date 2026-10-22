@@ -13,6 +13,7 @@ import hmac
 import html as html_lib
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -102,6 +103,9 @@ product_analytics.init_posthog()
 
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'change-me-in-production')
+# INFO reaches journald under gunicorn/systemd (and Sentry Logs when enabled).
+# Without this, Flask's default often hides app.logger.info in production.
+app.logger.setLevel(logging.INFO)
 
 # Database. DATABASE_URL lets tests point at a throwaway file -- importing this
 # module runs migrations and the orphan sweep, which must never touch real data.
@@ -3479,6 +3483,12 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None,
         stt_cost_usd=round(stt_job.cost_usd, 5),
         completed_at=datetime.now(timezone.utc),
     )
+    _emit_stt_job_summary(
+        stt_job,
+        language=language,
+        audio_duration=audio_duration,
+        key_source=key_source,
+    )
 
     if os.path.exists(audio_file):
         os.remove(audio_file)
@@ -3486,7 +3496,8 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None,
 
 def _whisper_transcribe_chunk(openai_client, chunk_file, language, *,
                               task_id=None, chunk_label=None,
-                              attempts=None, model=None, chunk_seconds=None):
+                              attempts=None, model=None, chunk_seconds=None,
+                              job=None):
     """Call an OpenAI transcription model on one chunk with a bounded retry budget.
 
     Default model is whisper-1 (verbose_json + segment timestamps). BYOK Best
@@ -3554,6 +3565,8 @@ def _whisper_transcribe_chunk(openai_client, chunk_file, language, *,
             )
             if attempt >= attempts:
                 break
+            if job is not None:
+                job.events['retries'] += 1
             # Prove we are still alive so a long retry budget cannot look like
             # a dead worker to the stale sweeper.
             if task_id:
@@ -3610,12 +3623,15 @@ class SttJob:
         self.providers_used = set()
         self.events = collections.Counter()
 
-    def charge(self, provider, seconds, *, exact_usd=None):
+    def charge(self, provider, seconds, *, exact_usd=None, count_chunk=False):
+        """Add provider spend. ``count_chunk`` marks a served chunk (not shadow)."""
         if exact_usd is not None:
             self.cost_usd += max(0.0, float(exact_usd))
         else:
             self.cost_usd += stt_mod.cost_usd(provider, seconds)
         self.providers_used.add(provider)
+        if count_chunk:
+            self.events[f'chunks_{provider}'] += 1
 
     def provider_label(self):
         if len(self.providers_used) > 1:
@@ -3676,7 +3692,7 @@ def _together_retryable(exc):
     return status is not None and (status >= 500 or status == 408)
 
 
-def _together_transcribe(client, path, language, *, label=''):
+def _together_transcribe(client, path, language, *, label='', job=None):
     """One Together call with bounded retries. Returns a whisper-1-shaped result.
 
     Raises the last error when attempts run out or the error is not
@@ -3711,6 +3727,8 @@ def _together_transcribe(client, path, language, *, label=''):
                                getattr(exc, 'status_code', ''))
             if not _together_retryable(exc) or attempt >= TOGETHER_CHUNK_ATTEMPTS:
                 break
+            if job is not None:
+                job.events['retries'] += 1
             time.sleep(min(2 ** (attempt - 1), 8))
     raise last_exc
 
@@ -3735,7 +3753,7 @@ class ScribeApiError(Exception):
         super().__init__(message or f'scribe_http_{status_code}')
 
 
-def _scribe_transcribe(path, language, *, label=''):
+def _scribe_transcribe(path, language, *, label='', job=None):
     """One ElevenLabs Scribe v2 call. Returns a whisper-1-shaped result + meta.
 
     Result namespace: text, segments, language, words, language_probability,
@@ -3784,6 +3802,8 @@ def _scribe_transcribe(path, language, *, label=''):
                     'Scribe %s attempt %s/%s failed (%s %s)', label,
                     attempt, SCRIBE_CHUNK_ATTEMPTS, type(err).__name__,
                     resp.status_code)
+                if job is not None:
+                    job.events['retries'] += 1
                 time.sleep(min(2 ** (attempt - 1), 8))
                 continue
             payload = resp.json()
@@ -3818,6 +3838,8 @@ def _scribe_transcribe(path, language, *, label=''):
                                status)
             if not _scribe_retryable(exc) or attempt >= SCRIBE_CHUNK_ATTEMPTS:
                 break
+            if job is not None:
+                job.events['retries'] += 1
             time.sleep(min(2 ** (attempt - 1), 8))
     raise last_exc
 
@@ -3935,7 +3957,9 @@ def _start_shadow_comparison(job, openai_client, chunk_file, language, together_
             }
             app.logger.info('stt shadow %s', props)
             product_analytics.capture('stt_shadow_compared', user_id, props)
+            job.events['shadow_ok'] += 1
         except Exception as exc:  # noqa: BLE001 - shadow must never hurt the job
+            job.events['shadow_fail'] += 1
             app.logger.warning('stt shadow failed (%s)', type(exc).__name__)
         finally:
             if os.path.exists(shadow_path):
@@ -4001,7 +4025,9 @@ def _start_scribe_shadow_comparison(job, chunk_file, language, served_text,
                 k: props[k] for k in props if k != 'task_id'
             })
             product_analytics.capture('stt_scribe_shadow_compared', user_id, props)
+            job.events['scribe_shadow_ok'] += 1
         except Exception as exc:  # noqa: BLE001 - shadow must never hurt the job
+            job.events['scribe_shadow_fail'] += 1
             props['error'] = type(exc).__name__
             props['status_code'] = getattr(exc, 'status_code', None)
             app.logger.warning('stt scribe shadow failed (%s)', type(exc).__name__)
@@ -4051,20 +4077,22 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
 
     def openai_call(charge_as=None):
         charge_as = charge_as or model
-        job.charge(charge_as, chunk_seconds)
+        job.charge(charge_as, chunk_seconds, count_chunk=True)
         return _whisper_transcribe_chunk(
             openai_client, chunk_file, language,
             task_id=task_id, chunk_label=chunk_label,
-            model=model, chunk_seconds=chunk_seconds)
+            model=model, chunk_seconds=chunk_seconds, job=job)
 
     label = chunk_label or os.path.basename(chunk_file)
 
     # --- ElevenLabs Scribe v2 -------------------------------------------------
     if job.provider == stt_mod.PROVIDER_SCRIBE:
         try:
-            result = _scribe_transcribe(chunk_file, language, label=label)
+            result = _scribe_transcribe(chunk_file, language, label=label,
+                                        job=job)
             billed = getattr(result, 'billed_usd', None)
-            job.charge(stt_mod.PROVIDER_SCRIBE, chunk_seconds, exact_usd=billed)
+            job.charge(stt_mod.PROVIDER_SCRIBE, chunk_seconds, exact_usd=billed,
+                       count_chunk=True)
         except Exception as exc:  # noqa: BLE001
             job.events['fallback_error'] += 1
             app.logger.warning('stt scribe fallback to whisper-1 for %s: %s %s',
@@ -4106,13 +4134,19 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
 
     try:
         result = _together_transcribe(job.together_client, chunk_file, language,
-                                      label=label)
-        job.charge(stt_mod.PROVIDER_TOGETHER, chunk_seconds)
+                                      label=label, job=job)
+        job.charge(stt_mod.PROVIDER_TOGETHER, chunk_seconds, count_chunk=True)
     except Exception as exc:  # noqa: BLE001 - classified in _together_transcribe
         job.events['fallback_error'] += 1
         app.logger.warning('stt fallback to whisper-1 for %s: %s %s', label,
                            type(exc).__name__, getattr(exc, 'status_code', ''))
-        return openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
+        # Fallback whisper-1 is what the user hears — shadow it like the
+        # normal OpenAI path so non-English trial first chunks are compared.
+        result = openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
+        _maybe_scribe_shadow(
+            job, chunk_file, language, getattr(result, 'text', '') or '',
+            chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
+        return result
 
     if not language:
         detected = normalize_language_code(result.language)
@@ -4124,7 +4158,11 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
                             'rest of task %s', detected, task_id)
             job.provider = stt_mod.PROVIDER_OPENAI
             job.openai_model = stt_mod.OPENAI_MODEL
-            return openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
+            result = openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
+            _maybe_scribe_shadow(
+                job, chunk_file, language, getattr(result, 'text', '') or '',
+                chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
+            return result
         job.pinned_language = detected
         language = detected
 
@@ -4132,7 +4170,11 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
                                    chunk_seconds):
         job.events['fallback_gap'] += 1
         app.logger.info('stt dropped window not repaired; whisper-1 for %s', label)
-        return openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
+        result = openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
+        _maybe_scribe_shadow(
+            job, chunk_file, language, getattr(result, 'text', '') or '',
+            chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
+        return result
 
     if stt_mod.shadow_rate() > 0 and secrets.randbelow(10_000) < int(
             stt_mod.shadow_rate() * 10_000):
@@ -4157,6 +4199,80 @@ def _stt_analytics_props(task):
         # funding labels.
         'stt_model': provider,
     }
+
+
+def _stt_funding_source(key_source, trial_seconds=0, paid_seconds=0):
+    """trial / paid / byok / mixed / none — for stt_job_summary (no revenue)."""
+    funding = _funding_analytics_props(
+        key_source, trial_seconds, paid_seconds).get('funding')
+    if funding == 'own_key':
+        return 'byok'
+    return funding or 'none'
+
+
+def _emit_stt_job_summary(stt_job, *, language=None, audio_duration=None,
+                          key_source=None):
+    """PostHog ``stt_job_summary`` once per completed job. Never raises.
+
+    Counters only — no transcript text, no revenue fields. distinct_id is the
+    job's user id. Safe to call after the completion ``_update_task`` for both
+    the normal worker and the resume path (both finish in ``transcribe_audio``).
+    """
+    if stt_job is None:
+        return
+    user_id = stt_job.user_id
+    if not user_id:
+        return
+    try:
+        trial_s = paid_s = 0
+        resumed = False
+        lang = language
+        if stt_job.task_id:
+            task = db.session.get(TranscriptionTask, stt_job.task_id)
+            if task is not None:
+                trial_s = int(task.trial_seconds_charged or 0)
+                paid_s = int(task.paid_seconds_charged or 0)
+                resumed = int(getattr(task, 'resume_attempts', 0) or 0) > 0
+                if not lang:
+                    lang = task.language
+                if audio_duration is None:
+                    audio_duration = task.audio_duration
+        events = stt_job.events
+        props = {
+            'task_id': stt_job.task_id,
+            'language': normalize_language_code(lang) or None,
+            'funding_source': _stt_funding_source(key_source, trial_s, paid_s),
+            'audio_minutes': round(float(audio_duration or 0) / 60.0, 2),
+            'stt_provider': stt_job.provider_label(),
+            'route_reason': stt_job.reason,
+            'resumed': resumed,
+            'retries': int(events.get('retries', 0)),
+            'chunks_together': int(events.get(
+                f'chunks_{stt_mod.PROVIDER_TOGETHER}', 0)),
+            'chunks_whisper1': int(events.get(
+                f'chunks_{stt_mod.PROVIDER_OPENAI}', 0)),
+            'chunks_scribe': int(events.get(
+                f'chunks_{stt_mod.PROVIDER_SCRIBE}', 0)),
+            'chunks_gpt_transcribe': int(events.get(
+                f'chunks_{stt_mod.MODEL_GPT_TRANSCRIBE}', 0)),
+            'fallback_error': int(events.get('fallback_error', 0)),
+            'fallback_language': int(events.get('fallback_language', 0)),
+            'fallback_gap': int(events.get('fallback_gap', 0)),
+            'fallback_coverage': int(events.get('fallback_coverage', 0)),
+            'scribe_shadow_attempts': int(events.get('scribe_shadow', 0)),
+            'scribe_shadow_ok': int(events.get('scribe_shadow_ok', 0)),
+            'scribe_shadow_fail': int(events.get('scribe_shadow_fail', 0)),
+            'shadow_attempts': int(events.get('shadow', 0)),
+            'shadow_ok': int(events.get('shadow_ok', 0)),
+            'shadow_fail': int(events.get('shadow_fail', 0)),
+        }
+        app.logger.info('stt_job_summary %s', {
+            k: props[k] for k in props if k != 'task_id'
+        })
+        product_analytics.capture('stt_job_summary', user_id, props)
+    except Exception:  # noqa: BLE001 - analytics must never fail a transcript
+        app.logger.exception('stt_job_summary failed for %s',
+                             getattr(stt_job, 'task_id', None))
 
 
 def _chunk_audio_seconds(chunk_file, *, index, total, audio_duration,
