@@ -14632,6 +14632,57 @@ def test_partial_preview_ready_props_include_offer(volume_on):
         assert banned not in props
 
 
+def test_status_partial_finish_fields_match_email_checkout_stash(stripe_on):
+    """B2: /status for a completed partial returns finish.* the card posts to checkout.
+
+    Same episode fields the lifecycle email finish CTA posts (audio_url,
+    duration_min, title, show meta, language). Template string-match alone
+    does not prove the JSON the JS reads.
+    """
+    from models import db, TranscriptionTask
+
+    uid = _make_user('pp-finish-status@test.com', limit=600, used=600)
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='pp-finish-1',
+            user_id=uid,
+            episode_title='Sixty-Seven Minute Ep',
+            podcast_name='The Show',
+            status='completed',
+            phase='completed',
+            transcript_text='preview body',
+            source_audio_url='https://cdn.example.com/ep67.mp3',
+            rss_url='https://cdn.example.com/feed.xml',
+            artwork_url='https://cdn.example.com/art.jpg',
+            episode_published='2026-03-01',
+            language='en',
+            trial_seconds_charged=60 * 60,
+            partial_meta=A.encode_partial_task_meta(60 * 60, 67 * 60),
+        ))
+        db.session.commit()
+
+    status = _login(uid).get('/status/pp-finish-1').get_json()
+    assert status['partial'] is True
+    assert status['partial_minutes'] == 60
+    assert status['episode_minutes'] == 67
+    finish = status.get('finish')
+    assert isinstance(finish, dict)
+    assert finish == {
+        'audio_url': 'https://cdn.example.com/ep67.mp3',
+        'episode_title': 'Sixty-Seven Minute Ep',
+        'podcast_name': 'The Show',
+        'artwork': 'https://cdn.example.com/art.jpg',
+        'published': '2026-03-01',
+        'rss_url': 'https://cdn.example.com/feed.xml',
+        'duration_min': '67',
+        'language': 'en',
+    }
+    # Buy path needs these to stash; empty audio_url would skip autostart.
+    assert finish['audio_url']
+    assert finish['duration_min']
+    assert finish['episode_title']
+
+
 def test_partial_preview_card_js_fires_paywall_shown_and_stashes_episode():
     """Client: card render → paywall_shown; buy click → episode fields on checkout."""
     import pathlib
