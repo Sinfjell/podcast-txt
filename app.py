@@ -11891,16 +11891,16 @@ Whisper takes the choice as a constraint rather than a hint.
 - [Home]({public_url('index')}): search, paste Spotify/Apple/RSS, pick an episode, transcribe
 - [Podcasts]({public_url('podcasts_index')}): show landing pages for popular podcasts
 - [Pricing]({public_url('pricing')}): free trial, one-time minute packs, optional own OpenAI key
-- [Use in ChatGPT & Claude]({public_url('ai_landing')}): connect Podskrift MCP (`/mcp`)
-- [Guides]({public_url('guides_index')}): setup walkthroughs for ChatGPT, Claude, and overview
-- [Connect Podskrift to ChatGPT]({public_url('guide_chatgpt')})
-- [Connect Podskrift to Claude]({public_url('guide_claude')})
-- [Guide: podcast transcripts in ChatGPT and Claude]({public_url('guide_ai_transcripts')})
+- [Use in ChatGPT & Claude]({public_url('ai_landing')}): connect Podskrift MCP (`/mcp`) in ChatGPT, Claude, Cursor or Claude Code; copyable prompts for your library, marketing, research and routines
+- [Guides]({public_url('guides_index')}): setup walkthroughs for ChatGPT, Claude, and the long-form overview
+- [Connect Podskrift to ChatGPT]({public_url('guide_chatgpt')}): Plugins → custom MCP server → OAuth
+- [Connect Podskrift to Claude]({public_url('guide_claude')}): Customize → Connectors → custom connector
+- [Guide: podcast transcripts in ChatGPT and Claude]({public_url('guide_ai_transcripts')}): step-by-step connector setup, example asks, and what it costs
 - [Help]({public_url('help_page')})
-- [Contact]({public_url('contact')}): hello@podskrift.com
-- [What's new]({public_url('whats_new')})
+- [Contact]({public_url('contact')}): hello@podskrift.com — we reply fast
+- [What's new]({public_url('whats_new')}): dated feature list, newest first (build in public)
 - [API docs]({public_url('api_docs')}): customer HTTP API (resolve → transcribe → transcript)
-- [How to find an RSS feed]({public_url('rss_help')})
+- [How to find an RSS feed]({public_url('rss_help')}): for podcasts outside the search index
 - [Sign up]({public_url('register')}): {signup_blurb}
 - [Full site summary for LLMs]({public_url('llms_full_txt')}): this file expanded with FAQ
 
