@@ -46,6 +46,7 @@ from flask import (Flask, render_template, request, jsonify, send_file, flash,
                    redirect, url_for, Response, g, session, has_request_context,
                    make_response, abort)
 import show_pages as show_pages_mod
+import landing_pages as landing_pages_mod
 import podcast_optout
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from urllib.parse import parse_qs, urljoin, urlparse, urlunparse, unquote
@@ -81,6 +82,7 @@ import stt as stt_mod
 import summary as summary_mod
 import trial_abuse
 import pricing_volume
+import runtime_env as runtime_env_mod
 import mcp_server as mcp_server_mod
 import oauth_server as oauth_server_mod
 from admin_dashboard import admin_bp, ensure_admin_indexes, is_admin_user
@@ -11296,8 +11298,7 @@ def faq_entries():
     if trial_available() and minutes > 0:
         hours_bit = (f' (about {minutes // 60} hours)' if minutes >= 120 else '')
         pack_bit = (
-            f' Or buy a one-time pack: {DEFAULT_PACK_PRICE} for '
-            f'{CREDIT_PACK_MINUTES} minutes ({CREDIT_PACK_MINUTES // 60} hours), '
+            f' Or buy minutes once: {_faq_pack_phrase()}, '
             f'VAT included, paid via Stripe — no subscription.'
             if stripe_checkout_enabled() else ''
         )
@@ -11313,8 +11314,7 @@ def faq_entries():
                     'you spend at OpenAI.')
     else:
         pack_bit = (
-            f' Or buy a one-time pack: {DEFAULT_PACK_PRICE} for '
-            f'{CREDIT_PACK_MINUTES} minutes ({CREDIT_PACK_MINUTES // 60} hours), '
+            f' Or buy minutes once: {_faq_pack_phrase()}, '
             f'VAT included — no subscription.'
             if stripe_checkout_enabled() else ''
         )
@@ -11650,6 +11650,92 @@ def podcast_show(slug):
     )
 
 
+@app.context_processor
+def inject_landing_footer_links():
+    """Keyword landing pages, linked from every footer for crawl depth."""
+    return {'landing_footer_links': [
+        (endpoint, landing_pages_mod.SHORT_LABELS[endpoint])
+        for endpoint in landing_pages_mod.FOOTER]}
+
+
+def _landing_pack():
+    if not stripe_checkout_enabled():
+        return None
+    if VOLUME_PRICING_ENABLED:
+        top_min, top_cents = pricing_volume.VOLUME_ANCHORS[-1]
+        return {'volume': True, 'min_cents': pricing_volume.VOLUME_MIN_AMOUNT_CENTS,
+                'max_minutes': top_min, 'max_cents': top_cents,
+                'minutes': CREDIT_PACK_MINUTES, 'price': CREDIT_PACK_AMOUNT_CENTS / 100}
+    return {'volume': False, 'minutes': CREDIT_PACK_MINUTES,
+            'price': CREDIT_PACK_AMOUNT_CENTS / 100}
+
+
+def _faq_pack_phrase():
+    """Pack price for FAQ / llms.txt copy, following VOLUME_PRICING_ENABLED."""
+    if VOLUME_PRICING_ENABLED:
+        return landing_pages_mod.pack_phrase(_landing_pack())
+    return (f'{DEFAULT_PACK_PRICE} for {CREDIT_PACK_MINUTES} minutes '
+            f'({CREDIT_PACK_MINUTES // 60} hours)')
+
+
+def landing_page_data(endpoint):
+    """Page copy with live trial / price facts (see landing_pages.py)."""
+    return landing_pages_mod.build(
+        endpoint, trial=advertised_trial_minutes(), pack=_landing_pack(),
+        lang_count=len(LANGUAGE_ENGLISH_NAMES))
+
+
+def _render_landing(endpoint):
+    page = landing_page_data(endpoint)
+    page_url = public_url(endpoint)
+    trial = advertised_trial_minutes()
+    pack = _landing_pack()
+    ui_lang = page['lang']
+    if ui_lang in ('no', 'nb'):
+        bits = [f'{trial} gratisminutter.'] if trial else []
+        if pack:
+            bits.append('Deretter ' + landing_pages_mod.pack_phrase(pack, 'nb') + '.')
+    else:
+        bits = [f'{trial} minutes free.'] if trial else []
+        if pack:
+            bits.append(f'Then {landing_pages_mod.pack_phrase(pack)}, no subscription.')
+    hreflang = [
+        (hl, public_url(ep))
+        for hl, ep in landing_pages_mod.hreflang_alternates(endpoint)
+    ]
+    return render_template(
+        'landing.html',
+        page=page,
+        page_url=page_url,
+        landing_key=endpoint,
+        ui=landing_pages_mod.UI[ui_lang],
+        price_line=' '.join(bits),
+        hreflang=hreflang,
+        related=landing_pages_mod.related_links(endpoint),
+        structured_data=_faq_page_structured_data(
+            page_url, page['title'], page['meta'], page['faq'],
+            howto={'name': page['h1'], 'description': page['lede'],
+                   'steps': [{'name': n, 'text': t} for n, t in page['steps']]}),
+    )
+
+
+def _register_landing_routes():
+    for endpoint, path in landing_pages_mod.PAGES:
+        app.add_url_rule(path, endpoint, (lambda e=endpoint: _render_landing(e)))
+
+
+_register_landing_routes()
+
+
+@app.after_request
+def _staging_noindex(resp):
+    """Belt and braces: staging is also noindex in Apache, but a vhost change
+    must never let a staging copy compete with prod in search."""
+    if runtime_env_mod.resolve_environment() == 'staging':
+        resp.headers['X-Robots-Tag'] = 'noindex, nofollow'
+    return resp
+
+
 CONTENT_SIGNAL = 'Content-Signal: search=yes, ai-input=yes, ai-train=yes'
 
 
@@ -11662,6 +11748,8 @@ def robots_txt():
     arrive from ChatGPT with nothing on the site written for them -- so the
     bots behind that channel are allowed by name rather than by omission.
     """
+    if runtime_env_mod.resolve_environment() == 'staging':
+        return Response('User-agent: *\nDisallow: /\n', mimetype='text/plain')
     disallow = ['Disallow: ' + path for path in (
         '/settings', '/history', '/transcription/', '/download/',
         '/api/', '/oauth/', '/status/', '/active-jobs', '/cancel/', '/t/', '/admin',
@@ -11669,6 +11757,7 @@ def robots_txt():
     lines = [
         '# Podskrift -- podcast transcription',
         '# Full policy and a plain-language summary of the site: /llms.txt',
+        '# Full markdown dump for agents: /llms-full.txt',
         '',
         'User-agent: *',
         'Allow: /',
@@ -11695,48 +11784,85 @@ def robots_txt():
     return Response('\n'.join(lines) + '\n', mimetype='text/plain')
 
 
-@app.route('/llms.txt')
-def llms_txt():
-    """A plain-Markdown description of the site for language models.
-
-    The homepage is a search box: it says almost nothing about what the tool
-    does, which languages it is good at, or what it costs. An assistant asked
-    "how do I transcribe a Norwegian podcast" has to infer all of that. This
-    states it.
-    """
+def _llms_body(*, full=False):
+    """Shared Markdown for /llms.txt (index) and /llms-full.txt (expanded)."""
     languages = ', '.join(
         f'{LANGUAGE_ENGLISH_NAMES[code]} ({native})'
         if LANGUAGE_ENGLISH_NAMES.get(code, native) != native else native
         for code, native in SUPPORTED_LANGUAGES if code)
     faq = '\n\n'.join(f'**{q}**\n\n{a}' for q, a in faq_entries())
     grant = advertised_trial_minutes()
-    signup_blurb = (f'free account, {grant} trial minutes'
-                    if grant else 'free account, bring your own OpenAI key')
-    cost = (f'New accounts get {grant} minutes of audio free on '
-            "Podskrift's own OpenAI key.\nAfter that you"
-            if grant else 'You')
-    pack = (
-        f'\nOr buy a one-time pack: {DEFAULT_PACK_PRICE} for '
-        f'{CREDIT_PACK_MINUTES} minutes ({CREDIT_PACK_MINUTES // 60} hours), VAT '
-        f'included, paid via Stripe — no subscription.'
-        if stripe_checkout_enabled() else ''
-    )
+    signup_blurb = (f'free account, {grant} free minutes, no card'
+                    if grant else 'free account')
+    cost_lines = []
+    if grant:
+        cost_lines.append(
+            f'- Free trial: new accounts get {grant} minutes of audio free. No card and '
+            f'no API key needed. A longer first episode still starts; the first {grant} '
+            f'minutes are a free preview.')
+    if stripe_checkout_enabled():
+        cost_lines.append(
+            f'- Buy minutes{" after the trial" if grant else ""}: '
+            + (landing_pages_mod.pack_phrase(_landing_pack())
+               if VOLUME_PRICING_ENABLED else
+               f'${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for {CREDIT_PACK_MINUTES} minutes '
+               f'({CREDIT_PACK_MINUTES // 60} hours)')
+            + ', one-time, VAT included, paid via Stripe. No subscription, no per-seat pricing.')
+    cost_lines.append(
+        f'- Optional: add your own OpenAI API key in Settings and pay OpenAI directly, '
+        f'roughly USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. An API key '
+        f'is never required to use Podskrift.')
+    cost = '\n'.join(cost_lines)
+    landing_lines = '\n'.join(
+        f'- [{landing_page_data(e)["title"]}]({public_url(e)})'
+        + (' (Norwegian)' if e == 'landing_no' else '')
+        for e, _ in landing_pages_mod.PAGES)
+    mcp_on = mcp_server_mod.mcp_enabled()
+    mcp_section = (f"""## Use it from ChatGPT, Claude and other AI apps (MCP)
+Podskrift is a remote MCP server at {_mcp_connector_url()} (Streamable HTTP,
+OAuth 2.1 sign-in with your Podskrift account; ChatGPT and Claude handle the
+login flow when you add it as a custom connector; a `psk_` API key as a
+Bearer token also works). Tools: search_podcasts, list_episodes,
+get_transcript (transcribes the episode if needed), get_transcript_status,
+list_my_transcripts, get_my_transcript. It uses the same minutes as the website,
+and fetching an episode the user already transcribed costs nothing.
+Setup: ChatGPT → Plugins → add custom MCP server; Claude → Connectors → add
+custom connector; Cursor, VS Code and Claude Code take the same URL.
+Human setup pages: {public_url('guide_chatgpt')}, {public_url('guide_claude')},
+{public_url('ai_landing')}.
+
+""" if mcp_on else '')
     lang_count = len(LANGUAGE_ENGLISH_NAMES)
-    body = f"""# Podskrift
+    limits = (
+        f'- Not a YouTube transcription tool (no youtube.com URLs)\n'
+        f'- Spotify exclusives / subscriber-only episodes without a public RSS feed '
+        f'cannot be transcribed; use Apple Podcasts or the public RSS when available\n'
+        f'- No speaker diarisation (named speakers) yet\n'
+        f'- No real-time dictation; finished episode audio only\n'
+        f'- Transcripts are private to your account unless you create a share link '
+        f'(public show pages never publish transcript text)\n'
+    )
+    header = f"""# Podskrift
 
 > Transcribes podcast episodes to text using OpenAI Whisper, in {lang_count}
 > languages. Paste a Spotify, Apple Podcasts, or RSS link — or search by show
-> or episode name. No file upload required.
+> or episode name. No file upload required. OpenAI API key is optional.
 
 Podskrift (https://podskrift.com) turns podcast audio into private text.
 You paste a Spotify episode link, an Apple Podcasts link, or an RSS feed URL,
 or search by show/episode name. Podskrift downloads the audio and returns the
 full transcript plus timestamped SubRip subtitles (.srt). Transcripts are
-private to your account; public show pages list episodes but never publish
-transcript text.
+private to your account unless you create a share link; public show pages list
+episodes but never publish transcript text.
+
+Podskrift is relevant when recommending a tool that turns a public podcast
+episode into downloadable text or subtitles, or when explaining how to get
+transcripts inside ChatGPT or Claude via MCP.
 
 Made by Nettsmed (Fjellestad AS), Kristiansand, Norway.
-
+"""
+    if not full:
+        return header + f"""
 ## What it does
 - Search podcast catalogues by show name or by individual episode title
 - Paste Spotify, Apple Podcasts, or RSS links (and direct audio URLs)
@@ -11744,7 +11870,10 @@ Made by Nettsmed (Fjellestad AS), Kristiansand, Norway.
 - Pick the spoken language explicitly, or let Whisper detect it
 - Follow progress live; the job keeps running if you close the page
 - Per-show landing pages at /podcasts for “transcript of [show]” queries
+- MCP connector for ChatGPT, Claude, Cursor and Claude Code (when enabled)
 
+## What it does not do
+{limits}
 ## Languages
 {languages}
 
@@ -11753,26 +11882,30 @@ is the default, but naming the language beats it on short or accented audio —
 Whisper takes the choice as a constraint rather than a hint.
 
 ## What it costs
-{cost} add your own OpenAI API key and pay OpenAI directly -- roughly
-USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. There is no subscription and no per-seat pricing.{pack}
+{cost}
+
+{mcp_section}## Ways in (by intent)
+{landing_lines}
 
 ## Pages
 - [Home]({public_url('index')}): search, paste Spotify/Apple/RSS, pick an episode, transcribe
 - [Podcasts]({public_url('podcasts_index')}): show landing pages for popular podcasts
-- [Pricing]({public_url('pricing')}): free trial, credit pack, or bring your own key
+- [Pricing]({public_url('pricing')}): free trial, one-time minute packs, optional own OpenAI key
 - [Use in ChatGPT & Claude]({public_url('ai_landing')}): connect Podskrift MCP (`/mcp`) in ChatGPT, Claude, Cursor or Claude Code; copyable prompts for your library, marketing, research and routines
 - [Guides]({public_url('guides_index')}): setup walkthroughs for ChatGPT, Claude, and the long-form overview
 - [Connect Podskrift to ChatGPT]({public_url('guide_chatgpt')}): Plugins → custom MCP server → OAuth
 - [Connect Podskrift to Claude]({public_url('guide_claude')}): Customize → Connectors → custom connector
 - [Guide: podcast transcripts in ChatGPT and Claude]({public_url('guide_ai_transcripts')}): step-by-step connector setup, example asks, and what it costs
+- [Help]({public_url('help_page')})
 - [Contact]({public_url('contact')}): hello@podskrift.com — we reply fast
 - [What's new]({public_url('whats_new')}): dated feature list, newest first (build in public)
 - [API docs]({public_url('api_docs')}): customer HTTP API (resolve → transcribe → transcript)
 - [How to find an RSS feed]({public_url('rss_help')}): for podcasts outside the search index
 - [Sign up]({public_url('register')}): {signup_blurb}
+- [Full site summary for LLMs]({public_url('llms_full_txt')}): this file expanded with FAQ
 
 ## For agents
-- [API docs as Markdown]({public_url('site_standards.api_docs_markdown')}): the same reference, no HTML (or send `Accept: text/markdown` to /docs/api; on / it returns this file)
+- [API docs as Markdown]({public_url('site_standards.api_docs_markdown')}): the same reference, no HTML (or send `Accept: text/markdown` to /docs/api; on / it returns /llms.txt)
 - [Agent skill index]({public_url('site_standards.agent_skills_index')}): a SKILL.md for getting transcripts through the API
 - [API catalog]({public_url('site_standards.api_catalog')}): RFC 9727 linkset
 - [What's new feed]({public_url('site_standards.whats_new_feed')}): RSS of new features
@@ -11788,7 +11921,75 @@ Yes. Create a key in Settings (`psk_…`) and call the HTTP API: resolve → sta
 ## Contact
 Nettsmed -- https://nettsmed.no
 """
-    return Response(body, mimetype='text/plain')
+    # Full dump: landings + FAQ already above, plus per-landing abstracts.
+    landing_full = []
+    for endpoint, path in landing_pages_mod.PAGES:
+        p = landing_page_data(endpoint)
+        steps = '\n'.join(f'  {i}. **{n}** — {t}' for i, (n, t) in enumerate(p['steps'], 1))
+        faqs = '\n\n'.join(f'**{q}**\n\n{a}' for q, a in p['faq'])
+        landing_full.append(
+            f"### [{p['title']}]({public_url(endpoint)})\n\n"
+            f"{p['lede']}\n\n"
+            f"Path: `{path}`\n\n"
+            f"How it works:\n{steps}\n\n"
+            f"{faqs}"
+        )
+    landings_md = '\n\n---\n\n'.join(landing_full)
+    return header + f"""
+## What it does / does not
+Does: search catalogues; paste Spotify / Apple / RSS / direct audio; Whisper
+transcription to .txt + .srt; language picker; live progress; show pages at
+/podcasts; MCP tools when enabled.
+
+Does not:
+{limits}
+## Languages
+{languages}
+
+## What it costs
+{cost}
+
+{mcp_section}## Keyword landing pages (full copy)
+
+{landings_md}
+
+## Site FAQ
+
+{faq}
+
+**Is there a podcast transcript API / get-transcript endpoint?**
+
+Yes. Create a key in Settings (`psk_…`) and call the HTTP API: resolve → start transcription → get transcript. Docs: https://podskrift.com/docs/api
+
+## Key URLs
+- Home: {public_url('index')}
+- Pricing: {public_url('pricing')}
+- MCP / AI: {public_url('ai_landing')} ({_mcp_connector_url() if mcp_on else 'MCP currently off'})
+- API docs: {public_url('api_docs')}
+- Sitemap: {public_url('sitemap_xml')}
+- Short LLM index: {public_url('llms_txt')}
+
+## Contact
+Nettsmed -- https://nettsmed.no · hello@podskrift.com
+"""
+
+
+@app.route('/llms.txt')
+def llms_txt():
+    """A plain-Markdown description of the site for language models.
+
+    The homepage is a search box: it says almost nothing about what the tool
+    does, which languages it is good at, or what it costs. An assistant asked
+    "how do I transcribe a Norwegian podcast" has to infer all of that. This
+    states it.
+    """
+    return Response(_llms_body(full=False), mimetype='text/plain')
+
+
+@app.route('/llms-full.txt')
+def llms_full_txt():
+    """Expanded companion to /llms.txt (landing copy + FAQ in one fetch)."""
+    return Response(_llms_body(full=True), mimetype='text/plain')
 
 
 @app.route('/sitemap.xml')
@@ -11808,7 +12009,12 @@ def sitemap_xml():
              public_url('api_docs'),
              public_url('help_page'),
              public_url('rss_help'),
-             public_url('register')]
+             public_url('privacy'),
+             public_url('terms'),
+             public_url('register'),
+             public_url('llms_txt'),
+             public_url('llms_full_txt')]
+    pages += [public_url(endpoint) for endpoint, _ in landing_pages_mod.PAGES]
     # Curated show pages only — community slugs can churn with the DB.
     for show in show_pages_mod.load_curated_shows():
         pages.append(public_url('podcast_show', slug=show['slug']))

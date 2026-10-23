@@ -1,0 +1,493 @@
+"""Keyword landing pages (/spotify-podcast-transcript, /no/podcast-til-tekst, …).
+
+One template (templates/landing.html), one definition per page here. Every
+price or trial fact is passed in at request time from the same settings the
+app enforces, so the copy cannot drift from what checkout and the trial do.
+
+Each page answers the question its URL asks, with facts specific to that
+intent (Spotify exclusives, Apple export limits, YouTube vs podcast). No page
+is a synonym-swapped copy of another.
+
+``title`` is the <title> stem; the template appends `` — Podskrift`` (12 chars).
+Keep stem + suffix ≤ 60 characters.
+"""
+
+# (endpoint, path) — full set for sitemap / related links / uniqueness tests.
+PAGES = (
+    ('landing_generator', '/podcast-transcript-generator'),
+    ('landing_spotify', '/spotify-podcast-transcript'),
+    ('landing_apple', '/apple-podcast-transcript'),
+    ('landing_podcast_to_text', '/podcast-to-text'),
+    ('landing_rss', '/rss-to-text'),
+    ('landing_free', '/transcribe-podcast-free'),
+    ('landing_youtube_vs', '/youtube-vs-podcast-transcript'),
+    ('landing_no', '/no/podcast-til-tekst'),
+)
+
+#: Compact footer column.
+FOOTER = (
+    'landing_generator',
+    'landing_spotify',
+    'landing_apple',
+    'landing_podcast_to_text',
+    'landing_rss',
+    'landing_free',
+    'landing_youtube_vs',
+    'landing_no',
+)
+
+#: Norwegian page <-> English podcast-to-text (reciprocal hreflang).
+HREFLANG_PAIRS = {
+    'landing_no': 'landing_podcast_to_text',
+}
+
+SHORT_LABELS = {
+    'landing_generator': 'Podcast transcript generator',
+    'landing_spotify': 'Transcribe a Spotify podcast',
+    'landing_apple': 'Transcribe from Apple Podcasts',
+    'landing_podcast_to_text': 'Podcast to text',
+    'landing_rss': 'RSS feed to text',
+    'landing_free': 'Transcribe a podcast free',
+    'landing_youtube_vs': 'YouTube vs podcast transcript',
+    'landing_no': 'Podcast til tekst (norsk)',
+}
+
+TITLE_SUFFIX = ' — Podskrift'
+TITLE_MAX = 60
+META_MAX = 160
+
+
+def lang_of(endpoint):
+    return 'nb' if endpoint == 'landing_no' else 'en'
+
+
+def hreflang_alternates(endpoint):
+    """[(hreflang, endpoint)] for *endpoint*, reciprocal by construction."""
+    en_to_nb = {en: nb for nb, en in HREFLANG_PAIRS.items()}
+    if endpoint in HREFLANG_PAIRS:
+        nb, en = endpoint, HREFLANG_PAIRS[endpoint]
+    elif endpoint in en_to_nb:
+        nb, en = en_to_nb[endpoint], endpoint
+    else:
+        return []
+    return [('en', en), ('nb', nb), ('x-default', en)]
+
+
+def related_links(endpoint):
+    """Other landings first, then the Norwegian entry when browsing English."""
+    core = [
+        'landing_generator', 'landing_spotify', 'landing_apple',
+        'landing_podcast_to_text', 'landing_rss', 'landing_free',
+        'landing_youtube_vs',
+    ]
+    if endpoint == 'landing_no':
+        out = ['landing_podcast_to_text', 'landing_spotify', 'landing_apple',
+               'landing_rss', 'landing_free', 'landing_generator',
+               'landing_youtube_vs']
+    else:
+        out = [e for e in core if e != endpoint] + ['landing_no']
+    seen, ordered = set(), []
+    for e in out:
+        if e not in seen and e != endpoint:
+            seen.add(e)
+            ordered.append(e)
+    return [(e, SHORT_LABELS[e]) for e in ordered]
+
+
+def _usd(cents):
+    return f'${cents // 100}' if cents % 100 == 0 else f'${cents / 100:.2f}'
+
+
+def _fmt_minutes(n, lang='en'):
+    """1,200 (en) / 1 200 (nb) for thousands."""
+    if n >= 1000:
+        sep = ' ' if lang in ('no', 'nb') else ','
+        return f'{n // 1000}{sep}{n % 1000:03d}'
+    return str(n)
+
+
+def pack_phrase(pack, lang='en'):
+    """Price phrase for *pack* (see app._landing_pack). Matches /pricing tone."""
+    if pack.get('volume'):
+        lo = _usd(pack['min_cents'])
+        top_min = _fmt_minutes(pack['max_minutes'], lang)
+        top = _usd(pack['max_cents'])
+        if lang in ('no', 'nb'):
+            return (f'fra {lo} for 60 minutter, billigere per minutt jo mer du kjøper '
+                    f'({top_min} min for {top}), eller bare minuttene én episode trenger')
+        return (f'from {lo} for 60 minutes, cheaper per minute the more you buy '
+                f'({top_min} min for {top}), or just the minutes one episode needs')
+    if lang in ('no', 'nb'):
+        return f'{pack["price"]:g} dollar for {pack["minutes"]} minutter'
+    return f'${pack["price"]:g} for {pack["minutes"]} minutes'
+
+
+def _start_button(trial, lang='en'):
+    if lang in ('no', 'nb'):
+        return 'Start gratis transkripsjon' if trial else 'Start transkripsjon'
+    return 'Start free transcript' if trial else 'Start transcript'
+
+
+def _price_en(trial, pack):
+    """One honest sentence on cost, in English."""
+    parts = []
+    if trial:
+        parts.append(f'New accounts get {trial} minutes free, no card needed.')
+    if pack:
+        parts.append(f'After that, minutes are a one-time purchase: '
+                     f'{pack_phrase(pack)}. No subscription.')
+    parts.append('You can also add your own OpenAI API key and pay OpenAI directly '
+                 'instead; that is optional.')
+    return ' '.join(parts)
+
+
+def _price_no(trial, pack):
+    parts = []
+    if trial:
+        parts.append(f'Nye kontoer får {trial} gratisminutter, uten kort.')
+    if pack:
+        parts.append(f'Deretter kjøper du minutter én gang: '
+                     f'{pack_phrase(pack, "nb")}. Uten abonnement.')
+    parts.append('Du kan også legge inn din egen OpenAI API-nøkkel og betale OpenAI '
+                 'direkte. Det er valgfritt.')
+    return ' '.join(parts)
+
+
+def _common_en(trial, pack, lang_count):
+    return [
+        ('What does it cost?', _price_en(trial, pack)),
+        ('What do I get back?',
+         'The full transcript as plain text (.txt) and as SubRip subtitles (.srt) '
+         'with timestamps, plus a reading view in the browser. Transcripts are '
+         'private to your account unless you create a share link.'),
+        ('Which languages work?',
+         f'{lang_count} languages, transcribed with OpenAI Whisper. Auto-detect is '
+         'the default; choosing the language yourself helps on short or accented audio.'),
+    ]
+
+
+def build(endpoint, *, trial, pack, lang_count):
+    """Return the page dict for one landing endpoint.
+
+    trial: advertised new-account free minutes, or None when the trial is off.
+    pack: app._landing_pack() dict (volume or legacy) when checkout is on, else None.
+    """
+    free_en = f'{trial} minutes free' if trial else 'a free account'
+    common = _common_en(trial, pack, lang_count)
+    start = _start_button(trial)
+
+    if endpoint == 'landing_generator':
+        return dict(
+            lang='en',
+            title='Podcast Transcript Generator: Link to Text',
+            meta=('Generate a podcast transcript from a Spotify, Apple Podcasts or RSS '
+                  f'link — no audio upload. Download .txt and .srt. {free_en.capitalize()}.'),
+            h1='Podcast transcript generator',
+            lede=('Turn any public podcast episode into text you can search, quote and '
+                  'paste into ChatGPT or Claude. Paste a link or search by show name; '
+                  'Podskrift fetches the audio and runs OpenAI Whisper.'),
+            placeholder='Paste a Spotify, Apple or RSS link',
+            input_label='Podcast or episode link',
+            button=start,
+            steps=[
+                ('Paste or search',
+                 'A Spotify episode link, Apple Podcasts link, RSS feed URL, or the show name.'),
+                ('Pick the episode',
+                 'You see titles and lengths before anything is charged.'),
+                ('Get the transcript',
+                 'Plain text for reading and quoting, plus .srt with timestamps.'),
+            ],
+            faq=[
+                ('Is this an AI transcript generator?',
+                 'Yes — OpenAI Whisper turns the audio into text. You do not need to '
+                 'upload a file; Podskrift downloads the episode from the show’s public feed.'),
+                ('Do I need to upload the audio?',
+                 'No. If you only have a local file, host it somewhere with a direct URL '
+                 'and paste that instead.'),
+                ('Can I generate transcripts inside ChatGPT?',
+                 'Yes. Add Podskrift as a custom MCP server, then ask ChatGPT for the '
+                 'episode. Setup guides are linked below.'),
+                ('Is there speaker labelling (diarisation)?',
+                 'Not yet. You get one continuous transcript with timestamps, not named speakers.'),
+            ] + common,
+        )
+
+    if endpoint == 'landing_spotify':
+        if trial:
+            spotify_meta = (f'Paste a Spotify episode link and get the transcript as .txt '
+                            f'and .srt. Works when the show has a public RSS feed. '
+                            f'{trial} minutes free.')
+        else:
+            spotify_meta = ('Paste a Spotify episode link and get the transcript as .txt '
+                            'and .srt. Works when the show has a public RSS feed.')
+        return dict(
+            lang='en',
+            title='Transcribe a Spotify Podcast to Text',
+            meta=spotify_meta,
+            h1='Transcribe a Spotify podcast from a link',
+            lede=('Paste an open.spotify.com episode (or show) link. Podskrift looks up the '
+                  'same episode in the show’s public RSS feed and transcribes that audio — '
+                  'Spotify’s in-app transcript is not exported.'),
+            placeholder='https://open.spotify.com/episode/…',
+            input_label='Spotify episode or show link',
+            button=start,
+            steps=[
+                ('Copy the Spotify link',
+                 'In Spotify, open the episode, tap Share (or ⋯), then Copy link.'),
+                ('Paste it here',
+                 'Podskrift matches the episode in the show’s public feed and lists it.'),
+                ('Read or download',
+                 'Transcription usually takes a few minutes. Download .txt or .srt.'),
+            ],
+            faq=[
+                ('Does every Spotify podcast work?',
+                 'Most do: almost every show on Spotify also publishes a public RSS feed, '
+                 'and that is where the audio comes from. Spotify exclusives and '
+                 'subscriber-only episodes have no public feed, so they cannot be transcribed.'),
+                ('What if the show is Spotify-only?',
+                 'Podskrift can\'t transcribe it. Some shows that look Spotify-only also '
+                 'publish a public feed. Search the show name here or check Apple Podcasts. '
+                 'If nothing turns up, it\'s a true exclusive.'),
+                ('Can I paste a show link instead of an episode link?',
+                 'Yes. A show link opens the episode list, and you pick the episode there.'),
+                ('Is this the same as Spotify’s own transcript?',
+                 'No. Podskrift makes its own transcript from the audio, so it also works '
+                 'for shows where Spotify shows none, and you can copy and download it.'),
+            ] + common,
+        )
+
+    if endpoint == 'landing_apple':
+        return dict(
+            lang='en',
+            title='Transcribe a podcast from an Apple Podcasts link',
+            meta=('Paste a podcasts.apple.com episode or show link and get a transcript '
+                  'you can copy and download as .txt and .srt. Public feeds only. '
+                  f'{free_en.capitalize()}.'),
+            h1='Transcribe a podcast from an Apple Podcasts link',
+            lede=('Apple shows transcripts inside its app for many shows, but you cannot '
+                  'export them. Paste the Apple Podcasts link here and get the text as files.'),
+            placeholder='https://podcasts.apple.com/…',
+            input_label='Apple Podcasts episode or show link',
+            button=start,
+            steps=[
+                ('Copy the link',
+                 'In Apple Podcasts, open the episode or show, tap Share, then Copy Link.'),
+                ('Paste it here',
+                 'Podskrift reads the show’s feed from Apple’s directory and finds the episode.'),
+                ('Read or download',
+                 'Get the transcript in the browser and as .txt or .srt.'),
+            ],
+            faq=[
+                ('Why not just use the transcript in the Apple Podcasts app?',
+                 'It stays in the app: you can read it while listening, but not export the '
+                 'whole thing, search across episodes, or paste it into another tool. '
+                 'Podskrift gives you the text as files.'),
+                ('Do subscriber-only (Apple Podcasts Subscriptions) episodes work?',
+                 'No. Only episodes in the public feed can be transcribed.'),
+                ('Does it work with a show link?',
+                 'Yes. A show link opens the episode list so you can pick one.'),
+            ] + common,
+        )
+
+    if endpoint == 'landing_podcast_to_text':
+        return dict(
+            lang='en',
+            title='Podcast to Text: Transcribe From a Link',
+            meta=('Convert a podcast episode to text without downloading the audio. Paste a '
+                  'Spotify, Apple Podcasts or RSS link, or search by name. Get .txt and .srt.'),
+            h1='Podcast to text, straight from a link',
+            lede=('No audio file to find, download or upload. Paste a link or search for the '
+                  'show, pick the episode, and Podskrift fetches the audio and transcribes it.'),
+            placeholder='Paste a Spotify, Apple or RSS link',
+            input_label='Podcast or episode link',
+            button=start,
+            steps=[
+                ('Paste a link or search',
+                 'Spotify, Apple Podcasts, an RSS feed or a direct audio URL all work.'),
+                ('Pick the episode',
+                 'You see the episode list with lengths before anything is charged.'),
+                ('Get the text',
+                 'Plain text for reading and quoting, .srt with timestamps for subtitles.'),
+            ],
+            faq=[
+                ('Do I need to upload the audio file?',
+                 'No. Podskrift downloads the episode from the podcast’s public feed. If you '
+                 'only have a file, host it somewhere and paste the direct audio URL.'),
+                ('How accurate is it?',
+                 'It uses OpenAI Whisper, which is good on clear speech. Crosstalk, heavy '
+                 'accents and music beds reduce accuracy, and there is no speaker labelling yet.'),
+                ('How long does it take?',
+                 'Usually a few minutes for an hour of audio. You can close the page; the job keeps going.'),
+                ('Can I use the transcript in ChatGPT or Claude?',
+                 'Yes. Connect Podskrift as an MCP connector and ask for summaries or quotes '
+                 'from episodes, or paste the text yourself.'),
+                ('Which languages work best?',
+                 f'{lang_count} languages in the picker. Name the spoken language instead of '
+                 'auto-detect for short or accented audio. Norwegian has its own page under '
+                 '“More ways to transcribe”.'),
+            ] + common,
+        )
+
+    if endpoint == 'landing_rss':
+        return dict(
+            lang='en',
+            title='RSS to Text: Transcribe Podcast Feeds',
+            meta=('Paste a podcast RSS feed URL, pick an episode and get a transcript. Works for '
+                  'shows outside Spotify and Apple, private-label hosts and your own feed.'),
+            h1='Transcribe podcast episodes from an RSS feed',
+            lede=('Every public podcast has an RSS feed. Paste it here to transcribe shows that '
+                  'are hard to find by search: small or local shows, new launches, your own podcast.'),
+            placeholder='https://feeds.example.com/show.xml',
+            input_label='Podcast RSS feed URL',
+            button='Open feed',
+            steps=[
+                ('Find the feed',
+                 'Hosts like Buzzsprout, Libsyn, Podbean and Acast all publish one. See the RSS guide below.'),
+                ('Paste the URL',
+                 'Podskrift lists the latest episodes with titles, dates and lengths.'),
+                ('Transcribe',
+                 'Pick an episode and get .txt and timestamped .srt.'),
+            ],
+            faq=[
+                ('Where do I find a podcast’s RSS feed?',
+                 'On the host’s website, in the show’s “Subscribe” or “RSS” link, or via its '
+                 'Apple Podcasts page. Our RSS guide walks through it.'),
+                ('Do private or password-protected feeds work?',
+                 'Only if the access token is part of the feed URL itself. Feeds that need a '
+                 'separate login do not work.'),
+                ('Can I transcribe my own podcast to publish the text?',
+                 'Yes. Download the .txt for show notes or the .srt for captions.'),
+            ] + common,
+        )
+
+    if endpoint == 'landing_free':
+        if trial:
+            free_answer = (f'New accounts get {trial} minutes of transcription free, no card '
+                           'needed. A longer first episode still starts: you get the first '
+                           f'{trial} minutes as a preview and can buy minutes to finish it.')
+            h1 = f'Transcribe a podcast free: {trial} minutes on us'
+            title = f'Transcribe a Podcast Free: {trial} Minutes, No Card'
+        else:
+            free_answer = ('There is no free trial right now. You can still transcribe at cost '
+                           'by adding your own OpenAI API key.')
+            h1 = 'Transcribe a podcast for free or at cost'
+            title = 'Transcribe a Podcast Free or at Cost'
+        return dict(
+            lang='en',
+            title=title,
+            meta=('How to transcribe a podcast episode for free, and what it costs after. '
+                  'Paste a Spotify, Apple or RSS link. No subscription.'),
+            h1=h1,
+            lede=('Straight answer on what is free and what is not, so there are no surprises '
+                  'at the end of an episode.'),
+            placeholder='Paste a Spotify, Apple or RSS link',
+            input_label='Podcast or episode link',
+            button='Try it free' if trial else 'Start transcript',
+            steps=[
+                ('Paste a link', 'Spotify, Apple Podcasts or RSS. Searching by name works too.'),
+                ('Create an account', 'Email and password. No card for the free minutes.'),
+                ('Get the transcript', 'Download .txt and .srt; the transcript stays in your history.'),
+            ],
+            faq=[
+                ('Is it really free?', free_answer),
+                ('What happens when the free minutes run out?', _price_en(None, pack)),
+                ('Is there a subscription?',
+                 'No. Minutes are a one-time purchase; nothing renews.'),
+                ('Are there free alternatives?',
+                 'Spotify and Apple show transcripts in their apps for many shows, free but not '
+                 'exportable. Running Whisper yourself is free if you have the hardware and are '
+                 'comfortable with the command line.'),
+            ] + common[1:],
+        )
+
+    if endpoint == 'landing_youtube_vs':
+        return dict(
+            lang='en',
+            title='YouTube vs Podcast Transcripts',
+            meta=('Podskrift transcribes podcasts from Spotify, Apple Podcasts or RSS, not '
+                  'YouTube videos. When YouTube captions are enough, and when they are not.'),
+            h1='YouTube captions vs a podcast transcript',
+            lede=('YouTube already gives most videos auto-captions. Podcasts usually do not '
+                  'publish a transcript you can download. Podskrift is built for that podcast '
+                  'gap — it is not a YouTube downloader or YouTube caption tool.'),
+            placeholder='Paste a Spotify, Apple or RSS podcast link',
+            input_label='Podcast or episode link (not a YouTube URL)',
+            button=start,
+            steps=[
+                ('Use a podcast link',
+                 'Spotify, Apple Podcasts, or the show’s RSS feed — not a youtube.com URL.'),
+                ('If the show is also on YouTube',
+                 'Find the same episode in the podcast feed (Apple / Spotify / RSS) and paste that.'),
+                ('Get downloadable text',
+                 'Unlike most YouTube caption UIs, you get .txt and .srt you can keep.'),
+            ],
+            faq=[
+                ('Can Podskrift transcribe a YouTube video?',
+                 'No. It does not accept YouTube URLs or download YouTube audio. Use YouTube’s '
+                 'own captions for video-only content.'),
+                ('My podcast is uploaded to YouTube as video — what then?',
+                 'If the same episode is published as a podcast (Apple Podcasts, Spotify, or '
+                 'an RSS feed), paste that podcast link. Podskrift uses the public podcast '
+                 'audio, not the YouTube file.'),
+                ('Why not just copy YouTube captions?',
+                 'You can, for YouTube. Podcasts often have no captions at all, and in-app '
+                 'podcast transcripts (Spotify / Apple) usually cannot be exported as files.'),
+                ('What does Podskrift actually support?',
+                 'Public podcast audio via Spotify links (when a public feed exists), Apple '
+                 'Podcasts links, RSS feeds, catalogue search, and direct audio URLs.'),
+            ] + common,
+        )
+
+    if endpoint == 'landing_no':
+        free_no = f'{trial} gratisminutter' if trial else 'gratis konto'
+        faq = [
+            ('Hva koster det?', _price_no(trial, pack)),
+            ('Hvor godt fungerer det på norsk?',
+             'Godt på tydelig tale. Sterke dialekter, folk som snakker i munnen på '
+             'hverandre og musikk under praten gir flere feil. Velg «Norsk» som språk i '
+             'stedet for automatisk gjenkjenning, så blir resultatet bedre.'),
+            ('Må jeg laste opp lydfilen?',
+             'Nei. Lim inn en lenke fra Spotify eller Apple Podcasts, eller en RSS-adresse, '
+             'så henter Podskrift lyden fra podkastens offentlige feed.'),
+            ('Fungerer NRK-podkaster?',
+             'Ja, så lenge episoden ligger i en offentlig RSS-feed eller på Apple Podcasts. '
+             'Episoder som bare finnes i NRK-appen, eller eksklusivt på én plattform, kan '
+             'ikke transkriberes.'),
+            ('Hva får jeg?',
+             'Hele transkripsjonen som tekst (.txt) og som undertekster med tidsstempler '
+             '(.srt). Transkripsjonene er private for kontoen din med mindre du lager en '
+             'delelenke.'),
+        ]
+        return dict(
+            lang='nb',
+            title='Podcast til tekst: norske podkaster fra lenke',
+            meta=('Gjør en podkastepisode om til tekst uten å laste opp lydfil. Lim inn lenke '
+                  f'fra Spotify, Apple Podcasts eller RSS. Støtter norsk. {free_no.capitalize()}.'),
+            h1='Podcast til tekst, rett fra en lenke',
+            lede=('Lim inn lenken til episoden, så får du hele teksten med tidsstempler. Du '
+                  'trenger ikke finne og laste opp lydfilen selv.'),
+            placeholder='Lim inn lenke fra Spotify, Apple eller RSS',
+            input_label='Lenke til podkast eller episode',
+            button=_start_button(trial, 'nb'),
+            steps=[
+                ('Kopier lenken', 'I Spotify eller Apple Podcasts: Del, deretter Kopier lenke.'),
+                ('Lim den inn', 'Velg episoden og gjerne «Norsk» som språk.'),
+                ('Få teksten', 'Les i nettleseren eller last ned .txt og .srt.'),
+            ],
+            faq=faq,
+        )
+    raise KeyError(endpoint)
+
+
+UI = {
+    'en': dict(how='How it works', faq='Questions', related='More ways to transcribe',
+               ai='Use in ChatGPT & Claude', guides='Setup guides', rss_help='How to find an RSS feed',
+               pricing='Pricing', shows='Popular podcasts',
+               note='Searching by podcast name works too.'),
+    'nb': dict(how='Slik fungerer det', faq='Spørsmål og svar', related='Mer om Podskrift',
+               ai='Bruk i ChatGPT og Claude', guides='Veiledninger', rss_help='Finn RSS-feeden',
+               pricing='Priser', shows='Populære podkaster',
+               note='Du kan også søke etter navnet på podkasten.'),
+    'no': None,
+}
+UI['no'] = UI['nb']

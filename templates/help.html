@@ -18,11 +18,16 @@
       <p class="ds-guide__muted">Search by podcast name or paste a link. Common questions are answered on the home page.</p>
       {{ button("Go to search", variant="primary", href=url_for('index')) }}
       {{ link_button("Read the FAQ", href=url_for('index') ~ '#faq') }}
+      {{ link_button("Podcast transcript generator", href=url_for('landing_generator')) }}
+      {{ link_button("Transcribe from Apple Podcasts", href=url_for('landing_apple')) }}
+      {{ link_button("Transcribe a Spotify podcast", href=url_for('landing_spotify')) }}
     {% endcall %}
 
     {% call section(title="Can't find a podcast?", variant="bordered") %}
-      <p class="ds-guide__muted">How to find the RSS feed for shows outside the search, and what to do with Spotify links.</p>
+      <p class="ds-guide__muted">How to find the RSS feed for shows outside the search, and what to do with Spotify-only shows.</p>
       {{ link_button("Finding RSS feeds", href=url_for('rss_help')) }}
+      {{ link_button("RSS feed to text", href=url_for('landing_rss')) }}
+      {{ link_button("YouTube vs podcast transcript", href=url_for('landing_youtube_vs')) }}
     {% endcall %}
 
     {% call section(title="Use transcripts in ChatGPT and Claude", variant="bordered") %}

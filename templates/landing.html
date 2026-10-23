@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import page_header %}
+{# Keyword landing pages: one template, content in landing_pages.py. #}
+
+{% block html_lang %}{{ page.lang }}{% endblock %}
+{% block title %}{{ page.title }} — Podskrift{% endblock %}
+{% block meta_description %}{{ page.meta }}{% endblock %}
+{% block canonical_url %}{{ page_url }}{% endblock %}
+{% block og_title %}{{ page.title }}{% endblock %}
+{% block og_description %}{{ page.meta }}{% endblock %}
+{% block og_url %}{{ page_url }}{% endblock %}
+{% block twitter_title %}{{ page.title }}{% endblock %}
+{% block twitter_description %}{{ page.meta }}{% endblock %}
+{% block head_links %}
+    {% for hl, href in hreflang %}<link rel="alternate" hreflang="{{ hl }}" href="{{ href }}">
+    {% endfor %}
+{% endblock %}
+
+{% block content %}
+<article class="ds-guide ds-landing" data-landing="{{ landing_key }}">
+  {{ page_header(page.h1, page.lede) }}
+
+  {# GET to the home page: the home search box detects Spotify / Apple / RSS /
+     audio links and runs the normal flow, so there is one paste path, not two. #}
+  <form class="ds-cmd ds-landing__form" method="get" action="{{ url_for('index') }}" role="search">
+    <div class="ds-cmd__box">
+      <span class="ds-cmd__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></span>
+      <input type="text" class="ds-cmd__input" name="q" id="landingInput" aria-label="{{ page.input_label }}"
+             placeholder="{{ page.placeholder }}" autocomplete="off" enterkeyhint="go" required>
+      <button type="submit" class="btn btn-primary btn-lg ds-cmd__go">{{ page.button }} <span class="ds-arrow" aria-hidden="true">→</span></button>
+    </div>
+    <p class="ds-guide__muted">{{ ui.note }} {{ price_line }}</p>
+  </form>
+
+  <section class="ds-guide__section" aria-labelledby="landing-how">
+    <h2 id="landing-how">{{ ui.how }}</h2>
+    <ol class="ds-guide__steps">
+      {% for name, text in page.steps %}
+      <li class="ds-guide__step">
+        <h3>{{ name }}</h3>
+        <p>{{ text }}</p>
+      </li>
+      {% endfor %}
+    </ol>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="landing-faq">
+    <h2 id="landing-faq">{{ ui.faq }}</h2>
+    <div class="ds-guide__faq">
+      {% for question, answer in page.faq %}
+      <details>
+        <summary>{{ question }}</summary>
+        <p>{{ answer }}</p>
+      </details>
+      {% endfor %}
+    </div>
+  </section>
+
+  <nav class="ds-guide__section" aria-labelledby="landing-related">
+    <h2 id="landing-related">{{ ui.related }}</h2>
+    <ul class="ds-guide__list">
+      {% for endpoint, label in related %}
+      <li><a href="{{ url_for(endpoint) }}">{{ label }}</a></li>
+      {% endfor %}
+      <li><a href="{{ url_for('ai_landing') }}">{{ ui.ai }}</a></li>
+      <li><a href="{{ url_for('guides_index') }}">{{ ui.guides }}</a></li>
+      <li><a href="{{ url_for('rss_help') }}">{{ ui.rss_help }}</a></li>
+      <li><a href="{{ url_for('podcasts_index') }}">{{ ui.shows }}</a></li>
+      <li><a href="{{ url_for('pricing') }}">{{ ui.pricing }}</a></li>
+    </ul>
+  </nav>
+</article>
+{% endblock %}

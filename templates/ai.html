@@ -39,6 +39,18 @@
 
     {% include '_ai_mcp_help.html' %}
 
+    <section class="ai-section" aria-labelledby="aiLandingsHeading">
+        <h2 id="aiLandingsHeading">Prefer the website?</h2>
+        <p>Paste a podcast link on the site, then bring the transcript into your AI — or connect MCP and skip the paste.</p>
+        <ul class="ai-related">
+            <li><a href="{{ url_for('landing_generator') }}">Podcast transcript generator</a></li>
+            <li><a href="{{ url_for('landing_spotify') }}">Transcribe a Spotify podcast</a></li>
+            <li><a href="{{ url_for('landing_apple') }}">Transcribe from Apple Podcasts</a></li>
+            <li><a href="{{ url_for('landing_podcast_to_text') }}">Podcast to text</a></li>
+            <li><a href="{{ url_for('guides_index') }}">Setup guides</a></li>
+        </ul>
+    </section>
+
     <section class="ai-section" aria-labelledby="aiStepsHeading">
         <h2 id="aiStepsHeading">How to connect</h2>
         <div class="ai-steps">

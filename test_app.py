@@ -19975,3 +19975,243 @@ def test_privacy_lists_together_ai_as_processor():
     assert 'Together AI' in body
     assert '(US)' in body
     assert 'Storage of prompts and model responses is turned off' in body
+
+
+# --- Keyword landing pages + llms.txt / llms-full.txt -----------------------
+
+LANDING_PATHS = [path for _, path in __import__('landing_pages').PAGES]
+LANDING_FOOTER_PATHS = [
+    dict(__import__('landing_pages').PAGES)[ep]
+    for ep in __import__('landing_pages').FOOTER
+]
+
+
+def _landing_jsonld(html):
+    import json as _json
+    import re as _re
+    m = _re.search(r'<script type="application/ld\+json">(.*?)</script>', html, _re.S)
+    assert m, 'no JSON-LD on the page'
+    return _json.loads(m.group(1))
+
+
+@pytest.mark.parametrize('path', LANDING_PATHS)
+def test_landing_page_renders_with_seo_basics(trial_on, path):
+    import re as _re
+    resp = A.app.test_client().get(path)
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert 'noindex' not in html.lower()
+    assert 'X-Robots-Tag' not in resp.headers
+    assert html.count('<h1') == 1
+    canon = _re.search(r'<link rel="canonical" href="([^"]+)"', html).group(1)
+    assert canon.endswith(path)
+    assert f'<meta property="og:url" content="{canon}"' in html
+    assert '<meta property="og:title"' in html
+    assert 'action="/"' in html and 'name="q"' in html
+    assert 'href="/ai"' in html and 'href="/guides"' in html
+    expected_lang = 'nb' if path.startswith('/no/') else 'en'
+    assert f'<html lang="{expected_lang}">' in html
+    # CTA to start a free transcript (or the free-trial wording when trial is on).
+    assert 'btn btn-primary' in html
+
+
+def test_landing_titles_and_descriptions_are_unique(trial_on):
+    import re as _re
+    client = A.app.test_client()
+    titles, metas, h1s = set(), set(), set()
+    for path in LANDING_PATHS:
+        html = client.get(path).data.decode()
+        titles.add(_re.search(r'<title>(.*?)</title>', html, _re.S).group(1).strip())
+        metas.add(_re.search(r'<meta name="description" content="([^"]*)"', html).group(1))
+        h1s.add(_re.search(r'<h1[^>]*>(.*?)</h1>', html, _re.S).group(1).strip())
+    n = len(LANDING_PATHS)
+    assert len(titles) == n and len(metas) == n and len(h1s) == n
+
+
+@pytest.mark.parametrize('path', LANDING_PATHS)
+def test_landing_title_and_meta_length_limits(trial_on, path):
+    """Rendered <title> ≤ 60; meta description ≤ 160; no doubled brand."""
+    import re as _re
+    import landing_pages as lp
+    html = A.app.test_client().get(path).data.decode()
+    title = _re.search(r'<title>(.*?)</title>', html, _re.S).group(1).strip()
+    meta = _re.search(r'<meta name="description" content="([^"]*)"', html).group(1)
+    assert len(title) <= lp.TITLE_MAX, f'{path} title is {len(title)} chars: {title!r}'
+    assert len(meta) <= lp.META_MAX, f'{path} meta is {len(meta)} chars'
+    assert title.count('Podskrift') <= 1, f'doubled Podskrift in {title!r}'
+    assert title.endswith(lp.TITLE_SUFFIX.strip()) or title.endswith('Podskrift')
+
+
+@pytest.mark.parametrize('path', LANDING_PATHS)
+def test_landing_faq_jsonld_matches_visible_faq(trial_on, path):
+    import html as _html
+    page = A.app.test_client().get(path).data.decode()
+    data = _landing_jsonld(page)
+    faq = next(n for n in data['@graph'] if n['@type'] == 'FAQPage')
+    assert len(faq['mainEntity']) >= 3
+    for q in faq['mainEntity']:
+        assert q['@type'] == 'Question' and q['acceptedAnswer']['text']
+        assert _html.escape(q['name'], quote=True) in page or q['name'] in page
+    assert any(n['@type'] == 'HowTo' for n in data['@graph'])
+
+
+def test_landing_copy_never_says_a_key_is_required(trial_on, monkeypatch):
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    client = A.app.test_client()
+    for path in LANDING_PATHS:
+        body = client.get(path).data.decode().lower()
+        assert 'key is required' not in body and 'requires an openai' not in body
+        assert 'bring your own key' not in body
+    free = client.get('/transcribe-podcast-free').data.decode()
+    grant = A.advertised_trial_minutes()
+    assert f'{grant} minutes free' in free
+
+
+def test_landing_free_page_is_honest_when_trial_off(monkeypatch):
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
+    html = A.app.test_client().get('/transcribe-podcast-free').data.decode()
+    assert 'minutes free' not in html
+    assert 'no free trial right now' in html
+
+
+def test_spotify_landing_is_honest_about_exclusives(trial_on):
+    html = A.app.test_client().get('/spotify-podcast-transcript').data.decode()
+    assert 'exclusives' in html.lower() or "can't transcribe" in html.lower()
+    assert 'public RSS' in html or 'public feed' in html
+    assert 'see how to work around' not in html.lower()
+    assert 'Workarounds that work today' not in html
+
+
+def test_youtube_vs_landing_does_not_claim_youtube_support(trial_on):
+    html = A.app.test_client().get('/youtube-vs-podcast-transcript').data.decode().lower()
+    assert 'not a youtube' in html or 'does not accept youtube' in html
+    assert 'youtube.com' in html
+
+
+def test_landing_pages_in_sitemap_and_footer(trial_on):
+    client = A.app.test_client()
+    xml = client.get('/sitemap.xml').data.decode()
+    import xml.etree.ElementTree as ET
+    locs = [el.text for el in ET.fromstring(xml).iter(
+        '{http://www.sitemaps.org/schemas/sitemap/0.9}loc')]
+    for path in LANDING_PATHS:
+        assert any(loc.endswith(path) for loc in locs), f'{path} not in sitemap'
+    assert any(loc.endswith('/privacy') for loc in locs)
+    assert any(loc.endswith('/terms') for loc in locs)
+    assert any(loc.endswith('/llms.txt') for loc in locs)
+    assert any(loc.endswith('/llms-full.txt') for loc in locs)
+    home = client.get('/').data.decode()
+    for path in LANDING_FOOTER_PATHS:
+        assert f'href="{path}"' in home, f'{path} not in footer'
+    # Near-duplicate language doorway pages were removed.
+    for gone in ('/podcast-to-text/english', '/podcast-to-text/spanish',
+                 '/podcast-to-text/german', '/podcast-to-text/french',
+                 '/podcast-to-text/portuguese'):
+        assert gone not in xml
+        assert client.get(gone).status_code == 404
+
+
+def test_norwegian_landing_has_hreflang_pair(trial_on):
+    client = A.app.test_client()
+    for path in ('/podcast-to-text', '/no/podcast-til-tekst'):
+        html = client.get(path).data.decode()
+        assert 'hreflang="nb"' in html and 'hreflang="en"' in html
+
+
+def test_help_and_ai_link_to_landings(trial_on):
+    help_html = A.app.test_client().get('/help').data.decode()
+    ai_html = A.app.test_client().get('/ai').data.decode()
+    for path in ('/podcast-transcript-generator', '/spotify-podcast-transcript',
+                 '/apple-podcast-transcript'):
+        assert f'href="{path}"' in help_html
+        assert f'href="{path}"' in ai_html
+
+
+def test_llms_txt_pricing_mcp_and_landings(trial_on, monkeypatch):
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    monkeypatch.setattr(A.mcp_server_mod, 'mcp_enabled', lambda: True)
+    body = A.app.test_client().get('/llms.txt').data.decode()
+    assert 'never required' in body
+    assert 'After that you add your own OpenAI API key' not in body
+    assert 'bring your own OpenAI key' not in body
+    assert f'{A.advertised_trial_minutes()} minutes of audio free' in body
+    assert '/mcp' in body and 'OAuth' in body and 'get_transcript' in body
+    for path in LANDING_PATHS:
+        assert path in body
+    assert '/guides/chatgpt' in body and '/guides/claude' in body
+    assert 'Not a YouTube' in body or 'not a YouTube' in body.lower()
+
+
+def test_llms_full_txt_expands_landings(trial_on, monkeypatch):
+    monkeypatch.setattr(A.mcp_server_mod, 'mcp_enabled', lambda: True)
+    resp = A.app.test_client().get('/llms-full.txt')
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert body.startswith('# Podskrift')
+    assert '/podcast-transcript-generator' in body
+    assert 'How it works:' in body
+    assert 'get_transcript' in body
+
+
+def test_llms_txt_omits_mcp_section_when_mcp_off(monkeypatch):
+    monkeypatch.setattr(A.mcp_server_mod, 'mcp_enabled', lambda: False)
+    body = A.app.test_client().get('/llms.txt').data.decode()
+    assert 'remote MCP server' not in body
+
+
+def test_staging_is_noindex_and_disallowed(monkeypatch):
+    monkeypatch.setenv('PODSKRIFT_ENV', 'staging')
+    # Clear resolve_environment cache if any.
+    if hasattr(A.runtime_env_mod, '_cached'):
+        A.runtime_env_mod._cached = None
+    client = A.app.test_client()
+    resp = client.get('/spotify-podcast-transcript')
+    assert 'noindex' in resp.headers.get('X-Robots-Tag', '')
+    robots = client.get('/robots.txt').data.decode()
+    assert 'Disallow: /\n' in robots and 'Sitemap:' not in robots
+
+
+def test_home_prefills_from_landing_query():
+    html = A.app.test_client().get('/').data.decode()
+    assert 'prefillFromLanding' in html
+    # Auto-search only for same-site referrers; otherwise prefill + focus.
+    assert 'sameSite' in html
+    assert "origin === window.location.origin" in html
+
+
+def test_landing_cta_says_start_transcript_when_trial_off(monkeypatch):
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
+    html = A.app.test_client().get('/podcast-transcript-generator').data.decode()
+    assert 'Start transcript' in html
+    assert 'Start free transcript' not in html
+    no = A.app.test_client().get('/no/podcast-til-tekst').data.decode()
+    assert 'Start transkripsjon' in no
+    assert 'Start gratis transkripsjon' not in no
+
+
+@pytest.mark.parametrize('volume', [True, False])
+def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volume):
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', volume)
+    c = A.app.test_client()
+    spotify = c.get('/spotify-podcast-transcript').data.decode()
+    no = c.get('/no/podcast-til-tekst').data.decode()
+    llms = c.get('/llms.txt').data.decode()
+    full = c.get('/llms-full.txt').data.decode()
+    trial = A.advertised_trial_minutes()
+    assert f'{trial} minutes free' in spotify
+    assert f'{trial} gratisminutter' in no
+    en_phrase = ('from $1.50 for 60 minutes, cheaper per minute the more you buy '
+                 '(1,200 min for $11), or just the minutes one episode needs')
+    nb_phrase = ('fra $1.50 for 60 minutter, billigere per minutt jo mer du kjøper '
+                 '(1 200 min for $11), eller bare minuttene én episode trenger')
+    if volume:
+        for body in (spotify, llms, full):
+            assert en_phrase in body
+            assert '$5 for 300' not in body
+        assert nb_phrase in no
+    else:
+        assert '$5 for 300 minutes' in spotify
+        assert '$5.00 for 300 minutes' in llms or '$5 for 300 minutes' in llms
+        assert 'cheaper per minute the more you buy' not in spotify + llms
+        assert '5 dollar for 300 minutter' in no

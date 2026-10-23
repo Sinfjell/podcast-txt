@@ -23,6 +23,15 @@
         margin: 0 0 24px;
     }
     .ai-section > p { font-size: 17px; line-height: 1.55; color: var(--muted); margin: 0 0 24px; max-width: 36em; }
+    .ai-related {
+        list-style: none; margin: 0; padding: 0;
+        display: flex; flex-direction: column; gap: 8px;
+    }
+    .ai-related a {
+        color: var(--ink); text-decoration: underline; text-underline-offset: 2px;
+        font-size: 17px; line-height: 1.4;
+    }
+    .ai-related a:hover { color: var(--accent); }
 
     .ai-steps { display: flex; flex-direction: column; gap: 0; }
     .ai-step {
