@@ -1144,14 +1144,22 @@
         debounceTimer = setTimeout(doSearch, 400);
     });
 
-    // Landing pages (/spotify-podcast-transcript, ...) GET here with ?q=<link>:
-    // run the same detection as a paste, then drop the query from the URL.
+    // Landing pages GET here with ?q=<link>. Always prefill; only auto-run the
+    // search when the referrer is same-site (the landing CTA). A crafted
+    // external ?q= URL would otherwise auto-POST parse_rss on load.
     (function prefillFromLanding() {
         var q = (new URLSearchParams(window.location.search).get('q') || '').trim();
         if (!q) return;
         searchInput.value = q;
         if (window.history && history.replaceState) history.replaceState(null, '', window.location.pathname);
-        doSearch();
+        var sameSite = false;
+        try {
+            if (document.referrer) {
+                sameSite = new URL(document.referrer).origin === window.location.origin;
+            }
+        } catch (e) { /* ignore bad referrer */ }
+        if (sameSite) doSearch();
+        else searchInput.focus();
     })();
 
     {% if trial and not trial.on_own_key and trial.stripe_buy %}

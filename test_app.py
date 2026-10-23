@@ -20029,6 +20029,20 @@ def test_landing_titles_and_descriptions_are_unique(trial_on):
 
 
 @pytest.mark.parametrize('path', LANDING_PATHS)
+def test_landing_title_and_meta_length_limits(trial_on, path):
+    """Rendered <title> ≤ 60; meta description ≤ 160; no doubled brand."""
+    import re as _re
+    import landing_pages as lp
+    html = A.app.test_client().get(path).data.decode()
+    title = _re.search(r'<title>(.*?)</title>', html, _re.S).group(1).strip()
+    meta = _re.search(r'<meta name="description" content="([^"]*)"', html).group(1)
+    assert len(title) <= lp.TITLE_MAX, f'{path} title is {len(title)} chars: {title!r}'
+    assert len(meta) <= lp.META_MAX, f'{path} meta is {len(meta)} chars'
+    assert title.count('Podskrift') <= 1, f'doubled Podskrift in {title!r}'
+    assert title.endswith(lp.TITLE_SUFFIX.strip()) or title.endswith('Podskrift')
+
+
+@pytest.mark.parametrize('path', LANDING_PATHS)
 def test_landing_faq_jsonld_matches_visible_faq(trial_on, path):
     import html as _html
     page = A.app.test_client().get(path).data.decode()
@@ -20062,8 +20076,10 @@ def test_landing_free_page_is_honest_when_trial_off(monkeypatch):
 
 def test_spotify_landing_is_honest_about_exclusives(trial_on):
     html = A.app.test_client().get('/spotify-podcast-transcript').data.decode()
-    assert 'Spotify exclusives' in html or 'exclusives' in html.lower()
+    assert 'exclusives' in html.lower() or "can't transcribe" in html.lower()
     assert 'public RSS' in html or 'public feed' in html
+    assert 'see how to work around' not in html.lower()
+    assert 'Workarounds that work today' not in html
 
 
 def test_youtube_vs_landing_does_not_claim_youtube_support(trial_on):
@@ -20087,9 +20103,12 @@ def test_landing_pages_in_sitemap_and_footer(trial_on):
     home = client.get('/').data.decode()
     for path in LANDING_FOOTER_PATHS:
         assert f'href="{path}"' in home, f'{path} not in footer'
-    # Language variants are linked from related pages, not every footer.
-    assert 'href="/podcast-to-text/spanish"' in client.get(
-        '/podcast-to-text').data.decode()
+    # Near-duplicate language doorway pages were removed.
+    for gone in ('/podcast-to-text/english', '/podcast-to-text/spanish',
+                 '/podcast-to-text/german', '/podcast-to-text/french',
+                 '/podcast-to-text/portuguese'):
+        assert gone not in xml
+        assert client.get(gone).status_code == 404
 
 
 def test_norwegian_landing_has_hreflang_pair(trial_on):
@@ -20155,6 +20174,19 @@ def test_staging_is_noindex_and_disallowed(monkeypatch):
 def test_home_prefills_from_landing_query():
     html = A.app.test_client().get('/').data.decode()
     assert 'prefillFromLanding' in html
+    # Auto-search only for same-site referrers; otherwise prefill + focus.
+    assert 'sameSite' in html
+    assert "origin === window.location.origin" in html
+
+
+def test_landing_cta_says_start_transcript_when_trial_off(monkeypatch):
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
+    html = A.app.test_client().get('/podcast-transcript-generator').data.decode()
+    assert 'Start transcript' in html
+    assert 'Start free transcript' not in html
+    no = A.app.test_client().get('/no/podcast-til-tekst').data.decode()
+    assert 'Start transkripsjon' in no
+    assert 'Start gratis transkripsjon' not in no
 
 
 @pytest.mark.parametrize('volume', [True, False])
@@ -20165,16 +20197,21 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
     spotify = c.get('/spotify-podcast-transcript').data.decode()
     no = c.get('/no/podcast-til-tekst').data.decode()
     llms = c.get('/llms.txt').data.decode()
+    full = c.get('/llms-full.txt').data.decode()
     trial = A.advertised_trial_minutes()
     assert f'{trial} minutes free' in spotify
     assert f'{trial} gratisminutter' in no
+    en_phrase = ('from $1.50 for 60 minutes, cheaper per minute the more you buy '
+                 '(1,200 min for $11), or just the minutes one episode needs')
+    nb_phrase = ('fra $1.50 for 60 minutter, billigere per minutt jo mer du kjøper '
+                 '(1 200 min for $11), eller bare minuttene én episode trenger')
     if volume:
-        for body in (spotify, llms):
-            assert 'from $1.50, volume discounts up to 1200 min for $11, or per episode' in body
+        for body in (spotify, llms, full):
+            assert en_phrase in body
             assert '$5 for 300' not in body
-        assert 'fra $1.50, med volumrabatt opptil 1200 min for $11' in no
+        assert nb_phrase in no
     else:
         assert '$5 for 300 minutes' in spotify
         assert '$5.00 for 300 minutes' in llms or '$5 for 300 minutes' in llms
-        assert 'volume discounts' not in spotify + llms
+        assert 'cheaper per minute the more you buy' not in spotify + llms
         assert '5 dollar for 300 minutter' in no
