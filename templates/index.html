@@ -1144,6 +1144,16 @@
         debounceTimer = setTimeout(doSearch, 400);
     });
 
+    // Landing pages (/spotify-podcast-transcript, ...) GET here with ?q=<link>:
+    // run the same detection as a paste, then drop the query from the URL.
+    (function prefillFromLanding() {
+        var q = (new URLSearchParams(window.location.search).get('q') || '').trim();
+        if (!q) return;
+        searchInput.value = q;
+        if (window.history && history.replaceState) history.replaceState(null, '', window.location.pathname);
+        doSearch();
+    })();
+
     {% if trial and not trial.on_own_key and trial.stripe_buy %}
     (function fireHomePaywall() {
         if (typeof window.podskriftPaywallShown !== 'function') return;

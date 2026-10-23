@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "seo-transcript-landing-pages",
+      "date": "2026-10-23",
+      "title": "New pages for common transcript searches",
+      "summary": "Dedicated pages for generating a podcast transcript, pasting Spotify or Apple Podcasts links, language-specific podcast-to-text, and an honest YouTube vs podcast comparison — plus clearer guidance for ChatGPT and other assistants."
+    },
+    {
       "id": "checkout-recovery-email",
       "date": "2026-10-21",
       "title": "A nudge if you leave checkout unfinished",

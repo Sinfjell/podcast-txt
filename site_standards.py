@@ -149,6 +149,7 @@ def csp_report_only():
 def link_header():
     links = [
         '</llms.txt>; rel="describedby"; type="text/markdown"; title="Site summary for LLMs"',
+        '</llms-full.txt>; rel="alternate"; type="text/markdown"; title="Full site summary for LLMs"',
         '</sitemap.xml>; rel="sitemap"; type="application/xml"',
         '</.well-known/api-catalog>; rel="api-catalog"; type="application/linkset+json"',
         '</docs/api>; rel="service-doc"; type="text/html"',

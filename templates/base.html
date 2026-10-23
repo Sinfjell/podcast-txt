@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{% block html_lang %}en{% endblock %}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -1412,6 +1412,14 @@
                             <li><a href="{{ url_for('guide_ai_transcripts') }}">AI transcript guide</a></li>
                             <li><a href="{{ url_for('pricing') }}">Pricing</a></li>
                             <li><a href="{{ url_for('whats_new') }}">What's new</a></li>
+                        </ul>
+                    </div>
+                    <div class="footer-col">
+                        <h2 class="footer-heading">Transcribe</h2>
+                        <ul class="footer-list">
+                            {% for endpoint, label in landing_footer_links %}
+                            <li><a href="{{ url_for(endpoint) }}"{% if endpoint == 'landing_no' %} hreflang="nb" lang="nb"{% endif %}>{{ label }}</a></li>
+                            {% endfor %}
                         </ul>
                     </div>
                     <div class="footer-col">
