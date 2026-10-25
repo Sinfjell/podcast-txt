@@ -84,8 +84,16 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
+      - name: Lint (undefined names, shadowed definitions, syntax errors)
+        # A NameError ships to production when a function is only ever called
+        # through a fake in the tests (PODSKRIFT-14, missing `import hashlib`).
+        # These rules cost nothing and cannot flag style, only real defects.
+        run: ruff check --select F821,F811,F823,F822,E9 .
+
       - name: Run test suite
-        run: python -m pytest test_app.py -q
+        # Whole suite, not just test_app.py: test_email, test_site_standards,
+        # test_design_system and the admin/ops tests are guards too.
+        run: python -m pytest -q
 
   deploy:
     name: Deploy to Hetzner
