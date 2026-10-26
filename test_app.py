@@ -20237,7 +20237,7 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
                  '(1 200 min for $11), eller bare minuttene én episode trenger')
     es_phrase = ('desde $1.50 por 60 minutos, más barato por minuto cuanto más compras '
                  '(1.200 min por $11), o solo los minutos que dura un episodio')
-    de_phrase = ('ab $1.50 für 60 Minuten, günstiger pro Minute je mehr du kaufst '
+    de_phrase = ('ab $1.50 für 60 Minuten, günstiger pro Minute, je mehr du kaufst '
                  '(1.200 Min. für $11), oder nur die Minuten einer Folge')
     if volume:
         for body in (spotify, llms, full):
@@ -20260,7 +20260,7 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
      ('exclusivos de Spotify', 'solo para suscriptores', 'no se pueden transcribir'),
      ('clave es obligatoria', 'requiere una clave', 'necesitas una clave de openai')),
     ('/de/podcast-transkribieren', 'de',
-     ('Spotify-Exklusiv', 'Abonnenten', 'nicht transkribieren'),
+     ('Exklusive Spotify-Podcasts', 'Abonnenten', 'nicht transkribieren'),
      ('schlüssel erforderlich', 'api-schlüssel nötig', 'openai-schlüssel erforderlich')),
 ])
 def test_es_de_landings_are_native_honest_and_priced(

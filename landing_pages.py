@@ -149,7 +149,7 @@ def pack_phrase(pack, lang='en'):
             return (f'desde {lo} por 60 minutos, más barato por minuto cuanto más compras '
                     f'({top_min} min por {top}), o solo los minutos que dura un episodio')
         if lang == 'de':
-            return (f'ab {lo} für 60 Minuten, günstiger pro Minute je mehr du kaufst '
+            return (f'ab {lo} für 60 Minuten, günstiger pro Minute, je mehr du kaufst '
                     f'({top_min} Min. für {top}), oder nur die Minuten einer Folge')
         return (f'from {lo} for 60 minutes, cheaper per minute the more you buy '
                 f'({top_min} min for {top}), or just the minutes one episode needs')
@@ -202,7 +202,7 @@ def _price_es(trial, pack):
     if trial:
         parts.append(f'Las cuentas nuevas reciben {trial} minutos gratis, sin tarjeta.')
     if pack:
-        parts.append(f'Después compras minutos una sola vez: '
+        parts.append(f'Después compras minutos con un pago único: '
                      f'{pack_phrase(pack, "es")}. Sin suscripción.')
     parts.append('También puedes añadir tu propia clave de API de OpenAI y pagar a '
                  'OpenAI directamente; es opcional.')
@@ -212,9 +212,9 @@ def _price_es(trial, pack):
 def _price_de(trial, pack):
     parts = []
     if trial:
-        parts.append(f'Neue Konten erhalten {trial} Minuten gratis, ohne Karte.')
+        parts.append(f'Neue Konten erhalten {trial} Minuten gratis, ohne Kreditkarte.')
     if pack:
-        parts.append(f'Danach kaufst du Minuten einmalig: '
+        parts.append(f'Danach kaufst du Minuten per Einmalzahlung: '
                      f'{pack_phrase(pack, "de")}. Ohne Abo.')
     parts.append('Du kannst auch deinen eigenen OpenAI-API-Schlüssel hinterlegen und '
                  'OpenAI direkt bezahlen. Das ist optional.')
@@ -550,9 +550,9 @@ def build(endpoint, *, trial, pack, lang_count):
         free_es = f'{trial} minutos gratis' if trial else 'cuenta gratuita'
         faq = [
             ('¿Cuánto cuesta?', _price_es(trial, pack)),
-            ('¿Qué tal funciona con el español?',
-             'Bien con habla clara, tanto de España como de Latinoamérica. Si el episodio '
-             'mezcla español e inglés, o hay acentos fuertes o gente hablando a la vez, '
+            ('¿Funciona bien en español?',
+             'Sí, cuando se habla con claridad, tanto en España como en Latinoamérica. Si el episodio '
+             'mezcla español e inglés, hay acentos marcados o varias personas hablan a la vez, '
              'elige «Español» en lugar de la detección automática.'),
             ('¿Funciona con todos los podcasts de Spotify?',
              'Con la mayoría sí: casi todos tienen también un feed RSS público, y de ahí '
@@ -563,7 +563,7 @@ def build(endpoint, *, trial, pack, lang_count):
              'Podskrift descarga el audio del feed público del programa.'),
             ('¿Qué recibo?',
              'La transcripción completa como texto (.txt) y como subtítulos con marcas de '
-             'tiempo (.srt). Las transcripciones son privadas de tu cuenta, salvo que '
+             'tiempo (.srt). Las transcripciones son privadas y solo tú las ves, salvo que '
              'crees un enlace para compartir.'),
             ('¿Podskrift traduce el podcast?',
              'No: lo transcribe en el idioma del audio. Si necesitas una traducción, pega '
@@ -583,9 +583,9 @@ def build(endpoint, *, trial, pack, lang_count):
             button=_start_button(trial, 'es'),
             steps=[
                 ('Copia el enlace',
-                 'En Spotify o Apple Podcasts: Comparte y luego Copia enlace.'),
+                 'En Spotify o Apple Podcasts: «Compartir» y luego «Copiar enlace».'),
                 ('Pégalo aquí',
-                 'Elige el episodio y, si puedes, marca «Español» como idioma.'),
+                 'Elige el episodio y, si puedes, selecciona «Español» como idioma.'),
                 ('Recibe el texto',
                  'Léelo en el navegador o descarga .txt y .srt.'),
             ],
@@ -593,36 +593,36 @@ def build(endpoint, *, trial, pack, lang_count):
         )
 
     if endpoint == 'landing_de':
-        free_de = f'{trial} Minuten gratis' if trial else 'kostenloses Konto'
+        free_de = f'{trial} Minuten gratis' if trial else 'Kostenloses Konto'
         faq = [
             ('Was kostet es?', _price_de(trial, pack)),
             ('Wie gut funktioniert es auf Deutsch?',
-             'Gut bei klarer Sprache. Dialekte, Überschneidungen und Musik unter dem '
-             'Gespräch erzeugen mehr Fehler. Wähle «Deutsch» statt automatischer '
-             'Erkennung — dann wird das Ergebnis besser.'),
+             'Gut, wenn deutlich gesprochen wird. Starker Dialekt, Durcheinanderreden und '
+             'Hintergrundmusik führen zu mehr Fehlern. Wähle „Deutsch“ statt der '
+             'automatischen Erkennung, dann wird das Ergebnis besser.'),
             ('Funktioniert das mit jedem Spotify-Podcast?',
              'Mit den meisten ja: fast jede Show hat auch einen öffentlichen RSS-Feed, '
-             'und von dort kommt das Audio. Spotify-Exklusivtitel und Folgen nur für '
-             'Abonnenten haben keinen öffentlichen Feed und lassen sich nicht '
+             'und von dort kommt das Audio. Exklusive Spotify-Podcasts und Folgen nur für '
+             'Abonnenten haben keinen öffentlichen Feed und lassen sich daher nicht '
              'transkribieren.'),
             ('Muss ich die Audiodatei hochladen?',
-             'Nein. Füge einen Spotify- oder Apple-Podcasts-Link ein, oder eine RSS-URL. '
+             'Nein. Füge einen Spotify- oder Apple-Podcasts-Link oder eine RSS-URL ein. '
              'Podskrift holt das Audio aus dem öffentlichen Feed der Show.'),
             ('Was bekomme ich?',
              'Die vollständige Transkription als Text (.txt) und als Untertitel mit '
-             'Zeitstempeln (.srt). Transkripte sind privat für dein Konto, es sei denn, '
-             'du erstellst einen Freigabelink.'),
+             'Zeitstempeln (.srt). Deine Transkripte sind privat, es sei denn, du '
+             'erstellst einen Freigabelink.'),
             ('Übersetzt Podskrift den Podcast?',
-             'Nein — es transkribiert. Wenn du eine Übersetzung brauchst, füge den Text '
-             'in ChatGPT oder Claude ein.'),
+             'Nein, Podskrift transkribiert in der Sprache der Aufnahme. Wenn du eine '
+             'Übersetzung brauchst, füge den Text in ChatGPT oder Claude ein.'),
         ]
         return dict(
             lang='de',
             title='Podcast transkribieren: vom Link zum Text',
             # free_de starts with a digit when the trial is on; .capitalize()
             # would lowercase «Minuten», which German spelling forbids.
-            meta=('Podcast-Folge in Text umwandeln ohne Audiodatei. Spotify- oder '
-                  f'Apple-Podcasts-Link einfügen, .txt und .srt laden. {free_de}.'),
+            meta=('Podcast-Folge ohne Audiodatei in Text umwandeln. Spotify- oder '
+                  f'Apple-Podcasts-Link einfügen, .txt und .srt herunterladen. {free_de}.'),
             h1='Podcast transkribieren, direkt vom Link',
             lede=('Füge einen Spotify- oder Apple-Podcasts-Link ein. Podskrift findet '
                   'dieselbe Folge im öffentlichen RSS-Feed der Show und macht aus dem '
@@ -634,7 +634,7 @@ def build(endpoint, *, trial, pack, lang_count):
                 ('Link kopieren',
                  'In Spotify oder Apple Podcasts: Teilen, dann Link kopieren.'),
                 ('Hier einfügen',
-                 'Folge wählen und nach Möglichkeit «Deutsch» als Sprache setzen.'),
+                 'Folge auswählen und am besten „Deutsch“ als Sprache wählen.'),
                 ('Text erhalten',
                  'Im Browser lesen oder als .txt und .srt herunterladen.'),
             ],
