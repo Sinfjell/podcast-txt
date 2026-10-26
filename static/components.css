@@ -1260,7 +1260,10 @@ body:has(.ds-signal) { overflow-x: clip; }
 
 /* Keyword landing pages (templates/landing.html). */
 .ds-landing__form { margin: 0 auto var(--space-9); }
-.ds-landing__form .ds-guide__muted { margin: 0; }
+.ds-landing__form .ds-guide__muted { margin: var(--space-2) 0 0; }
+.ds-landing__form .ds-guide__muted:first-of-type { margin-top: var(--space-3); }
+.ds-landing__will-work { max-width: 42rem; }
+.ds-landing__cta-note { max-width: 42rem; }
 
 /* ------------------------------------------------------------------------ */
 /* volume_slider — launch volume pricing (macro: volume_slider)              */

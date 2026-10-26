@@ -11678,11 +11678,50 @@ def _faq_pack_phrase():
             f'({CREDIT_PACK_MINUTES // 60} hours)')
 
 
+def _landing_episode_prices(trial):
+    """Live per-episode prices for landing copy, or {} when volume pricing is off.
+
+    Keys are episode lengths in minutes (90 / 120 / 180). Values are the same
+    ``price`` strings ``episode_offer`` shows on the partial-preview card.
+    """
+    if not VOLUME_PRICING_ENABLED or not stripe_checkout_enabled():
+        return {}
+    balance = trial or 0
+    out = {}
+    for ep in (90, 120, 180):
+        offer = episode_offer(ep, balance)
+        if offer:
+            out[ep] = offer['price']
+    return out
+
+
+def _spotify_price_line(trial, pack):
+    """Expectation line under the Spotify landing input (honest about long eps)."""
+    if trial and pack:
+        # Same path as the partial-preview card: shortfall for (trial + 60).
+        offer = episode_offer(trial + 60, trial) if VOLUME_PRICING_ENABLED else None
+        if offer:
+            return (f'{trial} minutes free, no card. Most episodes run longer: '
+                    f'you get the first {trial} minutes free and can finish the '
+                    f'episode from {offer["price"]}. One-time, minutes never '
+                    f'expire, no subscription.')
+        return (f'{trial} minutes free, no card. Then '
+                f'{landing_pages_mod.pack_phrase(pack)}. One-time, minutes '
+                f'never expire, no subscription.')
+    bits = [f'{trial} minutes free.'] if trial else []
+    if pack:
+        bits.append(f'Then {landing_pages_mod.pack_phrase(pack)}, no subscription.')
+    return ' '.join(bits)
+
+
 def landing_page_data(endpoint):
     """Page copy with live trial / price facts (see landing_pages.py)."""
+    trial = advertised_trial_minutes()
     return landing_pages_mod.build(
-        endpoint, trial=advertised_trial_minutes(), pack=_landing_pack(),
-        lang_count=len(LANGUAGE_ENGLISH_NAMES))
+        endpoint, trial=trial, pack=_landing_pack(),
+        lang_count=len(LANGUAGE_ENGLISH_NAMES),
+        episode_prices=_landing_episode_prices(trial),
+    )
 
 
 def _render_landing(endpoint):
@@ -11691,14 +11730,18 @@ def _render_landing(endpoint):
     trial = advertised_trial_minutes()
     pack = _landing_pack()
     ui_lang = page['lang']
-    if ui_lang in ('no', 'nb'):
+    if endpoint == 'landing_spotify':
+        price_line = _spotify_price_line(trial, pack)
+    elif ui_lang in ('no', 'nb'):
         bits = [f'{trial} gratisminutter.'] if trial else []
         if pack:
             bits.append('Deretter ' + landing_pages_mod.pack_phrase(pack, 'nb') + '.')
+        price_line = ' '.join(bits)
     else:
         bits = [f'{trial} minutes free.'] if trial else []
         if pack:
             bits.append(f'Then {landing_pages_mod.pack_phrase(pack)}, no subscription.')
+        price_line = ' '.join(bits)
     hreflang = [
         (hl, public_url(ep))
         for hl, ep in landing_pages_mod.hreflang_alternates(endpoint)
@@ -11709,7 +11752,7 @@ def _render_landing(endpoint):
         page_url=page_url,
         landing_key=endpoint,
         ui=landing_pages_mod.UI[ui_lang],
-        price_line=' '.join(bits),
+        price_line=price_line,
         hreflang=hreflang,
         related=landing_pages_mod.related_links(endpoint),
         structured_data=_faq_page_structured_data(

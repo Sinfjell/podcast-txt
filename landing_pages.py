@@ -141,6 +141,33 @@ def _price_en(trial, pack):
     return ' '.join(parts)
 
 
+def _spotify_whole_episode_cost(trial, pack, episode_prices):
+    """Spotify FAQ: live per-episode prices, or pack_phrase when volume is off.
+
+    episode_prices maps episode length (minutes) → price string from
+    app.episode_offer(...); empty/None means VOLUME_PRICING is off.
+    """
+    if episode_prices:
+        bits = []
+        for ep in (90, 120, 180):
+            price = episode_prices.get(ep)
+            if not price:
+                continue
+            if trial:
+                bits.append(f'{ep} min: first {trial} min free, the rest {price}')
+            else:
+                bits.append(f'{ep} min: {price}')
+        if bits:
+            return ('What does a whole episode cost?',
+                    'Examples — ' + '; '.join(bits) + '. '
+                    'One-time, VAT included, minutes never expire.')
+    if pack:
+        return ('What does a whole episode cost?',
+                f'Minutes are a one-time purchase: {pack_phrase(pack)}. '
+                'One-time, VAT included, minutes never expire, no subscription.')
+    return ('What does a whole episode cost?', _price_en(trial, pack))
+
+
 def _price_no(trial, pack):
     parts = []
     if trial:
@@ -166,15 +193,18 @@ def _common_en(trial, pack, lang_count):
     ]
 
 
-def build(endpoint, *, trial, pack, lang_count):
+def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
     """Return the page dict for one landing endpoint.
 
     trial: advertised new-account free minutes, or None when the trial is off.
     pack: app._landing_pack() dict (volume or legacy) when checkout is on, else None.
+    episode_prices: optional {90|120|180: price_str} from app.episode_offer for
+        Spotify cost copy; omit or pass None when volume pricing is off.
     """
     free_en = f'{trial} minutes free' if trial else 'a free account'
     common = _common_en(trial, pack, lang_count)
     start = _start_button(trial)
+    episode_prices = episode_prices or {}
 
     if endpoint == 'landing_generator':
         return dict(
@@ -220,22 +250,44 @@ def build(endpoint, *, trial, pack, lang_count):
         else:
             spotify_meta = ('Paste a Spotify episode link and get the transcript as .txt '
                             'and .srt. Works when the show has a public RSS feed.')
+        # Invented sample — not from a real show.
+        example_txt = (
+            'And then she said the quiet part out loud.\n'
+            'We sat with that for a moment.\n'
+            'Anyway — back to the story.'
+        )
+        example_srt = (
+            '12\n'
+            '00:12:31,200 --> 00:12:35,900\n'
+            'Anyway — back to the story.'
+        )
+        cost_faq = _spotify_whole_episode_cost(trial, pack, episode_prices)
+        # Drop the generic "What does it cost?" — Spotify has the episode FAQ.
+        common_rest = [qa for qa in common if qa[0] != 'What does it cost?']
         return dict(
             lang='en',
             title='Transcribe a Spotify Podcast to Text',
             meta=spotify_meta,
             h1='Transcribe a Spotify podcast from a link',
-            lede=('Paste an open.spotify.com episode (or show) link. Podskrift looks up the '
-                  'same episode in the show’s public RSS feed and transcribes that audio — '
-                  'Spotify’s in-app transcript is not exported.'),
+            lede=('Paste an open.spotify.com episode or show link. Podskrift finds the '
+                  'same episode in the show’s public RSS feed and turns the audio into '
+                  'text you can copy and download.'),
             placeholder='https://open.spotify.com/episode/…',
             input_label='Spotify episode or show link',
             button=start,
+            will_work=('Works when the show also has a public RSS feed — most do. '
+                       'Spotify Originals, exclusives and video-only shows don’t.'),
+            cta_note=('No card. You create a free account after you pick the episode.'),
+            example_label='Example format',
+            example_txt=example_txt,
+            example_srt=example_srt,
+            ai_note=('Paste it into ChatGPT or Claude to summarise or ask questions, '
+                     'or connect Podskrift so they fetch transcripts for you.'),
             steps=[
                 ('Copy the Spotify link',
                  'In Spotify, open the episode, tap Share (or ⋯), then Copy link.'),
                 ('Paste it here',
-                 'Podskrift matches the episode in the show’s public feed and lists it.'),
+                 'Podskrift matches the episode in the show’s public RSS feed and lists it.'),
                 ('Read or download',
                  'Transcription usually takes a few minutes. Download .txt or .srt.'),
             ],
@@ -253,7 +305,11 @@ def build(endpoint, *, trial, pack, lang_count):
                 ('Is this the same as Spotify’s own transcript?',
                  'No. Podskrift makes its own transcript from the audio, so it also works '
                  'for shows where Spotify shows none, and you can copy and download it.'),
-            ] + common,
+                ('Can I download the transcript Spotify shows in the app?',
+                 'No — Spotify doesn’t export it. Paste the link here to get your own '
+                 'copy as .txt and .srt.'),
+                cost_faq,
+            ] + common_rest,
         )
 
     if endpoint == 'landing_apple':

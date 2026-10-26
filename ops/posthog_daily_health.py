@@ -50,6 +50,7 @@ NOTION_NOTES_MAX_CHARS = 2000
 
 PODSKRIFT_EVENTS = (
     'podcast_searched',
+    'landing_cta_submitted',
     'user_signed_up',
     'settings_viewed',
     'openai_key_saved',

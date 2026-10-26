@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "components/macros.html" import page_header %}
+{% from "components/macros.html" import page_header, snippet %}
 {# Keyword landing pages: one template, content in landing_pages.py. #}
 
 {% block html_lang %}{{ page.lang }}{% endblock %}
@@ -22,14 +22,20 @@
 
   {# GET to the home page: the home search box detects Spotify / Apple / RSS /
      audio links and runs the normal flow, so there is one paste path, not two. #}
-  <form class="ds-cmd ds-landing__form" method="get" action="{{ url_for('index') }}" role="search">
+  <form class="ds-cmd ds-landing__form" method="get" action="{{ url_for('index') }}" role="search" id="landingForm">
     <div class="ds-cmd__box">
       <span class="ds-cmd__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></span>
       <input type="text" class="ds-cmd__input" name="q" id="landingInput" aria-label="{{ page.input_label }}"
              placeholder="{{ page.placeholder }}" autocomplete="off" enterkeyhint="go" required>
       <button type="submit" class="btn btn-primary btn-lg ds-cmd__go">{{ page.button }} <span class="ds-arrow" aria-hidden="true">→</span></button>
     </div>
+    {% if page.will_work %}
+    <p class="ds-guide__muted ds-landing__will-work">{{ page.will_work }}</p>
+    {% endif %}
     <p class="ds-guide__muted">{{ ui.note }} {{ price_line }}</p>
+    {% if page.cta_note %}
+    <p class="ds-guide__muted ds-landing__cta-note">{{ page.cta_note }}</p>
+    {% endif %}
   </form>
 
   <section class="ds-guide__section" aria-labelledby="landing-how">
@@ -43,6 +49,17 @@
       {% endfor %}
     </ol>
   </section>
+
+  {% if page.example_txt %}
+  <section class="ds-guide__section" aria-labelledby="landing-example">
+    <h2 id="landing-example">What you get</h2>
+    <p class="ds-guide__muted">{{ page.example_label or 'Example format' }}</p>
+    {{ snippet(page.example_txt ~ '\n\n--- .srt ---\n\n' ~ page.example_srt, copy_label='Copy', what='example') }}
+    {% if page.ai_note %}
+    <p>{{ page.ai_note }} (<a href="{{ url_for('ai_landing') }}">{{ ui.ai }}</a>)</p>
+    {% endif %}
+  </section>
+  {% endif %}
 
   <section class="ds-guide__section" aria-labelledby="landing-faq">
     <h2 id="landing-faq">{{ ui.faq }}</h2>
@@ -70,4 +87,50 @@
     </ul>
   </nav>
 </article>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  // Labels match templates/index.html detectInputType — keep them identical.
+  var SPOTIFY_RE = /(open\.spotify\.com\/.*(episode|show)\/[A-Za-z0-9]{22}|spotify:(episode|show):[A-Za-z0-9]{22}|(?:^|[^A-Za-z0-9])(?:episode|show|sode)\/[A-Za-z0-9]{22})/i;
+  var APPLE_RE = /podcasts\.apple\.com/i;
+  var YOUTUBE_RE = /(youtube\.com|youtu\.be)\//i;
+  var AUDIO_EXT_RE = /\.(mp3|m4a|wav|aac|ogg|mp4|mpeg)(\?|#|$)/i;
+  var RSS_HINT_RE = /(\/feed\b|\/rss\b|\.(xml|rss)(\?|#|$)|feeds?\.)/i;
+
+  function detectInputType(q) {
+    var s = (q || '').trim();
+    if (!s) return 'other';
+    if (SPOTIFY_RE.test(s)) return 'spotify_link';
+    if (APPLE_RE.test(s)) return 'apple_link';
+    if (YOUTUBE_RE.test(s)) return 'youtube_link';
+    if (/^https?:\/\//i.test(s)) {
+      if (AUDIO_EXT_RE.test(s)) return 'audio_url';
+      if (RSS_HINT_RE.test(s)) return 'rss_feed';
+      return 'other';
+    }
+    return 'name';
+  }
+
+  var form = document.getElementById('landingForm');
+  if (!form) return;
+  form.addEventListener('submit', function () {
+    try {
+      if (!window.posthog || typeof posthog.capture !== 'function') return;
+      var input = document.getElementById('landingInput');
+      var q = input ? input.value : '';
+      var opts = window.podskriftLeaveSafeCaptureOpts
+        ? window.podskriftLeaveSafeCaptureOpts()
+        : undefined;
+      posthog.capture('landing_cta_submitted', {
+        landing: '{{ landing_key }}',
+        lang: '{{ page.lang }}',
+        input_type: detectInputType(q),
+        has_query: !!(q && String(q).trim())
+      }, opts);
+    } catch (e) { /* never block submit */ }
+  });
+})();
+</script>
 {% endblock %}
