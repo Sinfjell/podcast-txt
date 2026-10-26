@@ -19997,6 +19997,7 @@ def _landing_jsonld(html):
 @pytest.mark.parametrize('path', LANDING_PATHS)
 def test_landing_page_renders_with_seo_basics(trial_on, path):
     import re as _re
+    import landing_pages as lp
     resp = A.app.test_client().get(path)
     assert resp.status_code == 200
     html = resp.data.decode()
@@ -20009,7 +20010,8 @@ def test_landing_page_renders_with_seo_basics(trial_on, path):
     assert '<meta property="og:title"' in html
     assert 'action="/"' in html and 'name="q"' in html
     assert 'href="/ai"' in html and 'href="/guides"' in html
-    expected_lang = 'nb' if path.startswith('/no/') else 'en'
+    endpoint = next(ep for ep, p in lp.PAGES if p == path)
+    expected_lang = lp.lang_of(endpoint)
     assert f'<html lang="{expected_lang}">' in html
     # CTA to start a free transcript (or the free-trial wording when trial is on).
     assert 'btn btn-primary' in html
@@ -20118,6 +20120,24 @@ def test_norwegian_landing_has_hreflang_pair(trial_on):
         assert 'hreflang="nb"' in html and 'hreflang="en"' in html
 
 
+def test_hreflang_group_is_reciprocal_across_language_landings(trial_on):
+    """Every member of HREFLANG_GROUP links to every other member and itself."""
+    import landing_pages as lp
+    client = A.app.test_client()
+    members = list(lp.HREFLANG_GROUP.items())  # (lang, endpoint)
+    paths = {lang: dict(lp.PAGES)[ep] for lang, ep in members}
+    for lang, endpoint in members:
+        html = client.get(paths[lang]).data.decode()
+        for other_lang, other_ep in members:
+            other_path = paths[other_lang]
+            assert f'hreflang="{other_lang}"' in html
+            assert other_path in html
+        assert 'hreflang="x-default"' in html
+        assert paths['en'] in html
+        # Non-members (e.g. Spotify) stay outside the group.
+        assert lp.hreflang_alternates('landing_spotify') == []
+
+
 def test_help_and_ai_link_to_landings(trial_on):
     help_html = A.app.test_client().get('/help').data.decode()
     ai_html = A.app.test_client().get('/ai').data.decode()
@@ -20187,6 +20207,12 @@ def test_landing_cta_says_start_transcript_when_trial_off(monkeypatch):
     no = A.app.test_client().get('/no/podcast-til-tekst').data.decode()
     assert 'Start transkripsjon' in no
     assert 'Start gratis transkripsjon' not in no
+    es = A.app.test_client().get('/es/transcribir-podcast').data.decode()
+    assert 'Empezar transcripción' in es
+    assert 'Empezar transcripción gratis' not in es
+    de = A.app.test_client().get('/de/podcast-transkribieren').data.decode()
+    assert 'Transkription starten' in de
+    assert 'Kostenlos transkribieren' not in de
 
 
 @pytest.mark.parametrize('volume', [True, False])
@@ -20197,15 +20223,23 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
     spotify = c.get('/spotify-podcast-transcript').data.decode()
     generator = c.get('/podcast-transcript-generator').data.decode()
     no = c.get('/no/podcast-til-tekst').data.decode()
+    es = c.get('/es/transcribir-podcast').data.decode()
+    de = c.get('/de/podcast-transkribieren').data.decode()
     llms = c.get('/llms.txt').data.decode()
     full = c.get('/llms-full.txt').data.decode()
     trial = A.advertised_trial_minutes()
     assert f'{trial} minutes free' in spotify
     assert f'{trial} gratisminutter' in no
+    assert f'{trial} minutos gratis' in es
+    assert f'{trial} Minuten gratis' in de
     en_phrase = ('from $1.50 for 60 minutes, cheaper per minute the more you buy '
                  '(1,200 min for $11), or just the minutes one episode needs')
     nb_phrase = ('fra $1.50 for 60 minutter, billigere per minutt jo mer du kjøper '
                  '(1 200 min for $11), eller bare minuttene én episode trenger')
+    es_phrase = ('desde $1.50 por 60 minutos, más barato por minuto cuanto más compras '
+                 '(1.200 min por $11), o solo los minutos que dura un episodio')
+    de_phrase = ('ab $1.50 für 60 Minuten, günstiger pro Minute, je mehr du kaufst '
+                 '(1.200 Min. für $11), oder nur die Minuten einer Folge')
     if volume:
         # Spotify uses per-episode offers instead of the pack phrase in the
         # price line / cost FAQ; other English landings still use pack_phrase.
@@ -20216,12 +20250,83 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
             assert en_phrase in body
             assert '$5 for 300' not in body
         assert nb_phrase in no
+        assert es_phrase in es
+        assert de_phrase in de
     else:
         assert '$5 for 300 minutes' in spotify
         assert '$5 for 300 minutes' in generator
         assert '$5.00 for 300 minutes' in llms or '$5 for 300 minutes' in llms
         assert 'cheaper per minute the more you buy' not in spotify + generator + llms
         assert '5 dollar for 300 minutter' in no
+        assert '5 dólares por 300 minutos' in es
+        assert '5 Dollar für 300 Minuten' in de
+
+
+@pytest.mark.parametrize('path,lang,exclusives,no_key_bits', [
+    ('/es/transcribir-podcast', 'es',
+     ('exclusivos de Spotify', 'solo para suscriptores', 'no se pueden transcribir'),
+     ('clave es obligatoria', 'requiere una clave', 'necesitas una clave de openai')),
+    ('/de/podcast-transkribieren', 'de',
+     ('Exklusive Spotify-Podcasts', 'Abonnenten', 'nicht transkribieren'),
+     ('schlüssel erforderlich', 'api-schlüssel nötig', 'openai-schlüssel erforderlich')),
+])
+def test_es_de_landings_are_native_honest_and_priced(
+        trial_on, monkeypatch, path, lang, exclusives, no_key_bits):
+    """Native es/de pages: live trial + pack_phrase, exclusives honesty, no key-required."""
+    import landing_pages as lp
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    client = A.app.test_client()
+    html = client.get(path).data.decode()
+    trial = A.advertised_trial_minutes()
+    pack = A._landing_pack()
+    assert f'<html lang="{lang}">' in html
+    assert lp.pack_phrase(pack, lang) in html
+    if lang == 'es':
+        assert f'{trial} minutos gratis' in html
+        assert 'Empezar transcripción gratis' in html
+        assert 'Pega el enlace de Spotify' in html or 'enlace de Spotify' in html
+    else:
+        assert f'{trial} Minuten gratis' in html
+        assert 'Kostenlos transkribieren' in html
+        assert 'Spotify- oder Apple-Podcasts-Link' in html
+    body_lower = html.lower()
+    assert any(bit.lower() in body_lower for bit in exclusives)
+    assert all(bit not in body_lower for bit in no_key_bits)
+    # Thin English doorway pages stay gone.
+    assert client.get('/podcast-to-text/spanish').status_code == 404
+    assert client.get('/podcast-to-text/german').status_code == 404
+
+
+def test_es_de_landings_honest_when_trial_and_volume_off(monkeypatch):
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', False)
+    client = A.app.test_client()
+    es = client.get('/es/transcribir-podcast').data.decode()
+    de = client.get('/de/podcast-transkribieren').data.decode()
+    assert 'minutos gratis' not in es
+    assert 'Minuten gratis' not in de
+    assert '5 dólares por 300 minutos' in es
+    assert '5 Dollar für 300 Minuten' in de
+    assert 'Empezar transcripción gratis' not in es
+    assert 'Kostenlos transkribieren' not in de
+
+
+def test_llms_txt_labels_native_language_landings(trial_on):
+    body = A.app.test_client().get('/llms.txt').data.decode()
+    assert '/es/transcribir-podcast' in body and '(Spanish)' in body
+    assert '/de/podcast-transkribieren' in body and '(German)' in body
+    assert '/no/podcast-til-tekst' in body and '(Norwegian)' in body
+
+
+def test_footer_emits_hreflang_for_non_english_landings(trial_on):
+    home = A.app.test_client().get('/').data.decode()
+    assert 'href="/es/transcribir-podcast"' in home
+    assert 'href="/de/podcast-transkribieren"' in home
+    assert 'hreflang="es"' in home and 'lang="es"' in home
+    assert 'hreflang="de"' in home and 'lang="de"' in home
+    assert 'hreflang="nb"' in home and 'lang="nb"' in home
 
 
 def test_spotify_landing_will_work_line_and_cta_note(trial_on):

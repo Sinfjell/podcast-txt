@@ -22,6 +22,8 @@ PAGES = (
     ('landing_free', '/transcribe-podcast-free'),
     ('landing_youtube_vs', '/youtube-vs-podcast-transcript'),
     ('landing_no', '/no/podcast-til-tekst'),
+    ('landing_es', '/es/transcribir-podcast'),
+    ('landing_de', '/de/podcast-transkribieren'),
 )
 
 #: Compact footer column.
@@ -34,9 +36,18 @@ FOOTER = (
     'landing_free',
     'landing_youtube_vs',
     'landing_no',
+    'landing_es',
+    'landing_de',
 )
 
-#: Norwegian page <-> English podcast-to-text (reciprocal hreflang).
+#: Reciprocal hreflang group for the podcast-to-text family (x-default = en).
+HREFLANG_GROUP = {
+    'en': 'landing_podcast_to_text',
+    'nb': 'landing_no',
+    'es': 'landing_es',
+    'de': 'landing_de',
+}
+#: Kept for callers/tests that still look up the old Norwegian↔English pair.
 HREFLANG_PAIRS = {
     'landing_no': 'landing_podcast_to_text',
 }
@@ -50,42 +61,56 @@ SHORT_LABELS = {
     'landing_free': 'Transcribe a podcast free',
     'landing_youtube_vs': 'YouTube vs podcast transcript',
     'landing_no': 'Podcast til tekst (norsk)',
+    'landing_es': 'Transcribir podcast (español)',
+    'landing_de': 'Podcast transkribieren (Deutsch)',
+}
+
+#: English labels for non-English landings in llms.txt / llms-full.txt.
+LANG_LABELS_EN = {
+    'nb': 'Norwegian',
+    'no': 'Norwegian',
+    'es': 'Spanish',
+    'de': 'German',
 }
 
 TITLE_SUFFIX = ' — Podskrift'
 TITLE_MAX = 60
 META_MAX = 160
 
+_ENDPOINT_LANG = {ep: lang for lang, ep in HREFLANG_GROUP.items()}
+
 
 def lang_of(endpoint):
-    return 'nb' if endpoint == 'landing_no' else 'en'
+    """BCP 47 lang for *endpoint* (defaults to English for ungrouped pages)."""
+    return _ENDPOINT_LANG.get(endpoint, 'en')
 
 
 def hreflang_alternates(endpoint):
-    """[(hreflang, endpoint)] for *endpoint*, reciprocal by construction."""
-    en_to_nb = {en: nb for nb, en in HREFLANG_PAIRS.items()}
-    if endpoint in HREFLANG_PAIRS:
-        nb, en = endpoint, HREFLANG_PAIRS[endpoint]
-    elif endpoint in en_to_nb:
-        nb, en = en_to_nb[endpoint], endpoint
-    else:
+    """[(hreflang, endpoint)] for *endpoint*; full reciprocal set for the group."""
+    if endpoint not in HREFLANG_GROUP.values():
         return []
-    return [('en', en), ('nb', nb), ('x-default', en)]
+    out = [(lang, ep) for lang, ep in HREFLANG_GROUP.items()]
+    out.append(('x-default', HREFLANG_GROUP['en']))
+    return out
 
 
 def related_links(endpoint):
-    """Other landings first, then the Norwegian entry when browsing English."""
+    """Other landings first; native pages prefer Spotify/Apple/English siblings."""
     core = [
         'landing_generator', 'landing_spotify', 'landing_apple',
         'landing_podcast_to_text', 'landing_rss', 'landing_free',
         'landing_youtube_vs',
     ]
+    native = ('landing_no', 'landing_es', 'landing_de')
     if endpoint == 'landing_no':
         out = ['landing_podcast_to_text', 'landing_spotify', 'landing_apple',
                'landing_rss', 'landing_free', 'landing_generator',
                'landing_youtube_vs']
+    elif endpoint in ('landing_es', 'landing_de'):
+        out = ['landing_spotify', 'landing_apple', 'landing_podcast_to_text',
+               'landing_rss', 'landing_free']
     else:
-        out = [e for e in core if e != endpoint] + ['landing_no']
+        out = [e for e in core if e != endpoint] + list(native)
     seen, ordered = set(), []
     for e in out:
         if e not in seen and e != endpoint:
@@ -99,9 +124,14 @@ def _usd(cents):
 
 
 def _fmt_minutes(n, lang='en'):
-    """1,200 (en) / 1 200 (nb) for thousands."""
+    """1,200 (en) / 1 200 (nb) / 1.200 (es, de) for thousands."""
     if n >= 1000:
-        sep = ' ' if lang in ('no', 'nb') else ','
+        if lang in ('no', 'nb'):
+            sep = ' '
+        elif lang in ('es', 'de'):
+            sep = '.'
+        else:
+            sep = ','
         return f'{n // 1000}{sep}{n % 1000:03d}'
     return str(n)
 
@@ -115,16 +145,30 @@ def pack_phrase(pack, lang='en'):
         if lang in ('no', 'nb'):
             return (f'fra {lo} for 60 minutter, billigere per minutt jo mer du kjøper '
                     f'({top_min} min for {top}), eller bare minuttene én episode trenger')
+        if lang == 'es':
+            return (f'desde {lo} por 60 minutos, más barato por minuto cuanto más compras '
+                    f'({top_min} min por {top}), o solo los minutos que dura un episodio')
+        if lang == 'de':
+            return (f'ab {lo} für 60 Minuten, günstiger pro Minute, je mehr du kaufst '
+                    f'({top_min} Min. für {top}), oder nur die Minuten einer Folge')
         return (f'from {lo} for 60 minutes, cheaper per minute the more you buy '
                 f'({top_min} min for {top}), or just the minutes one episode needs')
     if lang in ('no', 'nb'):
         return f'{pack["price"]:g} dollar for {pack["minutes"]} minutter'
+    if lang == 'es':
+        return f'{pack["price"]:g} dólares por {pack["minutes"]} minutos'
+    if lang == 'de':
+        return f'{pack["price"]:g} Dollar für {pack["minutes"]} Minuten'
     return f'${pack["price"]:g} for {pack["minutes"]} minutes'
 
 
 def _start_button(trial, lang='en'):
     if lang in ('no', 'nb'):
         return 'Start gratis transkripsjon' if trial else 'Start transkripsjon'
+    if lang == 'es':
+        return 'Empezar transcripción gratis' if trial else 'Empezar transcripción'
+    if lang == 'de':
+        return 'Kostenlos transkribieren' if trial else 'Transkription starten'
     return 'Start free transcript' if trial else 'Start transcript'
 
 
@@ -177,6 +221,30 @@ def _price_no(trial, pack):
                      f'{pack_phrase(pack, "nb")}. Uten abonnement.')
     parts.append('Du kan også legge inn din egen OpenAI API-nøkkel og betale OpenAI '
                  'direkte. Det er valgfritt.')
+    return ' '.join(parts)
+
+
+def _price_es(trial, pack):
+    parts = []
+    if trial:
+        parts.append(f'Las cuentas nuevas reciben {trial} minutos gratis, sin tarjeta.')
+    if pack:
+        parts.append(f'Después compras minutos con un pago único: '
+                     f'{pack_phrase(pack, "es")}. Sin suscripción.')
+    parts.append('También puedes añadir tu propia clave de API de OpenAI y pagar a '
+                 'OpenAI directamente; es opcional.')
+    return ' '.join(parts)
+
+
+def _price_de(trial, pack):
+    parts = []
+    if trial:
+        parts.append(f'Neue Konten erhalten {trial} Minuten gratis, ohne Kreditkarte.')
+    if pack:
+        parts.append(f'Danach kaufst du Minuten per Einmalzahlung: '
+                     f'{pack_phrase(pack, "de")}. Ohne Abo.')
+    parts.append('Du kannst auch deinen eigenen OpenAI-API-Schlüssel hinterlegen und '
+                 'OpenAI direkt bezahlen. Das ist optional.')
     return ' '.join(parts)
 
 
@@ -532,6 +600,102 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
             ],
             faq=faq,
         )
+
+    if endpoint == 'landing_es':
+        # Neutral Spanish for Spain and Latin America; Spotify-first (≈89% of jobs).
+        free_es = f'{trial} minutos gratis' if trial else 'cuenta gratuita'
+        faq = [
+            ('¿Cuánto cuesta?', _price_es(trial, pack)),
+            ('¿Funciona bien en español?',
+             'Sí, cuando se habla con claridad, tanto en España como en Latinoamérica. Si el episodio '
+             'mezcla español e inglés, hay acentos marcados o varias personas hablan a la vez, '
+             'elige «Español» en lugar de la detección automática.'),
+            ('¿Funciona con todos los podcasts de Spotify?',
+             'Con la mayoría sí: casi todos tienen también un feed RSS público, y de ahí '
+             'sale el audio. Los exclusivos de Spotify y los episodios solo para '
+             'suscriptores no tienen feed público, así que no se pueden transcribir.'),
+            ('¿Tengo que subir el archivo de audio?',
+             'No. Pega un enlace de Spotify o Apple Podcasts, o la URL de un feed RSS, y '
+             'Podskrift descarga el audio del feed público del programa.'),
+            ('¿Qué recibo?',
+             'La transcripción completa como texto (.txt) y como subtítulos con marcas de '
+             'tiempo (.srt). Las transcripciones son privadas y solo tú las ves, salvo que '
+             'crees un enlace para compartir.'),
+            ('¿Podskrift traduce el podcast?',
+             'No: lo transcribe en el idioma del audio. Si necesitas una traducción, pega '
+             'el texto en ChatGPT o Claude.'),
+        ]
+        return dict(
+            lang='es',
+            title='Transcribir podcast a texto desde un enlace',
+            meta=('Pasa un podcast a texto sin subir audio. Pega el enlace de Spotify o '
+                  f'Apple Podcasts y descarga .txt y .srt. {free_es.capitalize()}.'),
+            h1='Transcribir un podcast a texto desde un enlace',
+            lede=('Pega el enlace de Spotify o Apple Podcasts. Podskrift encuentra el '
+                  'episodio en el feed público del programa y convierte el audio en texto '
+                  'que puedes copiar y descargar.'),
+            placeholder='Pega el enlace de Spotify o Apple Podcasts',
+            input_label='Enlace de Spotify, Apple Podcasts o RSS',
+            button=_start_button(trial, 'es'),
+            steps=[
+                ('Copia el enlace',
+                 'En Spotify o Apple Podcasts: «Compartir» y luego «Copiar enlace».'),
+                ('Pégalo aquí',
+                 'Elige el episodio y, si puedes, selecciona «Español» como idioma.'),
+                ('Recibe el texto',
+                 'Léelo en el navegador o descarga .txt y .srt.'),
+            ],
+            faq=faq,
+        )
+
+    if endpoint == 'landing_de':
+        free_de = f'{trial} Minuten gratis' if trial else 'Kostenloses Konto'
+        faq = [
+            ('Was kostet es?', _price_de(trial, pack)),
+            ('Wie gut funktioniert es auf Deutsch?',
+             'Gut, wenn deutlich gesprochen wird. Starker Dialekt, Durcheinanderreden und '
+             'Hintergrundmusik führen zu mehr Fehlern. Wähle „Deutsch“ statt der '
+             'automatischen Erkennung, dann wird das Ergebnis besser.'),
+            ('Funktioniert das mit jedem Spotify-Podcast?',
+             'Mit den meisten ja: fast jede Show hat auch einen öffentlichen RSS-Feed, '
+             'und von dort kommt das Audio. Exklusive Spotify-Podcasts und Folgen nur für '
+             'Abonnenten haben keinen öffentlichen Feed und lassen sich daher nicht '
+             'transkribieren.'),
+            ('Muss ich die Audiodatei hochladen?',
+             'Nein. Füge einen Spotify- oder Apple-Podcasts-Link oder eine RSS-URL ein. '
+             'Podskrift holt das Audio aus dem öffentlichen Feed der Show.'),
+            ('Was bekomme ich?',
+             'Die vollständige Transkription als Text (.txt) und als Untertitel mit '
+             'Zeitstempeln (.srt). Deine Transkripte sind privat, es sei denn, du '
+             'erstellst einen Freigabelink.'),
+            ('Übersetzt Podskrift den Podcast?',
+             'Nein, Podskrift transkribiert in der Sprache der Aufnahme. Wenn du eine '
+             'Übersetzung brauchst, füge den Text in ChatGPT oder Claude ein.'),
+        ]
+        return dict(
+            lang='de',
+            title='Podcast transkribieren: vom Link zum Text',
+            # free_de starts with a digit when the trial is on; .capitalize()
+            # would lowercase «Minuten», which German spelling forbids.
+            meta=('Podcast-Folge ohne Audiodatei in Text umwandeln. Spotify- oder '
+                  f'Apple-Podcasts-Link einfügen, .txt und .srt herunterladen. {free_de}.'),
+            h1='Podcast transkribieren, direkt vom Link',
+            lede=('Füge einen Spotify- oder Apple-Podcasts-Link ein. Podskrift findet '
+                  'dieselbe Folge im öffentlichen RSS-Feed der Show und macht aus dem '
+                  'Audio Text zum Kopieren und Herunterladen.'),
+            placeholder='Spotify- oder Apple-Podcasts-Link einfügen',
+            input_label='Spotify-, Apple-Podcasts- oder RSS-Link',
+            button=_start_button(trial, 'de'),
+            steps=[
+                ('Link kopieren',
+                 'In Spotify oder Apple Podcasts: Teilen, dann Link kopieren.'),
+                ('Hier einfügen',
+                 'Folge auswählen und am besten „Deutsch“ als Sprache wählen.'),
+                ('Text erhalten',
+                 'Im Browser lesen oder als .txt und .srt herunterladen.'),
+            ],
+            faq=faq,
+        )
     raise KeyError(endpoint)
 
 
@@ -544,6 +708,16 @@ UI = {
                ai='Bruk i ChatGPT og Claude', guides='Veiledninger', rss_help='Finn RSS-feeden',
                pricing='Priser', shows='Populære podkaster',
                note='Du kan også søke etter navnet på podkasten.'),
+    'es': dict(how='Cómo funciona', faq='Preguntas', related='Más formas de transcribir',
+               ai='Usar en ChatGPT y Claude', guides='Guías de configuración',
+               rss_help='Cómo encontrar un feed RSS',
+               pricing='Precios', shows='Podcasts populares',
+               note='También puedes buscar por el nombre del podcast.'),
+    'de': dict(how='So funktioniert es', faq='Fragen', related='Weitere Wege zur Transkription',
+               ai='In ChatGPT und Claude nutzen', guides='Einrichtungsanleitungen',
+               rss_help='RSS-Feed finden',
+               pricing='Preise', shows='Beliebte Podcasts',
+               note='Du kannst auch nach dem Podcastnamen suchen.'),
     'no': None,
 }
 UI['no'] = UI['nb']

@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "id": "es-de-native-landings",
+      "date": "2026-10-26",
+      "title": "Spanish and German transcript pages",
+      "summary": "New native pages at /es/transcribir-podcast and /de/podcast-transkribieren — paste a Spotify or Apple Podcasts link and get .txt and .srt, with the same honest limits as the English pages."
+    },
+    {
       "id": "seo-transcript-landing-pages",
       "date": "2026-10-23",
       "title": "New pages for common transcript searches",
