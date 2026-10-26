@@ -1,18 +1,11 @@
 {
   "version": 1,
+  "retired_ids": [
+    "es-de-native-landings",
+    "partial-preview-minutes-wording",
+    "seo-transcript-landing-pages"
+  ],
   "entries": [
-    {
-      "id": "es-de-native-landings",
-      "date": "2026-10-26",
-      "title": "Spanish and German transcript pages",
-      "summary": "New native pages at /es/transcribir-podcast and /de/podcast-transkribieren — paste a Spotify or Apple Podcasts link and get .txt and .srt, with the same honest limits as the English pages."
-    },
-    {
-      "id": "seo-transcript-landing-pages",
-      "date": "2026-10-23",
-      "title": "New pages for common transcript searches",
-      "summary": "Dedicated pages for generating a podcast transcript, pasting Spotify or Apple Podcasts links, language-specific podcast-to-text, and an honest YouTube vs podcast comparison — plus clearer guidance for ChatGPT and other assistants."
-    },
     {
       "id": "checkout-recovery-email",
       "date": "2026-10-21",
@@ -145,12 +138,6 @@
       "date": "2026-10-09",
       "title": "Unsubscribe asks for a confirmation click",
       "summary": "Opening an unsubscribe link now shows a short confirm page before anything changes, so link scanners cannot opt you out. One-click unsubscribe from your mail app still works as before."
-    },
-    {
-      "id": "partial-preview-minutes-wording",
-      "date": "2026-10-09",
-      "title": "Clearer free-preview length wording",
-      "summary": "Partial previews now spell out the episode length in minutes (not a bare number) on the result page, downloads, and copy."
     },
     {
       "id": "email-alerts-coming-soon",

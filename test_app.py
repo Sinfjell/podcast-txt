@@ -9481,6 +9481,33 @@ def test_changelog_json_is_well_formed():
     assert '/whats-new' in llms
 
 
+def test_whats_new_retired_ids_are_caught_up_not_replayed(trial_on):
+    """Non-feature entries (SEO/landing pages, copy tweaks) were removed from
+    What's new. Browsers whose seen-state is one of those ids must be treated
+    as caught up, not shown older entries again or broken.
+    """
+    import json as _json
+    import re as _re
+    retired = A.load_changelog_retired_ids()
+    for rid in ('es-de-native-landings', 'seo-transcript-landing-pages',
+                'partial-preview-minutes-wording'):
+        assert rid in retired
+    ids = {e['id'] for e in A.load_changelog_entries()}
+    assert not ids & set(retired), 'retired ids must not be live entries'
+
+    body = A.app.test_client().get('/es/transcribir-podcast').data.decode()
+    m = _re.search(r'<script type="application/json" id="whatsNewData">(.*?)</script>',
+                   body, _re.S)
+    assert m
+    data = _json.loads(m.group(1))
+    assert data['latestId'] == A.load_changelog_entries()[0]['id']
+    assert data['latestId'] not in retired
+    assert set(retired) <= set(data['retiredIds'])
+    assert all(e['id'] not in retired for e in data['entries'])
+    assert 'Spanish and German transcript pages' not in body
+    assert 'var retired = data.retiredIds || [];' in body
+
+
 # --- trial_limit_hit: the buying signal ---------------------------------------
 
 def _limit_hits(ph_events):

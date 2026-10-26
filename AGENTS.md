@@ -13,6 +13,8 @@ Any PR that ships a **user-facing** feature must add an entry to
 [`changelog.json`](changelog.json) (top of the `entries` list, newest first).
 
 - Skip chores, refactors, dependency bumps, ops/analytics-only work.
+- Never add SEO/landing pages, marketing copy or wording tweaks — only new
+  functionality users can use. Removed ids go in `retired_ids`.
 - Title + one or two sentences in plain user language (English — matches the UI).
 - Optional helper: `python3 ops/suggest-changelog.py` (suggests from merged PR
   titles; not CI). Full format lives under **Build in public** in CLAUDE.md.

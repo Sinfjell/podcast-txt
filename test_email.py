@@ -746,7 +746,8 @@ def test_changelog_hides_email_keeps_user_visible_first():
     ids = [e['id'] for e in entries]
     # Infra/plumbing (deploy drain, restarts) never goes in What's new.
     assert 'resume-after-deploy' not in ids
-    assert 'partial-preview-minutes-wording' in ids
+    # Copy-only wording tweaks are not features either.
+    assert 'partial-preview-minutes-wording' not in ids
     assert 'partial-trial-preview' in ids
     assert 'email-alerts-coming-soon' not in set(ids)
 
