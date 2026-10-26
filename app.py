@@ -11652,9 +11652,14 @@ def podcast_show(slug):
 
 @app.context_processor
 def inject_landing_footer_links():
-    """Keyword landing pages, linked from every footer for crawl depth."""
+    """Keyword landing pages, linked from every footer for crawl depth.
+
+    Each tuple is (endpoint, label, lang). Non-English landings get
+    hreflang/lang on the footer anchor from *lang*.
+    """
     return {'landing_footer_links': [
-        (endpoint, landing_pages_mod.SHORT_LABELS[endpoint])
+        (endpoint, landing_pages_mod.SHORT_LABELS[endpoint],
+         landing_pages_mod.lang_of(endpoint))
         for endpoint in landing_pages_mod.FOOTER]}
 
 
@@ -11685,20 +11690,33 @@ def landing_page_data(endpoint):
         lang_count=len(LANGUAGE_ENGLISH_NAMES))
 
 
+def _landing_price_line(ui_lang, trial, pack):
+    """Muted cost line under the landing input; branches on page language."""
+    if ui_lang in ('no', 'nb'):
+        bits = [f'{trial} gratisminutter.'] if trial else []
+        if pack:
+            bits.append('Deretter ' + landing_pages_mod.pack_phrase(pack, 'nb') + '.')
+    elif ui_lang == 'es':
+        bits = [f'{trial} minutos gratis.'] if trial else []
+        if pack:
+            bits.append('Después ' + landing_pages_mod.pack_phrase(pack, 'es') + '.')
+    elif ui_lang == 'de':
+        bits = [f'{trial} Minuten gratis.'] if trial else []
+        if pack:
+            bits.append('Danach ' + landing_pages_mod.pack_phrase(pack, 'de') + '.')
+    else:
+        bits = [f'{trial} minutes free.'] if trial else []
+        if pack:
+            bits.append(f'Then {landing_pages_mod.pack_phrase(pack)}, no subscription.')
+    return ' '.join(bits)
+
+
 def _render_landing(endpoint):
     page = landing_page_data(endpoint)
     page_url = public_url(endpoint)
     trial = advertised_trial_minutes()
     pack = _landing_pack()
     ui_lang = page['lang']
-    if ui_lang in ('no', 'nb'):
-        bits = [f'{trial} gratisminutter.'] if trial else []
-        if pack:
-            bits.append('Deretter ' + landing_pages_mod.pack_phrase(pack, 'nb') + '.')
-    else:
-        bits = [f'{trial} minutes free.'] if trial else []
-        if pack:
-            bits.append(f'Then {landing_pages_mod.pack_phrase(pack)}, no subscription.')
     hreflang = [
         (hl, public_url(ep))
         for hl, ep in landing_pages_mod.hreflang_alternates(endpoint)
@@ -11709,7 +11727,7 @@ def _render_landing(endpoint):
         page_url=page_url,
         landing_key=endpoint,
         ui=landing_pages_mod.UI[ui_lang],
-        price_line=' '.join(bits),
+        price_line=_landing_price_line(ui_lang, trial, pack),
         hreflang=hreflang,
         related=landing_pages_mod.related_links(endpoint),
         structured_data=_faq_page_structured_data(
@@ -11813,9 +11831,14 @@ def _llms_body(*, full=False):
         f'roughly USD {60 * WHISPER_COST_PER_MINUTE:.2f} per hour of audio. An API key '
         f'is never required to use Podskrift.')
     cost = '\n'.join(cost_lines)
+    def _llms_landing_label(endpoint):
+        lang = landing_pages_mod.lang_of(endpoint)
+        label = landing_pages_mod.LANG_LABELS_EN.get(lang)
+        return f' ({label})' if label else ''
+
     landing_lines = '\n'.join(
         f'- [{landing_page_data(e)["title"]}]({public_url(e)})'
-        + (' (Norwegian)' if e == 'landing_no' else '')
+        + _llms_landing_label(e)
         for e, _ in landing_pages_mod.PAGES)
     mcp_on = mcp_server_mod.mcp_enabled()
     mcp_section = (f"""## Use it from ChatGPT, Claude and other AI apps (MCP)
