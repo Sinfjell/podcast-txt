@@ -20221,6 +20221,7 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
     monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', volume)
     c = A.app.test_client()
     spotify = c.get('/spotify-podcast-transcript').data.decode()
+    generator = c.get('/podcast-transcript-generator').data.decode()
     no = c.get('/no/podcast-til-tekst').data.decode()
     es = c.get('/es/transcribir-podcast').data.decode()
     de = c.get('/de/podcast-transkribieren').data.decode()
@@ -20240,7 +20241,12 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
     de_phrase = ('ab $1.50 für 60 Minuten, günstiger pro Minute, je mehr du kaufst '
                  '(1.200 Min. für $11), oder nur die Minuten einer Folge')
     if volume:
-        for body in (spotify, llms, full):
+        # Spotify uses per-episode offers instead of the pack phrase in the
+        # price line / cost FAQ; other English landings still use pack_phrase.
+        finish = A.episode_offer(trial + 60, trial)['price']
+        assert f'finish the episode from {finish}' in spotify
+        assert en_phrase not in spotify
+        for body in (generator, llms, full):
             assert en_phrase in body
             assert '$5 for 300' not in body
         assert nb_phrase in no
@@ -20248,8 +20254,9 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
         assert de_phrase in de
     else:
         assert '$5 for 300 minutes' in spotify
+        assert '$5 for 300 minutes' in generator
         assert '$5.00 for 300 minutes' in llms or '$5 for 300 minutes' in llms
-        assert 'cheaper per minute the more you buy' not in spotify + llms
+        assert 'cheaper per minute the more you buy' not in spotify + generator + llms
         assert '5 dollar for 300 minutter' in no
         assert '5 dólares por 300 minutos' in es
         assert '5 Dollar für 300 Minuten' in de
@@ -20320,3 +20327,99 @@ def test_footer_emits_hreflang_for_non_english_landings(trial_on):
     assert 'hreflang="es"' in home and 'lang="es"' in home
     assert 'hreflang="de"' in home and 'lang="de"' in home
     assert 'hreflang="nb"' in home and 'lang="nb"' in home
+
+
+def test_spotify_landing_will_work_line_and_cta_note(trial_on):
+    html = A.app.test_client().get('/spotify-podcast-transcript').data.decode()
+    assert 'Spotify Originals' in html and 'exclusives' in html.lower()
+    assert 'video-only' in html.lower()
+    # will-work sits in the form, before the FAQ.
+    form = html.split('</form>', 1)[0]
+    assert 'public RSS feed' in form
+    assert 'Originals' in form
+    assert 'You create a free account after you pick the episode.' in form
+    assert 'What you get' in html and 'Example format' in html
+    # Jinja escapes --> inside the snippet; the copy button still yields real SRT.
+    assert '00:12:31,200 --&gt; 00:12:35,900' in html
+    assert 'href="/ai"' in html
+    # Other landings stay free of Spotify-only chrome.
+    other = A.app.test_client().get('/podcast-to-text').data.decode()
+    assert 'What you get' not in other
+    assert 'cta-note' not in other
+    assert 'You create a free account after you pick the episode.' not in other
+
+
+def test_spotify_landing_cost_faq_uses_live_episode_offer(trial_on, monkeypatch):
+    """Cost examples must come from episode_offer, never hard-coded dollars."""
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    trial = A.advertised_trial_minutes()
+
+    def fake_quote(minutes):
+        # Sentinel so a hard-coded "$1.50" in landing copy fails this test.
+        price = f'$7.{int(minutes):02d}'
+        return {
+            'minutes': int(minutes),
+            'amount_cents': 700 + int(minutes),
+            'price': price,
+            'cents_per_minute': 1.0,
+            'savings_percent': 0,
+            'bucket': 'test',
+        }
+
+    monkeypatch.setattr(A.pricing_volume, 'quote', fake_quote)
+    expected = {
+        ep: A.episode_offer(ep, trial or 0)['price'] for ep in (90, 120, 180)
+    }
+    finish = A.episode_offer(trial + 60, trial)['price']
+    html = A.app.test_client().get('/spotify-podcast-transcript').data.decode()
+    for ep, price in expected.items():
+        assert f'{ep} min: first {trial} min free, the rest {price}' in html
+    assert f'finish the episode from {finish}' in html
+    assert 'One-time, VAT included, minutes never expire' in html
+    # Sentinels prove copy is live; site chrome may still mention floor prices.
+    assert all(p.startswith('$7.') for p in expected.values())
+    # No hard-coded dollar amounts in the page module.
+    import pathlib
+    src = pathlib.Path('landing_pages.py').read_text()
+    assert '$1.50' not in src and '$2.38' not in src
+
+
+def test_spotify_landing_cost_faq_falls_back_to_pack_when_volume_off(
+        trial_on, monkeypatch):
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', False)
+    html = A.app.test_client().get('/spotify-podcast-transcript').data.decode()
+    pack = A._landing_pack()
+    import landing_pages as lp
+    assert lp.pack_phrase(pack) in html
+    # No per-episode offer lines.
+    assert '90 min: first' not in html
+    assert '90 min: $' not in html
+
+
+def test_spotify_landing_omits_free_minutes_when_trial_off(monkeypatch):
+    monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    html = A.app.test_client().get('/spotify-podcast-transcript').data.decode()
+    assert 'minutes free' not in html.lower()
+    # Cost FAQ still quotes live offers (balance 0).
+    for ep in (90, 120, 180):
+        price = A.episode_offer(ep, 0)['price']
+        assert f'{ep} min: {price}' in html
+
+
+def test_landing_cta_submitted_on_every_landing(trial_on):
+    import ops.posthog_daily_health as ph
+    assert 'landing_cta_submitted' in ph.PODSKRIFT_EVENTS
+    client = A.app.test_client()
+    for path in LANDING_PATHS:
+        html = client.get(path).data.decode()
+        assert "capture('landing_cta_submitted'" in html
+        assert 'podskriftLeaveSafeCaptureOpts' in html
+        assert 'input_type' in html
+        # Never send the raw query (private feed tokens) — only has_query bool.
+        chunk = html.split("capture('landing_cta_submitted'", 1)[1][:500]
+        assert 'has_query:' in chunk
+        assert 'query: q' not in chunk and "query: '" not in chunk
