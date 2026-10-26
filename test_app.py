@@ -20337,7 +20337,7 @@ def test_spotify_landing_will_work_line_and_cta_note(trial_on):
     form = html.split('</form>', 1)[0]
     assert 'public RSS feed' in form
     assert 'Originals' in form
-    assert 'No card. You create a free account after you pick the episode.' in form
+    assert 'You create a free account after you pick the episode.' in form
     assert 'What you get' in html and 'Example format' in html
     # Jinja escapes --> inside the snippet; the copy button still yields real SRT.
     assert '00:12:31,200 --&gt; 00:12:35,900' in html

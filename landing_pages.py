@@ -345,7 +345,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
             button=start,
             will_work=('Works when the show also has a public RSS feed — most do. '
                        'Spotify Originals, exclusives and video-only shows don’t.'),
-            cta_note=('No card. You create a free account after you pick the episode.'),
+            cta_note=('You create a free account after you pick the episode.'),
             example_label='Example format',
             example_txt=example_txt,
             example_srt=example_srt,
