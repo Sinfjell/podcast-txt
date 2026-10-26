@@ -1485,6 +1485,7 @@
     </aside>
     <script type="application/json" id="whatsNewData">{{
         {'latestId': changelog_latest_id, 'entries': changelog_preview,
+         'retiredIds': changelog_retired_ids or [],
          'pagePath': url_for('whats_new')} | tojson
     }}</script>
 
@@ -2137,6 +2138,12 @@
             return;
         }
         if (seen === latestId) return;
+        // Seen id was a retired (non-feature) entry: everything still listed
+        // is older than it, so the visitor is already caught up.
+        var retired = data.retiredIds || [];
+        for (var r = 0; r < retired.length; r++) {
+            if (retired[r] === seen) { markSeen(); return; }
+        }
 
         var unseen = [];
         for (var i = 0; i < entries.length; i++) {

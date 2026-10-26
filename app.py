@@ -11443,6 +11443,7 @@ def inject_changelog_popup():
     return {
         'changelog_latest_id': entries[0]['id'] if entries else '',
         'changelog_preview': preview,
+        'changelog_retired_ids': load_changelog_retired_ids(),
     }
 
 
@@ -12647,6 +12648,23 @@ CUSTOMER_API_DOC_PATH = os.path.join(
 
 CHANGELOG_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'changelog.json')
+
+
+def load_changelog_retired_ids():
+    """Ids removed from changelog.json (not user-facing features).
+
+    Browsers may still hold one of these as their What's new seen-state; the
+    popup treats them as "caught up" instead of replaying older entries.
+    """
+    try:
+        with open(CHANGELOG_PATH, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    raw = data.get('retired_ids') if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [str(x).strip() for x in raw if isinstance(x, str) and x.strip()]
 
 
 def load_changelog_entries():

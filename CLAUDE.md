@@ -88,7 +88,10 @@ dismissible popup (localStorage) for entries newer than their last visit.
 
 **Any PR that ships a user-facing feature must add a changelog entry** at the
 top of `entries` (newest first). Skip chores, refactors, dependency bumps, and
-ops/analytics-only changes.
+ops/analytics-only changes. What's new is for **new functionality** only: no
+SEO/landing pages, marketing copy, translations of marketing pages, or wording
+tweaks. If you remove an entry, add its id to `retired_ids` so browsers that
+had it as their seen-state are treated as caught up.
 
 ```json
 {
