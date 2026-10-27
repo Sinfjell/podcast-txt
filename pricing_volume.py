@@ -213,3 +213,59 @@ def minutes_bucket(minutes):
     if m <= 600:
         return '301-600'
     return '601-1200'
+
+
+# ---------------------------------------------------------------------------
+# Remaining-minutes offer (7-day test, approved by Sindre 2026-10-27)
+# ---------------------------------------------------------------------------
+#: A partial free preview already covered the opening of the episode. This
+#: offer prices the finish on the minutes the preview did NOT cover, while
+#: still granting enough minutes to re-run the whole episode (the customer
+#: gets the full transcript). Sindre explicitly overrode the $1.50 minimum
+#: for this offer only; the cost floor (OpenAI + Stripe fee) still holds.
+#: Like a curve version, a released tier table is never edited: a new table
+#: gets a new version key.
+REMAINING_OFFER_VERSION = 'rem_v1'
+#: Analytics value for offer_variant while the test is on.
+REMAINING_OFFER_VARIANT = 'remaining_v1'
+#: Baseline variant name (price of the full episode on the volume curve).
+FULL_EPISODE_OFFER_VARIANT = 'full_episode'
+#: (max missing minutes, price in cents). Past the last tier the volume
+#: curve (vol_v1) is applied to the missing minutes, rounded up to the grid.
+REMAINING_OFFER_TIERS = {
+    'rem_v1': ((30, 99), (60, 149), (120, 199)),
+}
+
+
+def remaining_offer_cents(missing_minutes, grant_minutes,
+                          version=REMAINING_OFFER_VERSION):
+    """Price in cents of finishing an episode with *missing_minutes* left,
+    granting *grant_minutes*; None when the inputs or version are invalid.
+
+    Deterministic in (missing, grant, version) so the webhook can recompute
+    it from session metadata. Never below the cost floor of what is granted
+    and never above the regular price of the same grant.
+    """
+    tiers = REMAINING_OFFER_TIERS.get(str(version)) if version else None
+    if tiers is None:
+        return None
+    try:
+        missing = int(missing_minutes)
+        grant = int(grant_minutes)
+    except (TypeError, ValueError):
+        return None
+    if missing <= 0 or not is_valid_quantity(grant):
+        return None
+    cents = None
+    for cap, tier_cents in tiers:
+        if missing <= cap:
+            cents = tier_cents
+            break
+    if cents is None:
+        step = VOLUME_STEP_MINUTES
+        qty = int(math.ceil(missing / step) * step)
+        qty = max(VOLUME_MIN_MINUTES, min(VOLUME_MAX_MINUTES, qty))
+        cents = price_cents_for(qty, 'vol_v1')
+    regular = price_cents_for(grant, 'vol_v1')
+    return min(regular, max(cents, floor_cents(grant)))
+

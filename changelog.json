@@ -7,6 +7,12 @@
   ],
   "entries": [
     {
+      "id": "finish-preview-remaining-minutes",
+      "date": "2026-10-27",
+      "title": "Finish a free preview for less, in your language",
+      "summary": "After a free preview, the offer to finish the episode now shows in Spanish, German, Dutch, French and Portuguese with an approximate price in your currency, and for now you pay only for the minutes the preview didn't cover."
+    },
+    {
       "id": "checkout-recovery-email",
       "date": "2026-10-21",
       "title": "A nudge if you leave checkout unfinished",

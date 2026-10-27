@@ -111,7 +111,19 @@ def session_offer(d: dict) -> Optional[dict]:
         'return_to': return_to,
         'pack': (meta.get('pack') or '')[:64] or None,
         'location': (meta.get('location') or meta.get('source') or '')[:64] or None,
+        # Partial-preview finish: re-priced from the task on the way back.
+        'task_id': (meta.get('task_id') or '')[:64] or None,
     }
+
+
+def finish_offer_for(task_id, user):
+    """Live partial-preview finish offer for a recovery email, or None."""
+    if not task_id or user is None:
+        return None
+    A = _app()
+    task = A.TranscriptionTask.query.filter_by(
+        id=task_id, user_id=user.id).first()
+    return A.partial_finish_offer(task, user) if task is not None else None
 
 
 def offer_price_label(minutes: int) -> str:
@@ -140,7 +152,7 @@ def _click_serializer(secret_key: str) -> URLSafeTimedSerializer:
 
 def make_click_token(secret_key: str, *, user_id: int, minutes: int,
                      price_source: str, expired_session_id: str,
-                     return_to: str = '') -> str:
+                     return_to: str = '', task_id: str = '') -> str:
     data: dict[str, Any] = {
         'u': int(user_id),
         'm': int(minutes),
@@ -149,6 +161,8 @@ def make_click_token(secret_key: str, *, user_id: int, minutes: int,
     }
     if return_to:
         data['rt'] = return_to[:500]
+    if task_id:
+        data['t'] = str(task_id)[:64]
     return _click_serializer(secret_key).dumps(data)
 
 
@@ -172,16 +186,17 @@ def parse_click_token(secret_key: str, token: str) -> Optional[dict]:
     data['ps'] = ps
     data['cs'] = str(data.get('cs') or '')[:128]
     data['rt'] = str(data.get('rt') or '')[:500]
+    data['t'] = str(data.get('t') or '')[:64]
     return data
 
 
 def click_url(public_base: str, secret_key: str, *, user_id: int, minutes: int,
               price_source: str, expired_session_id: str,
-              return_to: str = '') -> str:
+              return_to: str = '', task_id: str = '') -> str:
     token = make_click_token(
         secret_key, user_id=user_id, minutes=minutes,
         price_source=price_source, expired_session_id=expired_session_id,
-        return_to=return_to)
+        return_to=return_to, task_id=task_id)
     base = (public_base or '').rstrip('/')
     query = urlencode({
         'utm_source': 'email',
@@ -377,6 +392,11 @@ def handle_expired_session(obj, *, now: Optional[datetime] = None) -> str:
 
         try:
             price = offer_price_label(offer['minutes'])
+            finish = finish_offer_for(offer.get('task_id'), user)
+            if finish is not None:
+                # Same price the click will charge (remaining-minutes test).
+                offer = dict(offer, minutes=finish['minutes'])
+                price = finish['price']
             public_base = A.PUBLIC_BASE_URL or ''
             secret_key = A.app.secret_key
             resume = click_url(
@@ -386,6 +406,7 @@ def handle_expired_session(obj, *, now: Optional[datetime] = None) -> str:
                 price_source=offer['price_source'],
                 expired_session_id=cs_id,
                 return_to=offer.get('return_to') or '',
+                task_id=offer.get('task_id') or '',
             )
             unsub = email_notify.unsubscribe_url(public_base, secret_key, user.id)
             subject, text, html = build_bodies(

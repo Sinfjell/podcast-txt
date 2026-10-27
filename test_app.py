@@ -20450,3 +20450,274 @@ def test_landing_cta_submitted_on_every_landing(trial_on):
         chunk = html.split("capture('landing_cta_submitted'", 1)[1][:500]
         assert 'has_query:' in chunk
         assert 'query: q' not in chunk and "query: '" not in chunk
+
+
+# ---------------------------------------------------------------------------
+# Remaining-minutes offer (rem_v1, 7-day test) + localized partial card
+# ---------------------------------------------------------------------------
+
+import paywall_i18n as P  # noqa: E402
+
+
+@pytest.fixture
+def remaining_on(monkeypatch, volume_on):
+    start = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    monkeypatch.setenv('REMAINING_MINUTES_OFFER', '1')
+    monkeypatch.setenv('REMAINING_MINUTES_OFFER_START', start)
+    monkeypatch.delenv('REMAINING_MINUTES_OFFER_DAYS', raising=False)
+    return volume_on
+
+
+def _partial_task(uid, task_id, preview_min=60, episode_min=117):
+    from models import db, TranscriptionTask
+    with A.app.app_context():
+        db.session.query(TranscriptionTask).filter_by(id=task_id).delete()
+        db.session.add(TranscriptionTask(
+            id=task_id, user_id=uid, episode_title='Long Ep',
+            podcast_name='Show', status='completed', phase='completed',
+            transcript_text='preview body',
+            source_audio_url='https://cdn.example.com/long.mp3',
+            language='es', trial_seconds_charged=preview_min * 60,
+            partial_meta=A.encode_partial_task_meta(
+                preview_min * 60, episode_min * 60),
+        ))
+        db.session.commit()
+
+
+@pytest.mark.parametrize('missing,grant,cents', [
+    (1, 60, 99), (30, 90, 99), (31, 90, 149), (57, 120, 149), (60, 120, 149),
+    (61, 135, 199), (120, 180, 199),
+    # Past 120 missing: the vol_v1 curve on the missing minutes (grid-rounded).
+    (121, 180, pv.price_cents_for(135, 'vol_v1')),
+    (240, 300, pv.price_cents_for(240, 'vol_v1')),
+])
+def test_remaining_offer_tiers(missing, grant, cents):
+    assert pv.remaining_offer_cents(missing, grant) == cents
+    # Never below what the grant costs us, never above the regular price.
+    assert cents >= pv.floor_cents(grant)
+    assert cents <= pv.price_cents_for(grant, 'vol_v1')
+
+
+@pytest.mark.parametrize('missing,grant', [
+    (0, 120), (-5, 120), (57, 61), (57, 0), ('x', 120), (57, None)])
+def test_remaining_offer_rejects_bad_inputs(missing, grant):
+    assert pv.remaining_offer_cents(missing, grant) is None
+
+
+def test_remaining_offer_unknown_version():
+    assert pv.remaining_offer_cents(57, 120, 'rem_v9') is None
+    assert pv.remaining_offer_cents(57, 120, None) is None
+
+
+def test_remaining_offer_window_needs_flag_and_start():
+    now = datetime(2026, 10, 27, 12, 0, tzinfo=timezone.utc)
+    env = {'REMAINING_MINUTES_OFFER': '1'}
+    assert A.remaining_offer_window(env) is None          # no start
+    env['REMAINING_MINUTES_OFFER_START'] = 'not-a-date'
+    assert A.remaining_offer_window(env) is None
+    env['REMAINING_MINUTES_OFFER_START'] = '2026-10-27T10:00:00+01:00'
+    start, end = A.remaining_offer_window(env)
+    assert end - start == timedelta(days=7)
+    assert A.remaining_offer_active(now, env) is True
+    assert A.remaining_offer_active(start - timedelta(seconds=1), env) is False
+    assert A.remaining_offer_active(end, env) is False    # ends on its own
+    assert A.remaining_offer_active(now, dict(env, REMAINING_MINUTES_OFFER='0')) is False
+    assert A.remaining_offer_active(now, dict(env, REMAINING_MINUTES_OFFER_DAYS='0')) is False
+
+
+def test_partial_finish_offer_baseline_when_test_off(volume_on, monkeypatch):
+    monkeypatch.delenv('REMAINING_MINUTES_OFFER', raising=False)
+    uid = _make_user('rem-off@test.com', limit=3600, used=3600)
+    _set_paid(uid, 0)
+    _partial_task(uid, 'rem-off-1')
+    from models import db, User, TranscriptionTask
+    with A.app.app_context():
+        offer = A.partial_finish_offer(
+            db.session.get(TranscriptionTask, 'rem-off-1'), db.session.get(User, uid))
+    assert offer['variant'] == 'full_episode'
+    assert offer['amount_cents'] == pv.price_cents(120) == 238
+    assert 'pricing_version' not in offer
+
+
+def test_status_card_shows_remaining_price_localized(remaining_on):
+    uid = _make_user('rem-status@test.com', limit=3600, used=3600)
+    _set_paid(uid, 0)
+    _partial_task(uid, 'rem-status-1')
+    client = _login(uid)
+    en = client.get('/status/rem-status-1').get_json()
+    assert en['episode_offer']['amount_cents'] == 149
+    assert en['episode_offer']['minutes'] == 120       # full re-run is covered
+    assert en['episode_offer']['variant'] == 'remaining_v1'
+    assert en['card']['button_buy'] == 'Get the remaining 57 min for $1.49'
+    assert en['card']['local_price_line'] == ''        # en-US: no local guess
+    es = client.get('/status/rem-status-1', headers={
+        'Accept-Language': 'es-ES,es;q=0.9'}).get_json()
+    assert es['card']['locale'] == 'es'
+    assert es['card']['button_buy'] == 'Obtén los 57 min restantes por 1,49\u00a0$'
+    assert es['card']['local_price'] == '1,33\u00a0€'
+    assert 'Stripe' in es['card']['local_price_line']
+    de = client.get('/status/rem-status-1', headers={
+        'Accept-Language': 'de'}).get_json()
+    assert de['card']['button_buy'].startswith('Restliche 57 Min.')
+
+
+def test_remaining_checkout_charges_what_the_card_shows(remaining_on, ph_events):
+    uid = _make_user('rem-co@test.com', limit=3600, used=3600)
+    _set_paid(uid, 0)
+    _partial_task(uid, 'rem-co-1')
+    client, token = _vol_csrf_client(uid)
+    shown = client.get('/status/rem-co-1').get_json()['episode_offer']
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'partial_preview',
+        # Tampered fields: the server re-derives quantity and price from the task.
+        'minutes': '60', 'price_source': 'slider', 'amount_cents': '1',
+        'offer': 'remaining', 'task_id': 'rem-co-1',
+    })
+    assert resp.status_code == 303
+    kw = remaining_on['last_create_params']
+    assert kw['line_items'][0]['price_data']['unit_amount'] == shown['amount_cents'] == 149
+    meta = kw['metadata']
+    assert meta['minutes'] == '120' and meta['amount_cents'] == '149'
+    assert meta['pricing_version'] == 'rem_v1'
+    assert meta['missing_minutes'] == '57'
+    assert meta['offer_variant'] == 'remaining_v1'
+    assert meta['task_id'] == 'rem-co-1'
+    assert meta['price_source'] == 'episode'
+    props = [e for e in ph_events.events
+             if e['event'] == 'checkout_started'][-1]['properties']
+    assert props['offer_variant'] == 'remaining_v1'
+    assert props['amount_cents'] == 149 and props['minutes'] == 120
+
+
+def test_remaining_checkout_ignores_someone_elses_task(remaining_on):
+    owner = _make_user('rem-owner@test.com', limit=3600, used=3600)
+    other = _make_user('rem-other@test.com', limit=3600, used=3600)
+    _set_paid(other, 0)
+    _partial_task(owner, 'rem-owned-1')
+    client, token = _vol_csrf_client(other)
+    client.post('/billing/checkout', data={
+        'csrf_token': token, 'minutes': '120', 'price_source': 'episode',
+        'offer': 'remaining', 'task_id': 'rem-owned-1'})
+    kw = remaining_on['last_create_params']
+    assert kw['line_items'][0]['price_data']['unit_amount'] == pv.price_cents(120)
+    assert kw['metadata']['pricing_version'] == 'vol_v1'
+    assert 'missing_minutes' not in kw['metadata']
+
+
+def test_remaining_checkout_after_test_ends_is_regular_price(remaining_on, monkeypatch):
+    monkeypatch.setenv('REMAINING_MINUTES_OFFER_START', '2020-01-01T00:00:00+00:00')
+    uid = _make_user('rem-ended@test.com', limit=3600, used=3600)
+    _set_paid(uid, 0)
+    _partial_task(uid, 'rem-ended-1')
+    client, token = _vol_csrf_client(uid)
+    client.post('/billing/checkout', data={
+        'csrf_token': token, 'minutes': '120', 'price_source': 'episode',
+        'offer': 'remaining', 'task_id': 'rem-ended-1'})
+    meta = remaining_on['last_create_params']['metadata']
+    assert meta['pricing_version'] == 'vol_v1'
+    assert meta['amount_cents'] == str(pv.price_cents(120))
+    assert meta['offer_variant'] == 'full_episode'
+
+
+def _rem_session(uid, session_id, minutes=120, amount=149, missing='57', **kw):
+    d = _volume_session(uid, minutes, amount, session_id=session_id,
+                        price_source='episode', pricing_version='rem_v1', **kw)
+    d['metadata'] = dict(d['metadata'], missing_minutes=missing,
+                         offer_variant='remaining_v1', task_id='t-1')
+    return d
+
+
+def test_remaining_webhook_credits_full_grant_once(remaining_on, ph_events):
+    from models import CreditPurchase
+    uid = _make_user('rem-wh@test.com', limit=3600, used=3600)
+    _set_paid(uid, 0)
+    sess = _rem_session(uid, 'cs_rem_once')
+    assert _register_and_post(remaining_on, sess).status_code == 200
+    assert _paid(uid) == 120 * 60
+    _register_and_post(remaining_on, sess)
+    _register_and_post(remaining_on, sess, eid='evt_rem_other')
+    assert _paid(uid) == 120 * 60
+    with A.app.app_context():
+        rows = CreditPurchase.query.filter_by(stripe_session_id='cs_rem_once').all()
+        assert len(rows) == 1 and rows[0].pricing_version == 'rem_v1'
+        assert rows[0].amount_total_cents == 149
+    props = [e for e in ph_events.events
+             if e['event'] == 'purchase_completed'][-1]['properties']
+    assert props['offer_variant'] == 'remaining_v1'
+    assert props['missing_minutes'] == 57
+
+
+@pytest.mark.parametrize('amount,missing', [
+    (99, '57'),     # cheaper tier than the missing minutes allow
+    (149, '20'),    # missing minutes do not match the amount
+    (149, ''),      # no missing minutes recorded
+    (149, 'abc'),
+])
+def test_remaining_webhook_refuses_terms_it_did_not_quote(remaining_on, amount, missing):
+    uid = _make_user('rem-tamper@test.com', limit=3600, used=3600)
+    _set_paid(uid, 0)
+    sess = _rem_session(uid, f'cs_rem_bad_{amount}_{missing}', amount=amount,
+                        missing=missing)
+    _register_and_post(remaining_on, sess)
+    assert _paid(uid) == 0
+
+
+def test_remaining_webhook_credits_after_test_ends(stripe_on, monkeypatch):
+    """An open rem_v1 Checkout still credits once the window closes."""
+    monkeypatch.delenv('REMAINING_MINUTES_OFFER', raising=False)
+    uid = _make_user('rem-late@test.com', limit=3600, used=3600)
+    _set_paid(uid, 0)
+    _register_and_post(stripe_on, _rem_session(uid, 'cs_rem_late'))
+    assert _paid(uid) == 120 * 60
+
+
+def test_remaining_offer_is_once_per_account(remaining_on):
+    uid = _make_user('rem-once@test.com', limit=3600, used=3600)
+    _set_paid(uid, 0)
+    _partial_task(uid, 'rem-once-1')
+    _register_and_post(remaining_on, _rem_session(uid, 'cs_rem_first'))
+    # Minutes spent elsewhere: the same preview no longer gets the low price.
+    _set_paid(uid, 0)
+    offer = _login(uid).get('/status/rem-once-1').get_json()['episode_offer']
+    assert offer['variant'] == 'full_episode'
+    assert offer['amount_cents'] == pv.price_cents(120)
+
+
+def test_partial_card_js_uses_server_copy_and_posts_offer():
+    import pathlib
+    tx = (pathlib.Path(A.__file__).parent / 'templates' / 'transcription.html'
+          ).read_text()
+    assert "buyExtra.offer = 'remaining'" in tx
+    assert 'buyExtra.task_id = taskId' in tx
+    assert 'card_t.button_buy' in tx
+    assert 'partialPreviewLocal' in tx
+    assert 'offer_variant: offer ? offer.variant : null' in tx
+    base = (pathlib.Path(A.__file__).parent / 'templates' / 'base.html').read_text()
+    assert "'offer_variant'" in base and "'ui_locale'" in base
+
+
+@pytest.mark.parametrize('langs,expected', [
+    ([('es-ES', 1), ('en', 0.5)], 'es'),
+    ([('pt-BR', 1)], 'pt'),
+    ([('en-US', 1), ('de', 0.8)], 'en'),
+    ([('it-IT', 1), ('fr', 0.7)], 'fr'),
+    ([('it-IT', 1)], 'en'),
+    ([], 'en'),
+])
+def test_card_locale(langs, expected):
+    assert P.card_locale(langs) == expected
+
+
+def test_card_copy_has_every_key_in_every_locale():
+    keys = set(P.CARD_COPY['en'])
+    for loc in P.CARD_LOCALES:
+        assert set(P.CARD_COPY[loc]) == keys, loc
+
+
+@pytest.mark.parametrize('country,locale,expected', [
+    ('ES', 'es', '1,33\u00a0€'), ('DE', 'en', '€1.33'), ('NL', 'nl', '€\u00a01,33'),
+    ('BR', 'pt', 'R$\u00a08,33'), ('PL', 'en', '5.86\u00a0zł'), ('US', 'en', None),
+    (None, 'es', None), (None, 'de', '1,33\u00a0€'), ('XX', 'fr', None),
+])
+def test_local_price(country, locale, expected):
+    assert P.local_price(149, country, locale) == expected
