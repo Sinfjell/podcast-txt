@@ -11751,6 +11751,68 @@ def _landing_price_line(ui_lang, trial, pack):
     return ' '.join(bits)
 
 
+#: Landing CTA for a signed-in account that cannot start a free transcript.
+_LANDING_ACCOUNT_COPY = {
+    'en': {
+        'start': 'Start transcript',
+        'see_price': 'See episode price',
+        'used_up': ('Your free minutes are used up. Paste a link to see the '
+                    'episode and its exact price before you pay. One-time, '
+                    'minutes never expire.'),
+        'paid': 'You have {n} paid minutes.',
+    },
+    'nb': {
+        'start': 'Start transkripsjon',
+        'see_price': 'Se pris for episoden',
+        'used_up': ('Gratisminuttene dine er brukt opp. Lim inn en lenke, så '
+                    'ser du episoden og prisen før du betaler. Engangskjøp, '
+                    'minuttene utløper aldri.'),
+        'paid': 'Du har {n} betalte minutter.',
+    },
+    'es': {
+        'start': 'Empezar transcripción',
+        'see_price': 'Ver precio del episodio',
+        'used_up': ('Ya usaste tus minutos gratis. Pega un enlace y verás el '
+                    'episodio y su precio exacto antes de pagar. Pago único, '
+                    'los minutos no caducan.'),
+        'paid': 'Tienes {n} minutos pagados.',
+    },
+    'de': {
+        'start': 'Transkription starten',
+        'see_price': 'Preis der Folge ansehen',
+        'used_up': ('Deine Gratisminuten sind aufgebraucht. Füg einen Link ein, '
+                    'dann siehst du die Folge und ihren genauen Preis, bevor du '
+                    'zahlst. Einmalzahlung, die Minuten verfallen nicht.'),
+        'paid': 'Du hast {n} bezahlte Minuten.',
+    },
+}
+_LANDING_ACCOUNT_COPY['no'] = _LANDING_ACCOUNT_COPY['nb']
+
+
+def _landing_account_cta(ui_lang):
+    """Override of the landing button + cost line for a signed-in account.
+
+    None for visitors and for accounts that can still start a free transcript
+    (the default "Start free transcript" copy is true for them).
+    """
+    if not current_user.is_authenticated:
+        return None
+    copy = _LANDING_ACCOUNT_COPY.get(ui_lang) or _LANDING_ACCOUNT_COPY['en']
+    if getattr(current_user, 'openai_api_key', None):
+        return {'state': 'own_key', 'button': copy['start'], 'line': None}
+    paid_min = paid_balance_seconds(current_user) // 60
+    if paid_min > 0:
+        return {'state': 'paid', 'button': copy['start'],
+                'line': copy['paid'].format(n=paid_min)}
+    free_min = trial_badge_remaining_minutes() or 0
+    if free_min * 60 >= TRIAL_PARTIAL_MIN_SECONDS:
+        return None
+    if not stripe_checkout_enabled():
+        return {'state': 'no_minutes', 'button': copy['start'], 'line': None}
+    return {'state': 'no_minutes', 'button': copy['see_price'],
+            'line': copy['used_up']}
+
+
 def _render_landing(endpoint):
     page = landing_page_data(endpoint)
     page_url = public_url(endpoint)
@@ -11761,6 +11823,12 @@ def _render_landing(endpoint):
         price_line = _spotify_price_line(trial, pack)
     else:
         price_line = _landing_price_line(ui_lang, trial, pack)
+    account_cta = _landing_account_cta(ui_lang)
+    if account_cta is not None:
+        # Signed in: "free" and "you create an account after" are not true.
+        page = dict(page, button=account_cta['button'], cta_note='')
+        if account_cta['line'] is not None:
+            price_line = account_cta['line']
     hreflang = [
         (hl, public_url(ep))
         for hl, ep in landing_pages_mod.hreflang_alternates(endpoint)
@@ -11770,6 +11838,7 @@ def _render_landing(endpoint):
         page=page,
         page_url=page_url,
         landing_key=endpoint,
+        account_cta_state=(account_cta or {}).get('state'),
         ui=landing_pages_mod.UI[ui_lang],
         price_line=price_line,
         hreflang=hreflang,
@@ -13411,6 +13480,21 @@ def _no_feed_message(name):
     )
 
 
+SPOTIFY_INCOMPLETE_LINK_MESSAGE = (
+    'This Spotify link looks cut off. In Spotify, tap Share \u2192 Copy link '
+    'and paste the whole link again.'
+)
+
+
+def _spotify_video_no_feed_message(name):
+    label = name or 'this show'
+    return (
+        f'"{label}" is a Spotify video show without a public RSS feed, so '
+        'Podskrift can\'t fetch its audio. Shows that are also on Apple '
+        'Podcasts or have their own RSS feed work.'
+    )
+
+
 def _paid_episode_message(show_name):
     base = (
         'This episode is for paying Spotify subscribers only, so Podskrift '
@@ -13443,6 +13527,13 @@ def resolve_spotify_url(raw):
     """
     kind, spotify_id = parse_spotify_url(raw)
     if not kind:
+        if 'spotify.com/' in (raw or '').lower() or 'spotify:' in (raw or '').lower():
+            # A Spotify link whose id got cut off while copying (seen in
+            # production: 21 of 22 characters). Say so instead of treating it
+            # as a feed URL or a name.
+            return _spotify_resolve_outcome(
+                [], SPOTIFY_INCOMPLETE_LINK_MESSAGE, 'unreadable_link',
+                error_detail='incomplete_id')
         return _spotify_resolve_outcome(
             [], "That doesn't look like a Spotify episode or show link.",
             'unreadable_link')
@@ -13531,6 +13622,12 @@ def resolve_spotify_url(raw):
              'Open the show below to pick from the episodes that are.'),
             'episode_not_in_feed', show_name)
     name = show_name or title
+    if meta.get('has_video'):
+        # Spotify video shows (often YouTube uploads) usually have no public
+        # feed anywhere, so retrying the same link cannot work.
+        return _spotify_resolve_outcome(
+            [], _spotify_video_no_feed_message(name), 'no_feed',
+            show_name or name, error_detail='video_no_feed')
     return _spotify_resolve_outcome(
         [], _no_feed_message(name), 'no_feed', show_name or name)
 
