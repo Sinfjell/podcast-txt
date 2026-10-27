@@ -722,8 +722,9 @@ def build_context(campaign: str, user, *, public_base: str, secret_key: str,
             n_min, m_min = A.partial_minutes_pair(partial)
             ctx['partial_minutes'] = n_min
             ctx['episode_minutes'] = m_min
-            trial_left, paid_left = A._platform_remaining_seconds(uid)
-            offer = A.episode_offer(m_min, (trial_left + paid_left) // 60)
+            # Same offer the result page shows (remaining-minutes price
+            # while that test is on), so the email never quotes another.
+            offer = A.partial_finish_offer(last, user)
             if offer and last.source_audio_url and A.stripe_checkout_enabled():
                 ctx['finish_price'] = offer['price']
                 ctx['finish_minutes'] = offer['minutes']
