@@ -103,6 +103,7 @@
     var s = (q || '').trim();
     if (!s) return 'other';
     if (SPOTIFY_RE.test(s)) return 'spotify_link';
+    if (/open\.spotify\.com\/|^spotify:/i.test(s)) return 'spotify_link';
     if (APPLE_RE.test(s)) return 'apple_link';
     if (YOUTUBE_RE.test(s)) return 'youtube_link';
     if (/^https?:\/\//i.test(s)) {
@@ -126,6 +127,7 @@
       posthog.capture('landing_cta_submitted', {
         landing: '{{ landing_key }}',
         lang: '{{ page.lang }}',
+        account_state: {{ (account_cta_state or 'visitor')|tojson }},
         input_type: detectInputType(q),
         has_query: !!(q && String(q).trim())
       }, opts);

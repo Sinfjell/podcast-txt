@@ -439,6 +439,22 @@
     var MAX_EPISODE_MIN = {{ max_episode_min|tojson }};
     var MAX_EPISODE_LABEL = {{ max_episode_label|tojson }};
     var STRIPE_BUY = {{ stripe_buy_enabled|tojson }};
+    // Display-only per-episode price for signed-in metered accounts (the
+    // server re-prices at checkout). Same shortfall rule as episode_offer.
+    var VOLUME_PRICES = {{ (volume_price_table if (volume_pricing_enabled and stripe_buy_enabled and current_user.is_authenticated and not current_user.openai_api_key) else [])|tojson }};
+    function episodePriceLabel(durationMin) {
+        if (!VOLUME_PRICES.length || durationMin == null) return '';
+        var have = (Number(TRIAL_REMAINING_MIN) || 0) + (Number(PAID_REMAINING_MIN) || 0);
+        var shortfall = Math.ceil(Number(durationMin) - have - 1e-9);
+        if (!(shortfall > 0)) return '';
+        var first = VOLUME_PRICES[0], last = VOLUME_PRICES[VOLUME_PRICES.length - 1];
+        var step = VOLUME_PRICES.length > 1 ? VOLUME_PRICES[1].minutes - first.minutes : 15;
+        var qty = Math.max(first.minutes, Math.min(last.minutes, Math.ceil(shortfall / step) * step));
+        for (var i = 0; i < VOLUME_PRICES.length; i++) {
+            if (VOLUME_PRICES[i].minutes === qty) return VOLUME_PRICES[i].price;
+        }
+        return '';
+    }
     var BUY_LABEL = {{ credit_pack_label|tojson }};
     var BUY_URL = {{ url_for('billing_checkout')|tojson }};
     {# Only mint CSRF when a logged-in user can actually submit Buy — otherwise
@@ -652,8 +668,11 @@
 
         if (item.type === 'episode' && episodeNeedsOwnKey(item.duration_min)) {
             var warn = document.createElement('span');
+            var epPrice = episodePriceLabel(item.duration_min);
             warn.className = 'badge badge-needs-key';
-            warn.textContent = (STRIPE_BUY ? 'Needs key or pack' : 'Needs own key')
+            if (epPrice) warn.setAttribute('data-episode-price', epPrice);
+            warn.textContent = (epPrice ? epPrice
+                : (STRIPE_BUY ? 'Needs key or pack' : 'Needs own key'))
                 + ' \u00B7 ' + Math.round(item.duration_min) + ' min';
             badges.appendChild(warn);
         }
@@ -794,6 +813,9 @@
         var s = prepareSearchQuery(q);
         if (!s) return 'other';
         if (SPOTIFY_RE.test(s)) return 'spotify_link';
+        // A cut-off Spotify link (id shorter than 22 characters) still goes
+        // to the Spotify resolver, which explains it, never to the feed path.
+        if (/open\.spotify\.com\/|^spotify:/i.test(s)) return 'spotify_link';
         if (APPLE_RE.test(s)) return 'apple_link';
         if (YOUTUBE_RE.test(s)) return 'youtube_link';
         if (/^https?:\/\//i.test(s)) {

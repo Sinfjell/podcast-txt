@@ -20721,3 +20721,100 @@ def test_card_copy_has_every_key_in_every_locale():
 ])
 def test_local_price(country, locale, expected):
     assert P.local_price(149, country, locale) == expected
+
+# Spotify lookup messages (user 563 repro) + landing CTA for signed-in accounts
+# ---------------------------------------------------------------------------
+
+def test_cut_off_spotify_link_is_explained_not_searched(monkeypatch):
+    called = []
+    monkeypatch.setattr(A, 'fetch_spotify_metadata',
+                        lambda *a: called.append(a) or (None, 'x'))
+    # 21-character id: what a German user pasted on 2026-10-26.
+    data = A.app.test_client().get(
+        '/resolve-spotify?url=' + 'https://open.spotify.com/episode/'
+        '19v1tOFBQagYcHoh5W3Yg?si=AF-KsDeVTqeoM7I0sKpt5A').get_json()
+    assert data['results'] == []
+    assert data['error'] == A.SPOTIFY_INCOMPLETE_LINK_MESSAGE
+    assert data['error_kind'] == 'unreadable_link'
+    assert data['error_detail'] == 'incomplete_id'
+    assert called == []
+
+
+def test_spotify_video_show_without_feed_says_so(monkeypatch):
+    monkeypatch.setattr(A, 'fetch_spotify_metadata', lambda kind, sid: ({
+        'title': 'jung, einsam: eine Folge', 'show': 'Videos von Marie Joan',
+        'related_show_id': None, 'playability_reason': 'PLAYABLE',
+        'is_playable': True, 'has_video': True}, None))
+    monkeypatch.setattr(A, '_public_shows_named', lambda name: [])
+    monkeypatch.setattr(A, '_public_shows_named_loose', lambda name: [])
+    monkeypatch.setattr(A, '_episode_from_itunes', lambda title, show: None)
+    out = A.resolve_spotify_url('https://open.spotify.com/episode/19v1tOFBQagYcHoh5W3YgL')
+    assert out['error_kind'] == 'no_feed'
+    assert out['error_detail'] == 'video_no_feed'
+    assert 'Spotify video show' in out['error']
+    assert 'Videos von Marie Joan' in out['error']
+
+
+def test_spotify_audio_show_without_feed_keeps_the_old_message(monkeypatch):
+    monkeypatch.setattr(A, 'fetch_spotify_metadata', lambda kind, sid: ({
+        'title': 'Ep', 'show': 'Some Show', 'related_show_id': None,
+        'playability_reason': 'PLAYABLE', 'is_playable': True,
+        'has_video': False}, None))
+    monkeypatch.setattr(A, '_public_shows_named', lambda name: [])
+    monkeypatch.setattr(A, '_public_shows_named_loose', lambda name: [])
+    monkeypatch.setattr(A, '_episode_from_itunes', lambda title, show: None)
+    out = A.resolve_spotify_url('https://open.spotify.com/episode/19v1tOFBQagYcHoh5W3YgL')
+    assert out['error'] == A._no_feed_message('Some Show')
+
+
+def test_home_and_landing_route_cut_off_spotify_links_to_the_resolver():
+    import pathlib
+    root = pathlib.Path(A.__file__).parent / 'templates'
+    for name in ('index.html', 'landing.html'):
+        assert r"/open\.spotify\.com\/|^spotify:/i.test(s)" in (root / name).read_text(), name
+
+
+def _landing_button(html):
+    m = re.search(r'class="btn btn-primary btn-lg ds-cmd__go">([^<]+)<', html)
+    return m.group(1).strip() if m else None
+
+
+def test_landing_cta_for_signed_in_account_without_free_minutes(stripe_on):
+    uid = _make_user('cta-used@test.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    client = _login(uid)
+    html = client.get('/spotify-podcast-transcript').data.decode()
+    assert _landing_button(html) == 'See episode price'
+    assert 'Your free minutes are used up' in html
+    assert 'You create a free account after' not in html
+    assert '"no_minutes"' in html  # landing_cta_submitted account_state
+    es = client.get('/es/transcribir-podcast').data.decode()
+    assert _landing_button(es) == 'Ver precio del episodio'
+    de = client.get('/de/podcast-transkribieren').data.decode()
+    assert _landing_button(de) == 'Preis der Folge ansehen'
+
+
+def test_landing_cta_unchanged_for_visitors_and_trial_users(stripe_on):
+    anon = A.app.test_client().get('/spotify-podcast-transcript').data.decode()
+    assert _landing_button(anon) == 'Start free transcript'
+    uid = _make_user('cta-trial@test.com', limit=600, used=0)
+    html = _login(uid).get('/spotify-podcast-transcript').data.decode()
+    assert _landing_button(html) == 'Start free transcript'
+
+
+def test_landing_cta_for_paid_and_own_key_accounts(stripe_on):
+    uid = _make_user('cta-paid@test.com', limit=600, used=600)
+    _set_paid(uid, 90 * 60)
+    html = _login(uid).get('/podcast-transcript-generator').data.decode()
+    assert _landing_button(html) == 'Start transcript'
+    assert 'You have 90 paid minutes.' in html
+    byok = _make_user('cta-byok@test.com', key='sk-user-key', limit=600, used=600)
+    html = _login(byok).get('/podcast-transcript-generator').data.decode()
+    assert _landing_button(html) == 'Start transcript'
+
+
+def test_home_rows_show_episode_price_for_signed_in_metered_accounts():
+    import pathlib
+    tx = (pathlib.Path(A.__file__).parent / 'templates' / 'index.html').read_text()
+    assert 'function episodePriceLabel(durationMin)' in tx
+    assert "warn.setAttribute('data-episode-price', epPrice)" in tx
