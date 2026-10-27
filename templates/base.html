@@ -1673,7 +1673,9 @@
                 // Surface-specific props (e.g. partial_preview paywall).
                 [
                     'surface', 'task_id', 'episode_minutes', 'preview_minutes',
-                    'minutes_missing', 'offered_price', 'offered_minutes'
+                    'minutes_missing', 'offered_price', 'offered_minutes',
+                    'offered_amount_cents', 'offer_variant', 'ui_locale',
+                    'local_price'
                 ].forEach(function (k) {
                     if (p[k] != null && p[k] !== '') payload[k] = p[k];
                 });

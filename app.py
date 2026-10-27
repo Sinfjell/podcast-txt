@@ -82,6 +82,7 @@ import stt as stt_mod
 import summary as summary_mod
 import trial_abuse
 import pricing_volume
+import paywall_i18n
 import runtime_env as runtime_env_mod
 import mcp_server as mcp_server_mod
 import oauth_server as oauth_server_mod
@@ -476,11 +477,12 @@ def partial_preview_ready_props(task, user_id):
         'user_id': user_id,
     }
     if stripe_checkout_enabled():
-        trial_left, paid_left = _platform_remaining_seconds(user_id)
-        offer = episode_offer(m_min, (trial_left + paid_left) // 60)
+        user = db.session.get(User, user_id) if user_id else None
+        offer = partial_finish_offer(task, user) if user is not None else None
         if offer:
             props['offered_price'] = offer['price']
             props['offered_minutes'] = offer['minutes']
+            props['offer_variant'] = offer['variant']
     return props
 
 
@@ -2342,6 +2344,95 @@ def episode_offer(episode_minutes, balance_minutes=0):
         'price': q['price'],
         'label': f'Transcribe this episode ({ep_min} min) for {q["price"]}',
     }
+
+
+#: Remaining-minutes offer test (rem_v1). Off unless REMAINING_MINUTES_OFFER
+#: is truthy AND REMAINING_MINUTES_OFFER_START (ISO 8601, with offset) is set;
+#: ends on its own REMAINING_MINUTES_OFFER_DAYS (default 7) after the start.
+REMAINING_OFFER_DEFAULT_DAYS = 7
+
+
+def remaining_offer_window(environ=None):
+    """(start, end) aware datetimes of the remaining-minutes test, or None."""
+    env = os.environ if environ is None else environ
+    raw = (env.get('REMAINING_MINUTES_OFFER') or '0').strip().lower()
+    if raw not in ('1', 'true', 'yes', 'on'):
+        return None
+    start_raw = (env.get('REMAINING_MINUTES_OFFER_START') or '').strip()
+    if not start_raw:
+        return None
+    try:
+        start = datetime.fromisoformat(start_raw.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    try:
+        days = float(env.get('REMAINING_MINUTES_OFFER_DAYS')
+                     or REMAINING_OFFER_DEFAULT_DAYS)
+    except (TypeError, ValueError):
+        days = REMAINING_OFFER_DEFAULT_DAYS
+    if days <= 0:
+        return None
+    return start, start + timedelta(days=days)
+
+
+def remaining_offer_active(now=None, environ=None):
+    window = remaining_offer_window(environ)
+    if window is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return window[0] <= now < window[1]
+
+
+def _user_used_remaining_offer(user_id):
+    """True once the account has a credited remaining-minutes purchase."""
+    return CreditPurchase.query.filter(
+        CreditPurchase.user_id == user_id,
+        CreditPurchase.pricing_version == pricing_volume.REMAINING_OFFER_VERSION,
+    ).first() is not None
+
+
+def partial_finish_offer(task, user):
+    """Offer to finish a partial free preview, or None.
+
+    With the remaining-minutes test on (and the account eligible) the price is
+    for the minutes the preview did not cover; otherwise it is the regular
+    per-episode offer. Either way the minutes granted are enough to re-run
+    the whole episode, so the buyer gets the full transcript. The server is
+    the only authority: /billing/checkout calls this again and charges what
+    it returns.
+    """
+    if task is None or user is None:
+        return None
+    meta = task_partial_meta(task)
+    if meta is None or task.user_id != getattr(user, 'id', None):
+        return None
+    if getattr(user, 'openai_api_key', None):
+        return None
+    n_min, m_min = partial_minutes_pair(meta)
+    trial_left, paid_left = _platform_remaining_seconds(user.id)
+    offer = episode_offer(m_min, (trial_left + paid_left) // 60)
+    if offer is None:
+        return None
+    offer = dict(offer)
+    missing = max(0, m_min - n_min)
+    offer['missing_minutes'] = missing
+    offer['preview_minutes'] = n_min
+    offer['variant'] = pricing_volume.FULL_EPISODE_OFFER_VARIANT
+    if (missing > 0 and remaining_offer_active()
+            and not _user_used_remaining_offer(user.id)):
+        cents = pricing_volume.remaining_offer_cents(missing, offer['minutes'])
+        if cents is not None and cents < offer['amount_cents']:
+            price = pricing_volume.format_usd(cents)
+            offer.update({
+                'amount_cents': cents,
+                'price': price,
+                'variant': pricing_volume.REMAINING_OFFER_VARIANT,
+                'pricing_version': pricing_volume.REMAINING_OFFER_VERSION,
+                'label': f'Get the remaining {missing} min for {price}',
+            })
+    return offer
 
 
 def _own_key_pack_offer_suffix():
@@ -5128,6 +5219,15 @@ def _signup_country():
     return None
 
 
+def _card_locale():
+    """Locale of the partial-preview card from the browser's languages."""
+    try:
+        langs = list(request.accept_languages)
+    except Exception:  # noqa: BLE001
+        return 'en'
+    return paywall_i18n.card_locale(langs)
+
+
 def _first_touch_analytics_props(*, utm=None):
     """Consume stashed first landing/referrer/utm into signup + person props."""
     if (FIRST_LANDING_SESSION_KEY not in session
@@ -5951,6 +6051,14 @@ def volume_session_terms(d):
     # Validate against the curve version the session was priced with, so a
     # later price change never strands an open Checkout.
     version = meta.get('pricing_version')
+    if version in pricing_volume.REMAINING_OFFER_TIERS:
+        # Remaining-minutes offer: the price depends on how much of the
+        # episode the preview had not covered, which we wrote at checkout.
+        expected = pricing_volume.remaining_offer_cents(
+            meta.get('missing_minutes'), minutes, version)
+        if expected is None or amount != expected:
+            return None
+        return minutes, amount
     if version:
         # A released curve never changes, so a versioned session must carry
         # exactly that curve's price for its minutes: anything else was not
@@ -6396,6 +6504,8 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
             'volume_v1' if metadata.get('pack') == pricing_volume.VOLUME_PACK_SKU
             else 'fixed_pack'),
         'pricing_version': metadata.get('pricing_version') or None,
+        'offer_variant': (metadata.get('offer_variant') or '')[:32] or None,
+        'missing_minutes': _int_or_none(metadata.get('missing_minutes')),
         'is_first_purchase': prior_credited == 0,
         'email_campaign': email_campaign,
         'revenue': (amount_total_cents or amount_for_legacy or 0) / 100.0,
@@ -6826,6 +6936,7 @@ def billing_checkout():
         cancel_abs = url_for('billing_cancel', next=next_path, _external=True)
 
     line_item = {'quantity': 1}
+    remaining_offer = None
     if VOLUME_PRICING_ENABLED:
         # The browser sends a quantity, never an amount; the price is ours.
         raw_minutes = (request.form.get('minutes') or '').strip()
@@ -6845,14 +6956,35 @@ def billing_checkout():
             price_source = 'default'
         buy_cents = pricing_volume.price_cents(buy_minutes)
         pack_sku = pricing_volume.VOLUME_PACK_SKU
+        # Finishing a partial preview: the server re-derives the offer from
+        # the task (never from posted amounts). The remaining-minutes test
+        # replaces quantity and price only when the account is eligible now.
+        offer_task_id = (request.form.get('task_id') or '').strip()[:64]
+        if offer_task_id and (request.form.get('offer') or '') == 'remaining':
+            offer_task = TranscriptionTask.query.filter_by(
+                id=offer_task_id, user_id=current_user.id).first()
+            finish = partial_finish_offer(offer_task, current_user)
+            if finish is not None:
+                remaining_offer = finish
+                if finish.get('pricing_version') == (
+                        pricing_volume.REMAINING_OFFER_VERSION):
+                    buy_minutes = finish['minutes']
+                    buy_cents = finish['amount_cents']
+                    price_source = 'episode'
         line_item['price_data'] = {
             'currency': CREDIT_PACK_CURRENCY,
             'unit_amount': buy_cents,
             'tax_behavior': CREDIT_PACK_TAX_BEHAVIOR,
             'product_data': {
                 'name': f'Podskrift — {buy_minutes} minutes',
-                'description': f'{buy_minutes} minutes of transcription '
-                               '(launch price)',
+                'description': (
+                    f'{buy_minutes} minutes of transcription: finishes the '
+                    f'episode (priced on the {remaining_offer["missing_minutes"]}'
+                    ' minutes the free preview did not cover)'
+                    if remaining_offer is not None
+                    and remaining_offer.get('pricing_version')
+                    else f'{buy_minutes} minutes of transcription '
+                         '(launch price)'),
                 'tax_code': STRIPE_TAX_CODE,
             },
         }
@@ -6887,6 +7019,13 @@ def billing_checkout():
     }
     if pack_sku == pricing_volume.VOLUME_PACK_SKU:
         meta['pricing_version'] = pricing_volume.CURRENT_PRICING_VERSION
+    if remaining_offer is not None:
+        meta['offer_variant'] = remaining_offer['variant']
+        meta['task_id'] = str(offer_task_id)
+        if remaining_offer.get('pricing_version'):
+            # Webhook recomputes the amount from (missing_minutes, minutes).
+            meta['pricing_version'] = remaining_offer['pricing_version']
+            meta['missing_minutes'] = str(remaining_offer['missing_minutes'])
     if ph_sid:
         meta['ph_sid'] = ph_sid
     email_campaign = _checkout_email_campaign()
@@ -6976,6 +7115,8 @@ def billing_checkout():
         'price_source': price_source,
         'pricing': 'volume_v1' if VOLUME_PRICING_ENABLED else 'fixed_pack',
         'pricing_version': meta.get('pricing_version'),
+        'offer_variant': meta.get('offer_variant'),
+        'missing_minutes': _int_or_none(meta.get('missing_minutes')),
         'managed_payments': bool(STRIPE_MANAGED_PAYMENTS),
         'trial_remaining_min': trial_remaining_min,
         'paid_remaining_min': paid_remaining_min,
@@ -7366,7 +7507,15 @@ def checkout_recovery_click(token):
 
     minutes = data['m']
     price_source = data['ps']
-    if VOLUME_PRICING_ENABLED:
+    finish = None
+    if VOLUME_PRICING_ENABLED and data.get('t'):
+        finish = checkout_recovery.finish_offer_for(data['t'], current_user)
+    if finish is not None:
+        minutes = finish['minutes']
+        price = finish['price']
+        what = (f'The remaining {finish["missing_minutes"]} min for {price}'
+                if finish.get('pricing_version') else f'{minutes} minutes for {price}')
+    elif VOLUME_PRICING_ENABLED:
         price = pricing_volume.format_usd(pricing_volume.price_cents(minutes))
         what = f'{minutes} minutes for {price}'
     else:
@@ -7383,6 +7532,9 @@ def checkout_recovery_click(token):
     if VOLUME_PRICING_ENABLED:
         fields['minutes'] = minutes
         fields['price_source'] = price_source
+    if finish is not None:
+        fields['offer'] = 'remaining'
+        fields['task_id'] = data['t']
 
     return render_template(
         'email_go.html',
@@ -7440,7 +7592,7 @@ def lifecycle_email_click(token):
         m_min = None
         if partial and not own_key and stripe_checkout_enabled():
             _n, m_min = partial_minutes_pair(partial)
-            offer = episode_offer(m_min, (trial_left + paid_left) // 60)
+            offer = partial_finish_offer(task, current_user)
         if offer is None or not task.source_audio_url:
             # Already covered (bought since), own key, or no price: the
             # result page has the right button for whatever is true now.
@@ -7458,11 +7610,17 @@ def lifecycle_email_click(token):
             'duration_min': m_min,
             'language': normalize_language_code(task.language) or '',
             'return_to': url_for('transcription_page', task_id=task.id),
+            'offer': 'remaining',
+            'task_id': task.id,
         }
         return render_template(
             'email_go.html',
             heading=f'Finish \u201c{task.episode_title or "this episode"}\u201d',
-            lede=f'{m_min} min for {offer["price"]}. Taking you to checkout\u2026',
+            lede=(
+                f'The remaining {offer["missing_minutes"]} min for '
+                f'{offer["price"]}. Taking you to checkout\u2026'
+                if offer.get('pricing_version') else
+                f'{m_min} min for {offer["price"]}. Taking you to checkout\u2026'),
             button_label=f'Continue to checkout ({offer["price"]})',
             action_url=url_for('billing_checkout'),
             fields=fields,
@@ -9331,17 +9489,23 @@ def get_status(task_id):
             result['trial_remaining_min'] = trial_left // 60
             result['can_finish_full'] = paid_left > 0 or bool(
                 getattr(current_user, 'openai_api_key', None))
+            offer = None
             if stripe_checkout_enabled():
                 result['buy_available'] = True
                 result['buy_label'] = UNLOCK_EPISODE_LABEL
                 result['unlock_label'] = UNLOCK_EPISODE_LABEL
-                # Finishing re-runs the whole episode, so price the full
-                # length against what is left (paid + free).
-                offer = episode_offer(
-                    m_min, (trial_left + paid_left) // 60)
+                # Finishing re-runs the whole episode, so the grant covers the
+                # full length against what is left (paid + free); the price is
+                # the remaining-minutes offer while that test is on.
+                offer = partial_finish_offer(task, current_user)
                 if offer:
                     result['episode_offer'] = offer
                     result['unlock_label'] = offer['label']
+            card = paywall_i18n.partial_card(
+                _card_locale(), partial_minutes=n_min, episode_minutes=m_min,
+                offer=offer, country=_signup_country(),
+                buy_available=stripe_checkout_enabled())
+            result['card'] = card
         elif (
             stripe_checkout_enabled()
             and not bool(getattr(current_user, 'openai_api_key', None))
