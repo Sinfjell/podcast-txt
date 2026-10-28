@@ -66,6 +66,10 @@ TRIAL_GLOBAL_WARN_THRESHOLDS = TRIAL_DAILY_WARN_THRESHOLDS
 # Nightly backup should land by 23:45 UTC; flag if the newest .gz is older than
 # this (covers a missed night plus a little slack before the weekday metrics run).
 BACKUP_STALE_AFTER_HOURS = 26
+# Earliest day the production daily trial cap is documented (app .env backup
+# taken 2026-10-13 shows TRIAL_DAILY_MINUTES=3500). Before this the cap is not
+# reconstructable, so cap columns stay empty on backfilled rows.
+TRIAL_DAILY_CAP_KNOWN_FROM = date(2026, 10, 13)
 
 try:
     import sentry_sdk
@@ -104,6 +108,23 @@ def parse_day(value: str | None) -> date:
     if value:
         return date.fromisoformat(value)
     return datetime.now(OSLO).date() - timedelta(days=1)
+
+
+def is_backfill_day(day: date, *, now: datetime | None = None) -> bool:
+    """True when *day* is older than yesterday (Oslo) -- a historical rerun."""
+    today = (now or datetime.now(UTC)).astimezone(OSLO).date()
+    return day < today - timedelta(days=1)
+
+
+def app_env_value(app_dir: Path, key: str) -> str | None:
+    """One non-secret config value from the app .env (what the app enforces)."""
+    try:
+        for line in (app_dir / '.env').read_text().splitlines():
+            if line.startswith(f'{key}='):
+                return line.split('=', 1)[1].strip().strip('"\'') or None
+    except OSError:
+        return None
+    return None
 
 
 def day_bounds_utc(day: date) -> tuple[str, str]:
@@ -379,10 +400,33 @@ def collect_metrics(conn: sqlite3.Connection, day: date,
         days_by_user.setdefault(int(row['user_id']), set()).add(oslo_day)
     returned_2plus = sum(1 for days in days_by_user.values() if len(days) >= 2)
 
-    trial_seconds_used_total = int(_scalar(
-        conn,
-        'SELECT COALESCE(SUM(trial_seconds_used), 0) FROM users',
-    ))
+    # Point-in-time (end of the metric day), so --day backfills are correct:
+    # today's per-user counter minus trial seconds charged on jobs started
+    # after the day ended. Cumulative over all users, not per day.
+    later_by_user = {
+        int(r[0]): int(r[1] or 0)
+        for r in conn.execute(
+            '''
+            SELECT user_id, SUM(COALESCE(trial_seconds_charged, 0)) AS s
+              FROM transcription_tasks
+             WHERE started_at >= ?
+             GROUP BY user_id
+            ''',
+            (end,),
+        )
+    }
+    trial_used_asof: dict[int, tuple[int, int | None]] = {}
+    for r in conn.execute(
+        '''
+        SELECT id, COALESCE(trial_seconds_used, 0) AS used, trial_seconds_limit
+          FROM users WHERE created_at < ?
+        ''',
+        (end,),
+    ):
+        uid, used_now, limit = int(r[0]), int(r[1] or 0), r[2]
+        used = max(0, used_now - later_by_user.get(uid, 0))
+        trial_used_asof[uid] = (used, limit)
+    trial_seconds_used_total = sum(u for u, _ in trial_used_asof.values())
     trial_minutes_used = round(trial_seconds_used_total / 60.0, 1)
 
     day_key = day.isoformat()
@@ -414,14 +458,10 @@ def collect_metrics(conn: sqlite3.Connection, day: date,
     trial_daily_used_minutes = round(trial_daily_used_seconds / 60.0, 1)
     trial_daily_cap_minutes = round(int(trial_daily_seconds) / 60.0, 1)
 
-    trial_exhausted = _scalar(
-        conn,
-        '''
-        SELECT COUNT(*) FROM users
-         WHERE COALESCE(trial_seconds_used, 0)
-               >= COALESCE(trial_seconds_limit, ?)
-        ''',
-        (trial_default_seconds,),
+    # Users (signed up by end of day) whose trial was used up at end of day.
+    trial_exhausted = sum(
+        1 for used, limit in trial_used_asof.values()
+        if used >= (int(limit) if limit is not None else int(trial_default_seconds))
     )
     return {
         'day': day.isoformat(),
@@ -433,9 +473,15 @@ def collect_metrics(conn: sqlite3.Connection, day: date,
         'Never started': int(never_started),
         'Ever completed': int(ever_completed),
         'Returned 2+ days': int(returned_2plus),
+        # Cumulative trial minutes used by all users as of end of the day.
         'Trial minutes used': trial_minutes_used,
-        # Shared free-trial budget for this Oslo calendar day.
-        # Printed in the cron JSON; not synced as Notion columns (no schema change).
+        # Shared free-trial pool for this Oslo calendar day (per day).
+        'Trial minutes 1d': trial_daily_used_minutes,
+        'Trial daily cap minutes 1d': trial_daily_cap_minutes,
+        'Trial daily cap used 1d': (
+            round(trial_daily_used_seconds / int(trial_daily_seconds), 4)
+            if int(trial_daily_seconds) > 0 else None
+        ),
         'Trial daily used minutes': trial_daily_used_minutes,
         'Trial daily cap minutes': trial_daily_cap_minutes,
         # Back-compat keys for older dashboards / tests.
@@ -480,6 +526,10 @@ def notion_properties(
         'Trial exhausted',
     ):
         props[key] = {'number': metrics[key]}
+    for key in ('Trial minutes 1d', 'Trial daily cap minutes 1d',
+                'Trial daily cap used 1d'):
+        if key in metrics:
+            props[key] = {'number': metrics[key]}
     # Unit economics (variable costs only) -- present when collected.
     for key in ue.NOTION_NUMBER_KEYS:
         if key in metrics:
@@ -669,11 +719,17 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.get('NOTION_METRICS_DATABASE_ID', DEFAULT_DATABASE_ID).strip()
         or DEFAULT_DATABASE_ID
     )
-    trial_minutes = int(os.environ.get('TRIAL_MINUTES', DEFAULT_TRIAL_MINUTES))
+    trial_minutes = int(
+        os.environ.get('TRIAL_MINUTES')
+        or app_env_value(app_dir, 'TRIAL_MINUTES')
+        or DEFAULT_TRIAL_MINUTES
+    )
     trial_default_seconds = trial_minutes * 60
 
     trial_daily_minutes = int(
-        os.environ.get('TRIAL_DAILY_MINUTES', DEFAULT_TRIAL_DAILY_MINUTES)
+        os.environ.get('TRIAL_DAILY_MINUTES')
+        or app_env_value(app_dir, 'TRIAL_DAILY_MINUTES')
+        or DEFAULT_TRIAL_DAILY_MINUTES
     )
     trial_daily_seconds = max(0, trial_daily_minutes) * 60
 
@@ -710,14 +766,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     metrics.pop('_trial_global_used_seconds', None)
     metrics.pop('_trial_global_cap_seconds', None)
-    health_lines.extend(trial_daily_cap_warning_lines(used_s, cap_s))
-    emit_trial_global_sentry_warnings(used_s, cap_s, metric_day=day)
-    # Nightly SQLite backup — catches a stopped timer even if OnFailure never fired.
-    backup_dir = Path(
-        os.environ.get('BACKUP_DIR')
-        or (app_dir / 'data' / 'backups')
-    )
-    health_lines.extend(backup_staleness_warning_lines(backup_dir))
+    if day < TRIAL_DAILY_CAP_KNOWN_FROM:
+        metrics['Trial daily cap minutes 1d'] = None
+        metrics['Trial daily cap used 1d'] = None
+        health_lines.append(
+            'Daglig trial-tak før 13.10 er ikke dokumentert; tak-kolonnene er tomme.')
+    else:
+        health_lines.extend(trial_daily_cap_warning_lines(used_s, cap_s))
+    # Backfill (--day older than yesterday): skip checks that describe *now*
+    # (backup age) and never page Sentry about a past day.
+    backfill = is_backfill_day(day)
+    if not backfill:
+        emit_trial_global_sentry_warnings(used_s, cap_s, metric_day=day)
+        # Nightly SQLite backup — catches a stopped timer even if OnFailure never fired.
+        backup_dir = Path(
+            os.environ.get('BACKUP_DIR')
+            or (app_dir / 'data' / 'backups')
+        )
+        health_lines.extend(backup_staleness_warning_lines(backup_dir))
     notes_content = phh.format_notes_content(health_lines)
 
     # Public metrics JSON (no internal underscore keys).
