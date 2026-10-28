@@ -18,6 +18,12 @@ Rollout (all env, read at call time so a restart is not needed in tests):
   STT_TOGETHER_FUNDING      trial (default) | all
   STT_TOGETHER_LANGUAGES    en (default)
   STT_SHADOW_RATE           0.02 (default) -- Together chunks also on whisper-1
+  STT_TOGETHER_SHADOW_LANGUAGES  empty (default = off) -- comma list, e.g.
+                            es,pt,de,nl,fr,it: platform chunks served by
+                            whisper-1 in these languages are also run on
+                            Together in the background (quality check before
+                            rollout; never served)
+  STT_TOGETHER_SHADOW_RATE  0 (default) -- 0..1 share of those chunks sampled
   TOGETHER_API_KEY          required for together
   ELEVENLABS_API_KEY        required for scribe serve or shadow (never log it)
   STT_SCRIBE_FUNDING        paid (default) | all | trial
@@ -189,6 +195,37 @@ def shadow_rate():
     except ValueError:
         return 0.0
     return min(1.0, max(0.0, rate))
+
+
+def together_shadow_languages():
+    """Languages whose whisper-1-served chunks get a Together shadow run."""
+    raw = _env('STT_TOGETHER_SHADOW_LANGUAGES', '')
+    return {p.strip().lower() for p in raw.split(',') if p.strip()}
+
+
+def together_shadow_rate():
+    try:
+        rate = float(_env('STT_TOGETHER_SHADOW_RATE', '0'))
+    except ValueError:
+        return 0.0
+    return min(1.0, max(0.0, rate))
+
+
+def together_shadow_applies(language, *, key_source_own=False, rand=None):
+    """True when this whisper-1 chunk should also run on Together (shadow).
+
+    Platform jobs only (never BYOK), language must be on the shadow list and
+    the sample must hit. ``rand`` is a float in [0, 1) (injectable for tests).
+    """
+    if key_source_own:
+        return False
+    code = (language or '').strip().lower()
+    if not code or code not in together_shadow_languages():
+        return False
+    rate = together_shadow_rate()
+    if rate <= 0:
+        return False
+    return (rand if rand is not None else 0.0) < rate
 
 
 def scribe_shadow_pct():

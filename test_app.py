@@ -18113,8 +18113,8 @@ def test_denial_reasons_each_signal():
 def test_denial_windows_and_denied_rows_do_not_chain():
     # similar only within 24h
     assert _verdict('aidenjonkman7@gmail.com', [_row('aidenjonkman6@gmail.com', hours_ago=25)]) is None
-    # ip/device only within 7 days
-    assert _verdict('f@x.com', [_row('o@y.com', ip='h', hours_ago=24 * 8)], ip='h') is None
+    # ip/device only within the reuse window (30 days by default)
+    assert _verdict('f@x.com', [_row('o@y.com', ip='h', hours_ago=24 * 31)], ip='h') is None
     # an account that itself got no trial does not poison the IP
     assert _verdict('f@x.com', [_row('o@y.com', ip='h', limit=0, denied='same_ip')], ip='h') is None
     assert _verdict('f@x.com', [_row('o@y.com', ip='h', limit=0)], ip='h') is None
@@ -20818,3 +20818,132 @@ def test_home_rows_show_episode_price_for_signed_in_metered_accounts():
     tx = (pathlib.Path(A.__file__).parent / 'templates' / 'index.html').read_text()
     assert 'function episodePriceLabel(durationMin)' in tx
     assert "warn.setAttribute('data-episode-price', epPrice)" in tx
+
+
+# -- Together shadow on whisper-1-served languages (quality check) ----------
+
+def _capture_threads(monkeypatch):
+    threads = []
+    real_thread = A.threading.Thread
+
+    def capture_thread(*a, **kw):
+        t = real_thread(*a, **kw)
+        threads.append(t)
+        return t
+
+    monkeypatch.setattr(A.threading, 'Thread', capture_thread)
+    return threads
+
+
+def test_together_shadow_first_chunk_compare_is_free(
+        tmp_path, together_on, monkeypatch, ph_events):
+    """Auto-detected non-English first chunk: Together's text vs whisper-1, no extra call."""
+    monkeypatch.setenv('STT_TOGETHER_SHADOW_LANGUAGES', 'es,pt')
+    monkeypatch.setenv('STT_TOGETHER_SHADOW_RATE', '0')
+    monkeypatch.setattr(A, '_repair_dropped_windows', lambda *a, **k: True)
+    tg = _ScriptedClient(_result('hola que tal amigo', [_seg(0, 20, ' hola que tal amigo')], 'es'))
+    oa = _ScriptedClient(_result('hola que tal', [_seg(0, 20, ' hola que tal')], 'es'))
+    job = _job(tg)
+    job.user_id = 5151
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), '', chunk_seconds=60)
+    assert r.text == 'hola que tal'                       # user gets whisper-1
+    assert len(tg.calls) == 1 and len(oa.calls) == 1      # no extra Together call
+    assert job.fallback_language == 'es'
+    ev = [e for e in ph_events.events if e['event'] == 'stt_together_shadow_compared']
+    assert len(ev) == 1
+    p = ev[0]['properties']
+    assert p['source'] == 'first_chunk_autodetect' and p['language'] == 'es'
+    assert p['together_words'] == 4 and p['whisper_words'] == 3
+    assert 0 < p['similarity'] <= 1
+    assert 'text' not in p and 'transcript' not in p
+
+
+def test_together_shadow_samples_later_whisper_chunks_and_never_serves(
+        tmp_path, together_on, monkeypatch, ph_events):
+    monkeypatch.setenv('STT_TOGETHER_SHADOW_LANGUAGES', 'es')
+    monkeypatch.setenv('STT_TOGETHER_SHADOW_RATE', '1')
+    threads = _capture_threads(monkeypatch)
+    tg = _ScriptedClient(_result('uno dos tres', [_seg(0, 20, ' uno dos tres')], 'es'))
+    oa = _ScriptedClient(_result('uno dos', [_seg(0, 20, ' uno dos')], 'es'))
+    job = _job(tg)
+    job.provider = STT.PROVIDER_OPENAI          # rest of the job is on whisper-1
+    job.fallback_language = 'es'
+    job.user_id = 5152
+    chunk = _chunk(tmp_path)
+    r = A._transcribe_chunk_routed(job, oa, chunk, '', chunk_seconds=60)
+    for t in threads:
+        t.join(5)
+    assert r.text == 'uno dos'
+    assert tg.calls and tg.calls[0].get('language') == 'es'
+    ev = [e for e in ph_events.events if e['event'] == 'stt_together_shadow_compared']
+    assert len(ev) == 1 and ev[0]['properties']['source'] == 'sampled_chunk'
+    assert ev[0]['properties']['error'] is None
+    assert not os.path.exists(chunk + '.together-shadow.mp3')
+    # Real spend: whisper-1 served + Together shadow; shadow is not a provider.
+    assert job.cost_usd == pytest.approx(0.006 + 0.0015)
+    assert job.shadow_cost_usd == pytest.approx(0.0015)
+    assert job.provider_label() == STT.OPENAI_MODEL
+
+
+def test_together_shadow_off_wrong_language_and_byok(
+        tmp_path, together_on, monkeypatch, ph_events):
+    monkeypatch.setenv('STT_TOGETHER_SHADOW_LANGUAGES', 'es')
+    monkeypatch.setenv('STT_TOGETHER_SHADOW_RATE', '1')
+    for lang, reason in (('de', 'test'), ('es', 'own_key')):
+        tg = _ScriptedClient()
+        oa = _ScriptedClient()
+        job = A.SttJob(STT.PROVIDER_OPENAI, reason, together_client=tg)
+        A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), lang, chunk_seconds=60)
+        assert tg.calls == []
+    monkeypatch.setenv('STT_TOGETHER_SHADOW_RATE', '0')
+    tg = _ScriptedClient()
+    job = A.SttJob(STT.PROVIDER_OPENAI, 'test', together_client=tg)
+    A._transcribe_chunk_routed(job, _ScriptedClient(), _chunk(tmp_path), 'es',
+                               chunk_seconds=60)
+    assert tg.calls == []
+    assert not [e for e in ph_events.events if e['event'] == 'stt_together_shadow_compared']
+
+
+def test_together_shadow_failure_is_logged_not_raised(
+        tmp_path, together_on, monkeypatch, ph_events):
+    monkeypatch.setenv('STT_TOGETHER_SHADOW_LANGUAGES', 'es')
+    monkeypatch.setenv('STT_TOGETHER_SHADOW_RATE', '1')
+    threads = _capture_threads(monkeypatch)
+    tg = _ScriptedClient(_openai_exc(503), _openai_exc(503), _openai_exc(503))
+    job = A.SttJob(STT.PROVIDER_OPENAI, 'test', together_client=tg, user_id=5153)
+    r = A._transcribe_chunk_routed(job, _ScriptedClient(), _chunk(tmp_path), 'es',
+                                   chunk_seconds=60)
+    for t in threads:
+        t.join(5)
+    assert r.text == 'whisper default'
+    ev = [e for e in ph_events.events if e['event'] == 'stt_together_shadow_compared']
+    assert len(ev) == 1 and ev[0]['properties']['error']
+    assert job.events['together_shadow_fail'] == 1
+
+
+def test_whisper_shadow_of_together_chunk_does_not_make_job_mixed(
+        tmp_path, together_on, monkeypatch):
+    monkeypatch.setenv('STT_SHADOW_RATE', '1')
+    threads = _capture_threads(monkeypatch)
+    monkeypatch.setattr(A, '_repair_dropped_windows', lambda *a, **k: True)
+    tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)], 'en'))
+    job = _job(tg)
+    A._transcribe_chunk_routed(job, _ScriptedClient(), _chunk(tmp_path), 'en',
+                               chunk_seconds=60)
+    for t in threads:
+        t.join(5)
+    assert job.provider_label() == STT.PROVIDER_TOGETHER
+    assert job.cost_usd == pytest.approx(0.0015 + 0.006)
+
+
+def test_trial_reuse_window_defaults_to_30_days(monkeypatch):
+    monkeypatch.delenv('TRIAL_REUSE_WINDOW_DAYS', raising=False)
+    assert TA.reuse_window() == timedelta(days=30)
+    # 8 and 29 days ago: still blocked; 31 days: granted
+    for days, verdict in ((8, 'same_ip'), (29, 'same_ip'), (31, None)):
+        assert _verdict('f@x.com', [_row('o@y.com', ip='h', hours_ago=24 * days)],
+                        ip='h') == verdict
+    monkeypatch.setenv('TRIAL_REUSE_WINDOW_DAYS', '7')
+    assert TA.reuse_window() == timedelta(days=7)
+    monkeypatch.setenv('TRIAL_REUSE_WINDOW_DAYS', 'junk')
+    assert TA.reuse_window() == timedelta(days=30)

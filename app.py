@@ -2269,7 +2269,7 @@ def trial_abuse_verdict(email, ip_hash, device_id):
         return None
     try:
         norm = trial_abuse.normalize_email(email)
-        since = datetime.now(timezone.utc) - trial_abuse.REUSE_WINDOW
+        since = datetime.now(timezone.utc) - trial_abuse.reuse_window()
         rows = User.query.filter(db.or_(
             User.email_normalized == norm,
             User.created_at >= since.replace(tzinfo=None),
@@ -3713,15 +3713,29 @@ class SttJob:
         )
         self.pinned_language = None
         self.cost_usd = 0.0
+        self.shadow_cost_usd = 0.0
+        # Language detected on the first chunk when the rest went to whisper-1
+        # (lets the Together shadow sample the same language).
+        self.fallback_language = None
         self.providers_used = set()
         self.events = collections.Counter()
 
-    def charge(self, provider, seconds, *, exact_usd=None, count_chunk=False):
-        """Add provider spend. ``count_chunk`` marks a served chunk (not shadow)."""
+    def charge(self, provider, seconds, *, exact_usd=None, count_chunk=False,
+               shadow=False):
+        """Add provider spend. ``count_chunk`` marks a served chunk.
+
+        ``shadow`` spend (background quality comparisons) is real cost but
+        never served the user, so it does not make the job ``mixed``.
+        """
         if exact_usd is not None:
             self.cost_usd += max(0.0, float(exact_usd))
         else:
             self.cost_usd += stt_mod.cost_usd(provider, seconds)
+        if shadow:
+            self.shadow_cost_usd += (
+                max(0.0, float(exact_usd)) if exact_usd is not None
+                else stt_mod.cost_usd(provider, seconds))
+            return
         self.providers_used.add(provider)
         if count_chunk:
             self.events[f'chunks_{provider}'] += 1
@@ -4030,7 +4044,7 @@ def _start_shadow_comparison(job, openai_client, chunk_file, language, together_
         shutil.copyfile(chunk_file, shadow_path)
     except OSError:
         return None
-    job.charge(stt_mod.PROVIDER_OPENAI, chunk_seconds)
+    job.charge(stt_mod.PROVIDER_OPENAI, chunk_seconds, shadow=True)
     user_id, task_id = job.user_id, job.task_id
 
     def run():
@@ -4081,7 +4095,7 @@ def _start_scribe_shadow_comparison(job, chunk_file, language, served_text,
     # Charge list-price estimate on the job (same pattern as Together→whisper
     # shadow). Billed fiat from the response header is reported to PostHog only
     # — never mutate job.cost_usd from the background thread.
-    job.charge(stt_mod.PROVIDER_SCRIBE, chunk_seconds)
+    job.charge(stt_mod.PROVIDER_SCRIBE, chunk_seconds, shadow=True)
     user_id, task_id = job.user_id, job.task_id
     estimate = stt_mod.cost_usd(stt_mod.PROVIDER_SCRIBE, chunk_seconds)
 
@@ -4135,6 +4149,98 @@ def _start_scribe_shadow_comparison(job, chunk_file, language, served_text,
     t = threading.Thread(target=run, daemon=True, name='stt-scribe-shadow')
     t.start()
     return t
+
+
+def _together_shadow_props(served_text, together_result, *, task_id, language,
+                           chunk_seconds, source):
+    """Comparison props for one whisper-1-served chunk vs Together (no text)."""
+    t_text = getattr(together_result, 'text', '') or ''
+    segs = [{'start': s.start, 'end': s.end, 'text': s.text}
+            for s in (getattr(together_result, 'segments', None) or [])]
+    served_text = served_text or ''
+    return {
+        'task_id': task_id,
+        'source': source,
+        'language': language or None,
+        'together_detected_language': normalize_language_code(
+            getattr(together_result, 'language', None)) or None,
+        'similarity': stt_mod.similarity(served_text, t_text),
+        'length_ratio': round(len(t_text.split()) / max(1, len(served_text.split())), 3),
+        'together_words': len(t_text.split()),
+        'whisper_words': len(served_text.split()),
+        'flagged_windows': len(stt_mod.suspicious_segments(segs)),
+        'soft_flagged_windows': len(stt_mod.soft_suspicious_segments(segs)),
+        'chunk_seconds': round(float(chunk_seconds or 0), 1),
+        'error': None,
+    }
+
+
+def _log_together_shadow(job, props):
+    app.logger.info('stt together shadow %s',
+                    {k: v for k, v in props.items() if k != 'task_id'})
+    try:
+        product_analytics.capture('stt_together_shadow_compared', job.user_id, props)
+    except Exception:  # noqa: BLE001 - analytics must never hurt the job
+        pass
+
+
+def _start_together_shadow_comparison(job, client, chunk_file, language, served_text,
+                                      chunk_seconds):
+    """Run this whisper-1-served chunk on Together in the background (never served)."""
+    shadow_path = f'{chunk_file}.together-shadow.mp3'
+    try:
+        shutil.copyfile(chunk_file, shadow_path)
+    except OSError:
+        return None
+    job.charge(stt_mod.PROVIDER_TOGETHER, chunk_seconds, shadow=True)
+    task_id = job.task_id
+
+    def run():
+        started = time.monotonic()
+        try:
+            result = _together_transcribe(client, shadow_path, language,
+                                          label='together-shadow')
+            props = _together_shadow_props(
+                served_text, result, task_id=task_id, language=language,
+                chunk_seconds=chunk_seconds, source='sampled_chunk')
+            props['latency_ms'] = int((time.monotonic() - started) * 1000)
+            job.events['together_shadow_ok'] += 1
+        except Exception as exc:  # noqa: BLE001 - shadow must never hurt the job
+            job.events['together_shadow_fail'] += 1
+            props = {'task_id': task_id, 'source': 'sampled_chunk',
+                     'language': language or None,
+                     'chunk_seconds': round(float(chunk_seconds or 0), 1),
+                     'error': type(exc).__name__,
+                     'status_code': getattr(exc, 'status_code', None)}
+        finally:
+            if os.path.exists(shadow_path):
+                os.remove(shadow_path)
+        _log_together_shadow(job, props)
+
+    t = threading.Thread(target=run, daemon=True, name='stt-together-shadow')
+    t.start()
+    return t
+
+
+def _maybe_together_shadow(job, chunk_file, language, served_text, chunk_seconds):
+    """Sample whisper-1-served platform chunks in STT_TOGETHER_SHADOW_LANGUAGES."""
+    if job.reason == 'own_key':
+        return None
+    lang = (language or job.fallback_language or '').strip().lower()
+    if not stt_mod.together_shadow_applies(
+            lang, rand=secrets.randbelow(10_000) / 10_000):
+        return None
+    client = job.together_client
+    if client is None:
+        client = getattr(job, '_shadow_together_client', None)
+        if client is None:
+            client = build_together_client()
+            job._shadow_together_client = client
+    if client is None:
+        return None
+    job.events['together_shadow'] += 1
+    return _start_together_shadow_comparison(
+        job, client, chunk_file, lang, served_text, chunk_seconds)
 
 
 def _maybe_scribe_shadow(job, chunk_file, language, served_text, chunk_seconds,
@@ -4223,6 +4329,9 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
             _maybe_scribe_shadow(
                 job, chunk_file, language, getattr(result, 'text', '') or '',
                 chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
+            _maybe_together_shadow(
+                job, chunk_file, language, getattr(result, 'text', '') or '',
+                chunk_seconds)
         return result
 
     try:
@@ -4251,7 +4360,16 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
                             'rest of task %s', detected, task_id)
             job.provider = stt_mod.PROVIDER_OPENAI
             job.openai_model = stt_mod.OPENAI_MODEL
+            job.fallback_language = detected or None
+            together_first = result
             result = openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
+            # Together already transcribed this chunk (paid): compare for free.
+            if detected and detected in stt_mod.together_shadow_languages():
+                job.events['together_shadow_first'] += 1
+                _log_together_shadow(job, _together_shadow_props(
+                    getattr(result, 'text', '') or '', together_first,
+                    task_id=job.task_id, language=detected,
+                    chunk_seconds=chunk_seconds, source='first_chunk_autodetect'))
             _maybe_scribe_shadow(
                 job, chunk_file, language, getattr(result, 'text', '') or '',
                 chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
@@ -4358,6 +4476,11 @@ def _emit_stt_job_summary(stt_job, *, language=None, audio_duration=None,
             'shadow_attempts': int(events.get('shadow', 0)),
             'shadow_ok': int(events.get('shadow_ok', 0)),
             'shadow_fail': int(events.get('shadow_fail', 0)),
+            'together_shadow_attempts': int(events.get('together_shadow', 0)),
+            'together_shadow_first': int(events.get('together_shadow_first', 0)),
+            'together_shadow_ok': int(events.get('together_shadow_ok', 0)),
+            'together_shadow_fail': int(events.get('together_shadow_fail', 0)),
+            'shadow_cost_usd': round(float(getattr(stt_job, 'shadow_cost_usd', 0.0)), 5),
         }
         app.logger.info('stt_job_summary %s', {
             k: props[k] for k in props if k != 'task_id'
