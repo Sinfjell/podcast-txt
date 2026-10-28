@@ -141,7 +141,29 @@ jobs:
                # Install/upgrade runtime deps (e.g. PyJWT for ChatGPT OAuth).
                .venv/bin/pip install -r requirements.txt
                systemctl restart podskrift
+               # "active" only means systemd started gunicorn, not that the app
+               # answers (28.10: unreadable new files gave ~1 min downtime while
+               # this step stayed green). Require /health 200 on 60 consecutive
+               # checks (~1 min) within 4 min, else fail with the journal tail.
+               ok=0
+               deadline=$(( $(date +%s) + 240 ))
+               while [ "$ok" -lt 60 ]; do
+                 if curl -fs -m 5 -o /dev/null http://127.0.0.1:5002/health; then
+                   ok=$((ok + 1))
+                 else
+                   [ "$ok" -gt 0 ] && echo "health check failed after $ok OK checks; counting again"
+                   ok=0
+                 fi
+                 if [ "$(date +%s)" -ge "$deadline" ]; then
+                   echo "::error::podskrift /health did not return 200 for 60 consecutive checks within 240s"
+                   systemctl status podskrift --no-pager || true
+                   journalctl -u podskrift -n 80 --no-pager || true
+                   exit 1
+                 fi
+                 sleep 1
+               done
                systemctl is-active --quiet podskrift
+               curl -fsS -m 5 -o /dev/null -w "prod /health %{http_code} (60 consecutive OK)\n" http://127.0.0.1:5002/health
                echo "podskrift is active"
                echo "HEAD $(git rev-parse --short HEAD)"
               '
