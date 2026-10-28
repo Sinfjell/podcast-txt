@@ -16,6 +16,12 @@ Run via ops/notion-daily-metrics.sh on the host, or:
     DRY_RUN=1 python3 ops/notion-daily-metrics.py
     python3 ops/notion-daily-metrics.py --day 2026-09-10
 
+Unit economics (variable costs only, see ops/unit_economics.py): gross/net
+revenue, buyers, STT + LLM cost, contribution margin and cumulative CM since
+2026-10-09. Net revenue uses Stripe balance transactions (read-only; the key is
+STRIPE_SECRET_KEY from the env or the app .env) and falls back to a labelled
+estimate.
+
 Requires ops/.env.metrics (or $APP_DIR/.env.metrics) with NOTION_TOKEN.
 Optional: POSTHOG_PERSONAL_API_KEY (query:read), POSTHOG_PROJECT_ID,
 POSTHOG_HOST. Do not set the Entity relation — the integration is database-scoped
@@ -38,6 +44,7 @@ from zoneinfo import ZoneInfo
 # Sibling module (ops/ is not a package).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import posthog_daily_health as phh  # noqa: E402
+import unit_economics as ue  # noqa: E402
 
 OSLO = ZoneInfo('Europe/Oslo')
 UTC = timezone.utc
@@ -473,6 +480,13 @@ def notion_properties(
         'Trial exhausted',
     ):
         props[key] = {'number': metrics[key]}
+    # Unit economics (variable costs only) -- present when collected.
+    for key in ue.NOTION_NUMBER_KEYS:
+        if key in metrics:
+            props[key] = {'number': metrics[key]}
+    for key in ue.NOTION_SELECT_KEYS:
+        if metrics.get(key):
+            props[key] = {'select': {'name': metrics[key]}}
     # Only set Notes when the health check produced warnings — omit otherwise
     # so a manual note on the row is left untouched.
     if notes_content:
@@ -664,14 +678,27 @@ def main(argv: list[str] | None = None) -> int:
     trial_daily_seconds = max(0, trial_daily_minutes) * 60
 
     day = parse_day(args.day)
+    unit_econ_notes: list[str] = []
     with open_db(db_path) as conn:
         metrics = collect_metrics(
             conn, day, trial_default_seconds,
             trial_daily_seconds=trial_daily_seconds,
         )
+        # Reporting only: a failure here never blocks the growth row.
+        try:
+            bts, stripe_reason = ue.load_stripe_bts(app_dir)
+            metrics.update(ue.collect_unit_economics(conn, day, bts=bts))
+            if metrics.get('Net revenue source') in ('estimate', 'mixed'):
+                unit_econ_notes.append(
+                    'Netto inntekt er delvis estimert (ikke Stripe): '
+                    f'{stripe_reason or "betaling ikke funnet i Stripe"}')
+        except sqlite3.Error as exc:
+            unit_econ_notes.append(
+                f'Enhetsøkonomi kunne ikke beregnes: {type(exc).__name__}')
 
     # Health check after metrics collect; failures become a single Notes line.
     health_lines = run_health_check(day)
+    health_lines.extend(unit_econ_notes)
     # Daily free-trial budget — silent stop risk for every free-trial user.
     used_s = metrics.pop(
         '_trial_daily_used_seconds',
