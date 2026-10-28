@@ -9490,7 +9490,8 @@ def test_whats_new_retired_ids_are_caught_up_not_replayed(trial_on):
     import re as _re
     retired = A.load_changelog_retired_ids()
     for rid in ('es-de-native-landings', 'seo-transcript-landing-pages',
-                'partial-preview-minutes-wording'):
+                'partial-preview-minutes-wording',
+                'finish-preview-remaining-minutes', 'checkout-recovery-email'):
         assert rid in retired
     ids = {e['id'] for e in A.load_changelog_entries()}
     assert not ids & set(retired), 'retired ids must not be live entries'
