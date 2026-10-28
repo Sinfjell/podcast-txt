@@ -11,8 +11,8 @@ Signals (first match wins, order is the ``reason`` priority):
                            (gmail: dots and +tags ignored; others: +tag ignored)
 * ``similar_email``     -- same local part once trailing digits are stripped,
                            signed up within ``SIMILAR_WINDOW`` (name1, name2, ...)
-* ``same_device``       -- device cookie already got a trial within ``REUSE_WINDOW``
-* ``same_ip``           -- hashed signup IP already got a trial within ``REUSE_WINDOW``
+* ``same_device``       -- device cookie already got a trial within ``reuse_window()`` (30 d)
+* ``same_ip``           -- hashed signup IP already got a trial within ``reuse_window()`` (30 d)
 
 IPs are never stored raw: ``hash_ip`` is an HMAC keyed with the app secret.
 """
@@ -28,12 +28,24 @@ from typing import Iterable, Optional
 
 GMAIL_DOMAINS = frozenset({'gmail.com', 'googlemail.com'})
 SIMILAR_WINDOW = timedelta(hours=24)
-REUSE_WINDOW = timedelta(days=7)
+#: Default IP/device reuse window (was 7 days; same person came back after 14).
+DEFAULT_REUSE_WINDOW_DAYS = 30
+REUSE_WINDOW = timedelta(days=DEFAULT_REUSE_WINDOW_DAYS)
 DEVICE_COOKIE = 'ps_did'
 _DEVICE_RE = re.compile(r'^[a-f0-9]{32}$')
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 DISPOSABLE_LIST_PATH = os.path.join(_HERE, 'disposable_email_domains.txt')
+
+
+def reuse_window() -> timedelta:
+    """IP/device reuse window; ``TRIAL_REUSE_WINDOW_DAYS`` overrides (1..365)."""
+    raw = (os.getenv('TRIAL_REUSE_WINDOW_DAYS') or '').strip()
+    try:
+        days = int(raw) if raw else DEFAULT_REUSE_WINDOW_DAYS
+    except ValueError:
+        days = DEFAULT_REUSE_WINDOW_DAYS
+    return timedelta(days=min(365, max(1, days)))
 
 
 def load_disposable_domains(path: str = DISPOSABLE_LIST_PATH) -> frozenset:
@@ -114,7 +126,7 @@ def denial_reason(*, email: str, ip_hash: Optional[str],
     norm = normalize_email(email)
     base = email_base(norm)
     similar_since = now - SIMILAR_WINDOW
-    reuse_since = now - REUSE_WINDOW
+    reuse_since = now - reuse_window()
     reasons = set()
     for row in existing:
         other = row.email_normalized or normalize_email(row.email)
