@@ -463,3 +463,12 @@ def test_is_backfill_day_and_app_env_value(tmp_path):
     assert mod.app_env_value(tmp_path, 'TRIAL_DAILY_MINUTES') == '3500'
     assert mod.app_env_value(tmp_path, 'MISSING') is None
     assert mod.app_env_value(tmp_path / 'nope', 'X') is None
+
+
+def test_day_bounds_utc_handles_dst_days():
+    mod = _load_metrics_module('notion_daily_metrics_dst')
+    # 2026-10-25: summer time ends in Oslo -> 25-hour day.
+    assert mod.day_bounds_utc(date(2026, 10, 25)) == ('2026-10-24 22:00:00', '2026-10-25 23:00:00')
+    # 2026-03-29: summer time starts -> 23-hour day.
+    assert mod.day_bounds_utc(date(2026, 3, 29)) == ('2026-03-28 23:00:00', '2026-03-29 22:00:00')
+    assert mod.day_bounds_utc(date(2026, 10, 26)) == ('2026-10-25 23:00:00', '2026-10-26 23:00:00')

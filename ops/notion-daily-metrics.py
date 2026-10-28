@@ -133,7 +133,9 @@ def day_bounds_utc(day: date) -> tuple[str, str]:
     SQLite stores naive UTC timestamps from SQLAlchemy (no updated_at on tasks).
     """
     start = datetime(day.year, day.month, day.day, tzinfo=OSLO).astimezone(UTC)
-    end = start + timedelta(days=1)
+    # Next Oslo midnight, not start + 24 h: DST days are 23 or 25 hours long.
+    nxt = day + timedelta(days=1)
+    end = datetime(nxt.year, nxt.month, nxt.day, tzinfo=OSLO).astimezone(UTC)
     fmt = '%Y-%m-%d %H:%M:%S'
     return start.strftime(fmt), end.strftime(fmt)
 

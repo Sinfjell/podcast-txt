@@ -268,14 +268,13 @@ def stripe_net_by_day(purchases: list[dict], bts: list[dict]) -> tuple[dict, set
                 charge_by_pi[p['pi']] = b
                 factors.append(int(p['gross_cents']) / int(b['amount']))
     net: dict[date, float] = {}
-    counted_amount_by_utc_day: dict[date, int] = {}
+    counted_by_utc_day: dict[date, list] = {}
     for pi, b in charge_by_pi.items():
         p = counted[pi]
         f = int(p['gross_cents']) / int(b['amount'])
         net[p['day']] = net.get(p['day'], 0.0) + int(b['net']) * f / 100.0
         utc_d = datetime.fromtimestamp(int(b['created']), tz=UTC).date()
-        counted_amount_by_utc_day[utc_d] = (
-            counted_amount_by_utc_day.get(utc_d, 0) + int(b['amount']))
+        counted_by_utc_day.setdefault(utc_d, []).append((p['day'], int(b['amount'])))
     mean_f = sum(factors) / len(factors) if factors else None
     for b in bts:
         if b.get('type') != 'stripe_fee' or mean_f is None:
@@ -283,13 +282,15 @@ def stripe_net_by_day(purchases: list[dict], bts: list[dict]) -> tuple[dict, set
         m = MP_FEE_RE.search(b.get('description') or '')
         if not m:
             continue
+        # The fee covers that UTC day's charges; split it per counted charge
+        # and book each share on that purchase's Oslo day.
         fee_day = date.fromisoformat(m.group(1))
         total = all_charge_amount_by_utc_day.get(fee_day, 0)
-        mine = counted_amount_by_utc_day.get(fee_day, 0)
-        if total <= 0 or mine <= 0:
+        if total <= 0:
             continue
-        share = mine / total
-        net[fee_day] = net.get(fee_day, 0.0) + int(b['amount']) * mean_f / 100.0 * share
+        fee_usd = int(b['amount']) * mean_f / 100.0
+        for oslo_d, amount in counted_by_utc_day.get(fee_day, []):
+            net[oslo_d] = net.get(oslo_d, 0.0) + fee_usd * amount / total
     return net, set(charge_by_pi)
 
 
