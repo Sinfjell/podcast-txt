@@ -189,3 +189,21 @@ def test_notion_properties_include_unit_economics():
     for key in ue.NOTION_NUMBER_KEYS:
         assert props[key] == {'number': metrics[key]}
     assert props['Net revenue source'] == {'select': {'name': 'stripe'}}
+
+
+def test_managed_payments_fee_follows_purchase_oslo_day():
+    """A charge at 22:44Z belongs to the next Oslo day -- so does its fee share."""
+    conn = _db()
+    conn.execute("INSERT INTO credit_purchases VALUES "
+                 "(7, 501, '2026-10-12 22:44:00', 172, 172, 0, 'credited', 'pi_late')")
+    bts = _bts() + [_bt('pi_late', 1720, 1400, '2026-10-12 22:44:00')]
+    total = 1720 + 2820 + 1720 + 9990 + 1720           # all UTC-12 charges
+    f = sum([172 / 1720, 282 / 2820, 172 / 1720, 172 / 1720]) / 4
+    fee = -100 * f / 100
+    d12 = ue.collect_unit_economics(conn, date(2026, 10, 12), bts=bts)
+    d13 = ue.collect_unit_economics(conn, date(2026, 10, 13), bts=bts)
+    assert d12['Net revenue (USD)'] == round(1.90 + 1.40 + fee * (2820 + 1720) / total, 2)
+    assert d13['Net revenue (USD)'] == round(1.40 + fee * 1720 / total, 2)
+    # Cumulative is the running sum of the daily rows (no fee leaking across days).
+    assert d13['Cumulative CM (USD)'] == pytest.approx(
+        d12['Cumulative CM (USD)'] + d13['Contribution margin (USD)'], abs=0.011)
