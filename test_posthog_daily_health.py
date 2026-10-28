@@ -6,7 +6,7 @@ import os
 import sqlite3
 import sys
 import tempfile
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -388,3 +388,78 @@ def test_collect_metrics_includes_daily_trial_used_vs_cap():
     assert metrics['Trial daily cap minutes'] == 750.0
     assert metrics['_trial_daily_used_seconds'] == 680 * 60
     assert metrics['_trial_daily_cap_seconds'] == 750 * 60
+
+
+def _load_metrics_module(name):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, OPS / 'notion-daily-metrics.py')
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_backfill_day_reports_trial_state_as_of_that_day():
+    """--day must not leak today's counters into a past row."""
+    mod = _load_metrics_module('notion_daily_metrics_asof')
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / 'podcast.db'
+        _minimal_podcast_db(db)
+        conn = sqlite3.connect(db)
+        conn.executemany(
+            "INSERT INTO users (id, created_at, trial_seconds_used, trial_seconds_limit) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                (1, '2026-10-01 08:00:00', 3600, 3600),   # 30 min on 10-02, 30 on 10-05
+                (2, '2026-10-04 08:00:00', 600, None),    # signs up after the day
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO transcription_tasks (id, user_id, status, started_at, completed_at, "
+            "trial_seconds_charged) VALUES (?, ?, 'completed', ?, ?, ?)",
+            [
+                ('a', 1, '2026-10-02 08:00:00', '2026-10-02 08:10:00', 1800),
+                ('b', 1, '2026-10-05 08:00:00', '2026-10-05 08:10:00', 1800),
+                ('c', 2, '2026-10-05 09:00:00', '2026-10-05 09:10:00', 600),
+            ],
+        )
+        conn.execute("INSERT INTO trial_budget_days VALUES ('2026-10-02', 1800)")
+        conn.commit()
+        conn.row_factory = sqlite3.Row  # as open_db() in production
+        past = mod.collect_metrics(conn, date(2026, 10, 2), 3600,
+                                   trial_daily_seconds=3500 * 60)
+        now = mod.collect_metrics(conn, date(2026, 10, 5), 3600,
+                                  trial_daily_seconds=3500 * 60)
+        conn.close()
+    assert past['Users total'] == 1
+    assert past['Trial minutes used'] == 30.0      # not today's 70
+    assert past['Trial exhausted'] == 0            # user 1 hit the limit on 10-05
+    assert past['Trial minutes 1d'] == 30.0
+    assert past['Trial daily cap minutes 1d'] == 3500.0
+    assert past['Trial daily cap used 1d'] == round(1800 / (3500 * 60), 4)
+    assert now['Trial minutes used'] == 70.0
+    assert now['Trial exhausted'] == 1
+
+
+def test_trial_columns_reach_notion_properties():
+    mod = _load_metrics_module('notion_daily_metrics_props2')
+    metrics = {k: 0 for k in (
+        'Users total', 'Signups 1d', 'Active users 1d', 'Completions 1d',
+        'Errors 1d', 'Never started', 'Ever completed', 'Returned 2+ days',
+        'Trial minutes used', 'Trial exhausted')}
+    metrics.update({'day': '2026-10-02', 'Trial minutes 1d': 30.0,
+                    'Trial daily cap minutes 1d': 3500.0,
+                    'Trial daily cap used 1d': 0.0086})
+    props = mod.notion_properties(metrics, 'backfill', datetime.now(timezone.utc))
+    assert props['Trial minutes 1d'] == {'number': 30.0}
+    assert props['Trial daily cap used 1d'] == {'number': 0.0086}
+
+
+def test_is_backfill_day_and_app_env_value(tmp_path):
+    mod = _load_metrics_module('notion_daily_metrics_bf')
+    now = datetime(2026, 10, 28, 6, 0, tzinfo=timezone.utc)
+    assert mod.is_backfill_day(date(2026, 10, 27), now=now) is False
+    assert mod.is_backfill_day(date(2026, 10, 26), now=now) is True
+    (tmp_path / '.env').write_text('X=1\nTRIAL_DAILY_MINUTES=3500\n')
+    assert mod.app_env_value(tmp_path, 'TRIAL_DAILY_MINUTES') == '3500'
+    assert mod.app_env_value(tmp_path, 'MISSING') is None
+    assert mod.app_env_value(tmp_path / 'nope', 'X') is None
