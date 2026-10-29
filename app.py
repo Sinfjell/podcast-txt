@@ -3506,8 +3506,8 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None,
     part_seconds = (
         stt_mod.segment_seconds_for_model(openai_model) or SEGMENT_SECONDS
     )
-    # Route before prepare so Soniox can request a single whole-file part
-    # (SONIOX_MAX_SECONDS) instead of Whisper-sized chunks.
+    # Route before prepare so Soniox (and gpt-transcribe) can adjust
+    # segment_seconds; Soniox keeps the standard Whisper-sized parts.
     stt_job = _stt_job_for_task(
         task_id, key_source, language, openai_model=openai_model,
         segment_seconds=part_seconds, audio_seconds=billable_duration)
@@ -3690,7 +3690,8 @@ def _whisper_transcribe_chunk(openai_client, chunk_file, language, *,
 # STT_TOGETHER_FUNDING=all) to Together AI whisper-large-v3. STT_PROVIDER=scribe
 # sends matching jobs (STT_SCRIBE_FUNDING, default paid) to ElevenLabs scribe_v2.
 # STT_SONIOX_LANGUAGES (independent overlay) sends known languages to Soniox
-# stt-async-v5 as a whole-file async job (max 300 min); empty list = off.
+# stt-async-v5 one async job per standard 900 s part (episode cap 300 min);
+# empty list = off.
 # Every failure mode falls back to whisper-1 for that chunk on the platform
 # OpenAI client (Soniox whole-job failures fall back for the whole job):
 #   429/5xx/dropped connection -> retried, then whisper-1
@@ -4645,7 +4646,7 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
 
     label = chunk_label or os.path.basename(chunk_file)
 
-    # --- Soniox async (whole-file or per-chunk gap fallback) ------------------
+    # --- Soniox async (per part, or Together gap fallback) --------------------
     if job.provider == stt_mod.PROVIDER_SONIOX:
         try:
             result = _soniox_transcribe(

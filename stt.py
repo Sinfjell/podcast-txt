@@ -11,15 +11,17 @@ the default whisper-1. Scribe/Soniox are not offered in the BYOK picker.
 
 Soniox (``stt-async-v5``) is an optional language overlay, independent of
 ``STT_PROVIDER``. When ``STT_SONIOX_LANGUAGES`` lists a known language (picker
-or RSS, ``nb-NO``→``no``) and ``SONIOX_API_KEY`` is set, that job is a
-whole-file async Soniox transcription (no chunking; max 300 min — longer
-episodes keep the Together/whisper path). Empty language list = feature off.
+or RSS, ``nb-NO``→``no``) and ``SONIOX_API_KEY`` is set, each standard
+``SEGMENT_SECONDS`` (900 s) part is a Soniox async job (upload + poll +
+delete). Episodes longer than ``SONIOX_MAX_SECONDS`` (300 min, Soniox's
+per-file cap — we keep the episode under it) stay on Together/whisper.
+Empty language list = feature off.
 
 Unknown language (picker auto + no feed language): keep the existing
-Together/Scribe/whisper detection flow. Soniox is whole-file and gated by a
-known language list, so auto-detect would either bill Soniox for languages we
-never intended to route or require a throwaway first pass — neither is
-practical. After detection the job stays on the provider that detected it.
+Together/Scribe/whisper detection flow. Soniox is gated by a known language
+list, so auto-detect would either bill Soniox for languages we never intended
+to route or require a throwaway first pass — neither is practical. After
+detection the job stays on the provider that detected it.
 
 Optional ``STT_SONIOX_FALLBACK=1`` uses Soniox instead of whisper-1 when a
 Together gap/error would otherwise fall back (per chunk). Default off.
@@ -249,7 +251,7 @@ def soniox_api_key():
 
 
 def soniox_languages():
-    """Languages routed to whole-file Soniox. Empty set = feature off."""
+    """Languages routed to Soniox (per 900 s part). Empty set = feature off."""
     raw = _env('STT_SONIOX_LANGUAGES', '')
     return {p.strip().lower() for p in raw.split(',') if p.strip()}
 
@@ -261,7 +263,7 @@ def soniox_fallback_enabled():
 
 
 def soniox_applies(language):
-    """True when a *known* language should take the whole-file Soniox path."""
+    """True when a *known* language should take the Soniox path (per part)."""
     if not soniox_api_key():
         return False
     allowed = soniox_languages()
@@ -272,7 +274,12 @@ def soniox_applies(language):
 
 
 def soniox_within_duration(audio_seconds):
-    """Soniox async rejects files over 300 minutes; longer keep existing path."""
+    """Episode longer than Soniox's 300 min per-file cap → existing path.
+
+    Parts are only ``SEGMENT_SECONDS`` (900 s), well under the cap; we still
+    refuse the overlay for episodes that would exceed it as a whole so a
+    future whole-file optimisation cannot silently trip the API limit.
+    """
     if audio_seconds is None:
         return True
     try:
@@ -491,10 +498,10 @@ def route_job(key_source, language, trial_seconds=0, paid_seconds=0,
     ``language_allowed`` / ``scribe_language_allowed``).
 
     Soniox overlay: a known language in ``STT_SONIOX_LANGUAGES`` (with API key)
-    wins over Together/Scribe for platform jobs. Empty/unknown language never
-    routes to Soniox (see module docstring). Episodes longer than
-    ``SONIOX_MAX_SECONDS`` keep the non-Soniox path when ``audio_seconds`` is
-    provided.
+    wins over Together/Scribe for platform jobs (one async job per standard
+    part). Empty/unknown language never routes to Soniox (see module
+    docstring). Episodes longer than ``SONIOX_MAX_SECONDS`` keep the
+    non-Soniox path when ``audio_seconds`` is provided.
     """
     if key_source != 'trial':
         return PROVIDER_OPENAI, 'own_key'

@@ -469,12 +469,12 @@ cap cannot carry prod volume), then add the env vars and restart.
 
 Optional **language overlay** (independent of `STT_PROVIDER`). When a job’s
 language is known (picker or RSS, `nb-NO`→`no`) and listed in
-`STT_SONIOX_LANGUAGES`, the whole file goes to Soniox `stt-async-v5` (upload +
-poll; max 300 minutes per file — longer episodes keep the Together/whisper
-path). Empty list = feature off. BYOK stays on OpenAI. Unknown language
-(picker auto + no feed language) keeps the existing Together/Scribe/whisper
-detection flow — Soniox is whole-file and only practical once the language is
-known up front.
+`STT_SONIOX_LANGUAGES`, each standard 900 s part goes to Soniox `stt-async-v5`
+(upload + poll + delete). Episodes longer than 300 minutes keep the
+Together/whisper path. Empty list = feature off. BYOK stays on OpenAI.
+Unknown language (picker auto + no feed language) keeps the existing
+Together/Scribe/whisper detection flow — Soniox is only practical once the
+language is known up front.
 
 | Var | Default | Notes |
 | --- | --- | --- |

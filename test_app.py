@@ -19890,7 +19890,7 @@ def test_stt_soniox_known_language_routes(soniox_on):
 
 
 def test_stt_soniox_unknown_language_keeps_detection_flow(soniox_on):
-    """Auto-detect (empty language) never takes the whole-file Soniox path."""
+    """Auto-detect (empty language) never takes the Soniox path."""
     assert STT.route_job('trial', '', 600, 0) == (
         STT.PROVIDER_TOGETHER, 'rollout')
 
