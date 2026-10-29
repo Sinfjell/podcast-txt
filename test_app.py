@@ -19480,8 +19480,13 @@ def _scribe_payload(text, *, language='en', probability=0.99, words=None):
 class _FakeHttpxResp:
     def __init__(self, status_code, payload=None, headers=None):
         self.status_code = status_code
-        self._payload = payload or {}
+        self._payload = {} if payload is None else payload
         self.headers = headers or {}
+        # Soniox DELETE returns 204 with no body; httpx uses .content.
+        if payload is None and status_code == 204:
+            self.content = b''
+        else:
+            self.content = b'{}' if self._payload is not None else b''
 
     def json(self):
         return self._payload
@@ -19783,6 +19788,370 @@ def test_stt_together_fallback_never_scribe_shadows_byok(
     assert job.events['scribe_shadow'] == 0
 
 
+# -- Soniox async -----------------------------------------------------------
+
+@pytest.fixture
+def soniox_on(monkeypatch):
+    """Known-language Soniox overlay; Together still available for other langs."""
+    monkeypatch.setenv('STT_PROVIDER', 'together')
+    monkeypatch.setenv('TOGETHER_API_KEY', 'tg-test-not-a-real-key')
+    monkeypatch.setenv('STT_TOGETHER_FUNDING', 'all')
+    monkeypatch.setenv('STT_TOGETHER_LANGUAGES', 'en,es,fr,it,pt')
+    monkeypatch.setenv('STT_SONIOX_LANGUAGES', 'de,nl,he,hu,fi,pl')
+    monkeypatch.setenv('SONIOX_API_KEY', 'sx-test-not-a-real-key')
+    monkeypatch.setenv('STT_SONIOX_FALLBACK', '0')
+    monkeypatch.setenv('STT_SHADOW_RATE', '0')
+    monkeypatch.setenv('SCRIBE_SHADOW_PCT', '0')
+    monkeypatch.setattr(A.time, 'sleep', lambda *_: None)
+    return True
+
+
+def _soniox_tokens_for(text, *, start_ms=0):
+    """Build Soniox-style tokens (leading space on each word) from text."""
+    tokens = []
+    t = start_ms
+    for i, word in enumerate(text.split()):
+        prefix = ' ' if i > 0 or start_ms == 0 else ''
+        # First token also gets a leading space like Soniox word tokens.
+        raw = (' ' + word) if i == 0 else (prefix + word)
+        if i == 0:
+            raw = ' ' + word
+        tokens.append({
+            'text': raw, 'start_ms': t, 'end_ms': t + 400, 'confidence': 0.9,
+        })
+        t += 500
+    return tokens
+
+
+def _soniox_http_script(monkeypatch, *, poll_statuses=None, transcript_text=None,
+                        transcript_tokens=None, fail_at=None, status_on_fail=503):
+    """Mock httpx.request for the Soniox upload→create→poll→transcript→delete flow."""
+    poll_statuses = list(poll_statuses or ['completed'])
+    transcript_text = transcript_text or _GOOD
+    transcript_tokens = transcript_tokens or _soniox_tokens_for(transcript_text)
+    calls = []
+    poll_i = {'n': 0}
+
+    def fake_request(method, url, **kw):
+        calls.append({'method': method, 'url': url, 'json': kw.get('json'),
+                      'files': bool(kw.get('files')),
+                      'auth': (kw.get('headers') or {}).get('Authorization')})
+        assert calls[-1]['auth'] == 'Bearer sx-test-not-a-real-key'
+        if fail_at and len(calls) == fail_at:
+            return _FakeHttpxResp(status_on_fail, {'error_type': 'limit_exceeded'})
+        path = url.split('api.soniox.com', 1)[-1]
+        if method == 'POST' and path.endswith('/v1/files'):
+            return _FakeHttpxResp(201, {'id': 'file-1', 'filename': 'a.mp3', 'size': 10})
+        if method == 'POST' and path.endswith('/v1/transcriptions'):
+            body = kw.get('json') or {}
+            assert body.get('model') == STT.SONIOX_MODEL
+            assert 'translation' not in body
+            return _FakeHttpxResp(201, {
+                'id': 'tr-1', 'status': 'queued', 'model': STT.SONIOX_MODEL,
+            })
+        if method == 'GET' and path.endswith('/transcript'):
+            return _FakeHttpxResp(200, {
+                'id': 'tr-1', 'text': transcript_text, 'tokens': transcript_tokens,
+            })
+        if method == 'GET' and '/v1/transcriptions/' in path:
+            idx = min(poll_i['n'], len(poll_statuses) - 1)
+            poll_i['n'] += 1
+            return _FakeHttpxResp(200, {
+                'id': 'tr-1', 'status': poll_statuses[idx],
+                'audio_duration_ms': 60_000,
+            })
+        if method == 'DELETE':
+            return _FakeHttpxResp(204, None)
+        raise AssertionError(f'unexpected Soniox call {method} {path}')
+
+    monkeypatch.setattr(A.httpx, 'request', fake_request)
+    return calls
+
+
+def test_stt_soniox_default_off(monkeypatch):
+    monkeypatch.delenv('STT_SONIOX_LANGUAGES', raising=False)
+    monkeypatch.setenv('SONIOX_API_KEY', 'sx-test-not-a-real-key')
+    monkeypatch.setenv('STT_PROVIDER', 'together')
+    monkeypatch.setenv('TOGETHER_API_KEY', 'tg-test')
+    monkeypatch.setenv('STT_TOGETHER_LANGUAGES', 'en')
+    assert STT.route_job('trial', 'de', 600, 0)[0] == STT.PROVIDER_OPENAI
+
+
+def test_stt_soniox_own_key_never_routed(soniox_on):
+    assert STT.route_job('user', 'de', 600, 0) == (STT.PROVIDER_OPENAI, 'own_key')
+
+
+def test_stt_soniox_known_language_routes(soniox_on):
+    assert STT.route_job('trial', 'de', 600, 0) == (
+        STT.PROVIDER_SONIOX, 'soniox_language')
+    assert STT.route_job('trial', 'nl', 0, 600)[0] == STT.PROVIDER_SONIOX
+    # English stays on Together when not in the Soniox list.
+    assert STT.route_job('trial', 'en', 600, 0)[0] == STT.PROVIDER_TOGETHER
+
+
+def test_stt_soniox_unknown_language_keeps_detection_flow(soniox_on):
+    """Auto-detect (empty language) never takes the Soniox path."""
+    assert STT.route_job('trial', '', 600, 0) == (
+        STT.PROVIDER_TOGETHER, 'rollout')
+
+
+def test_stt_soniox_over_max_duration_falls_through(soniox_on):
+    over = STT.SONIOX_MAX_SECONDS + 60
+    provider, reason = STT.route_job('trial', 'de', 600, 0, audio_seconds=over)
+    assert provider == STT.PROVIDER_OPENAI
+    assert reason == 'language_not_rolled_out'
+
+
+def test_stt_soniox_no_key_falls_through(soniox_on, monkeypatch):
+    monkeypatch.delenv('SONIOX_API_KEY')
+    assert STT.route_job('trial', 'de', 600, 0)[0] == STT.PROVIDER_OPENAI
+
+
+def test_stt_soniox_filler_cleanup_language_aware():
+    tokens = [
+        {'text': ' Hello', 'start_ms': 0, 'end_ms': 100},
+        {'text': ' uh', 'start_ms': 100, 'end_ms': 150},
+        {'text': ' world', 'start_ms': 150, 'end_ms': 300},
+        {'text': ' world', 'start_ms': 300, 'end_ms': 400},  # immediate dup
+        {'text': ' ähm', 'start_ms': 400, 'end_ms': 450},
+        {'text': ' ja', 'start_ms': 450, 'end_ms': 500},
+    ]
+    # English: uh + immediate dup dropped; ähm kept (German-only filler).
+    words_en = STT.clean_soniox_words(STT.merge_soniox_tokens_to_words(tokens), 'en')
+    assert [w['text'] for w in words_en] == ['Hello', 'world', 'ähm', 'ja']
+    words_de = STT.clean_soniox_words(STT.merge_soniox_tokens_to_words(tokens), 'de')
+    assert [w['text'] for w in words_de] == ['Hello', 'world', 'ja']
+    # Conservative: content words that merely contain filler letters stay.
+    assert not STT.is_soniox_filler('umbrella', 'en')
+    assert not STT.is_soniox_filler('Uhmager', 'de')
+    assert STT.is_soniox_filler('ehm', 'nl')
+    assert STT.is_soniox_filler('UM', 'en')
+
+
+def _soniox_words(text, language):
+    toks = [{'text': ' ' + w, 'start_ms': i * 100, 'end_ms': i * 100 + 90}
+            for i, w in enumerate(text.split())]
+    return [w['text'] for w in STT.clean_soniox_words(
+        STT.merge_soniox_tokens_to_words(toks), language)]
+
+
+def test_stt_soniox_repeats_never_collapsed_across_punctuation():
+    """Benchmark regression: collapsing 'very, very' cut real words."""
+    assert _soniox_words('very, very good', 'en') == ['very,', 'very', 'good']
+    assert _soniox_words('nei. Nei, det', 'no') == ['nei.', 'Nei,', 'det']
+    # Plain stutter with nothing between still goes.
+    assert _soniox_words('the the dog', 'en') == ['the', 'dog']
+    assert _soniox_words('bra bra', 'no') == ['bra']
+
+
+def test_stt_soniox_keeps_grammatical_doubles_and_real_words():
+    assert _soniox_words('Leute, die die Arbeit machen', 'de') == [
+        'Leute,', 'die', 'die', 'Arbeit', 'machen']
+    assert _soniox_words('ik denk dat dat klopt', 'nl') == [
+        'ik', 'denk', 'dat', 'dat', 'klopt']
+    # 'er' is a real word in de/nl/no/da; only an English hesitation.
+    assert _soniox_words('er sagt', 'de') == ['er', 'sagt']
+    assert _soniox_words('det er bra', 'no') == ['det', 'er', 'bra']
+    assert _soniox_words('so er yes', 'en') == ['so', 'yes']
+    assert not STT.is_soniox_filler('הם', 'he')
+    assert not STT.is_soniox_filler('izé', 'hu')
+    assert _soniox_words('eh ehm mhm um uh hei', 'no') == ['hei']
+
+
+def test_stt_soniox_job_keeps_standard_part_size(soniox_on):
+    """Whole-file parts would exceed the 25 MB prepare limit past ~70 min and
+    break the per-chunk whisper-1 fallback; Soniox uses SEGMENT_SECONDS."""
+    with A.app.app_context():
+        job = A._stt_job_for_task('no-such-task', 'trial', 'de',
+                                  segment_seconds=A.SEGMENT_SECONDS,
+                                  audio_seconds=88 * 60)
+    assert job.provider == STT.PROVIDER_SONIOX
+    assert job.segment_seconds == A.SEGMENT_SECONDS
+
+
+def test_stt_soniox_tokens_to_segments_sentence_and_time():
+    # Two sentences spanning >10 s should split; short clause stays one segment.
+    tokens = []
+    t = 0
+    for word in 'Hello world this is fine.'.split():
+        tokens.append({'text': ' ' + word, 'start_ms': t, 'end_ms': t + 300})
+        t += 400
+    # Jump ahead past the 10 s budget for the next sentence.
+    t = 12_000
+    for word in 'And later on.'.split():
+        tokens.append({'text': ' ' + word, 'start_ms': t, 'end_ms': t + 300})
+        t += 400
+    text, segs, words = STT.soniox_tokens_to_result(tokens, language='en')
+    assert 'Hello' in text and 'later' in text
+    assert len(segs) >= 2
+    assert segs[0]['start'] == pytest.approx(0.0)
+    assert segs[-1]['start'] >= 10.0
+    # ms → seconds
+    assert all(s['end'] >= s['start'] for s in segs)
+    assert words[0]['start'] == pytest.approx(0.0)
+
+
+def test_stt_soniox_cost_prefers_tokens_then_minutes(monkeypatch):
+    # Explicit tokens → per-million prices.
+    c = STT.soniox_cost_usd(
+        input_audio_tokens=30_000, input_text_tokens=0, output_text_tokens=15_000)
+    # 30k * 1.5/1M + 15k * 3.5/1M = 0.045 + 0.0525 = 0.0975
+    assert c == pytest.approx(0.0975)
+    # Estimate from duration + text (no explicit tokens).
+    est = STT.soniox_cost_usd(audio_seconds=3600, text='a' * 1000)
+    assert est > 0
+    # No signal → blended minute rate on zero seconds is 0.
+    assert STT.soniox_cost_usd() == 0.0
+    monkeypatch.setenv('STT_SONIOX_USD_PER_MIN', '0.002')
+    assert STT.cost_usd(STT.PROVIDER_SONIOX, 60) == pytest.approx(0.002)
+
+
+def test_stt_soniox_success_uploads_polls_cleans_and_costs(
+        tmp_path, soniox_on, monkeypatch):
+    calls = _soniox_http_script(
+        monkeypatch, poll_statuses=['queued', 'processing', 'completed'])
+    oa = _ScriptedClient()
+    job = A.SttJob(STT.PROVIDER_SONIOX, 'soniox_language', task_id='sx-1')
+    r = A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path), 'de', chunk_seconds=60)
+    assert r.text  # cleaned from tokens
+    assert 'uh' not in r.text.split() or 'word' in r.text  # fillers stripped when present
+    assert oa.calls == []
+    assert job.provider_label() == STT.PROVIDER_SONIOX
+    assert job.cost_usd > 0
+    methods = [c['method'] for c in calls]
+    assert methods.count('POST') >= 2  # file + transcription
+    assert 'GET' in methods and methods.count('DELETE') >= 2  # transcription + file
+    # language_hints set; never translation.
+    create = next(c for c in calls if c['method'] == 'POST' and c['json'])
+    assert create['json']['language_hints'] == ['de']
+    assert 'translation' not in create['json']
+
+
+def test_stt_soniox_error_falls_back_to_whisper1(
+        tmp_path, soniox_on, monkeypatch):
+    def boom(method, url, **kw):
+        raise A.SonioxApiError(503)
+
+    monkeypatch.setattr(A.httpx, 'request', boom)
+    oa = _ScriptedClient()
+    job = A.SttJob(STT.PROVIDER_SONIOX, 'soniox_language')
+    r = A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path), 'de', chunk_seconds=60)
+    assert r.text == 'whisper default'
+    assert len(oa.calls) == 1
+    assert job.events['fallback_error'] == 1
+    assert job.fallback_reason == 'soniox_error'
+    # Soniox never charged (failed before billable work) → label is whisper-1.
+    assert job.provider_label() == STT.PROVIDER_OPENAI
+
+
+def test_stt_soniox_timeout_falls_back(tmp_path, soniox_on, monkeypatch):
+    monkeypatch.setattr(A, 'SONIOX_POLL_TIMEOUT_SECONDS', 0.0)
+    calls = []
+
+    def fake_request(method, url, **kw):
+        calls.append(method + url)
+        if method == 'POST' and url.endswith('/v1/files'):
+            return _FakeHttpxResp(201, {'id': 'file-1'})
+        if method == 'POST' and url.endswith('/v1/transcriptions'):
+            return _FakeHttpxResp(201, {'id': 'tr-1', 'status': 'queued'})
+        if method == 'DELETE':
+            return _FakeHttpxResp(204, None)
+        if method == 'GET':
+            return _FakeHttpxResp(200, {'id': 'tr-1', 'status': 'processing'})
+        return _FakeHttpxResp(200, {})
+
+    monkeypatch.setattr(A.httpx, 'request', fake_request)
+    oa = _ScriptedClient()
+    job = A.SttJob(STT.PROVIDER_SONIOX, 'soniox_language')
+    r = A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path), 'nl', chunk_seconds=60)
+    assert r.text == 'whisper default'
+    assert job.fallback_reason == 'soniox_timeout'
+    # Cleanup still ran despite timeout.
+    assert any('DELETE' in c for c in calls)
+
+
+def test_stt_soniox_429_retried_then_succeeds(tmp_path, soniox_on, monkeypatch):
+    state = {'n': 0}
+
+    def flaky(method, url, **kw):
+        state['n'] += 1
+        # First upload attempt → 429, then success path.
+        if method == 'POST' and url.endswith('/v1/files'):
+            if state['n'] == 1:
+                return _FakeHttpxResp(429, {'error_type': 'limit_exceeded'})
+            return _FakeHttpxResp(201, {'id': 'file-1'})
+        if method == 'POST' and url.endswith('/v1/transcriptions'):
+            return _FakeHttpxResp(201, {'id': 'tr-1', 'status': 'completed'})
+        if method == 'GET' and url.endswith('/transcript'):
+            return _FakeHttpxResp(200, {
+                'id': 'tr-1', 'text': _GOOD,
+                'tokens': _soniox_tokens_for(_GOOD),
+            })
+        if method == 'GET':
+            return _FakeHttpxResp(200, {'id': 'tr-1', 'status': 'completed'})
+        if method == 'DELETE':
+            return _FakeHttpxResp(204, None)
+        return _FakeHttpxResp(200, {})
+
+    monkeypatch.setattr(A.httpx, 'request', flaky)
+    job = A.SttJob(STT.PROVIDER_SONIOX, 'soniox_language')
+    r = A._transcribe_chunk_routed(
+        job, _ScriptedClient(), _chunk(tmp_path), 'de', chunk_seconds=60)
+    assert 'word' in r.text
+    assert job.events['retries'] >= 1
+    assert job.provider_label() == STT.PROVIDER_SONIOX
+
+
+def test_stt_soniox_gap_fallback_for_together(
+        tmp_path, together_on, monkeypatch):
+    monkeypatch.setenv('STT_SONIOX_FALLBACK', '1')
+    monkeypatch.setenv('SONIOX_API_KEY', 'sx-test-not-a-real-key')
+    monkeypatch.setenv('STT_SONIOX_LANGUAGES', 'de')  # not required for gap fallback
+    _soniox_http_script(monkeypatch, transcript_text=_GOOD)
+    # Together fails once → Soniox gap fallback (not whisper).
+    tg = _ScriptedClient(_openai_exc(503), _openai_exc(503), _openai_exc(503))
+    oa = _ScriptedClient()
+    job = _job(tg)
+    r = A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path), 'en', chunk_seconds=60)
+    assert oa.calls == []  # whisper not used
+    assert job.events['soniox_gap_fallback'] == 1
+    assert job.fallback_reason == 'soniox_after_error'
+    assert STT.PROVIDER_SONIOX in job.providers_used
+    assert 'word' in r.text
+
+
+def test_stt_job_summary_includes_soniox_fields(ph_events, monkeypatch):
+    from models import db, TranscriptionTask
+    uid = _make_user('stt-sum-sx@test.com', limit=3600)
+    with A.app.app_context():
+        db.session.merge(TranscriptionTask(
+            id='stt-sum-sx', user_id=uid, episode_title='x',
+            status='transcribing', trial_seconds_charged=600,
+            paid_seconds_charged=0, language='de', audio_duration=600.0,
+            resume_attempts=0))
+        db.session.commit()
+        job = A.SttJob(STT.PROVIDER_SONIOX, 'soniox_language',
+                       task_id='stt-sum-sx', user_id=uid)
+        job.events[f'chunks_{STT.PROVIDER_SONIOX}'] = 1
+        job.events['soniox_gap_fallback'] = 0
+        job.fallback_reason = None
+        job.providers_used.add(STT.PROVIDER_SONIOX)
+        A._emit_stt_job_summary(job, language='de', audio_duration=600.0,
+                                key_source='trial')
+    evs = [e for e in ph_events.events if e['event'] == 'stt_job_summary']
+    assert len(evs) == 1
+    props = evs[0]['properties']
+    assert props['stt_provider'] == STT.PROVIDER_SONIOX
+    assert props['chunks_soniox'] == 1
+    assert props['fallback_reason'] is None
+    assert props['soniox_gap_fallback'] == 0
+    assert 'stt_cost_usd' not in props
+
+
 def test_stt_job_summary_emitted_once_on_normal_completion(ph_events, monkeypatch):
     from models import db, TranscriptionTask
     uid = _make_user('stt-sum@test.com', limit=3600)
@@ -19818,6 +20187,8 @@ def test_stt_job_summary_emitted_once_on_normal_completion(ph_events, monkeypatc
     assert props['nonspeech_windows'] == 1
     assert props['scribe_shadow_attempts'] == 1
     assert props['scribe_shadow_ok'] == 1
+    assert props['chunks_soniox'] == 0
+    assert props['fallback_reason'] is None
     assert props['resumed'] is False
     assert 'transcript' not in props and 'text' not in props
     assert 'cost_usd' not in props and 'stt_cost_usd' not in props

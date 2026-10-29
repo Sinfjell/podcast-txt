@@ -465,6 +465,38 @@ data-use settings appropriate for customer audio (zero-retention is
 Enterprise-only), pick a plan that can cover expected minutes (Starter’s hard
 cap cannot carry prod volume), then add the env vars and restart.
 
+## Speech-to-text provider (Soniox async)
+
+Optional **language overlay** (independent of `STT_PROVIDER`). When a job’s
+language is known (picker or RSS, `nb-NO`→`no`) and listed in
+`STT_SONIOX_LANGUAGES`, each standard 900 s part goes to Soniox `stt-async-v5`
+(upload + poll + delete). Episodes longer than 300 minutes keep the
+Together/whisper path. Empty list = feature off. BYOK stays on OpenAI.
+Unknown language (picker auto + no feed language) keeps the existing
+Together/Scribe/whisper detection flow — Soniox is only practical once the
+language is known up front.
+
+| Var | Default | Notes |
+| --- | --- | --- |
+| `STT_SONIOX_LANGUAGES` | empty (= off) | Comma list, e.g. `de,nl,he,hu,fi,pl`. **Rollback:** empty / unset + restart. |
+| `SONIOX_API_KEY` | unset | Required when the list is non-empty. **Never log or surface it.** |
+| `STT_SONIOX_FALLBACK` | `0` | `1` = use Soniox instead of whisper-1 when a Together gap/error would fall back (per chunk). |
+| `STT_SONIOX_USD_PER_MIN` | `0.00191` | Blended minute rate when token counts are unavailable. |
+| `STT_SONIOX_USD_PER_M_INPUT_AUDIO` | `1.50` | $/1M input audio tokens (published async pricing). |
+| `STT_SONIOX_USD_PER_M_INPUT_TEXT` | `3.50` | $/1M input text tokens. |
+| `STT_SONIOX_USD_PER_M_OUTPUT_TEXT` | `3.50` | $/1M output text tokens. |
+
+Cost: the transcript API does not return usage; we estimate tokens from audio
+duration (~30k input-audio tokens/hour) and transcript length (~0.3 tokens/char),
+then apply the per-million prices above. If even that signal is missing, we use
+`STT_SONIOX_USD_PER_MIN`. Transcription + uploaded file are always deleted after
+fetch (account caps: 2000 stored / 100 pending). On Soniox error/timeout the job
+falls back to whisper-1 and logs it; `stt_job_summary` includes `chunks_soniox`,
+`fallback_reason`, and `soniox_gap_fallback`.
+
+**Data residency:** Soniox processes in the US by default; an EU region requires
+a request to Soniox. Confirm account retention settings before enabling.
+
 ## Free-trial budget env vars
 
 | Var | Default | Notes |
