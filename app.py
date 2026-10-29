@@ -3497,7 +3497,8 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None,
         raise TaskAbandoned('Task was cancelled before it could be prepared.')
 
     # BYOK model pick (null → whisper-1). Platform jobs always stay on whisper-1
-    # / Together routing; never fall back to the platform key for a BYOK job.
+    # / Together / Soniox routing; never fall back to the platform key for a
+    # BYOK job.
     owner = None
     if task_row is not None and task_row.user_id is not None:
         owner = db.session.get(User, task_row.user_id)
@@ -3505,6 +3506,12 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None,
     part_seconds = (
         stt_mod.segment_seconds_for_model(openai_model) or SEGMENT_SECONDS
     )
+    # Route before prepare so Soniox can request a single whole-file part
+    # (SONIOX_MAX_SECONDS) instead of Whisper-sized chunks.
+    stt_job = _stt_job_for_task(
+        task_id, key_source, language, openai_model=openai_model,
+        segment_seconds=part_seconds, audio_seconds=billable_duration)
+    part_seconds = stt_job.segment_seconds or part_seconds
     audio_chunks = prepare_audio_for_whisper(
         audio_file, segment_seconds=part_seconds)
 
@@ -3552,13 +3559,6 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None,
             )
 
         upload_start = time.time()
-        # Provider for the whole job (per-chunk fallback is inside). An unknown
-        # key_source is treated as the user's own key: their model, their bill.
-        # Together routing is unchanged for non-BYOK; openai_model only affects
-        # the OpenAI call when the job stays on OpenAI.
-        stt_job = _stt_job_for_task(
-            task_id, key_source, language, openai_model=openai_model,
-            segment_seconds=part_seconds)
         full_text, all_segments = _transcribe_chunks(
             audio_chunks, remaining, task_id, openai_client, language, audio_duration,
             stt_job=stt_job,
@@ -3689,11 +3689,14 @@ def _whisper_transcribe_chunk(openai_client, chunk_file, language, *,
 # STT_PROVIDER=together sends platform-funded chunks (trial, and paid once
 # STT_TOGETHER_FUNDING=all) to Together AI whisper-large-v3. STT_PROVIDER=scribe
 # sends matching jobs (STT_SCRIBE_FUNDING, default paid) to ElevenLabs scribe_v2.
+# STT_SONIOX_LANGUAGES (independent overlay) sends known languages to Soniox
+# stt-async-v5 as a whole-file async job (max 300 min); empty list = off.
 # Every failure mode falls back to whisper-1 for that chunk on the platform
-# OpenAI client:
+# OpenAI client (Soniox whole-job failures fall back for the whole job):
 #   429/5xx/dropped connection -> retried, then whisper-1
 #   auto-detected language outside the rollout list (or wrong) -> whisper-1
 #   Together: dropped 30 s window / "Teksting av ..." -> +-2 s window, else whisper-1
+#     (STT_SONIOX_FALLBACK=1 → Soniox instead of whisper-1 for that gap)
 #   Scribe: empty or near-empty coverage -> whisper-1
 # SCRIBE_SHADOW_PCT runs Scribe in parallel on a sample of non-Scribe chunks;
 # shadow never reaches the user and never fails the job.
@@ -3704,6 +3707,11 @@ TOGETHER_CHUNK_ATTEMPTS = 3
 TOGETHER_TIMEOUT_SECONDS = 300.0
 SCRIBE_CHUNK_ATTEMPTS = 3
 SCRIBE_TIMEOUT_SECONDS = 600.0
+SONIOX_HTTP_ATTEMPTS = 4
+SONIOX_UPLOAD_TIMEOUT_SECONDS = 300.0
+SONIOX_POLL_TIMEOUT_SECONDS = float(os.getenv('SONIOX_POLL_TIMEOUT_SECONDS', '1800') or 1800)
+SONIOX_POLL_INITIAL_SECONDS = 1.0
+SONIOX_POLL_MAX_SECONDS = 15.0
 
 
 class SttJob:
@@ -3727,6 +3735,8 @@ class SttJob:
         # Language detected on the first chunk when the rest went to whisper-1
         # (lets the Together shadow sample the same language).
         self.fallback_language = None
+        # Last Together/Soniox → whisper (or Soniox) fallback reason for PostHog.
+        self.fallback_reason = None
         self.providers_used = set()
         self.events = collections.Counter()
 
@@ -3776,21 +3786,28 @@ def build_together_client():
 
 
 def _stt_job_for_task(task_id, key_source, language, *, openai_model=None,
-                      segment_seconds=None):
+                      segment_seconds=None, audio_seconds=None):
     """Route a job from its key source, funding and language."""
     task = db.session.get(TranscriptionTask, task_id)
     trial_s = int(task.trial_seconds_charged or 0) if task is not None else 0
     paid_s = int(task.paid_seconds_charged or 0) if task is not None else 0
     user_id = task.user_id if task is not None else None
-    provider, reason = stt_mod.route_job(key_source, language, trial_s, paid_s)
+    provider, reason = stt_mod.route_job(
+        key_source, language, trial_s, paid_s, audio_seconds=audio_seconds)
     client = build_together_client() if provider == stt_mod.PROVIDER_TOGETHER else None
     if provider == stt_mod.PROVIDER_TOGETHER and client is None:
         provider, reason = stt_mod.PROVIDER_OPENAI, 'no_together_key'
     if provider == stt_mod.PROVIDER_SCRIBE and not stt_mod.elevenlabs_api_key():
         provider, reason = stt_mod.PROVIDER_OPENAI, 'no_scribe_key'
+    if provider == stt_mod.PROVIDER_SONIOX and not stt_mod.soniox_api_key():
+        provider, reason = stt_mod.PROVIDER_OPENAI, 'no_soniox_key'
     model = stt_mod.normalize_transcription_model(openai_model)
-    # BYOK Best quality never goes to Together/Scribe (route_job already keeps
-    # own_key on OpenAI); record the chosen model for logging / stt_provider.
+    # Whole-file Soniox: one prepared part (Soniox max 300 min). Whisper-sized
+    # splits would only add concat work; oversize episodes are demoted above.
+    if provider == stt_mod.PROVIDER_SONIOX:
+        segment_seconds = stt_mod.SONIOX_MAX_SECONDS
+    # BYOK Best quality never goes to Together/Scribe/Soniox (route_job already
+    # keeps own_key on OpenAI); record the chosen model for logging / stt_provider.
     app.logger.info(
         'stt route task=%s provider=%s reason=%s openai_model=%s',
         task_id, provider, reason, model)
@@ -3963,6 +3980,253 @@ def _scribe_transcribe(path, language, *, label='', job=None):
                 job.events['retries'] += 1
             time.sleep(min(2 ** (attempt - 1), 8))
     raise last_exc
+
+
+class SonioxApiError(Exception):
+    """Soniox STT failure without echoing response bodies (keys)."""
+
+    def __init__(self, status_code, message='', *, error_type=None):
+        self.status_code = status_code
+        self.error_type = error_type
+        super().__init__(message or f'soniox_http_{status_code}')
+
+
+def _soniox_retryable(exc):
+    """429/5xx/timeouts/connection. Auth, 402 balance, most 4xx are not."""
+    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+        return True
+    status = getattr(exc, 'status_code', None)
+    if status == 429:
+        return True
+    return status is not None and (status >= 500 or status == 408)
+
+
+def _soniox_base_url():
+    return (os.getenv('SONIOX_API_BASE') or stt_mod.SONIOX_API_BASE).rstrip('/')
+
+
+def _soniox_request(method, path, *, key, json_body=None, files=None,
+                    timeout=None, job=None, label=''):
+    """HTTP helper for Soniox. Retries 429/5xx with backoff. Never logs the key."""
+    url = _soniox_base_url() + path
+    timeout = timeout or httpx.Timeout(
+        connect=30.0, read=60.0, write=60.0, pool=30.0)
+    headers = {'Authorization': f'Bearer {key}'}
+    last_exc = None
+    for attempt in range(1, SONIOX_HTTP_ATTEMPTS + 1):
+        try:
+            kwargs = {'headers': headers, 'timeout': timeout}
+            if files is not None:
+                kwargs['files'] = files
+            elif json_body is not None:
+                kwargs['json'] = json_body
+            resp = httpx.request(method, url, **kwargs)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                err = SonioxApiError(resp.status_code)
+                if attempt >= SONIOX_HTTP_ATTEMPTS:
+                    raise err
+                last_exc = err
+                app.logger.warning(
+                    'Soniox %s %s attempt %s/%s failed (%s)',
+                    label or path, method, attempt, SONIOX_HTTP_ATTEMPTS,
+                    resp.status_code)
+                if job is not None:
+                    job.events['retries'] += 1
+                time.sleep(min(2 ** (attempt - 1), 16))
+                continue
+            if resp.status_code >= 400:
+                err_type = None
+                try:
+                    err_type = (resp.json() or {}).get('error_type')
+                except Exception:  # noqa: BLE001
+                    err_type = None
+                raise SonioxApiError(resp.status_code, error_type=err_type)
+            if resp.status_code == 204 or not resp.content:
+                return {}
+            return resp.json()
+        except SonioxApiError:
+            raise
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            last_exc = exc
+            app.logger.warning(
+                'Soniox %s %s attempt %s/%s failed (%s)',
+                label or path, method, attempt, SONIOX_HTTP_ATTEMPTS,
+                type(exc).__name__)
+            if attempt >= SONIOX_HTTP_ATTEMPTS:
+                break
+            if job is not None:
+                job.events['retries'] += 1
+            time.sleep(min(2 ** (attempt - 1), 16))
+    raise last_exc or SonioxApiError(0, 'soniox_request_failed')
+
+
+def _soniox_delete_quiet(path, *, key, job=None, label=''):
+    """Best-effort DELETE — account limits require cleanup even on failure."""
+    try:
+        _soniox_request('DELETE', path, key=key, job=job, label=label)
+    except Exception as exc:  # noqa: BLE001 - cleanup must not fail the job
+        app.logger.warning(
+            'Soniox cleanup %s failed (%s %s)', label or path,
+            type(exc).__name__, getattr(exc, 'status_code', ''))
+
+
+def _soniox_transcribe(path, language, *, label='', job=None, task_id=None,
+                       audio_url=None, chunk_seconds=None):
+    """Upload (or URL) → async Soniox job → poll → transcript → always delete.
+
+    Returns a whisper-1-shaped namespace: text, segments, language, billed_usd,
+    input_audio_tokens, output_text_tokens. Never enables translation. Always
+    deletes the transcription and uploaded file (account caps: 2000 stored /
+    100 pending). Heartbeats ``task_id`` while polling so the stale sweeper
+    does not kill a long async job.
+    """
+    import types
+    key = stt_mod.soniox_api_key()
+    if not key:
+        raise SonioxApiError(0, 'no_soniox_key')
+
+    file_id = None
+    transcription_id = None
+    started = time.monotonic()
+    try:
+        if audio_url:
+            create_body_source = {'audio_url': audio_url}
+        else:
+            upload_timeout = httpx.Timeout(
+                connect=30.0, read=SONIOX_UPLOAD_TIMEOUT_SECONDS,
+                write=SONIOX_UPLOAD_TIMEOUT_SECONDS, pool=30.0)
+            with open(path, 'rb') as f:
+                uploaded = _soniox_request(
+                    'POST', '/v1/files', key=key, job=job, label=label or 'upload',
+                    files={'file': (os.path.basename(path) or 'audio.mp3', f,
+                                    'audio/mpeg')},
+                    timeout=upload_timeout)
+            file_id = uploaded.get('id')
+            if not file_id:
+                raise SonioxApiError(0, 'soniox_upload_missing_id')
+            create_body_source = {'file_id': file_id}
+
+        create_body = {
+            'model': stt_mod.SONIOX_MODEL,
+            # Never translate — keep the spoken language.
+            'enable_language_identification': not bool(language),
+            'enable_speaker_diarization': False,
+            **create_body_source,
+        }
+        if language:
+            create_body['language_hints'] = [language]
+        if task_id:
+            create_body['client_reference_id'] = str(task_id)[:256]
+
+        created = _soniox_request(
+            'POST', '/v1/transcriptions', key=key, json_body=create_body,
+            job=job, label=label or 'create')
+        transcription_id = created.get('id')
+        if not transcription_id:
+            raise SonioxApiError(0, 'soniox_create_missing_id')
+
+        # Poll with exponential backoff until completed / error / timeout.
+        deadline = time.monotonic() + SONIOX_POLL_TIMEOUT_SECONDS
+        delay = SONIOX_POLL_INITIAL_SECONDS
+        status_payload = created
+        while True:
+            status = (status_payload.get('status') or '').lower()
+            if status == 'completed':
+                break
+            if status == 'error':
+                raise SonioxApiError(
+                    0, 'soniox_transcription_error',
+                    error_type=status_payload.get('error_type'))
+            if time.monotonic() >= deadline:
+                raise SonioxApiError(0, 'soniox_poll_timeout')
+            if task_id:
+                _update_task(task_id)
+            time.sleep(delay)
+            delay = min(delay * 1.6, SONIOX_POLL_MAX_SECONDS)
+            status_payload = _soniox_request(
+                'GET', f'/v1/transcriptions/{transcription_id}',
+                key=key, job=job, label=label or 'poll')
+
+        transcript = _soniox_request(
+            'GET', f'/v1/transcriptions/{transcription_id}/transcript',
+            key=key, job=job, label=label or 'transcript')
+        tokens = transcript.get('tokens') or []
+        api_text = transcript.get('text') or ''
+        text, seg_dicts, _words = stt_mod.soniox_tokens_to_result(
+            tokens, language=language or '', text=api_text)
+        segs = [types.SimpleNamespace(start=s['start'], end=s['end'],
+                                      text=s['text'])
+                for s in seg_dicts]
+        if not segs and text:
+            dur = float(chunk_seconds or 0)
+            segs = [types.SimpleNamespace(start=0.0, end=max(dur, 0.0),
+                                          text=' ' + text)]
+
+        audio_seconds = chunk_seconds
+        if audio_seconds is None:
+            dur_ms = status_payload.get('audio_duration_ms')
+            if dur_ms:
+                audio_seconds = float(dur_ms) / 1000.0
+        # Token counts are not on the transcript response (they live on the
+        # separate usage-logs API). Estimate from duration + text via
+        # soniox_cost_usd's published ratios, then apply per-token prices.
+        billed = stt_mod.soniox_cost_usd(
+            audio_seconds=audio_seconds or 0, text=text)
+        latency_ms = int((time.monotonic() - started) * 1000)
+        return types.SimpleNamespace(
+            text=text,
+            segments=segs,
+            language=language or None,
+            tokens=tokens,
+            billed_usd=billed,
+            latency_ms=latency_ms,
+            cost_basis='estimated_tokens',
+        )
+    finally:
+        # ALWAYS delete transcription + uploaded file (pending/storage caps).
+        if transcription_id and key:
+            _soniox_delete_quiet(
+                f'/v1/transcriptions/{transcription_id}',
+                key=key, job=job, label='delete-transcription')
+        if file_id and key:
+            _soniox_delete_quiet(
+                f'/v1/files/{file_id}',
+                key=key, job=job, label='delete-file')
+
+
+def _together_gap_fallback(job, openai_call, chunk_file, language, *,
+                           task_id=None, chunk_label=None, chunk_seconds=0.0,
+                           reason='gap'):
+    """After Together gives up: optional Soniox (``STT_SONIOX_FALLBACK``), else whisper-1.
+
+    Callers increment ``fallback_*`` counters. Sets ``job.fallback_reason`` for
+    ``stt_job_summary`` (last reason wins; counters still tally each event).
+    """
+    label = chunk_label or os.path.basename(chunk_file)
+    job.fallback_reason = reason
+    if (stt_mod.soniox_fallback_enabled()
+            and stt_mod.soniox_api_key()
+            and job.provider != stt_mod.PROVIDER_SONIOX):
+        try:
+            result = _soniox_transcribe(
+                chunk_file, language, label=label, job=job, task_id=task_id,
+                chunk_seconds=chunk_seconds)
+            billed = getattr(result, 'billed_usd', None)
+            job.charge(stt_mod.PROVIDER_SONIOX, chunk_seconds, exact_usd=billed,
+                       count_chunk=True)
+            job.events['soniox_gap_fallback'] += 1
+            job.fallback_reason = f'soniox_after_{reason}'
+            app.logger.info(
+                'stt %s: Soniox used as Together fallback (reason=%s)',
+                label, reason)
+            return result
+        except Exception as exc:  # noqa: BLE001
+            app.logger.warning(
+                'stt Soniox fallback failed for %s (%s %s); whisper-1',
+                label, type(exc).__name__, getattr(exc, 'status_code', ''))
+            job.events['soniox_fallback_failed'] += 1
+            job.fallback_reason = f'whisper_after_soniox_{reason}'
+    return openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
 
 
 def _cut_audio_window(src, offset, length, dst):
@@ -4380,6 +4644,26 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
 
     label = chunk_label or os.path.basename(chunk_file)
 
+    # --- Soniox async (whole-file or per-chunk gap fallback) ------------------
+    if job.provider == stt_mod.PROVIDER_SONIOX:
+        try:
+            result = _soniox_transcribe(
+                chunk_file, language, label=label, job=job, task_id=task_id,
+                chunk_seconds=chunk_seconds)
+            billed = getattr(result, 'billed_usd', None)
+            job.charge(stt_mod.PROVIDER_SONIOX, chunk_seconds, exact_usd=billed,
+                       count_chunk=True)
+            return result
+        except Exception as exc:  # noqa: BLE001
+            job.events['fallback_error'] += 1
+            job.fallback_reason = 'soniox_error'
+            if isinstance(exc, SonioxApiError) and 'timeout' in str(exc):
+                job.fallback_reason = 'soniox_timeout'
+            app.logger.warning(
+                'stt soniox fallback to whisper-1 for %s: %s %s',
+                label, type(exc).__name__, getattr(exc, 'status_code', ''))
+            return openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
+
     # --- ElevenLabs Scribe v2 -------------------------------------------------
     if job.provider == stt_mod.PROVIDER_SCRIBE:
         try:
@@ -4436,14 +4720,19 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
         job.charge(stt_mod.PROVIDER_TOGETHER, chunk_seconds, count_chunk=True)
     except Exception as exc:  # noqa: BLE001 - classified in _together_transcribe
         job.events['fallback_error'] += 1
-        app.logger.warning('stt fallback to whisper-1 for %s: %s %s', label,
-                           type(exc).__name__, getattr(exc, 'status_code', ''))
-        # Fallback whisper-1 is what the user hears — shadow it like the
-        # normal OpenAI path so non-English trial first chunks are compared.
-        result = openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
-        _maybe_scribe_shadow(
-            job, chunk_file, language, getattr(result, 'text', '') or '',
-            chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
+        app.logger.warning('stt fallback after Together error for %s: %s %s',
+                           label, type(exc).__name__,
+                           getattr(exc, 'status_code', ''))
+        # Optional Soniox (STT_SONIOX_FALLBACK) then whisper-1.
+        before_soniox = int(job.events.get('soniox_gap_fallback', 0))
+        result = _together_gap_fallback(
+            job, openai_call, chunk_file, language, task_id=task_id,
+            chunk_label=label, chunk_seconds=chunk_seconds, reason='error')
+        if int(job.events.get('soniox_gap_fallback', 0)) == before_soniox:
+            # Served whisper-1 — shadow it like the normal OpenAI path.
+            _maybe_scribe_shadow(
+                job, chunk_file, language, getattr(result, 'text', '') or '',
+                chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
         return result
 
     if not language:
@@ -4490,12 +4779,18 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
             else:
                 job.events['fallback_gap'] += 1
                 app.logger.info(
-                    'stt empty Together chunk not recovered; whisper-1 for %s',
+                    'stt empty Together chunk not recovered; fallback for %s',
                     label)
-                result = openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
-                _maybe_scribe_shadow(
-                    job, chunk_file, language, getattr(result, 'text', '') or '',
-                    chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
+                before_soniox = int(job.events.get('soniox_gap_fallback', 0))
+                result = _together_gap_fallback(
+                    job, openai_call, chunk_file, language, task_id=task_id,
+                    chunk_label=label, chunk_seconds=chunk_seconds,
+                    reason='gap')
+                if int(job.events.get('soniox_gap_fallback', 0)) == before_soniox:
+                    _maybe_scribe_shadow(
+                        job, chunk_file, language,
+                        getattr(result, 'text', '') or '',
+                        chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
                 return result
 
     if not _repair_dropped_windows(job, result, chunk_file, language, label,
@@ -4510,11 +4805,16 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
         else:
             job.events['fallback_gap'] += 1
             app.logger.info(
-                'stt dropped window not repaired; whisper-1 for %s', label)
-            result = openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
-            _maybe_scribe_shadow(
-                job, chunk_file, language, getattr(result, 'text', '') or '',
-                chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
+                'stt dropped window not repaired; fallback for %s', label)
+            before_soniox = int(job.events.get('soniox_gap_fallback', 0))
+            result = _together_gap_fallback(
+                job, openai_call, chunk_file, language, task_id=task_id,
+                chunk_label=label, chunk_seconds=chunk_seconds, reason='gap')
+            if int(job.events.get('soniox_gap_fallback', 0)) == before_soniox:
+                _maybe_scribe_shadow(
+                    job, chunk_file, language,
+                    getattr(result, 'text', '') or '',
+                    chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
             return result
 
     if stt_mod.shadow_rate() > 0 and secrets.randbelow(10_000) < int(
@@ -4594,12 +4894,18 @@ def _emit_stt_job_summary(stt_job, *, language=None, audio_duration=None,
                 f'chunks_{stt_mod.PROVIDER_OPENAI}', 0)),
             'chunks_scribe': int(events.get(
                 f'chunks_{stt_mod.PROVIDER_SCRIBE}', 0)),
+            'chunks_soniox': int(events.get(
+                f'chunks_{stt_mod.PROVIDER_SONIOX}', 0)),
             'chunks_gpt_transcribe': int(events.get(
                 f'chunks_{stt_mod.MODEL_GPT_TRANSCRIBE}', 0)),
             'fallback_error': int(events.get('fallback_error', 0)),
             'fallback_language': int(events.get('fallback_language', 0)),
             'fallback_gap': int(events.get('fallback_gap', 0)),
             'fallback_coverage': int(events.get('fallback_coverage', 0)),
+            'fallback_reason': getattr(stt_job, 'fallback_reason', None),
+            'soniox_gap_fallback': int(events.get('soniox_gap_fallback', 0)),
+            'soniox_fallback_failed': int(
+                events.get('soniox_fallback_failed', 0)),
             'together_retry_recovered': int(
                 events.get('together_retry_recovered', 0)),
             'nonspeech_windows': int(events.get('nonspeech_windows', 0)),

@@ -5,12 +5,28 @@ Together or ElevenLabs Scribe. With Together, platform-funded jobs run on
 ``openai/whisper-large-v3`` with whisper-1 as the per-chunk fallback. With
 Scribe (``STT_PROVIDER=scribe``), they run on ElevenLabs ``scribe_v2``
 (``no_verbatim``), again with whisper-1 fallback. Users with their own OpenAI
-key always stay on OpenAI (never Together/Scribe): it is their key and their
-bill. BYOK users may pick ``gpt-transcribe`` (Best quality) instead of the
-default whisper-1. Scribe is not offered in the BYOK picker.
+key always stay on OpenAI (never Together/Scribe/Soniox): it is their key and
+their bill. BYOK users may pick ``gpt-transcribe`` (Best quality) instead of
+the default whisper-1. Scribe/Soniox are not offered in the BYOK picker.
+
+Soniox (``stt-async-v5``) is an optional language overlay, independent of
+``STT_PROVIDER``. When ``STT_SONIOX_LANGUAGES`` lists a known language (picker
+or RSS, ``nb-NO``→``no``) and ``SONIOX_API_KEY`` is set, that job is a
+whole-file async Soniox transcription (no chunking; max 300 min — longer
+episodes keep the Together/whisper path). Empty language list = feature off.
+
+Unknown language (picker auto + no feed language): keep the existing
+Together/Scribe/whisper detection flow. Soniox is whole-file and gated by a
+known language list, so auto-detect would either bill Soniox for languages we
+never intended to route or require a throwaway first pass — neither is
+practical. After detection the job stays on the provider that detected it.
+
+Optional ``STT_SONIOX_FALLBACK=1`` uses Soniox instead of whisper-1 when a
+Together gap/error would otherwise fall back (per chunk). Default off.
 
 Everything here is pure (no Flask, no DB) so it can be tested directly; the
-calls themselves live in ``app._transcribe_chunk_routed``.
+calls themselves live in ``app._transcribe_chunk_routed`` /
+``app._soniox_transcribe``.
 
 Rollout (all env, read at call time so a restart is not needed in tests):
 
@@ -31,9 +47,16 @@ Rollout (all env, read at call time so a restart is not needed in tests):
   SCRIBE_SHADOW_PCT         0 (default) -- %% of non-Scribe platform chunks
                             also run on Scribe in the background (PostHog)
   STT_SCRIBE_USD_PER_MIN    0.00366 (billed fiat from the Oct 2026 test)
+  STT_SONIOX_LANGUAGES      empty (default = off) -- e.g. de,nl,he,hu,fi,pl
+  SONIOX_API_KEY            required for Soniox (never log it)
+  STT_SONIOX_FALLBACK       0 (default) -- 1 = Soniox instead of whisper-1
+                            for Together gap/error fallbacks
+  STT_SONIOX_USD_PER_MIN    0.00191 (benchmark blended when tokens unavailable)
+  STT_SONIOX_USD_PER_M_*    token prices (input_audio / input_text / output_text)
 
 Scribe stages: 1) shadow only (SCRIBE_SHADOW_PCT)  2) STT_PROVIDER=scribe +
 paid  3) STT_SCRIBE_FUNDING=all. Rollback: STT_PROVIDER=whisper-1 (or unset).
+Soniox rollback: empty ``STT_SONIOX_LANGUAGES`` (or unset).
 """
 
 from __future__ import annotations
@@ -59,19 +82,41 @@ SCRIBE_API_URL = 'https://api.elevenlabs.io/v1/speech-to-text'
 # Billed fiat from the 2026-10-21 offline test (header fiat-cost-before-overages).
 SCRIBE_DEFAULT_USD_PER_MIN = 0.00366
 
+SONIOX_MODEL = 'stt-async-v5'
+SONIOX_API_BASE = 'https://api.soniox.com'
+# Fixed Soniox async file duration cap (cannot be raised).
+SONIOX_MAX_SECONDS = 300 * 60
+# Benchmark blended rate when token counts are unavailable (~$0.10/h list is
+# $0.00167/min; real jobs with output tokens landed ~$0.00191/min).
+SONIOX_DEFAULT_USD_PER_MIN = 0.00191
+# Published async token prices (https://soniox.com/pricing) — $/1M tokens.
+SONIOX_DEFAULT_USD_PER_M_INPUT_AUDIO = 1.50
+SONIOX_DEFAULT_USD_PER_M_INPUT_TEXT = 3.50
+SONIOX_DEFAULT_USD_PER_M_OUTPUT_TEXT = 3.50
+# Soniox docs: ~30k input audio tokens per hour of audio.
+SONIOX_INPUT_AUDIO_TOKENS_PER_HOUR = 30_000
+# Soniox docs: ~0.3 tokens per output character.
+SONIOX_OUTPUT_TOKENS_PER_CHAR = 0.3
+# Group tokens into whisper-shaped segments (~sentence / 10 s).
+SONIOX_SEGMENT_MAX_SECONDS = 10.0
+
 PROVIDER_OPENAI = 'whisper-1'
 PROVIDER_TOGETHER = 'together'
 PROVIDER_SCRIBE = 'scribe'
+PROVIDER_SONIOX = 'soniox'
 PROVIDER_GPT_TRANSCRIBE = MODEL_GPT_TRANSCRIBE
 
 # What each provider actually costs us per audio minute. Internal accounting
 # only (admin costs, PostHog). User-facing "est. cost" copy is about BYOK and
 # stays on app.WHISPER_COST_PER_MINUTE (OpenAI's list price). BYOK still
 # records the model so cost reports can exclude those rows by funding.
+# Soniox prefers token-based cost when available; this minute rate is the
+# fallback used by ``cost_usd`` / ``usd_per_minute``.
 PROVIDER_USD_PER_MIN = {
     PROVIDER_OPENAI: 0.006,           # https://openai.com/api/pricing/
     PROVIDER_TOGETHER: 0.0015,        # api.together.xyz/v1/models price_per_minute
     PROVIDER_SCRIBE: SCRIBE_DEFAULT_USD_PER_MIN,  # ElevenLabs Scribe v2 billed
+    PROVIDER_SONIOX: SONIOX_DEFAULT_USD_PER_MIN,  # blended when tokens unavailable
     PROVIDER_GPT_TRANSCRIBE: 0.0045,  # gpt-transcribe list price ($/min)
 }
 
@@ -198,6 +243,44 @@ def scribe_no_verbatim():
     return raw not in ('0', 'false', 'no', 'off')
 
 
+def soniox_api_key():
+    """Soniox key. Never log or surface this value."""
+    return _env('SONIOX_API_KEY') or None
+
+
+def soniox_languages():
+    """Languages routed to whole-file Soniox. Empty set = feature off."""
+    raw = _env('STT_SONIOX_LANGUAGES', '')
+    return {p.strip().lower() for p in raw.split(',') if p.strip()}
+
+
+def soniox_fallback_enabled():
+    """Use Soniox instead of whisper-1 for Together gap/error fallbacks."""
+    raw = _env('STT_SONIOX_FALLBACK', '0').lower()
+    return raw in ('1', 'true', 'yes', 'on')
+
+
+def soniox_applies(language):
+    """True when a *known* language should take the whole-file Soniox path."""
+    if not soniox_api_key():
+        return False
+    allowed = soniox_languages()
+    if not allowed:
+        return False
+    code = (language or '').strip().lower()
+    return bool(code) and code in allowed
+
+
+def soniox_within_duration(audio_seconds):
+    """Soniox async rejects files over 300 minutes; longer keep existing path."""
+    if audio_seconds is None:
+        return True
+    try:
+        return float(audio_seconds) <= float(SONIOX_MAX_SECONDS)
+    except (TypeError, ValueError):
+        return True
+
+
 def shadow_rate():
     try:
         rate = float(_env('STT_SHADOW_RATE', '0.02'))
@@ -251,22 +334,77 @@ def scribe_shadow_rate():
     return scribe_shadow_pct() / 100.0
 
 
+def _env_float(name, default):
+    try:
+        return float(_env(name, str(default)))
+    except ValueError:
+        return float(default)
+
+
 def usd_per_minute(provider):
     if provider == PROVIDER_TOGETHER:
-        try:
-            return float(_env('STT_TOGETHER_USD_PER_MIN',
-                              str(PROVIDER_USD_PER_MIN[PROVIDER_TOGETHER])))
-        except ValueError:
-            return PROVIDER_USD_PER_MIN[PROVIDER_TOGETHER]
+        return _env_float('STT_TOGETHER_USD_PER_MIN',
+                          PROVIDER_USD_PER_MIN[PROVIDER_TOGETHER])
     if provider == PROVIDER_SCRIBE:
-        try:
-            return float(_env('STT_SCRIBE_USD_PER_MIN',
-                              str(PROVIDER_USD_PER_MIN[PROVIDER_SCRIBE])))
-        except ValueError:
-            return PROVIDER_USD_PER_MIN[PROVIDER_SCRIBE]
+        return _env_float('STT_SCRIBE_USD_PER_MIN',
+                          PROVIDER_USD_PER_MIN[PROVIDER_SCRIBE])
+    if provider == PROVIDER_SONIOX:
+        return _env_float('STT_SONIOX_USD_PER_MIN',
+                          PROVIDER_USD_PER_MIN[PROVIDER_SONIOX])
     if provider in PROVIDER_USD_PER_MIN:
         return PROVIDER_USD_PER_MIN[provider]
     return PROVIDER_USD_PER_MIN[PROVIDER_OPENAI]
+
+
+def soniox_token_prices():
+    """($/1M input audio, $/1M input text, $/1M output text)."""
+    return (
+        _env_float('STT_SONIOX_USD_PER_M_INPUT_AUDIO',
+                   SONIOX_DEFAULT_USD_PER_M_INPUT_AUDIO),
+        _env_float('STT_SONIOX_USD_PER_M_INPUT_TEXT',
+                   SONIOX_DEFAULT_USD_PER_M_INPUT_TEXT),
+        _env_float('STT_SONIOX_USD_PER_M_OUTPUT_TEXT',
+                   SONIOX_DEFAULT_USD_PER_M_OUTPUT_TEXT),
+    )
+
+
+def soniox_cost_usd(*, audio_seconds=0, text='',
+                    input_audio_tokens=None, input_text_tokens=None,
+                    output_text_tokens=None):
+    """USD for one Soniox job.
+
+    Prefer token counts when any are provided (including zeros from a real
+    usage payload). The async transcript endpoint does not return usage; we
+    normally *estimate* tokens from duration + transcript length using Soniox's
+    published ratios (30k input-audio tokens/hour, ~0.3 output tokens/char),
+    then apply env-configurable per-million prices. Pass
+    ``input_audio_tokens=None`` and ``output_text_tokens=None`` *and* leave
+    ``audio_seconds``/``text`` empty only when falling back to the blended
+    minute rate (``STT_SONIOX_USD_PER_MIN``, default 0.00191).
+
+    Callers that estimated tokens should pass the estimates explicitly so
+    cost stays on the token path. Callers with no usable signal pass nothing
+    and get minutes × blended rate.
+    """
+    has_token_signal = any(v is not None for v in (
+        input_audio_tokens, input_text_tokens, output_text_tokens))
+    if has_token_signal:
+        in_a = max(0.0, float(input_audio_tokens or 0))
+        in_t = max(0.0, float(input_text_tokens or 0))
+        out_t = max(0.0, float(output_text_tokens or 0))
+        p_a, p_t, p_o = soniox_token_prices()
+        return (in_a * p_a + in_t * p_t + out_t * p_o) / 1_000_000.0
+    # Estimate tokens from duration + text when we have either signal.
+    sec = max(0.0, float(audio_seconds or 0))
+    body = text or ''
+    if sec > 0 or body:
+        est_in = sec / 3600.0 * SONIOX_INPUT_AUDIO_TOKENS_PER_HOUR
+        est_out = len(body) * SONIOX_OUTPUT_TOKENS_PER_CHAR
+        return soniox_cost_usd(
+            audio_seconds=sec, text=body,
+            input_audio_tokens=est_in, input_text_tokens=0.0,
+            output_text_tokens=est_out)
+    return cost_usd(PROVIDER_SONIOX, sec)
 
 
 def cost_usd(provider, seconds):
@@ -341,7 +479,8 @@ def _scribe_funding_allows(funding):
     return funding == sf
 
 
-def route_job(key_source, language, trial_seconds=0, paid_seconds=0):
+def route_job(key_source, language, trial_seconds=0, paid_seconds=0,
+              audio_seconds=None):
     """Decide the provider for a job. Returns (provider, reason).
 
     ``language`` is the user's pick, or feed/episode metadata when the picker
@@ -350,11 +489,27 @@ def route_job(key_source, language, trial_seconds=0, paid_seconds=0):
     first-chunk probe that would come back ``mixed``. With auto, Together/
     Scribe is tried and the first chunk's detected language may decide (see
     ``language_allowed`` / ``scribe_language_allowed``).
+
+    Soniox overlay: a known language in ``STT_SONIOX_LANGUAGES`` (with API key)
+    wins over Together/Scribe for platform jobs. Empty/unknown language never
+    routes to Soniox (see module docstring). Episodes longer than
+    ``SONIOX_MAX_SECONDS`` keep the non-Soniox path when ``audio_seconds`` is
+    provided.
     """
     if key_source != 'trial':
         return PROVIDER_OPENAI, 'own_key'
     funding = job_funding(key_source, trial_seconds, paid_seconds)
     lang = (language or '').strip().lower()
+
+    # Language overlay — checked before STT_PROVIDER so de/nl/… can leave
+    # Together's English-heavy list without changing the global provider.
+    if soniox_applies(lang):
+        if not soniox_within_duration(audio_seconds):
+            # Too long for one Soniox file: fall through to Together/whisper.
+            pass
+        else:
+            return PROVIDER_SONIOX, 'soniox_language'
+
     setting = provider_setting()
 
     if setting == PROVIDER_SCRIBE:
@@ -464,6 +619,180 @@ def scribe_words_to_segments(words, max_seconds=SRT_MAX_CUE_SECONDS):
             'text': ' ' + ' '.join(cur_words),
         })
     return segs
+
+
+# ---------------------------------------------------------------------------
+# Soniox token → segments + filler cleanup
+# ---------------------------------------------------------------------------
+#
+# Soniox returns subword/word tokens with start_ms/end_ms. We never enable
+# translation. Fillers are stripped conservatively (whole-token match only)
+# so "umbrella" / "Uhmager" stay intact. Language-aware lists add local
+# hesitations on top of a small shared set.
+
+_SONIOX_FILLERS_COMMON = frozenset({
+    'um', 'uh', 'uhh', 'umm', 'uh-huh', 'uhhuh', 'mhm', 'mm', 'mmm', 'hmm',
+    'hm', 'ah', 'ahh', 'er', 'erm', 'eh', 'ehm', 'huh', 'hmph',
+})
+# Local hesitations commonly emitted verbatim by multilingual STT.
+_SONIOX_FILLERS_BY_LANG = {
+    'de': frozenset({'ähm', 'äh', 'öhm', 'öh', 'hm'}),
+    'nl': frozenset({'ehm', 'eh', 'uhm', 'uh'}),
+    'no': frozenset({'eh', 'ehm', 'øh', 'øhm', 'hm'}),
+    'da': frozenset({'øh', 'øhh', 'eh', 'ehm', 'hm'}),
+    'sv': frozenset({'öh', 'äh', 'eh', 'ehm', 'hm'}),
+    'fi': frozenset({'öö', 'ööö', 'eh', 'ehm', 'hm'}),
+    'pl': frozenset({'yyy', 'eee', 'hm', 'ee'}),
+    'hu': frozenset({'öö', 'ööö', 'izé', 'hm'}),
+    'he': frozenset({'אמ', 'אה', 'הם'}),
+    'en': frozenset({'like'}),  # only bare "like" as hesitation — still conservative
+}
+# "like" as a filler is too aggressive for English podcasts (content word).
+_SONIOX_FILLERS_BY_LANG['en'] = frozenset()
+
+_SENTENCE_END_RE = re.compile(r'[.!?…]["\')\]]*$')
+
+
+def _soniox_filler_set(language=''):
+    code = (language or '').strip().lower()
+    extra = _SONIOX_FILLERS_BY_LANG.get(code, frozenset())
+    return _SONIOX_FILLERS_COMMON | extra
+
+
+def _norm_filler_token(text):
+    """Lowercase alphanumeric core of a token for filler / duplicate checks."""
+    t = unicodedata.normalize('NFKC', text or '').casefold().strip()
+    t = t.strip('.,!?;:\'\"«»„“”…—–-()[]{}')
+    return t
+
+
+def is_soniox_filler(text, language=''):
+    """True when ``text`` is a whole-word hesitation for this language."""
+    core = _norm_filler_token(text)
+    if not core:
+        return False
+    return core in _soniox_filler_set(language)
+
+
+def merge_soniox_tokens_to_words(tokens):
+    """Merge Soniox subword tokens into whitespace-delimited words with timings.
+
+    Skips translation tokens and audio-event tokens. Token ``text`` often
+    carries its own leading space; a leading space (or explicit space token)
+    starts a new word.
+    """
+    words = []
+    cur = None
+    for tok in tokens or []:
+        if (tok.get('translation_status') or 'none') == 'translation':
+            continue
+        if tok.get('is_audio_event'):
+            continue
+        raw = tok.get('text')
+        if raw is None or raw == '':
+            continue
+        start_ms = tok.get('start_ms')
+        end_ms = tok.get('end_ms')
+        starts_word = raw[:1].isspace() or cur is None
+        piece = raw.strip()
+        if not piece:
+            # Pure whitespace — word boundary for the next token.
+            if cur is not None:
+                words.append(cur)
+                cur = None
+            continue
+        start_s = (float(start_ms) / 1000.0) if start_ms is not None else None
+        end_s = (float(end_ms) / 1000.0) if end_ms is not None else start_s
+        if starts_word or cur is None:
+            if cur is not None:
+                words.append(cur)
+            cur = {
+                'text': piece,
+                'start': start_s if start_s is not None else 0.0,
+                'end': end_s if end_s is not None else (start_s or 0.0),
+            }
+        else:
+            cur['text'] += piece
+            if end_s is not None:
+                cur['end'] = end_s
+    if cur is not None:
+        words.append(cur)
+    return words
+
+
+def clean_soniox_words(words, language=''):
+    """Drop fillers and immediate duplicate words (conservative, language-aware)."""
+    out = []
+    for w in words or []:
+        text = (w.get('text') or '').strip()
+        if not text:
+            continue
+        if is_soniox_filler(text, language):
+            continue
+        if out and _norm_filler_token(out[-1]['text']) == _norm_filler_token(text):
+            # Keep the longer span; drop the immediate echo.
+            prev = out[-1]
+            prev['end'] = max(float(prev.get('end') or 0), float(w.get('end') or 0))
+            continue
+        out.append({
+            'text': text,
+            'start': float(w.get('start') or 0.0),
+            'end': float(w.get('end') or w.get('start') or 0.0),
+        })
+    return out
+
+
+def soniox_words_to_segments(words, max_seconds=SONIOX_SEGMENT_MAX_SECONDS):
+    """Group cleaned words into whisper-shaped segments (~sentence / 10 s)."""
+    segs = []
+    cur_words = []
+    cur_start = None
+    cur_end = None
+    for w in words or []:
+        token = (w.get('text') or '').strip()
+        if not token:
+            continue
+        start = float(w.get('start') or 0.0)
+        end = float(w.get('end') or start)
+        if cur_start is None:
+            cur_start, cur_end, cur_words = start, end, [token]
+            continue
+        dur = end - cur_start
+        boundary = _SENTENCE_END_RE.search(cur_words[-1] or '')
+        if cur_words and ((dur >= max_seconds) or (boundary and dur >= 2.0)):
+            segs.append({
+                'start': cur_start, 'end': cur_end,
+                'text': ' ' + ' '.join(cur_words),
+            })
+            cur_start, cur_end, cur_words = start, end, [token]
+        else:
+            cur_words.append(token)
+            cur_end = end
+    if cur_words:
+        segs.append({
+            'start': cur_start or 0.0, 'end': cur_end or 0.0,
+            'text': ' ' + ' '.join(cur_words),
+        })
+    return segs
+
+
+def soniox_tokens_to_result(tokens, *, language='', text=None,
+                            max_seconds=SONIOX_SEGMENT_MAX_SECONDS):
+    """Tokens → cleaned text + whisper-shaped segment dicts (seconds).
+
+    Never translates: translation tokens are dropped in
+    ``merge_soniox_tokens_to_words``. When ``text`` is omitted, text is rebuilt
+    from cleaned words (preferred — matches what we store).
+    """
+    words = clean_soniox_words(merge_soniox_tokens_to_words(tokens), language)
+    segs = soniox_words_to_segments(words, max_seconds=max_seconds)
+    if text is None:
+        text = ' '.join(w['text'] for w in words).strip()
+    else:
+        # Still prefer cleaned words when we have them; fall back to API text.
+        cleaned = ' '.join(w['text'] for w in words).strip()
+        text = cleaned or (text or '').strip()
+    return text, segs, words
 
 
 def word_timeline_gaps(words, min_gap=SCRIBE_GAP_MIN_SECONDS):
