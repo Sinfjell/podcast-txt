@@ -105,9 +105,14 @@ MIN_PART_SECONDS = 1.0
 
 # Segment-level guard: Together cuts audio on a 30 s grid, and some windows
 # come back nearly empty although someone is talking ("Det er mye." for 101
-# words). Real silence also trips this, which only costs one small retry.
+# words). Genuine silence/music also looks sparse; callers confirm with a
+# shifted window retry (and optional ffmpeg mean-volume) before falling
+# back to whisper-1 — see ``nonspeech_agreement`` / quiet checks in app.
 GAP_MIN_SECONDS = 10.0
 GAP_MAX_WORDS_PER_SECOND = 0.6
+# ffmpeg volumedetect mean_volume at/below this ⇒ near-silence (digital
+# silence is ~-91 dB; spoken podcast audio is typically well above -40).
+SILENCE_MEAN_DB = -45.0
 # Whisper's best-known hallucinations: subtitle credits and outro lines learnt
 # from subtitle training data. Matched case-insensitively on a segment.
 HALLUCINATION_PATTERNS = [
@@ -129,6 +134,10 @@ MAX_RETRY_WINDOWS_PER_CHUNK = 4
 # clearly longer; otherwise the original stays and nothing falls back.
 SOFT_RATE_FRACTION = 0.5
 MAX_SOFT_RETRIES_PER_CHUNK = 4
+# Empty Together transcript on a long energetic chunk → hard safety net
+# (full-chunk Together retry, then whisper-1). Silence is exempted by the
+# caller's mean-volume check.
+TOGETHER_EMPTY_MIN_SECONDS = 30.0
 
 # SRT: whisper-1 segments are ~3-5 s; Together's run up to 30 s. Long cues are
 # split on word boundaries with time interpolated by character position.
@@ -335,9 +344,12 @@ def _scribe_funding_allows(funding):
 def route_job(key_source, language, trial_seconds=0, paid_seconds=0):
     """Decide the provider for a job. Returns (provider, reason).
 
-    `language` is the user's pick ('' = auto). With auto, Together/Scribe is
-    tried and the first chunk's detected language may decide (see
-    `language_allowed` / `scribe_language_allowed`).
+    ``language`` is the user's pick, or feed/episode metadata when the picker
+    was left on auto ('' = still unknown). A *known* code outside the
+    Together/Scribe rollout list goes straight to whisper-1 — never a billed
+    first-chunk probe that would come back ``mixed``. With auto, Together/
+    Scribe is tried and the first chunk's detected language may decide (see
+    ``language_allowed`` / ``scribe_language_allowed``).
     """
     if key_source != 'trial':
         return PROVIDER_OPENAI, 'own_key'
@@ -361,6 +373,9 @@ def route_job(key_source, language, trial_seconds=0, paid_seconds=0):
         return PROVIDER_OPENAI, 'no_together_key'
     if funding == 'paid' and together_funding() != 'all':
         return PROVIDER_OPENAI, 'paid_not_rolled_out'
+    # Known language outside the rollout list: whisper-1 for the whole job
+    # (no Together first chunk). Empty language stays on Together so chunk 1
+    # can detect; STT_TOGETHER_SHADOW_LANGUAGES still samples whisper-1 jobs.
     if lang and lang not in together_languages():
         return PROVIDER_OPENAI, 'language_not_rolled_out'
     return PROVIDER_TOGETHER, 'rollout'
@@ -505,10 +520,20 @@ def is_hallucination(text):
     return bool(_HALLUCINATION_RE.search(text or ''))
 
 
+def segment_is_sparse(text, duration_seconds):
+    """True when a long window has too few words to be plausible speech."""
+    dur = float(duration_seconds or 0)
+    if dur < GAP_MIN_SECONDS:
+        return False
+    return _words(text) / dur < GAP_MAX_WORDS_PER_SECOND
+
+
 def suspicious_segments(segments):
     """Indexes of segments that look like dropped speech or invented text.
 
     `segments` are dicts with start/end/text (chunk-relative seconds).
+    Sparse long windows are flagged even when the audio is silence/music —
+    callers must confirm via shifted retry / mean-volume before whisper-1.
     """
     flagged = []
     for i, seg in enumerate(segments or []):
@@ -517,9 +542,48 @@ def suspicious_segments(segments):
         text = seg.get('text') or ''
         if is_hallucination(text):
             flagged.append(i)
-        elif dur >= GAP_MIN_SECONDS and _words(text) / dur < GAP_MAX_WORDS_PER_SECOND:
+        elif segment_is_sparse(text, dur):
             flagged.append(i)
     return flagged
+
+
+def together_output_empty(text, chunk_seconds,
+                          min_seconds=TOGETHER_EMPTY_MIN_SECONDS):
+    """Hard safety net: no words on a long chunk (silence checked by caller)."""
+    if _words(text) > 0:
+        return False
+    return float(chunk_seconds or 0) >= float(min_seconds)
+
+
+def nonspeech_agreement(original_text, retry_text, window_seconds):
+    """Both passes stay sparse → music/silence, not a recoverable drop.
+
+    Dropped-speech windows usually recover on a shifted +-2 s retry
+    (2026-10-18). When the retry is also sparse, whisper-1 typically returns
+    the same near-empty text — falling back only burns OpenAI minutes.
+    Hallucinations are never treated as nonspeech here (handled separately).
+    """
+    dur = float(window_seconds or 0)
+    if dur < GAP_MIN_SECONDS:
+        return False
+    if is_hallucination(original_text) or is_hallucination(retry_text):
+        return False
+    return (segment_is_sparse(original_text, dur)
+            and segment_is_sparse(retry_text, dur))
+
+
+def accept_unrecovered_gap(original_text, retry_text, window_seconds, *,
+                           quiet=False):
+    """True when a failed window repair should stay on Together (no whisper).
+
+    Quiet audio (ffmpeg mean_volume ≤ SILENCE_MEAN_DB) or sparse↔sparse
+    agreement means the window is silence/music. A genuine missing passage
+    recovers words on the shifted retry and returns False here.
+    """
+    if quiet and not is_hallucination(retry_text):
+        # Near-silence: keep the sparse/empty original; do not burn whisper-1.
+        return True
+    return nonspeech_agreement(original_text, retry_text, window_seconds)
 
 
 def _rate(seg):

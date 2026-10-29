@@ -794,17 +794,27 @@ LANGUAGE_NAME_TO_CODE = {
 def normalize_language_code(value):
     """Return an ISO language code, or '' (auto-detect) when unknown.
 
-    Accepts picker codes (`en`) and Whisper/legacy names (`english`). Unknown
-    values become auto rather than being stored or sent to Whisper as junk.
+    Accepts picker codes (`en`), Whisper/legacy names (`english`), and RSS
+    BCP-47 tags (`en-US`, `nb-NO`). Unknown values become auto rather than
+    being stored or sent to Whisper as junk.
     """
     if not value:
         return ''
     raw = str(value).strip()
     if not raw:
         return ''
-    lowered = raw.casefold()
+    lowered = raw.casefold().replace('_', '-')
     if lowered in VALID_LANGUAGE_CODES:
         return lowered
+    # Primary subtag of en-US / pt-BR / nb-NO (RSS <language> / itunes:language).
+    if '-' in lowered:
+        base = lowered.split('-', 1)[0]
+        if base in VALID_LANGUAGE_CODES:
+            return base
+        if base in ('nb', 'nn'):
+            return 'no'
+    if lowered in ('nb', 'nn'):
+        return 'no'
     return LANGUAGE_NAME_TO_CODE.get(lowered, '')
 
 
@@ -3799,11 +3809,13 @@ def _together_retryable(exc):
     return status is not None and (status >= 500 or status == 408)
 
 
-def _together_transcribe(client, path, language, *, label='', job=None):
+def _together_transcribe(client, path, language, *, label='', job=None,
+                         temperature=None):
     """One Together call with bounded retries. Returns a whisper-1-shaped result.
 
     Raises the last error when attempts run out or the error is not
-    retryable; the caller falls back to whisper-1.
+    retryable; the caller falls back to whisper-1. ``temperature`` is set on
+    full-chunk quality retries (0 = greedy) and left unset for normal calls.
     """
     import types
     last_exc = None
@@ -3818,6 +3830,8 @@ def _together_transcribe(client, path, language, *, label='', job=None):
                 }
                 if language:
                     kwargs['language'] = language
+                if temperature is not None:
+                    kwargs['temperature'] = temperature
                 r = client.audio.transcriptions.create(**kwargs)
             segs = [types.SimpleNamespace(start=float(getattr(s, 'start', 0) or 0),
                                           end=float(getattr(s, 'end', 0) or 0),
@@ -3961,6 +3975,46 @@ def _cut_audio_window(src, offset, length, dst):
     return dst
 
 
+def _audio_mean_volume_db(path, offset=0.0, length=None):
+    """ffmpeg volumedetect mean_volume in dB, or None when probing fails."""
+    cmd = ['ffmpeg', '-v', 'error']
+    if offset and offset > 0:
+        cmd += ['-ss', f'{float(offset):.2f}']
+    if length is not None and float(length) > 0:
+        cmd += ['-t', f'{float(length):.2f}']
+    cmd += ['-i', path, '-af', 'volumedetect', '-f', 'null', '-']
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    # volumedetect logs to stderr even with -v error.
+    err = proc.stderr or ''
+    match = re.search(r'mean_volume:\s*([-\d.]+)\s*dB', err)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _window_is_quiet(chunk_file, seg, chunk_seconds):
+    """True when the +-2 s retry window is near-silent (genuine pause/music bed)."""
+    offset, length = stt_mod.retry_window(seg, chunk_seconds)
+    mean_db = _audio_mean_volume_db(chunk_file, offset, length)
+    if mean_db is None:
+        return False
+    return mean_db <= stt_mod.SILENCE_MEAN_DB
+
+
+def _chunk_is_quiet(chunk_file):
+    """True when the whole chunk is near-silent."""
+    mean_db = _audio_mean_volume_db(chunk_file)
+    if mean_db is None:
+        return False
+    return mean_db <= stt_mod.SILENCE_MEAN_DB
+
+
 def _retry_segment_window(job, chunk_file, segs, i, language, label, chunk_seconds):
     """Re-send the +-2 s window around segs[i]. Returns (retry_text, length) or None."""
     offset, length = stt_mod.retry_window(segs[i], chunk_seconds)
@@ -3989,9 +4043,11 @@ def _splice_retry(segs, result, i, retry_text):
 def _repair_dropped_windows(job, result, chunk_file, language, label, chunk_seconds):
     """Re-send +-2 s windows around flagged segments. True when all repaired.
 
-    Hard flags (near-empty long window, invented credit line) must be repaired
-    or the chunk falls back to whisper-1. Soft flags (partial drop) are only
-    improved when the retry is clearly longer; they never cause a fallback.
+    Hard flags (near-empty long window, invented credit line) must be repaired,
+    confirmed as nonspeech (quiet audio or sparse↔sparse agreement), or the
+    caller escalates (full-chunk Together retry, then whisper-1). Soft flags
+    (partial drop) are only improved when the retry is clearly longer; they
+    never cause a fallback.
     """
     segs = [{'start': s.start, 'end': s.end, 'text': s.text} for s in result.segments]
     flagged = stt_mod.suspicious_segments(segs)
@@ -4013,13 +4069,24 @@ def _repair_dropped_windows(job, result, chunk_file, language, label, chunk_seco
         if got is None:
             return False
         retry_text, length = got
-        if not stt_mod.retry_recovered(segs[i]['text'], retry_text, length):
-            app.logger.info('stt %s: retry of segment %d not recovered (%d words)',
-                            label, i, len(retry_text.split()))
-            return False
-        _splice_retry(segs, result, i, retry_text)
-        job.events['repaired_windows'] += 1
-        changed = True
+        if stt_mod.retry_recovered(segs[i]['text'], retry_text, length):
+            _splice_retry(segs, result, i, retry_text)
+            job.events['repaired_windows'] += 1
+            changed = True
+            continue
+        quiet = _window_is_quiet(chunk_file, segs[i], chunk_seconds)
+        if stt_mod.accept_unrecovered_gap(segs[i]['text'], retry_text, length,
+                                          quiet=quiet):
+            job.events['nonspeech_windows'] += 1
+            app.logger.info(
+                'stt %s: segment %d treated as nonspeech/silence (%d→%d words, '
+                'quiet=%s); keeping Together',
+                label, i, len((segs[i]['text'] or '').split()),
+                len(retry_text.split()), quiet)
+            continue
+        app.logger.info('stt %s: retry of segment %d not recovered (%d words)',
+                        label, i, len(retry_text.split()))
+        return False
     for i in soft:
         got = _retry_segment_window(job, chunk_file, segs, i, language, label,
                                     chunk_seconds)
@@ -4034,6 +4101,35 @@ def _repair_dropped_windows(job, result, chunk_file, language, label, chunk_seco
         result.segments = [s for s in result.segments if s.text.strip()]
         result.text = ' '.join(s.text.strip() for s in result.segments)
     return True
+
+
+def _together_full_chunk_retry(job, chunk_file, language, label, chunk_seconds):
+    """One full-chunk Together re-run (temperature=0) before whisper-1 fallback.
+
+    Returns the new result when gap repair succeeds (or there is nothing to
+    repair); None when the retry errors or still looks dropped. Charges the
+    Together minutes either way on success.
+    """
+    try:
+        result = _together_transcribe(
+            job.together_client, chunk_file, language,
+            label=f'{label} full-retry', job=job, temperature=0)
+        job.charge(stt_mod.PROVIDER_TOGETHER, chunk_seconds)
+    except Exception as exc:  # noqa: BLE001 - escalate to whisper-1
+        app.logger.warning(
+            'stt full-chunk Together retry failed for %s: %s %s',
+            label, type(exc).__name__, getattr(exc, 'status_code', ''))
+        return None
+    if stt_mod.together_output_empty(result.text, chunk_seconds):
+        if _chunk_is_quiet(chunk_file):
+            job.events['nonspeech_windows'] += 1
+            return result
+        app.logger.info('stt %s: full-retry still empty on energetic chunk', label)
+        return None
+    if not _repair_dropped_windows(job, result, chunk_file, language,
+                                   f'{label} full-retry', chunk_seconds):
+        return None
+    return result
 
 
 def _start_shadow_comparison(job, openai_client, chunk_file, language, together_text,
@@ -4377,15 +4473,49 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
         job.pinned_language = detected
         language = detected
 
+    # Empty long energetic chunk: try one full Together re-run, else whisper-1.
+    if stt_mod.together_output_empty(result.text, chunk_seconds):
+        if _chunk_is_quiet(chunk_file):
+            job.events['nonspeech_windows'] += 1
+            app.logger.info('stt %s: empty Together output on quiet chunk; keeping',
+                            label)
+        else:
+            app.logger.info('stt %s: empty Together output; full-chunk retry', label)
+            retried = _together_full_chunk_retry(
+                job, chunk_file, language, label, chunk_seconds)
+            if retried is not None and not stt_mod.together_output_empty(
+                    retried.text, chunk_seconds):
+                job.events['together_retry_recovered'] += 1
+                result = retried
+            else:
+                job.events['fallback_gap'] += 1
+                app.logger.info(
+                    'stt empty Together chunk not recovered; whisper-1 for %s',
+                    label)
+                result = openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
+                _maybe_scribe_shadow(
+                    job, chunk_file, language, getattr(result, 'text', '') or '',
+                    chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
+                return result
+
     if not _repair_dropped_windows(job, result, chunk_file, language, label,
                                    chunk_seconds):
-        job.events['fallback_gap'] += 1
-        app.logger.info('stt dropped window not repaired; whisper-1 for %s', label)
-        result = openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
-        _maybe_scribe_shadow(
-            job, chunk_file, language, getattr(result, 'text', '') or '',
-            chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
-        return result
+        # One full-chunk Together re-run (temperature=0) before whisper-1.
+        app.logger.info('stt %s: gap unrepaired; full-chunk Together retry', label)
+        retried = _together_full_chunk_retry(
+            job, chunk_file, language, label, chunk_seconds)
+        if retried is not None:
+            job.events['together_retry_recovered'] += 1
+            result = retried
+        else:
+            job.events['fallback_gap'] += 1
+            app.logger.info(
+                'stt dropped window not repaired; whisper-1 for %s', label)
+            result = openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
+            _maybe_scribe_shadow(
+                job, chunk_file, language, getattr(result, 'text', '') or '',
+                chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
+            return result
 
     if stt_mod.shadow_rate() > 0 and secrets.randbelow(10_000) < int(
             stt_mod.shadow_rate() * 10_000):
@@ -4470,6 +4600,9 @@ def _emit_stt_job_summary(stt_job, *, language=None, audio_duration=None,
             'fallback_language': int(events.get('fallback_language', 0)),
             'fallback_gap': int(events.get('fallback_gap', 0)),
             'fallback_coverage': int(events.get('fallback_coverage', 0)),
+            'together_retry_recovered': int(
+                events.get('together_retry_recovered', 0)),
+            'nonspeech_windows': int(events.get('nonspeech_windows', 0)),
             'scribe_shadow_attempts': int(events.get('scribe_shadow', 0)),
             'scribe_shadow_ok': int(events.get('scribe_shadow_ok', 0)),
             'scribe_shadow_fail': int(events.get('scribe_shadow_fail', 0)),
@@ -5171,6 +5304,15 @@ def get_episodes_from_rss(rss_url, *, timeout=None):
         feed_image = ''
         if getattr(feed.feed, 'image', None):
             feed_image = feed.feed.image.get('href', '') or ''
+        # RSS <language> / itunes:language — used to skip Together when the
+        # user left the picker on auto but the feed already names a language
+        # outside STT_TOGETHER_LANGUAGES (avoids a billed first-chunk probe).
+        feed_language = normalize_language_code(
+            getattr(feed.feed, 'language', None)
+            or (feed.feed.get('language') if hasattr(feed.feed, 'get') else None)
+            or getattr(feed.feed, 'itunes_language', None)
+            or ''
+        )
 
         episodes = []
         for i, entry in enumerate(feed.entries):
@@ -5207,6 +5349,7 @@ def get_episodes_from_rss(rss_url, *, timeout=None):
                 'podcast_name': feed_title,
                 'episode_link': episode_link,
                 'show_link': show_link,
+                'language': feed_language,
             })
 
         if not episodes:
@@ -5965,7 +6108,10 @@ def _pending_transcription_meta(pending):
             'apple_url': pending.get('apple_url') or '',
             'episode_link': episode.get('episode_link') or pending.get('episode_link') or '',
             'show_link': episode.get('show_link') or pending.get('show_link') or '',
+            'language': episode.get('language') or '',
         }
+        if not language:
+            language = normalize_language_code(meta.get('language') or '')
     else:
         audio_url = (pending.get('audio_url') or '').strip()
         if not audio_url or not _is_fetchable_url(audio_url):
@@ -5983,7 +6129,10 @@ def _pending_transcription_meta(pending):
             'episode_link': pending.get('episode_link') or '',
             'website_url': pending.get('website_url') or '',
             'show_link': pending.get('show_link') or '',
+            'language': pending.get('language') or '',
         }
+        if not language:
+            language = normalize_language_code(meta.get('language') or '')
     return meta, rss_url, language, None
 
 
@@ -8375,7 +8524,11 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
     if podcast_optout.match_item(meta) or podcast_optout.match_url(rss_url):
         return podcast_optout.payload(), 403
 
-    language = normalize_language_code(language)
+    # Picker wins; otherwise use feed/episode language metadata so a known
+    # out-of-rollout language routes straight to whisper-1 (no Together probe).
+    language = (normalize_language_code(language)
+                or normalize_language_code(meta.get('language') if meta else '')
+                or '')
     source = normalize_task_source(source)
     client_label = (source_client or '').strip()[:64] or None
 
@@ -11184,6 +11337,7 @@ def _catalog_episode_payload(ep, rss_url):
         'rss_url': rss_url,
         'duration_min': ep.get('duration_min'),
         'artwork_url': ep.get('artwork'),
+        'language': ep.get('language') or '',
         'transcript_status': 'none',
     }
 
@@ -11431,6 +11585,7 @@ def _catalog_to_enqueue_meta(catalog):
         'artwork': catalog.get('artwork_url'),
         'published': catalog.get('published_at'),
         'duration_min': _positive_float_or_none(catalog.get('duration_min')),
+        'language': catalog.get('language') or '',
     }
 
 
