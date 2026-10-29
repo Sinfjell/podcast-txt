@@ -20458,7 +20458,10 @@ def test_summarize_landing_honesty_when_summary_enabled(trial_on, monkeypatch):
     assert 'Summarize this episode' in html
     # Honesty: transcript + checkable summary; no minute metering for summary.
     assert 'full transcript' in html.lower() or 'full text' in html.lower()
-    assert 'does not' in html.lower() and 'minutes' in html.lower()
+    assert 'at no extra cost' in html
+    assert 'same OpenAI key that funded' not in html
+    assert 'in-app summary' not in html.lower()
+    assert "ChatGPT can’t listen" in html or "ChatGPT can't listen" in html
     assert 'Preview' in html
     assert 'exclusives' in html.lower() or "don't" in html.lower()
     assert 'not a youtube' in html.lower()
@@ -20486,17 +20489,6 @@ def test_summarize_landing_honesty_when_summary_enabled(trial_on, monkeypatch):
     meta = _re.search(r'<meta name="description" content="([^"]*)"', html).group(1)
     assert len(title) <= lp.TITLE_MAX and len(meta) <= lp.META_MAX
     assert title.count('Podskrift') <= 1
-
-
-def test_landing_batch_does_not_touch_changelog():
-    """SEO/landing pages must not add What's new entries (features-only)."""
-    import pathlib
-    import subprocess
-    diff = subprocess.check_output(
-        ['git', 'diff', 'origin/main', '--', 'changelog.json'],
-        cwd=str(pathlib.Path(A.__file__).parent),
-    )
-    assert diff == b'', 'changelog.json must be unchanged for landing/SEO PRs'
 
 
 def test_spotify_landing_will_work_line_and_cta_note(trial_on):

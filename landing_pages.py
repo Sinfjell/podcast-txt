@@ -297,12 +297,12 @@ def _price_de(trial, pack):
 def _price_pt(trial, pack):
     parts = []
     if trial:
-        parts.append(f'Contas novas recebem {trial} minutos grátis, sem cartão.')
+        parts.append(f'Novas contas ganham {trial} minutos grátis, sem cartão.')
     if pack:
         parts.append(f'Depois você compra minutos com um pagamento único: '
                      f'{pack_phrase(pack, "pt")}. Sem assinatura.')
     parts.append('Você também pode adicionar sua própria chave de API da OpenAI e '
-                 'pagar a OpenAI diretamente; é opcional.')
+                 'pagar a OpenAI diretamente; isso é opcional.')
     return ' '.join(parts)
 
 
@@ -802,9 +802,8 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
                  'language as the transcript. You also get the full transcript to check '
                  'every point and quote.'),
                 ('Does the summary use extra minutes?',
-                 'No. Only the transcription uses trial or paid minutes. The summary runs '
-                 'on the same OpenAI key that funded the transcript and is not metered '
-                 'against your balance.'),
+                 'No. Only the transcription uses trial or paid minutes. The summary comes '
+                 'with the transcript at no extra cost.'),
                 ('What if I only get a free preview of a long episode?',
                  'The summary covers only the part that was transcribed. A “Preview” badge '
                  'marks that the summary is partial.'),
@@ -813,9 +812,9 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
                  'or a tweet thread, or connect Podskrift as a connector so they can fetch '
                  'transcripts for you. See the AI and ChatGPT guide links below.'),
                 ('Is this the same as Spotify’s or ChatGPT’s own summary?',
-                 'No. Spotify’s in-app summary (when it exists) stays in the app. ChatGPT '
-                 'cannot listen to the episode audio. Podskrift transcribes the public-feed '
-                 'audio itself, then summarises that transcript.'),
+                 'No. ChatGPT can’t listen to the episode audio, and Spotify’s own '
+                 'transcripts stay inside the Spotify app. Podskrift transcribes the '
+                 'public-feed audio itself, then summarises that transcript.'),
                 ('Is there speaker labelling?',
                  'Not yet. You get one continuous transcript with timestamps, not named speakers.'),
                 ('Do I need an OpenAI API key?',
@@ -831,42 +830,43 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
             ('Quanto custa?', _price_pt(trial, pack)),
             ('Funciona bem em português?',
              'Sim, quando a fala está clara — no Brasil e em Portugal. Se o episódio '
-             'mistura português e inglês, tem sotaques marcados ou várias pessoas falam '
-             'ao mesmo tempo, escolha «Português» em vez da detecção automática.'),
+             'mistura português e inglês, tem sotaque bem marcado ou várias pessoas '
+             'falam ao mesmo tempo, escolha «Português» em vez da detecção automática.'),
             ('Funciona com todos os podcasts do Spotify?',
-             'Com a maioria, sim: quase todos também têm um feed RSS público, e é daí '
-             'que sai o áudio. Exclusivos do Spotify e episódios só para assinantes não '
-             'têm feed público, então não dá para transcrever.'),
+             'Com a maioria, sim: quase todos também têm um feed RSS público, e o áudio '
+             'vem dali. Exclusivos do Spotify e episódios só para assinantes não têm '
+             'feed público, então não dá para transcrever.'),
             ('Preciso enviar o arquivo de áudio?',
              'Não. Cole um link do Spotify ou do Apple Podcasts, ou a URL de um feed RSS, '
-             'e o Podskrift baixa o áudio do feed público do programa.'),
+             'e o Podskrift baixa o áudio do feed público do podcast.'),
             ('O que eu recebo?',
-             'A transcrição completa como texto (.txt) e como legendas com marcas de '
-             'tempo (.srt). Dá para copiar e colar no ChatGPT ou no Claude. As '
-             'transcrições são privadas na sua conta, a menos que você crie um link para '
+             'A transcrição completa em texto (.txt) e em legendas com timestamps '
+             '(.srt). Dá para copiar e colar no ChatGPT ou no Claude. As transcrições '
+             'ficam privadas na sua conta, a não ser que você crie um link para '
              'compartilhar.'),
             ('Preciso de chave de API ou assinatura?',
-             'Não. Não é obrigatório ter chave da OpenAI, e não há assinatura — os '
-             'minutos são compra única.'),
+             'Não. Não precisa de chave da OpenAI, e não tem assinatura — os minutos '
+             'são compra única.'),
         ]
         return dict(
             lang='pt',
-            title='Transcrever podcast a texto a partir do link',
-            meta=('Passe um podcast para texto sem enviar áudio. Cole o link do Spotify '
-                  f'ou Apple Podcasts e baixe .txt e .srt. {free_pt.capitalize()}.'),
-            h1='Transcrever um podcast a texto a partir do link',
+            title='Transcrever podcast em texto pelo link',
+            meta=('Transforme um podcast em texto sem enviar áudio. Cole o link do '
+                  f'Spotify ou Apple Podcasts e baixe .txt e .srt. {free_pt.capitalize()}.'),
+            h1='Transforme um podcast em texto a partir do link',
             lede=('Cole o link do episódio do Spotify ou Apple Podcasts. O Podskrift '
-                  'encontra o episódio no feed público do programa e transforma o áudio '
+                  'encontra o episódio no feed público do podcast e transforma o áudio '
                   'em texto que você pode copiar e baixar.'),
             placeholder='Cole o link do episódio do Spotify ou Apple Podcasts',
             input_label='Link do Spotify, Apple Podcasts ou RSS',
             button=_start_button(trial, 'pt'),
             steps=[
                 ('Copie o link',
-                 'No Spotify ou Apple Podcasts: «Compartilhar» e depois «Copiar link».'),
+                 'No Spotify ou Apple Podcasts: toque em Compartilhar e depois em '
+                 'Copiar link.'),
                 ('Cole aqui',
                  'Escolha o episódio e, se puder, selecione «Português» como idioma.'),
-                ('Receba o texto',
+                ('Leia ou baixe',
                  'Leia no navegador ou baixe .txt e .srt.'),
             ],
             faq=faq,
@@ -893,7 +893,8 @@ UI = {
                rss_help='RSS-Feed finden',
                pricing='Preise', shows='Beliebte Podcasts',
                note='Du kannst auch nach dem Podcastnamen suchen.'),
-    'pt': dict(how='Como funciona', faq='Perguntas', related='Mais formas de transcrever',
+    'pt': dict(how='Como funciona', faq='Perguntas frequentes',
+               related='Outras formas de transcrever',
                ai='Usar no ChatGPT e no Claude', guides='Guias de configuração',
                rss_help='Como encontrar um feed RSS',
                pricing='Preços', shows='Podcasts populares',
