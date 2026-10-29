@@ -79,6 +79,9 @@
       {% for endpoint, label in related %}
       <li><a href="{{ url_for(endpoint) }}">{{ label }}</a></li>
       {% endfor %}
+      {% for endpoint, label in page.also_related or [] %}
+      <li><a href="{{ url_for(endpoint) }}">{{ label }}</a></li>
+      {% endfor %}
       <li><a href="{{ url_for('ai_landing') }}">{{ ui.ai }}</a></li>
       <li><a href="{{ url_for('guides_index') }}">{{ ui.guides }}</a></li>
       <li><a href="{{ url_for('rss_help') }}">{{ ui.rss_help }}</a></li>
