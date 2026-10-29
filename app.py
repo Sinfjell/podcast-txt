@@ -11948,7 +11948,7 @@ def inject_landing_footer_links():
     return {'landing_footer_links': [
         (endpoint, landing_pages_mod.SHORT_LABELS[endpoint],
          landing_pages_mod.lang_of(endpoint))
-        for endpoint in landing_pages_mod.FOOTER]}
+        for endpoint in landing_pages_mod.public_footer()]}
 
 
 def _landing_pack():
@@ -12031,6 +12031,10 @@ def _landing_price_line(ui_lang, trial, pack):
         bits = [f'{trial} Minuten gratis.'] if trial else []
         if pack:
             bits.append('Danach ' + landing_pages_mod.pack_phrase(pack, 'de') + '.')
+    elif ui_lang == 'pt':
+        bits = [f'{trial} minutos grátis.'] if trial else []
+        if pack:
+            bits.append('Depois ' + landing_pages_mod.pack_phrase(pack, 'pt') + '.')
     else:
         bits = [f'{trial} minutes free.'] if trial else []
         if pack:
@@ -12072,6 +12076,14 @@ _LANDING_ACCOUNT_COPY = {
                     'zahlst. Einmalzahlung, die Minuten verfallen nicht.'),
         'paid': 'Du hast {n} bezahlte Minuten.',
     },
+    'pt': {
+        'start': 'Começar transcrição',
+        'see_price': 'Ver preço do episódio',
+        'used_up': ('Seus minutos grátis acabaram. Cole um link para ver o '
+                    'episódio e o preço exato antes de pagar. Pagamento único, '
+                    'os minutos não expiram.'),
+        'paid': 'Você tem {n} minutos pagos.',
+    },
 }
 _LANDING_ACCOUNT_COPY['no'] = _LANDING_ACCOUNT_COPY['nb']
 
@@ -12101,6 +12113,8 @@ def _landing_account_cta(ui_lang):
 
 
 def _render_landing(endpoint):
+    if not landing_pages_mod.page_is_public(endpoint):
+        abort(404)
     page = landing_page_data(endpoint)
     page_url = public_url(endpoint)
     trial = advertised_trial_minutes()
@@ -12239,7 +12253,7 @@ def _llms_body(*, full=False):
     landing_lines = '\n'.join(
         f'- [{landing_page_data(e)["title"]}]({public_url(e)})'
         + _llms_landing_label(e)
-        for e, _ in landing_pages_mod.PAGES)
+        for e, _ in landing_pages_mod.public_pages())
     mcp_on = mcp_server_mod.mcp_enabled()
     mcp_section = (f"""## Use it from ChatGPT, Claude and other AI apps (MCP)
 Podskrift is a remote MCP server at {_mcp_connector_url()} (Streamable HTTP,
@@ -12346,7 +12360,7 @@ Nettsmed -- https://nettsmed.no
 """
     # Full dump: landings + FAQ already above, plus per-landing abstracts.
     landing_full = []
-    for endpoint, path in landing_pages_mod.PAGES:
+    for endpoint, path in landing_pages_mod.public_pages():
         p = landing_page_data(endpoint)
         steps = '\n'.join(f'  {i}. **{n}** — {t}' for i, (n, t) in enumerate(p['steps'], 1))
         faqs = '\n\n'.join(f'**{q}**\n\n{a}' for q, a in p['faq'])
@@ -12437,7 +12451,7 @@ def sitemap_xml():
              public_url('register'),
              public_url('llms_txt'),
              public_url('llms_full_txt')]
-    pages += [public_url(endpoint) for endpoint, _ in landing_pages_mod.PAGES]
+    pages += [public_url(endpoint) for endpoint, _ in landing_pages_mod.public_pages()]
     # Curated show pages only — community slugs can churn with the DB.
     for show in show_pages_mod.load_curated_shows():
         pages.append(public_url('podcast_show', slug=show['slug']))
