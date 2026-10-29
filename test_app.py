@@ -19928,6 +19928,47 @@ def test_stt_soniox_filler_cleanup_language_aware():
     assert STT.is_soniox_filler('UM', 'en')
 
 
+def _soniox_words(text, language):
+    toks = [{'text': ' ' + w, 'start_ms': i * 100, 'end_ms': i * 100 + 90}
+            for i, w in enumerate(text.split())]
+    return [w['text'] for w in STT.clean_soniox_words(
+        STT.merge_soniox_tokens_to_words(toks), language)]
+
+
+def test_stt_soniox_repeats_never_collapsed_across_punctuation():
+    """Benchmark regression: collapsing 'very, very' cut real words."""
+    assert _soniox_words('very, very good', 'en') == ['very,', 'very', 'good']
+    assert _soniox_words('nei. Nei, det', 'no') == ['nei.', 'Nei,', 'det']
+    # Plain stutter with nothing between still goes.
+    assert _soniox_words('the the dog', 'en') == ['the', 'dog']
+    assert _soniox_words('bra bra', 'no') == ['bra']
+
+
+def test_stt_soniox_keeps_grammatical_doubles_and_real_words():
+    assert _soniox_words('Leute, die die Arbeit machen', 'de') == [
+        'Leute,', 'die', 'die', 'Arbeit', 'machen']
+    assert _soniox_words('ik denk dat dat klopt', 'nl') == [
+        'ik', 'denk', 'dat', 'dat', 'klopt']
+    # 'er' is a real word in de/nl/no/da; only an English hesitation.
+    assert _soniox_words('er sagt', 'de') == ['er', 'sagt']
+    assert _soniox_words('det er bra', 'no') == ['det', 'er', 'bra']
+    assert _soniox_words('so er yes', 'en') == ['so', 'yes']
+    assert not STT.is_soniox_filler('הם', 'he')
+    assert not STT.is_soniox_filler('izé', 'hu')
+    assert _soniox_words('eh ehm mhm um uh hei', 'no') == ['hei']
+
+
+def test_stt_soniox_job_keeps_standard_part_size(soniox_on):
+    """Whole-file parts would exceed the 25 MB prepare limit past ~70 min and
+    break the per-chunk whisper-1 fallback; Soniox uses SEGMENT_SECONDS."""
+    with A.app.app_context():
+        job = A._stt_job_for_task('no-such-task', 'trial', 'de',
+                                  segment_seconds=A.SEGMENT_SECONDS,
+                                  audio_seconds=88 * 60)
+    assert job.provider == STT.PROVIDER_SONIOX
+    assert job.segment_seconds == A.SEGMENT_SECONDS
+
+
 def test_stt_soniox_tokens_to_segments_sentence_and_time():
     # Two sentences spanning >10 s should split; short clause stays one segment.
     tokens = []

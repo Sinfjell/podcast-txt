@@ -630,9 +630,12 @@ def scribe_words_to_segments(words, max_seconds=SRT_MAX_CUE_SECONDS):
 # so "umbrella" / "Uhmager" stay intact. Language-aware lists add local
 # hesitations on top of a small shared set.
 
+# Shared set must never contain a real word in any routed language: 'er'
+# (de "he", nl "there", no/da "is") and 'ah' stay out; English-only
+# hesitations live in the 'en' list.
 _SONIOX_FILLERS_COMMON = frozenset({
-    'um', 'uh', 'uhh', 'umm', 'uh-huh', 'uhhuh', 'mhm', 'mm', 'mmm', 'hmm',
-    'hm', 'ah', 'ahh', 'er', 'erm', 'eh', 'ehm', 'huh', 'hmph',
+    'um', 'uh', 'uhh', 'umm', 'uhm', 'mhm', 'mm', 'mmm', 'hmm', 'hm',
+    'eh', 'ehm', 'hmph',
 })
 # Local hesitations commonly emitted verbatim by multilingual STT.
 _SONIOX_FILLERS_BY_LANG = {
@@ -643,12 +646,25 @@ _SONIOX_FILLERS_BY_LANG = {
     'sv': frozenset({'öh', 'äh', 'eh', 'ehm', 'hm'}),
     'fi': frozenset({'öö', 'ööö', 'eh', 'ehm', 'hm'}),
     'pl': frozenset({'yyy', 'eee', 'hm', 'ee'}),
-    'hu': frozenset({'öö', 'ööö', 'izé', 'hm'}),
-    'he': frozenset({'אמ', 'אה', 'הם'}),
-    'en': frozenset({'like'}),  # only bare "like" as hesitation — still conservative
+    # 'izé' ("thingy") is a content word; keep it.
+    'hu': frozenset({'öö', 'ööö', 'hm'}),
+    # 'הם' means "they" — never a filler.
+    'he': frozenset({'אמ', 'אה'}),
+    'en': frozenset({'er', 'erm', 'uh-huh', 'uhhuh'}),
 }
-# "like" as a filler is too aggressive for English podcasts (content word).
-_SONIOX_FILLERS_BY_LANG['en'] = frozenset()
+# Grammatical doubles that are real speech, not stutters ("Leute, die die
+# Arbeit machen", "ik denk dat dat klopt", "I know that that works").
+_SONIOX_KEEP_DOUBLES = {
+    'de': frozenset({'die', 'das', 'der', 'den', 'dem', 'des', 'sie'}),
+    'nl': frozenset({'dat', 'die', 'de'}),
+    'en': frozenset({'that', 'had', 'is'}),
+    'no': frozenset({'det', 'som', 'at'}),
+    'da': frozenset({'det', 'der', 'som', 'at'}),
+    'sv': frozenset({'det', 'som', 'att'}),
+}
+# Any punctuation at the end of the previous word means the speaker paused
+# or a new clause started ("very, very good"); never collapse across it.
+_CLAUSE_PUNCT_RE = re.compile(r'[,;:.!?…—–\-"»”)\]]$')
 
 _SENTENCE_END_RE = re.compile(r'[.!?…]["\')\]]*$')
 
@@ -720,6 +736,18 @@ def merge_soniox_tokens_to_words(tokens):
     return words
 
 
+def _is_stutter_repeat(prev_text, text, language=''):
+    """Immediate echo ("the the") with nothing between — never across a comma
+    or other punctuation, and never for grammatical doubles."""
+    if _CLAUSE_PUNCT_RE.search((prev_text or '').strip()):
+        return False
+    core = _norm_filler_token(text)
+    if not core or core != _norm_filler_token(prev_text):
+        return False
+    code = (language or '').strip().lower()
+    return core not in _SONIOX_KEEP_DOUBLES.get(code, frozenset())
+
+
 def clean_soniox_words(words, language=''):
     """Drop fillers and immediate duplicate words (conservative, language-aware)."""
     out = []
@@ -729,7 +757,7 @@ def clean_soniox_words(words, language=''):
             continue
         if is_soniox_filler(text, language):
             continue
-        if out and _norm_filler_token(out[-1]['text']) == _norm_filler_token(text):
+        if out and _is_stutter_repeat(out[-1]['text'], text, language):
             # Keep the longer span; drop the immediate echo.
             prev = out[-1]
             prev['end'] = max(float(prev.get('end') or 0), float(w.get('end') or 0))

@@ -3802,10 +3802,11 @@ def _stt_job_for_task(task_id, key_source, language, *, openai_model=None,
     if provider == stt_mod.PROVIDER_SONIOX and not stt_mod.soniox_api_key():
         provider, reason = stt_mod.PROVIDER_OPENAI, 'no_soniox_key'
     model = stt_mod.normalize_transcription_model(openai_model)
-    # Whole-file Soniox: one prepared part (Soniox max 300 min). Whisper-sized
-    # splits would only add concat work; oversize episodes are demoted above.
-    if provider == stt_mod.PROVIDER_SONIOX:
-        segment_seconds = stt_mod.SONIOX_MAX_SECONDS
+    # Soniox keeps the standard Whisper-sized parts (SEGMENT_SECONDS): a single
+    # whole-file part would exceed WHISPER_MAX_UPLOAD_BYTES past ~70 min at
+    # 48 kbps (prepare_audio_for_whisper rejects it, failing the job), and the
+    # per-chunk whisper-1 fallback needs parts OpenAI accepts. Per-part Soniox
+    # jobs also keep trial partial-preview, progress and resume unchanged.
     # BYOK Best quality never goes to Together/Scribe/Soniox (route_job already
     # keeps own_key on OpenAI); record the chosen model for logging / stt_provider.
     app.logger.info(
