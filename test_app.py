@@ -13347,6 +13347,9 @@ def test_normalize_language_code_maps_names_and_unknown_to_auto():
     assert A.normalize_language_code('EN') == 'en'
     assert A.normalize_language_code('english') == 'en'
     assert A.normalize_language_code('Norwegian') == 'no'
+    assert A.normalize_language_code('en-US') == 'en'
+    assert A.normalize_language_code('nb-NO') == 'no'
+    assert A.normalize_language_code('pt_BR') == 'pt'
     assert A.normalize_language_code('not-a-language') == ''
     assert A.normalize_language_code('') == ''
     assert A.normalize_language_code(None) == ''
@@ -18833,6 +18836,92 @@ def test_stt_job_for_byok_task_never_builds_together_client(together_on, monkeyp
     assert built == []
 
 
+def test_stt_known_unrolled_language_skips_together_entirely(
+        tmp_path, together_on, monkeypatch):
+    """User/feed language outside STT_TOGETHER_LANGUAGES → whisper-1, never mixed."""
+    monkeypatch.setenv('STT_TOGETHER_LANGUAGES', 'en,es,fr,it,pt')
+    from models import db, TranscriptionTask
+    built = []
+    monkeypatch.setattr(A, 'build_together_client', lambda: built.append(1) or object())
+    uid = _make_user('stt-known-lang@test.com', limit=3600)
+    with A.app.app_context():
+        db.session.merge(TranscriptionTask(
+            id='stt-known-lang', user_id=uid, episode_title='x',
+            status='transcribing', trial_seconds_charged=600))
+        db.session.commit()
+        job = A._stt_job_for_task('stt-known-lang', 'trial', 'no')
+    assert job.provider == STT.PROVIDER_OPENAI
+    assert job.reason == 'language_not_rolled_out'
+    assert job.together_client is None
+    assert built == []
+    tg = _ScriptedClient()
+    oa = _ScriptedClient()
+    job.together_client = tg  # even if somehow attached, routed path must not call it
+    job.provider = STT.PROVIDER_OPENAI
+    A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'no', chunk_seconds=60)
+    assert tg.calls == [] and len(oa.calls) == 1
+    assert job.provider_label() == STT.PROVIDER_OPENAI  # not mixed
+
+
+def test_stt_unknown_language_still_tries_together_first(together_on, monkeypatch):
+    """Auto-detect (empty language) keeps current Together-first behaviour."""
+    monkeypatch.setenv('STT_TOGETHER_LANGUAGES', 'en,es,fr,it,pt')
+    assert STT.route_job('trial', '', 600, 0) == (STT.PROVIDER_TOGETHER, 'rollout')
+    assert STT.route_job('trial', 'de', 600, 0) == (
+        STT.PROVIDER_OPENAI, 'language_not_rolled_out')
+
+
+def test_enqueue_uses_feed_language_when_picker_is_auto(together_on, monkeypatch, trial_on):
+    """RSS/catalog language fills in when the picker is left on auto-detect."""
+    monkeypatch.setenv('STT_TOGETHER_LANGUAGES', 'en,es,fr,it,pt')
+    seen = {}
+
+    def fake_transcribe(audio_file, task_id, client, language=None, key_source=None):
+        seen['language'] = language
+        from models import db, TranscriptionTask
+        job = A._stt_job_for_task(task_id, key_source, language)
+        seen['provider'] = job.provider
+        seen['reason'] = job.reason
+        raise A.TaskAbandoned()
+
+    import types
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: target and target()))
+    monkeypatch.setattr(A, 'download_audio', lambda *a, **kw: None)
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+    monkeypatch.setattr(A, 'transcribe_audio', fake_transcribe)
+    uid = _make_user('stt-feed-lang@test.com', limit=3600)
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user,
+            {'title': 'Ep', 'audio_url': 'https://example.com/ep-feed-lang.mp3',
+             'duration_min': 5, 'language': 'nb-NO'},
+            language='',  # picker auto
+        )
+        assert status == 200, payload
+    assert seen['language'] == 'no'
+    assert seen['provider'] == STT.PROVIDER_OPENAI
+    assert seen['reason'] == 'language_not_rolled_out'
+
+
+def test_rss_feed_language_is_attached_to_episodes(tmp_path, monkeypatch):
+    feed = tmp_path / 'lang.xml'
+    feed.write_text(
+        '<?xml version="1.0"?>\n'
+        '<rss version="2.0"><channel>\n'
+        '<title>Norsk Show</title><language>nb-NO</language>\n'
+        '<item><title>Ep</title>\n'
+        '<enclosure url="https://example.com/a.mp3" type="audio/mpeg"/>\n'
+        '</item></channel></rss>\n',
+        encoding='utf-8')
+    episodes, err = A.get_episodes_from_rss(str(feed))
+    assert err is None and episodes
+    assert episodes[0]['language'] == 'no'
+
+
 # -- retries and fallback --------------------------------------------------
 
 def test_stt_together_success_sends_language_and_costs_together_rate(tmp_path, together_on):
@@ -18960,23 +19049,94 @@ def test_stt_dropped_window_is_repaired_with_shifted_retry(tmp_path, together_on
     assert job.cost_usd == pytest.approx(STT.cost_usd('together', 34 + 26))
 
 
-def test_stt_unrepaired_window_falls_back_to_whisper1(tmp_path, together_on, monkeypatch):
+def test_stt_sparse_nonspeech_window_stays_on_together(tmp_path, together_on, monkeypatch):
+    """Silence/music: sparse original + sparse shifted retry → no whisper-1."""
     monkeypatch.setattr(A, '_cut_audio_window',
                         lambda src, off, ln, dst: open(dst, 'wb').close() or dst)
+    monkeypatch.setattr(A, '_window_is_quiet', lambda *a, **k: False)
     tg = _ScriptedClient(
         _result('a', [_seg(0, 30, ' Det er mye.')], 'no'),
-        _result('Det er mye.', [], 'no'))          # still dropped
+        _result('Det er mye.', [], 'no'))          # still sparse (= music/silence)
     oa = _ScriptedClient()
     job = _job(tg)
     r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'no', chunk_seconds=30)
+    assert oa.calls == []
+    assert r.segments[0].text.strip() == 'Det er mye.'  # original kept
+    assert job.events['nonspeech_windows'] == 1
+    assert job.events['fallback_gap'] == 0
+    assert job.events['together_retry_recovered'] == 0
+    assert job.provider_label() == STT.PROVIDER_TOGETHER
+
+
+def test_stt_quiet_sparse_window_stays_on_together(tmp_path, together_on, monkeypatch):
+    """ffmpeg-quiet window: keep Together even when the shifted retry is empty."""
+    monkeypatch.setattr(A, '_cut_audio_window',
+                        lambda src, off, ln, dst: open(dst, 'wb').close() or dst)
+    monkeypatch.setattr(A, '_window_is_quiet', lambda *a, **k: True)
+    tg = _ScriptedClient(
+        _result('a', [_seg(0, 30, ' Det er mye.')], 'en'),
+        _result('', [], 'en'))
+    oa = _ScriptedClient()
+    job = _job(tg)
+    A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'en', chunk_seconds=30)
+    assert oa.calls == []
+    assert job.events['nonspeech_windows'] == 1
+    assert job.events['fallback_gap'] == 0
+
+
+def test_stt_gap_full_chunk_retry_recovers_without_whisper(
+        tmp_path, together_on, monkeypatch):
+    """Unrepaired hard flag → one full-chunk Together retry can avoid whisper-1."""
+    monkeypatch.setattr(A, '_cut_audio_window',
+                        lambda src, off, ln, dst: open(dst, 'wb').close() or dst)
+    monkeypatch.setattr(A, '_window_is_quiet', lambda *a, **k: False)
+    # Window retry API fails → repair returns False → full-chunk retry succeeds.
+    monkeypatch.setattr(A, '_retry_segment_window', lambda *a, **k: None)
+    recovered = ' '.join(['word'] * 40)
+    tg = _ScriptedClient(
+        _result('a', [_seg(0, 30, ' Det er mye.')], 'en'),
+        _result(recovered, [_seg(0, 30, ' ' + recovered)], 'en'))
+    oa = _ScriptedClient()
+    job = _job(tg)
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'en', chunk_seconds=30)
+    assert oa.calls == []
+    assert r.text == recovered
+    assert job.events['together_retry_recovered'] == 1
+    assert job.events['fallback_gap'] == 0
+    assert any(c.get('temperature') == 0 for c in tg.calls[1:])
+
+
+def test_stt_real_gap_retries_chunk_then_falls_back_to_whisper1(
+        tmp_path, together_on, monkeypatch):
+    """Genuine drop that Together cannot repair → full retry then whisper-1."""
+    monkeypatch.setattr(A, '_cut_audio_window',
+                        lambda src, off, ln, dst: open(dst, 'wb').close() or dst)
+    monkeypatch.setattr(A, '_window_is_quiet', lambda *a, **k: False)
+    monkeypatch.setattr(A, '_chunk_is_quiet', lambda *a, **k: False)
+    # Hallucination whose retry is also a hallucination: not nonspeech, not recovered.
+    tg = _ScriptedClient(
+        _result('a', [_seg(0, 20, ' Teksting av Nicolai Winther')], 'no'),
+        _result('Teksting av Nicolai Winther', [], 'no'),   # window retry
+        _result('b', [_seg(0, 20, ' Teksting av Nicolai Winther')], 'no'),  # full
+        _result('Teksting av Nicolai Winther', [], 'no'))   # full's window retry
+    oa = _ScriptedClient()
+    job = _job(tg)
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'no', chunk_seconds=20)
     assert r.text == 'whisper default' and len(oa.calls) == 1
     assert job.events['fallback_gap'] == 1
+    assert job.events['together_retry_recovered'] == 0
+    assert len(tg.calls) >= 2  # original + full-chunk retry
 
 
 def test_stt_hallucinated_retry_is_not_accepted(tmp_path, together_on, monkeypatch):
     monkeypatch.setattr(A, '_cut_audio_window',
                         lambda src, off, ln, dst: open(dst, 'wb').close() or dst)
+    monkeypatch.setattr(A, '_window_is_quiet', lambda *a, **k: False)
+    monkeypatch.setattr(A, '_chunk_is_quiet', lambda *a, **k: False)
     tg = _ScriptedClient(
+        _result('a', [_seg(0, 5, ' Teksting av Nicolai Winther')], 'no'),
+        _result('Teksting av Nicolai Winther ' * 5, [], 'no'),
+        # Full-chunk retry also fails the same way.
         _result('a', [_seg(0, 5, ' Teksting av Nicolai Winther')], 'no'),
         _result('Teksting av Nicolai Winther ' * 5, [], 'no'))
     oa = _ScriptedClient()
@@ -18984,13 +19144,29 @@ def test_stt_hallucinated_retry_is_not_accepted(tmp_path, together_on, monkeypat
     assert len(oa.calls) == 1
 
 
-def test_stt_too_many_flagged_windows_go_straight_to_whisper1(tmp_path, together_on, monkeypatch):
-    monkeypatch.setattr(A, '_cut_audio_window', lambda *a: pytest.fail('no retries'))
+def test_stt_too_many_flagged_windows_go_to_full_retry_then_whisper1(
+        tmp_path, together_on, monkeypatch):
+    monkeypatch.setattr(A, '_cut_audio_window', lambda *a: pytest.fail('no window cuts'))
+    monkeypatch.setattr(A, '_window_is_quiet', lambda *a, **k: False)
+    monkeypatch.setattr(A, '_chunk_is_quiet', lambda *a, **k: False)
     segs = [_seg(i * 30, i * 30 + 30, ' hm') for i in range(STT.MAX_RETRY_WINDOWS_PER_CHUNK + 1)]
-    tg = _ScriptedClient(_result('hm', segs, 'en'))
+    # First pass too many flags; full-chunk retry equally bad → whisper-1.
+    tg = _ScriptedClient(_result('hm', segs, 'en'), _result('hm', segs, 'en'))
     oa = _ScriptedClient()
-    A._transcribe_chunk_routed(_job(tg), oa, _chunk(tmp_path), 'en', chunk_seconds=150)
-    assert len(tg.calls) == 1 and len(oa.calls) == 1
+    job = _job(tg)
+    A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'en', chunk_seconds=150)
+    assert len(tg.calls) == 2 and len(oa.calls) == 1
+    assert job.events['fallback_gap'] == 1
+
+
+def test_stt_nonspeech_agreement_decision_helpers():
+    assert STT.nonspeech_agreement('Det er mye.', 'hm ok', 30)
+    assert STT.accept_unrecovered_gap('Det er mye.', '', 30, quiet=True)
+    assert not STT.accept_unrecovered_gap(
+        'Det er mye.', ' '.join(['ord'] * 40), 30, quiet=False)
+    assert STT.together_output_empty('', 60)
+    assert not STT.together_output_empty('hello there', 60)
+    assert not STT.together_output_empty('', 10)
 
 
 def test_stt_trim_overlap():
@@ -19238,6 +19414,31 @@ def test_stt_gap_retry_over_music_bed_counts_as_recovered():
 def test_stt_gap_retry_must_bring_back_clearly_more_words():
     assert not STT.retry_recovered(' '.join(['a'] * 15), ' '.join(['b'] * 20), 30)
     assert STT.retry_recovered(' '.join(['a'] * 15), ' '.join(['b'] * 30), 30)
+
+
+def test_stt_empty_energetic_chunk_full_retry_then_whisper(
+        tmp_path, together_on, monkeypatch):
+    monkeypatch.setattr(A, '_chunk_is_quiet', lambda *a, **k: False)
+    monkeypatch.setattr(A, '_window_is_quiet', lambda *a, **k: False)
+    tg = _ScriptedClient(
+        _result('', [], 'en'),
+        _result('', [], 'en'))  # full-chunk retry still empty
+    oa = _ScriptedClient()
+    job = _job(tg)
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'en', chunk_seconds=60)
+    assert r.text == 'whisper default' and len(oa.calls) == 1
+    assert job.events['fallback_gap'] == 1
+
+
+def test_stt_empty_quiet_chunk_stays_on_together(tmp_path, together_on, monkeypatch):
+    monkeypatch.setattr(A, '_chunk_is_quiet', lambda *a, **k: True)
+    tg = _ScriptedClient(_result('', [], 'en'))
+    oa = _ScriptedClient()
+    job = _job(tg)
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'en', chunk_seconds=60)
+    assert oa.calls == [] and r.text == ''
+    assert job.events['nonspeech_windows'] == 1
+    assert job.events['fallback_gap'] == 0
 
 
 # --------------------------------------------------------------------------
@@ -19547,6 +19748,8 @@ def test_stt_together_fallback_still_scribe_shadows_at_100pct(
         tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)], 'no'))
         language = 'no'
         monkeypatch.setattr(A, '_repair_dropped_windows', lambda *a, **k: False)
+        # Full-chunk Together retry also fails → whisper-1 (still shadow).
+        monkeypatch.setattr(A, '_together_full_chunk_retry', lambda *a, **k: None)
 
     oa = _ScriptedClient()
     job = _job(tg)
@@ -19595,6 +19798,8 @@ def test_stt_job_summary_emitted_once_on_normal_completion(ph_events, monkeypatc
         job.events['chunks_whisper-1'] = 2
         job.events['fallback_error'] = 1
         job.events['retries'] = 3
+        job.events['together_retry_recovered'] = 2
+        job.events['nonspeech_windows'] = 1
         job.events['scribe_shadow'] = 1
         job.events['scribe_shadow_ok'] = 1
         A._emit_stt_job_summary(job, language='no', audio_duration=600.0,
@@ -19609,6 +19814,8 @@ def test_stt_job_summary_emitted_once_on_normal_completion(ph_events, monkeypatc
     assert props['chunks_whisper1'] == 2
     assert props['fallback_error'] == 1
     assert props['retries'] == 3
+    assert props['together_retry_recovered'] == 2
+    assert props['nonspeech_windows'] == 1
     assert props['scribe_shadow_attempts'] == 1
     assert props['scribe_shadow_ok'] == 1
     assert props['resumed'] is False
@@ -21039,6 +21246,28 @@ def test_together_shadow_off_wrong_language_and_byok(
                                chunk_seconds=60)
     assert tg.calls == []
     assert not [e for e in ph_events.events if e['event'] == 'stt_together_shadow_compared']
+
+
+def test_known_unrolled_language_still_together_shadows(
+        tmp_path, together_on, monkeypatch, ph_events):
+    """language_not_rolled_out whisper-1 jobs keep STT_TOGETHER_SHADOW_* sampling."""
+    monkeypatch.setenv('STT_TOGETHER_LANGUAGES', 'en,es,fr,it,pt')
+    monkeypatch.setenv('STT_TOGETHER_SHADOW_LANGUAGES', 'de,no')
+    monkeypatch.setenv('STT_TOGETHER_SHADOW_RATE', '1')
+    threads = _capture_threads(monkeypatch)
+    tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)], 'de'))
+    oa = _ScriptedClient()
+    job = A.SttJob(STT.PROVIDER_OPENAI, 'language_not_rolled_out',
+                   together_client=tg, user_id=6161, task_id='shadow-unrolled')
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), 'de', chunk_seconds=60)
+    for t in threads:
+        t.join(5)
+    assert r.text == 'whisper default'
+    assert len(oa.calls) == 1 and len(tg.calls) == 1  # served whisper, shadow Together
+    assert job.provider_label() == STT.PROVIDER_OPENAI  # shadow spend is not mixed
+    ev = [e for e in ph_events.events if e['event'] == 'stt_together_shadow_compared']
+    assert len(ev) == 1
+    assert ev[0]['properties']['language'] == 'de'
 
 
 def test_together_shadow_failure_is_logged_not_raised(
