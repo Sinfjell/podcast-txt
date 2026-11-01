@@ -3691,11 +3691,13 @@ def _whisper_transcribe_chunk(openai_client, chunk_file, language, *,
 # sends matching jobs (STT_SCRIBE_FUNDING, default paid) to ElevenLabs scribe_v2.
 # STT_SONIOX_LANGUAGES (independent overlay) sends known languages to Soniox
 # stt-async-v5 one async job per standard 900 s part (episode cap 300 min);
-# empty list = off.
+# empty list = off. Auto-detect: Together part 1 may detect a Soniox-list
+# language → remaining parts switch to Soniox (route_reason
+# soniox_after_detect); Together's part-1 text is kept when usable.
 # Every failure mode falls back to whisper-1 for that chunk on the platform
 # OpenAI client (Soniox whole-job failures fall back for the whole job):
 #   429/5xx/dropped connection -> retried, then whisper-1
-#   auto-detected language outside the rollout list (or wrong) -> whisper-1
+#   auto-detected language outside Together and Soniox lists (or wrong) -> whisper-1
 #   Together: dropped 30 s window / "Teksting av ..." -> +-2 s window, else whisper-1
 #     (STT_SONIOX_FALLBACK=1 → Soniox instead of whisper-1 for that gap)
 #   Scribe: empty or near-empty coverage -> whisper-1
@@ -3719,7 +3721,8 @@ class SttJob:
     """Per-job provider state: who transcribes, what it cost, what happened."""
 
     def __init__(self, provider, reason, *, task_id=None, user_id=None,
-                 together_client=None, openai_model=None, segment_seconds=None):
+                 together_client=None, openai_model=None, segment_seconds=None,
+                 audio_seconds=None):
         self.provider = provider
         self.reason = reason
         self.task_id = task_id
@@ -3730,6 +3733,8 @@ class SttJob:
         self.segment_seconds = (
             int(segment_seconds) if segment_seconds else SEGMENT_SECONDS
         )
+        # Episode length for Soniox's 300 min gate (after-detect re-route).
+        self.audio_seconds = audio_seconds
         self.pinned_language = None
         self.cost_usd = 0.0
         self.shadow_cost_usd = 0.0
@@ -3815,7 +3820,8 @@ def _stt_job_for_task(task_id, key_source, language, *, openai_model=None,
         task_id, provider, reason, model)
     return SttJob(provider, reason, task_id=task_id, user_id=user_id,
                   together_client=client, openai_model=model,
-                  segment_seconds=segment_seconds)
+                  segment_seconds=segment_seconds,
+                  audio_seconds=audio_seconds)
 
 
 def _together_retryable(exc):
@@ -4740,29 +4746,53 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
     if not language:
         detected = normalize_language_code(result.language)
         if not stt_mod.language_allowed(detected):
-            # Not rolled out, or implausible (accented English read as Swahili):
-            # this chunk and the rest of the job go to whisper-1.
-            job.events['fallback_language'] += 1
-            app.logger.info('stt language %r not on Together; whisper-1 for the '
-                            'rest of task %s', detected, task_id)
-            job.provider = stt_mod.PROVIDER_OPENAI
-            job.openai_model = stt_mod.OPENAI_MODEL
-            job.fallback_language = detected or None
-            together_first = result
-            result = openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
-            # Together already transcribed this chunk (paid): compare for free.
-            if detected and detected in stt_mod.together_shadow_languages():
-                job.events['together_shadow_first'] += 1
-                _log_together_shadow(job, _together_shadow_props(
-                    getattr(result, 'text', '') or '', together_first,
-                    task_id=job.task_id, language=detected,
-                    chunk_seconds=chunk_seconds, source='first_chunk_autodetect'))
-            _maybe_scribe_shadow(
-                job, chunk_file, language, getattr(result, 'text', '') or '',
-                chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
-            return result
-        job.pinned_language = detected
-        language = detected
+            # Outside Together rollout (or implausible detection). Prefer
+            # Soniox when the detected code is on STT_SONIOX_LANGUAGES;
+            # otherwise whisper-1 for this chunk and the rest of the job.
+            next_provider, next_reason = stt_mod.after_detect_route(
+                detected, audio_seconds=job.audio_seconds)
+            if next_provider == stt_mod.PROVIDER_SONIOX:
+                # Keep Together's part-1 text: detection named a real
+                # Soniox-list language, so the transcript is usable. Re-running
+                # on Soniox would double-pay part 1; whisper-1 is the costly
+                # path this route avoids. Remaining parts use Soniox.
+                app.logger.info(
+                    'stt language %r after Together detect; Soniox for the '
+                    'rest of task %s (keeping Together part 1)',
+                    detected, task_id)
+                job.provider = stt_mod.PROVIDER_SONIOX
+                job.reason = next_reason
+                job.pinned_language = detected
+                language = detected
+                # Fall through to Together quality guards on this part, then
+                # return; later chunks hit the Soniox branch above.
+            else:
+                job.events['fallback_language'] += 1
+                app.logger.info(
+                    'stt language %r not on Together; whisper-1 for the '
+                    'rest of task %s', detected, task_id)
+                job.provider = stt_mod.PROVIDER_OPENAI
+                job.reason = next_reason
+                job.openai_model = stt_mod.OPENAI_MODEL
+                job.fallback_language = detected or None
+                together_first = result
+                result = openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
+                # Together already transcribed this chunk (paid): compare for free.
+                if detected and detected in stt_mod.together_shadow_languages():
+                    job.events['together_shadow_first'] += 1
+                    _log_together_shadow(job, _together_shadow_props(
+                        getattr(result, 'text', '') or '', together_first,
+                        task_id=job.task_id, language=detected,
+                        chunk_seconds=chunk_seconds,
+                        source='first_chunk_autodetect'))
+                _maybe_scribe_shadow(
+                    job, chunk_file, language,
+                    getattr(result, 'text', '') or '',
+                    chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
+                return result
+        else:
+            job.pinned_language = detected
+            language = detected
 
     # Empty long energetic chunk: try one full Together re-run, else whisper-1.
     if stt_mod.together_output_empty(result.text, chunk_seconds):

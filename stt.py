@@ -17,11 +17,14 @@ delete). Episodes longer than ``SONIOX_MAX_SECONDS`` (300 min, Soniox's
 per-file cap — we keep the episode under it) stay on Together/whisper.
 Empty language list = feature off.
 
-Unknown language (picker auto + no feed language): keep the existing
-Together/Scribe/whisper detection flow. Soniox is gated by a known language
-list, so auto-detect would either bill Soniox for languages we never intended
-to route or require a throwaway first pass — neither is practical. After
-detection the job stays on the provider that detected it.
+Unknown language (picker auto + no feed language): Together (or Scribe)
+runs part 1 to detect. If the detected code is in ``STT_SONIOX_LANGUAGES``
+and Soniox is configured, remaining parts switch to Soniox
+(``soniox_after_detect``) and Together's part-1 text is kept when usable.
+Otherwise languages outside ``STT_TOGETHER_LANGUAGES`` (e.g. ``zh``) still
+go to whisper-1 for the rest of the job. Starting Soniox with an empty
+language would either bill it for languages we never intended to route or
+require a throwaway first pass — neither is practical.
 
 Optional ``STT_SONIOX_FALLBACK=1`` uses Soniox instead of whisper-1 when a
 Together gap/error would otherwise fall back (per chunk). Default off.
@@ -548,10 +551,26 @@ def language_allowed(detected):
 
     Catches both "not rolled out yet" and "looks wrong" (Together once read
     accented English as Swahili and returned gibberish): anything outside the
-    rollout list goes back to whisper-1, which detected that clip correctly.
+    rollout list leaves Together. See ``after_detect_route`` for where the
+    rest of the job goes (Soniox overlay vs whisper-1).
     """
     code = (detected or '').strip().lower()
     return bool(code) and code in together_languages()
+
+
+def after_detect_route(detected, *, audio_seconds=None):
+    """Provider for remaining parts after Together auto-detect leaves Together.
+
+    Returns ``(provider, reason)``. When the detected language is on
+    ``STT_SONIOX_LANGUAGES`` (with key and under the episode duration cap),
+    route to Soniox (``soniox_after_detect``). Otherwise whisper-1
+    (``language_not_rolled_out``) — including ``zh`` and bogus detections
+    that are not on the Soniox list.
+    """
+    code = (detected or '').strip().lower()
+    if code and soniox_applies(code) and soniox_within_duration(audio_seconds):
+        return PROVIDER_SONIOX, 'soniox_after_detect'
+    return PROVIDER_OPENAI, 'language_not_rolled_out'
 
 
 def normalize_scribe_language(code):

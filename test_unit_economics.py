@@ -141,6 +141,9 @@ def test_provider_bucket():
     assert ue.provider_bucket('whisper-1') == 'openai'
     assert ue.provider_bucket('mixed') == 'mixed'
     assert ue.provider_bucket('scribe') == 'mixed'
+    # Pure Soniox and Together→Soniox-after-detect (label mixed) both land here;
+    # dollar attribution still uses stt_cost_usd, not the bucket name.
+    assert ue.provider_bucket('soniox') == 'mixed'
 
 
 def test_fetch_paginates(monkeypatch):
