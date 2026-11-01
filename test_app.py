@@ -20124,6 +20124,114 @@ def test_stt_soniox_gap_fallback_for_together(
     assert 'word' in r.text
 
 
+def test_stt_after_detect_route_helper(soniox_on):
+    assert STT.after_detect_route('pl') == (
+        STT.PROVIDER_SONIOX, 'soniox_after_detect')
+    assert STT.after_detect_route('en') == (
+        STT.PROVIDER_OPENAI, 'language_not_rolled_out')
+    assert STT.after_detect_route('zh') == (
+        STT.PROVIDER_OPENAI, 'language_not_rolled_out')
+    over = STT.SONIOX_MAX_SECONDS + 1
+    assert STT.after_detect_route('pl', audio_seconds=over)[0] == STT.PROVIDER_OPENAI
+
+
+def test_stt_auto_detect_pl_switches_to_soniox_keeps_part1(
+        tmp_path, soniox_on, monkeypatch):
+    """Auto + detected pl: keep Together part 1, remaining parts on Soniox."""
+    pl_text = ' '.join(['słowo'] * 40)
+    tg = _ScriptedClient(_result(pl_text, [_seg(0, 20, ' ' + pl_text)], 'pl'))
+    oa = _ScriptedClient()
+    job = A.SttJob(
+        STT.PROVIDER_TOGETHER, 'rollout', together_client=tg,
+        audio_seconds=1800)
+    r1 = A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path), '', chunk_seconds=60)
+    assert r1.text == pl_text
+    assert oa.calls == []  # part 1 not re-run on whisper
+    assert job.provider == STT.PROVIDER_SONIOX
+    assert job.reason == 'soniox_after_detect'
+    assert job.pinned_language == 'pl'
+    assert job.events['fallback_language'] == 0
+    assert STT.PROVIDER_TOGETHER in job.providers_used
+    assert STT.PROVIDER_SONIOX not in job.providers_used  # part 1 only so far
+
+    _soniox_http_script(monkeypatch, transcript_text=pl_text)
+    r2 = A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path, 'p2.mp3'), 'pl', chunk_seconds=60)
+    assert 'słowo' in r2.text or 'word' in r2.text or pl_text.split()[0] in r2.text
+    assert oa.calls == []
+    assert STT.PROVIDER_SONIOX in job.providers_used
+    assert job.provider_label() == 'mixed'
+
+
+def test_stt_auto_detect_en_stays_on_together(tmp_path, soniox_on):
+    tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)], 'en'))
+    oa = _ScriptedClient()
+    job = _job(tg)
+    r = A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path), '', chunk_seconds=60)
+    assert r.text == _GOOD
+    assert oa.calls == []
+    assert job.provider == STT.PROVIDER_TOGETHER
+    assert job.pinned_language == 'en'
+    assert job.provider_label() == STT.PROVIDER_TOGETHER
+
+
+def test_stt_auto_detect_zh_goes_to_whisper1(tmp_path, soniox_on):
+    zh_text = ' '.join(['词'] * 40)
+    tg = _ScriptedClient(_result(zh_text, [_seg(0, 20, ' ' + zh_text)], 'zh'))
+    oa = _ScriptedClient()
+    job = _job(tg)
+    r = A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path), '', chunk_seconds=60)
+    assert r.text == 'whisper default'
+    assert len(oa.calls) == 1
+    assert job.provider == STT.PROVIDER_OPENAI
+    assert job.reason == 'language_not_rolled_out'
+    assert job.provider_label() == 'mixed'
+    # Later chunks stay on whisper-1.
+    A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path, 'z2.mp3'), '', chunk_seconds=60)
+    assert len(tg.calls) == 1 and len(oa.calls) == 2
+
+
+def test_stt_auto_detect_byok_unchanged(tmp_path, soniox_on):
+    """BYOK never hits Together/Soniox even when language is empty."""
+    assert STT.route_job('user', '', 600, 0) == (STT.PROVIDER_OPENAI, 'own_key')
+    oa = _ScriptedClient()
+    job = A.SttJob(STT.PROVIDER_OPENAI, 'own_key')
+    r = A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path), '', chunk_seconds=60)
+    assert r.text == 'whisper default'
+    assert len(oa.calls) == 1
+    assert job.provider_label() == STT.PROVIDER_OPENAI
+
+
+def test_stt_soniox_after_detect_error_falls_back_to_whisper1(
+        tmp_path, soniox_on, monkeypatch):
+    """After switching to Soniox, a Soniox error on a later part → whisper-1."""
+    pl_text = ' '.join(['słowo'] * 40)
+    tg = _ScriptedClient(_result(pl_text, [_seg(0, 20, ' ' + pl_text)], 'pl'))
+    oa = _ScriptedClient()
+    job = A.SttJob(
+        STT.PROVIDER_TOGETHER, 'rollout', together_client=tg,
+        audio_seconds=1800)
+    A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), '', chunk_seconds=60)
+    assert job.provider == STT.PROVIDER_SONIOX
+
+    def boom(method, url, **kw):
+        raise A.SonioxApiError(503)
+
+    monkeypatch.setattr(A.httpx, 'request', boom)
+    r2 = A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path, 'p2.mp3'), 'pl', chunk_seconds=60)
+    assert r2.text == 'whisper default'
+    assert len(oa.calls) == 1
+    assert job.events['fallback_error'] == 1
+    assert job.fallback_reason == 'soniox_error'
+    assert job.provider_label() == 'mixed'  # together + whisper-1
+
+
 def test_stt_job_summary_includes_soniox_fields(ph_events, monkeypatch):
     from models import db, TranscriptionTask
     uid = _make_user('stt-sum-sx@test.com', limit=3600)

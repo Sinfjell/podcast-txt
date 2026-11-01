@@ -472,9 +472,11 @@ language is known (picker or RSS, `nb-NO`→`no`) and listed in
 `STT_SONIOX_LANGUAGES`, each standard 900 s part goes to Soniox `stt-async-v5`
 (upload + poll + delete). Episodes longer than 300 minutes keep the
 Together/whisper path. Empty list = feature off. BYOK stays on OpenAI.
-Unknown language (picker auto + no feed language) keeps the existing
-Together/Scribe/whisper detection flow — Soniox is only practical once the
-language is known up front.
+Unknown language (picker auto + no feed language): Together (or Scribe) still
+detects on part 1. If the detected code is in `STT_SONIOX_LANGUAGES`, remaining
+parts switch to Soniox (`route_reason=soniox_after_detect`, `stt_provider` is
+`mixed` when both Together and Soniox served chunks). Otherwise languages
+outside the Together list (e.g. `zh`) keep going to whisper-1.
 
 | Var | Default | Notes |
 | --- | --- | --- |

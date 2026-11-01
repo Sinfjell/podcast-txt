@@ -116,6 +116,13 @@ def _utc_naive(d: date) -> str:
 
 
 def provider_bucket(label) -> str:
+    """Collapse stt_provider labels into the Notion STT cost columns.
+
+    ``together`` and OpenAI stay their own buckets. Everything else
+    (``mixed``, ``scribe``, ``soniox``, Together→Soniox-after-detect mixed
+    jobs, …) rolls into ``stt_mixed``. Dollar totals still come from
+    ``stt_cost_usd``; the bucket is only for the daily breakdown columns.
+    """
     p = (label or '').strip().lower()
     if p == 'together':
         return 'together'
