@@ -20982,6 +20982,9 @@ def test_landing_cta_says_start_transcript_when_trial_off(monkeypatch):
     pt = A.app.test_client().get('/pt/transcrever-podcast').data.decode()
     assert 'Começar transcrição' in pt
     assert 'Começar transcrição grátis' not in pt
+    fr = A.app.test_client().get('/fr/transcrire-podcast').data.decode()
+    assert 'Commencer la transcription' in fr
+    assert 'Commencer la transcription gratuite' not in fr
 
 
 @pytest.mark.parametrize('volume', [True, False])
@@ -20995,6 +20998,7 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
     es = c.get('/es/transcribir-podcast').data.decode()
     de = c.get('/de/podcast-transkribieren').data.decode()
     pt = c.get('/pt/transcrever-podcast').data.decode()
+    fr = c.get('/fr/transcrire-podcast').data.decode()
     llms = c.get('/llms.txt').data.decode()
     full = c.get('/llms-full.txt').data.decode()
     trial = A.advertised_trial_minutes()
@@ -21003,6 +21007,7 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
     assert f'{trial} minutos gratis' in es
     assert f'{trial} Minuten gratis' in de
     assert f'{trial} minutos grátis' in pt
+    assert f'{trial} minutes gratuites' in fr
     en_phrase = ('from $1.50 for 60 minutes, cheaper per minute the more you buy '
                  '(1,200 min for $11), or just the minutes one episode needs')
     nb_phrase = ('fra $1.50 for 60 minutter, billigere per minutt jo mer du kjøper '
@@ -21013,6 +21018,9 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
                  '(1.200 Min. für $11), oder nur die Minuten einer Folge')
     pt_phrase = ('a partir de $1.50 por 60 minutos, mais barato por minuto quanto mais '
                  'você compra (1.200 min por $11), ou só os minutos que um episódio precisa')
+    fr_phrase = ('à partir de $1.50 pour 60 minutes, moins cher à la minute plus vous '
+                 'achetez (1 200 min pour $11), ou seulement les minutes dont un '
+                 'épisode a besoin')
     if volume:
         # Spotify uses per-episode offers instead of the pack phrase in the
         # price line / cost FAQ; other English landings still use pack_phrase.
@@ -21026,6 +21034,7 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
         assert es_phrase in es
         assert de_phrase in de
         assert pt_phrase in pt
+        assert fr_phrase in fr
     else:
         assert '$5 for 300 minutes' in spotify
         assert '$5 for 300 minutes' in generator
@@ -21035,6 +21044,7 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
         assert '5 dólares por 300 minutos' in es
         assert '5 Dollar für 300 Minuten' in de
         assert '5 dólares por 300 minutos' in pt
+        assert '5 dollars pour 300 minutes' in fr
 
 
 @pytest.mark.parametrize('path,lang,exclusives,no_key_bits', [
@@ -21047,10 +21057,13 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
     ('/pt/transcrever-podcast', 'pt',
      ('exclusivos do Spotify', 'só para assinantes', 'não dá para transcrever'),
      ('chave é obrigatória', 'precisa de uma chave', 'requer uma chave da openai')),
+    ('/fr/transcrire-podcast', 'fr',
+     ('exclusivités Spotify', 'réservés aux abonnés', 'ne peut pas les transcrire'),
+     ('clé est obligatoire', 'nécessite une clé', 'besoin d’une clé openai')),
 ])
-def test_es_de_pt_landings_are_native_honest_and_priced(
+def test_es_de_pt_fr_landings_are_native_honest_and_priced(
         trial_on, monkeypatch, path, lang, exclusives, no_key_bits):
-    """Native es/de/pt pages: live trial + pack_phrase, exclusives honesty, no key-required."""
+    """Native es/de/pt/fr pages: live trial + pack_phrase, exclusives honesty, no key-required."""
     import landing_pages as lp
     monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
     monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
@@ -21068,10 +21081,14 @@ def test_es_de_pt_landings_are_native_honest_and_priced(
         assert f'{trial} Minuten gratis' in html
         assert 'Kostenlos transkribieren' in html
         assert 'Spotify- oder Apple-Podcasts-Link' in html
-    else:
+    elif lang == 'pt':
         assert f'{trial} minutos grátis' in html
         assert 'Começar transcrição grátis' in html
         assert 'Cole o link do episódio do Spotify' in html
+    else:
+        assert f'{trial} minutes gratuites' in html
+        assert 'Commencer la transcription gratuite' in html
+        assert 'Collez le lien de l’épisode Spotify' in html
     body_lower = html.lower()
     assert any(bit.lower() in body_lower for bit in exclusives)
     assert all(bit not in body_lower for bit in no_key_bits)
@@ -21079,9 +21096,10 @@ def test_es_de_pt_landings_are_native_honest_and_priced(
     assert client.get('/podcast-to-text/spanish').status_code == 404
     assert client.get('/podcast-to-text/german').status_code == 404
     assert client.get('/podcast-to-text/portuguese').status_code == 404
+    assert client.get('/podcast-to-text/french').status_code == 404
 
 
-def test_es_de_pt_landings_honest_when_trial_and_volume_off(monkeypatch):
+def test_es_de_pt_fr_landings_honest_when_trial_and_volume_off(monkeypatch):
     monkeypatch.setattr(A, 'TRIAL_ENABLED', False)
     monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
     monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', False)
@@ -21089,15 +21107,19 @@ def test_es_de_pt_landings_honest_when_trial_and_volume_off(monkeypatch):
     es = client.get('/es/transcribir-podcast').data.decode()
     de = client.get('/de/podcast-transkribieren').data.decode()
     pt = client.get('/pt/transcrever-podcast').data.decode()
+    fr = client.get('/fr/transcrire-podcast').data.decode()
     assert 'minutos gratis' not in es
     assert 'Minuten gratis' not in de
     assert 'minutos grátis' not in pt
+    assert 'minutes gratuites' not in fr
     assert '5 dólares por 300 minutos' in es
     assert '5 Dollar für 300 Minuten' in de
     assert '5 dólares por 300 minutos' in pt
+    assert '5 dollars pour 300 minutes' in fr
     assert 'Empezar transcripción gratis' not in es
     assert 'Kostenlos transkribieren' not in de
     assert 'Começar transcrição grátis' not in pt
+    assert 'Commencer la transcription gratuite' not in fr
 
 
 def test_llms_txt_labels_native_language_landings(trial_on):
@@ -21106,6 +21128,7 @@ def test_llms_txt_labels_native_language_landings(trial_on):
     assert '/de/podcast-transkribieren' in body and '(German)' in body
     assert '/no/podcast-til-tekst' in body and '(Norwegian)' in body
     assert '/pt/transcrever-podcast' in body and '(Portuguese)' in body
+    assert '/fr/transcrire-podcast' in body and '(French)' in body
 
 
 def test_footer_emits_hreflang_for_non_english_landings(trial_on):
@@ -21113,10 +21136,12 @@ def test_footer_emits_hreflang_for_non_english_landings(trial_on):
     assert 'href="/es/transcribir-podcast"' in home
     assert 'href="/de/podcast-transkribieren"' in home
     assert 'href="/pt/transcrever-podcast"' in home
+    assert 'href="/fr/transcrire-podcast"' in home
     assert 'hreflang="es"' in home and 'lang="es"' in home
     assert 'hreflang="de"' in home and 'lang="de"' in home
     assert 'hreflang="nb"' in home and 'lang="nb"' in home
     assert 'hreflang="pt"' in home and 'lang="pt"' in home
+    assert 'hreflang="fr"' in home and 'lang="fr"' in home
 
 
 def test_pt_landing_html_lang_and_hreflang_reciprocity(trial_on):
@@ -21127,7 +21152,7 @@ def test_pt_landing_html_lang_and_hreflang_reciprocity(trial_on):
     client = A.app.test_client()
     html = client.get('/pt/transcrever-podcast').data.decode()
     assert '<html lang="pt">' in html
-    for lang in ('en', 'nb', 'es', 'de', 'pt'):
+    for lang in ('en', 'nb', 'es', 'de', 'pt', 'fr'):
         assert f'hreflang="{lang}"' in html
     assert 'hreflang="x-default"' in html
     # Reciprocal: English sibling also lists pt.
@@ -21159,6 +21184,99 @@ def test_pt_price_phrase_uses_live_helper_mutation(trial_on, monkeypatch):
     mutated_html = A.app.test_client().get('/pt/transcrever-podcast').data.decode()
     assert 'PRECO-MUTACAO-SENTINELA' in mutated_html
     assert live not in mutated_html
+
+
+def test_fr_landing_html_lang_and_hreflang_reciprocity(trial_on):
+    """French joins the native group; every member links to every other incl. fr."""
+    import landing_pages as lp
+    assert lp.HREFLANG_GROUP['fr'] == 'landing_fr'
+    assert lp.lang_of('landing_fr') == 'fr'
+    client = A.app.test_client()
+    html = client.get('/fr/transcrire-podcast').data.decode()
+    assert '<html lang="fr">' in html
+    for lang in ('en', 'nb', 'es', 'de', 'pt', 'fr'):
+        assert f'hreflang="{lang}"' in html
+    assert 'hreflang="x-default"' in html
+    en = client.get('/podcast-to-text').data.decode()
+    assert 'hreflang="fr"' in en
+    assert '/fr/transcrire-podcast' in en
+    # Reciprocal on another sibling too.
+    pt = client.get('/pt/transcrever-podcast').data.decode()
+    assert 'hreflang="fr"' in pt and '/fr/transcrire-podcast' in pt
+
+
+def test_fr_price_phrase_uses_live_helper_mutation(trial_on, monkeypatch):
+    """Break pack_phrase for fr → page loses the live phrase (mutation check)."""
+    import landing_pages as lp
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    pack = A._landing_pack()
+    live = lp.pack_phrase(pack, 'fr')
+    assert '1 200' in live
+    html = A.app.test_client().get('/fr/transcrire-podcast').data.decode()
+    assert live in html
+    assert live.replace('1 200', '1200') not in html
+    real = lp.pack_phrase
+
+    def _mutated(pack, lang='en'):
+        if lang == 'fr':
+            return 'PRIX-MUTATION-SENTINELLE'
+        return real(pack, lang)
+
+    monkeypatch.setattr(lp, 'pack_phrase', _mutated)
+    mutated_html = A.app.test_client().get('/fr/transcrire-podcast').data.decode()
+    assert 'PRIX-MUTATION-SENTINELLE' in mutated_html
+    assert live not in mutated_html
+
+
+def test_whole_podcast_landing_is_honest_about_feed_flow(trial_on, monkeypatch):
+    """No bulk-all claim; feed honesty; live prices; discovery surfaces."""
+    import landing_pages as lp
+    import pathlib
+    import xml.etree.ElementTree as ET
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    client = A.app.test_client()
+    resp = client.get('/transcribe-whole-podcast')
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert '<html lang="en">' in html
+    assert 'List the episodes' in html
+    assert 'one episode at a time' in html.lower() or 'episode by episode' in html.lower()
+    body_lower = html.lower()
+    # Must not promise a bulk / all-at-once control that does not exist.
+    for claim in ('transcribe all at once', 'bulk transcribe', 'queue the whole',
+                  'transcribe all episodes with one click', 'one-click for the whole'):
+        assert claim not in body_lower
+    assert 'no “transcribe all”' in body_lower or 'no "transcribe all"' in body_lower \
+        or 'there is no' in body_lower
+    assert 'public rss' in body_lower or 'public feed' in body_lower
+    assert 'history' in body_lower
+    assert '.txt' in html and '.srt' in html
+    pack = A._landing_pack()
+    assert lp.pack_phrase(pack) in html
+    # No hard-coded dollar amounts in the page module for this landing.
+    src = pathlib.Path('landing_pages.py').read_text()
+    assert '$1.50' not in src and '$5 for 300' not in src
+    # Related + discovery.
+    assert 'href="/rss-to-text"' in html
+    assert 'href="/podcast-to-text"' in html
+    assert 'href="/spotify-podcast-transcript"' in html
+    assert 'href="/ai"' in html
+    locs = [el.text for el in ET.fromstring(client.get('/sitemap.xml').data).iter(
+        '{http://www.sitemaps.org/schemas/sitemap/0.9}loc')]
+    assert any(loc.endswith('/transcribe-whole-podcast') for loc in locs)
+    assert any(loc.endswith('/fr/transcrire-podcast') for loc in locs)
+    home = client.get('/').data.decode()
+    assert 'href="/transcribe-whole-podcast"' in home
+    assert 'href="/fr/transcrire-podcast"' in home
+    llms = client.get('/llms.txt').data.decode()
+    assert '/transcribe-whole-podcast' in llms
+    assert '/fr/transcrire-podcast' in llms
+    # Landing/SEO pages must not touch What's new.
+    changelog = pathlib.Path('changelog.json').read_text()
+    assert 'transcribe-whole-podcast' not in changelog
+    assert 'transcrire-podcast' not in changelog
 
 
 def test_summarize_landing_gated_when_summary_disabled(monkeypatch):
