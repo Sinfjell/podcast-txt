@@ -23,10 +23,12 @@ PAGES = (
     ('landing_free', '/transcribe-podcast-free'),
     ('landing_youtube_vs', '/youtube-vs-podcast-transcript'),
     ('landing_summarize', '/summarize-podcast-episode'),
+    ('landing_whole_podcast', '/transcribe-whole-podcast'),
     ('landing_no', '/no/podcast-til-tekst'),
     ('landing_es', '/es/transcribir-podcast'),
     ('landing_de', '/de/podcast-transkribieren'),
     ('landing_pt', '/pt/transcrever-podcast'),
+    ('landing_fr', '/fr/transcrire-podcast'),
 )
 
 #: Compact footer column.
@@ -39,10 +41,12 @@ FOOTER = (
     'landing_free',
     'landing_youtube_vs',
     'landing_summarize',
+    'landing_whole_podcast',
     'landing_no',
     'landing_es',
     'landing_de',
     'landing_pt',
+    'landing_fr',
 )
 
 #: Reciprocal hreflang group for the podcast-to-text family (x-default = en).
@@ -52,6 +56,7 @@ HREFLANG_GROUP = {
     'es': 'landing_es',
     'de': 'landing_de',
     'pt': 'landing_pt',
+    'fr': 'landing_fr',
 }
 #: Kept for callers/tests that still look up the old Norwegian↔English pair.
 HREFLANG_PAIRS = {
@@ -70,10 +75,12 @@ SHORT_LABELS = {
     'landing_free': 'Transcribe a podcast free',
     'landing_youtube_vs': 'YouTube vs podcast transcript',
     'landing_summarize': 'Summarize a podcast episode',
+    'landing_whole_podcast': 'Transcribe a whole podcast',
     'landing_no': 'Podcast til tekst (norsk)',
     'landing_es': 'Transcribir podcast (español)',
     'landing_de': 'Podcast transkribieren (Deutsch)',
     'landing_pt': 'Transcrever podcast (português)',
+    'landing_fr': 'Transcrire un podcast (français)',
 }
 
 #: English labels for non-English landings in llms.txt / llms-full.txt.
@@ -83,6 +90,7 @@ LANG_LABELS_EN = {
     'es': 'Spanish',
     'de': 'German',
     'pt': 'Portuguese',
+    'fr': 'French',
 }
 
 TITLE_SUFFIX = ' — Podskrift'
@@ -134,17 +142,20 @@ def related_links(endpoint):
     core = [
         'landing_generator', 'landing_spotify', 'landing_apple',
         'landing_podcast_to_text', 'landing_rss', 'landing_free',
-        'landing_youtube_vs',
+        'landing_youtube_vs', 'landing_whole_podcast',
     ]
-    native = ('landing_no', 'landing_es', 'landing_de', 'landing_pt')
+    native = ('landing_no', 'landing_es', 'landing_de', 'landing_pt', 'landing_fr')
     if endpoint == 'landing_summarize':
         out = ['landing_spotify', 'landing_podcast_to_text', 'landing_generator',
                'landing_free', 'landing_apple']
+    elif endpoint == 'landing_whole_podcast':
+        # Brief: RSS, podcast-to-text, Spotify (/ai is always appended by the template).
+        out = ['landing_rss', 'landing_podcast_to_text', 'landing_spotify']
     elif endpoint == 'landing_no':
         out = ['landing_podcast_to_text', 'landing_spotify', 'landing_apple',
                'landing_rss', 'landing_free', 'landing_generator',
                'landing_youtube_vs']
-    elif endpoint in ('landing_es', 'landing_de', 'landing_pt'):
+    elif endpoint in ('landing_es', 'landing_de', 'landing_pt', 'landing_fr'):
         out = ['landing_spotify', 'landing_apple', 'landing_podcast_to_text',
                'landing_rss', 'landing_free']
     else:
@@ -162,9 +173,9 @@ def _usd(cents):
 
 
 def _fmt_minutes(n, lang='en'):
-    """1,200 (en) / 1 200 (nb) / 1.200 (es, de, pt) for thousands."""
+    """1,200 (en) / 1 200 (nb, fr) / 1.200 (es, de, pt) for thousands."""
     if n >= 1000:
-        if lang in ('no', 'nb'):
+        if lang in ('no', 'nb', 'fr'):
             sep = ' '
         elif lang in ('es', 'de', 'pt'):
             sep = '.'
@@ -193,6 +204,10 @@ def pack_phrase(pack, lang='en'):
             return (f'a partir de {lo} por 60 minutos, mais barato por minuto quanto mais '
                     f'você compra ({top_min} min por {top}), ou só os minutos que um '
                     f'episódio precisa')
+        if lang == 'fr':
+            return (f'à partir de {lo} pour 60 minutes, moins cher à la minute plus vous '
+                    f'achetez ({top_min} min pour {top}), ou seulement les minutes dont '
+                    f'un épisode a besoin')
         return (f'from {lo} for 60 minutes, cheaper per minute the more you buy '
                 f'({top_min} min for {top}), or just the minutes one episode needs')
     if lang in ('no', 'nb'):
@@ -203,6 +218,8 @@ def pack_phrase(pack, lang='en'):
         return f'{pack["price"]:g} Dollar für {pack["minutes"]} Minuten'
     if lang == 'pt':
         return f'{pack["price"]:g} dólares por {pack["minutes"]} minutos'
+    if lang == 'fr':
+        return f'{pack["price"]:g} dollars pour {pack["minutes"]} minutes'
     return f'${pack["price"]:g} for {pack["minutes"]} minutes'
 
 
@@ -215,6 +232,9 @@ def _start_button(trial, lang='en'):
         return 'Kostenlos transkribieren' if trial else 'Transkription starten'
     if lang == 'pt':
         return 'Começar transcrição grátis' if trial else 'Começar transcrição'
+    if lang == 'fr':
+        return ('Commencer la transcription gratuite' if trial
+                else 'Commencer la transcription')
     return 'Start free transcript' if trial else 'Start transcript'
 
 
@@ -303,6 +323,19 @@ def _price_pt(trial, pack):
                      f'{pack_phrase(pack, "pt")}. Sem assinatura.')
     parts.append('Você também pode adicionar sua própria chave de API da OpenAI e '
                  'pagar a OpenAI diretamente; isso é opcional.')
+    return ' '.join(parts)
+
+
+def _price_fr(trial, pack):
+    parts = []
+    if trial:
+        parts.append(f'Les nouveaux comptes reçoivent {trial} minutes gratuites, '
+                     'sans carte.')
+    if pack:
+        parts.append(f'Ensuite vous achetez des minutes en un seul paiement : '
+                     f'{pack_phrase(pack, "fr")}. Sans abonnement.')
+    parts.append('Vous pouvez aussi ajouter votre propre clé API OpenAI et payer '
+                 'OpenAI directement ; c’est facultatif.')
     return ' '.join(parts)
 
 
@@ -871,6 +904,124 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
             ],
             faq=faq,
         )
+
+    if endpoint == 'landing_whole_podcast':
+        # Honest about the real flow: show/feed → episode list → one episode at
+        # a time (episode_selection.html is single-select). No bulk button.
+        # MCP list_episodes + get_transcript can chain several via /ai.
+        free_bit = f'{trial} minutes free' if trial else 'a free account'
+        return dict(
+            lang='en',
+            title='Transcribe a Whole Podcast from Its Feed',
+            meta=('Paste a show link or RSS feed, pick episodes from the list, and '
+                  'transcribe a podcast’s back catalogue. Download .txt and .srt. '
+                  f'{free_bit.capitalize()}.'),
+            h1='Transcribe a whole podcast from its feed',
+            lede=('Paste a show link — RSS feed, Apple Podcasts show, or Spotify show '
+                  '— and Podskrift lists the episodes. Pick one, get the transcript, '
+                  'then come back for the next. Jobs keep running if you close the page; '
+                  'finished transcripts sit in History.'),
+            placeholder='Paste a show link or RSS feed URL',
+            input_label='Show link or podcast RSS feed',
+            button='List the episodes',
+            will_work=('Works when the show has a public RSS feed — most do. '
+                       'Private, password-protected and Spotify-exclusive shows don’t.'),
+            steps=[
+                ('Paste the show link',
+                 'An RSS feed URL, an Apple Podcasts show link, or a Spotify show link. '
+                 'Podskrift opens the episode list with titles, dates and lengths.'),
+                ('Pick an episode',
+                 'Choose one episode at a time and start the transcript. There is no '
+                 '“transcribe all” button — each job is one episode.'),
+                ('Collect transcripts in History',
+                 'Each job keeps running if you close the page. Download .txt or .srt '
+                 'per episode from History when it finishes.'),
+            ],
+            faq=[
+                ('Can I transcribe every episode of a show?',
+                 'Yes, episode by episode. Paste the show or feed link, pick an episode, '
+                 'start the job, then pick the next. There is no single bulk button that '
+                 'queues the whole catalogue at once.'),
+                ('What does it cost for a whole show?',
+                 'Minutes are charged per episode length — a two-hour episode uses about '
+                 'two hours of minutes. '
+                 + (_price_en(trial, pack) if (trial or pack) else
+                    'Buy minutes once; no subscription.')
+                 + (' Minutes never expire.' if pack else '')),
+                ('Can ChatGPT or Claude fetch several episodes for me?',
+                 'Yes. Connect Podskrift as an MCP connector, then ask for episodes one '
+                 'after another (list_episodes, then get_transcript). Setup is on the '
+                 'AI page.'),
+                ('Does this work for my own podcast?',
+                 'Yes. Paste your public feed and transcribe episodes for show notes or '
+                 'captions. The RSS landing page covers creator workflows in more detail.'),
+                ('What about private or subscriber-only feeds?',
+                 'Private feeds that need a separate login, password-protected feeds, and '
+                 'Spotify exclusives without a public RSS feed cannot be transcribed. '
+                 'Only public feed audio works.'),
+                ('Which languages work?',
+                 f'{lang_count} languages in the picker. Choosing the spoken language '
+                 'yourself usually beats auto-detect on short or accented audio.'),
+                ('Is there speaker labelling?',
+                 'Not yet. You get one continuous transcript with timestamps, not named '
+                 'speakers.'),
+                ('Do I need an OpenAI API key?',
+                 'No. An API key is optional; you can use free minutes or buy minutes '
+                 'instead.'),
+            ],
+        )
+
+    if endpoint == 'landing_fr':
+        # Native French (vous-form), Spotify-first; hreflang "fr".
+        free_fr = f'{trial} minutes gratuites' if trial else 'compte gratuit'
+        faq = [
+            ('Combien ça coûte ?', _price_fr(trial, pack)),
+            ('Faut-il choisir « Français » plutôt que la détection auto ?',
+             'Oui, de préférence. La détection automatique marche souvent, mais '
+             'choisir « Français » donne en général un meilleur résultat, surtout '
+             'sur un audio court, un accent marqué ou un mélange de langues.'),
+            ('Est-ce que ça marche avec tous les podcasts Spotify ?',
+             'Avec la plupart oui : presque tous publient aussi un flux RSS public, '
+             'et c’est de là que vient l’audio. Les exclusivités Spotify et les '
+             'épisodes réservés aux abonnés n’ont pas de flux public, donc on ne '
+             'peut pas les transcrire.'),
+            ('Dois-je envoyer un fichier audio ?',
+             'Non. Collez le lien de l’épisode Spotify ou Apple Podcasts, ou l’URL '
+             'd’un flux RSS, et Podskrift télécharge l’audio depuis le flux public '
+             'du podcast.'),
+            ('Qu’est-ce que je reçois ?',
+             'La transcription complète en texte (.txt) et en sous-titres avec '
+             'horodatage (.srt). Vous pouvez la coller dans ChatGPT ou Claude. Les '
+             'transcriptions restent privées sur votre compte, sauf si vous créez '
+             'un lien de partage.'),
+            ('Faut-il une clé API ou un abonnement ?',
+             'Non. Pas de clé OpenAI obligatoire, et pas d’abonnement — les minutes '
+             's’achètent une seule fois.'),
+        ]
+        return dict(
+            lang='fr',
+            title='Transcrire un podcast en texte depuis un lien',
+            meta=('Passez un podcast en texte sans envoyer d’audio. Collez le lien '
+                  'Spotify ou Apple Podcasts et téléchargez .txt et .srt. '
+                  f'{free_fr.capitalize()}.'),
+            h1='Transcrire un podcast en texte depuis un lien',
+            lede=('Collez le lien de l’épisode Spotify ou Apple Podcasts. Podskrift '
+                  'trouve l’épisode dans le flux public du podcast et transforme '
+                  'l’audio en texte que vous pouvez copier et télécharger.'),
+            placeholder='Collez le lien de l’épisode Spotify ou Apple Podcasts',
+            input_label='Lien Spotify, Apple Podcasts ou RSS',
+            button=_start_button(trial, 'fr'),
+            steps=[
+                ('Copiez le lien',
+                 'Dans Spotify ou Apple Podcasts : Partager, puis Copier le lien.'),
+                ('Collez-le ici',
+                 'Choisissez l’épisode et, si possible, sélectionnez « Français » '
+                 'comme langue.'),
+                ('Lisez ou téléchargez',
+                 'Lisez dans le navigateur ou téléchargez .txt et .srt.'),
+            ],
+            faq=faq,
+        )
     raise KeyError(endpoint)
 
 
@@ -899,6 +1050,12 @@ UI = {
                rss_help='Como encontrar um feed RSS',
                pricing='Preços', shows='Podcasts populares',
                note='Você também pode buscar pelo nome do podcast.'),
+    'fr': dict(how='Comment ça marche', faq='Questions fréquentes',
+               related='D’autres façons de transcrire',
+               ai='Utiliser dans ChatGPT et Claude', guides='Guides de configuration',
+               rss_help='Comment trouver un flux RSS',
+               pricing='Tarifs', shows='Podcasts populaires',
+               note='Vous pouvez aussi chercher par le nom du podcast.'),
     'no': None,
 }
 UI['no'] = UI['nb']

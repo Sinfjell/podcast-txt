@@ -12567,6 +12567,10 @@ def _landing_price_line(ui_lang, trial, pack):
         bits = [f'{trial} minutos grátis.'] if trial else []
         if pack:
             bits.append('Depois ' + landing_pages_mod.pack_phrase(pack, 'pt') + '.')
+    elif ui_lang == 'fr':
+        bits = [f'{trial} minutes gratuites.'] if trial else []
+        if pack:
+            bits.append('Ensuite ' + landing_pages_mod.pack_phrase(pack, 'fr') + '.')
     else:
         bits = [f'{trial} minutes free.'] if trial else []
         if pack:
@@ -12615,6 +12619,14 @@ _LANDING_ACCOUNT_COPY = {
                     'episódio e o preço exato antes de pagar. Pagamento único, '
                     'os minutos não expiram.'),
         'paid': 'Você tem {n} minutos pagos.',
+    },
+    'fr': {
+        'start': 'Commencer la transcription',
+        'see_price': 'Voir le prix de l’épisode',
+        'used_up': ('Vos minutes gratuites sont épuisées. Collez un lien pour '
+                    'voir l’épisode et son prix exact avant de payer. Paiement '
+                    'unique, les minutes n’expirent pas.'),
+        'paid': 'Vous avez {n} minutes payantes.',
     },
 }
 _LANDING_ACCOUNT_COPY['no'] = _LANDING_ACCOUNT_COPY['nb']
