@@ -12897,6 +12897,8 @@ def _render_landing(endpoint):
         price_line=price_line,
         hreflang=hreflang,
         related=landing_pages_mod.related_links(endpoint),
+        link_lang=landing_pages_mod.lang_of,
+        chrome=landing_pages_mod.CHROME.get(ui_lang),
         structured_data=_faq_page_structured_data(
             page_url, page['title'], page['meta'], page['faq'],
             howto={'name': page['h1'], 'description': page['lede'],
@@ -12910,6 +12912,24 @@ def _register_landing_routes():
 
 
 _register_landing_routes()
+
+
+def _language_root_redirect(lang):
+    target = url_for(landing_pages_mod.LANGUAGE_ROOT_REDIRECTS[lang])
+    query = request.query_string.decode('utf-8', 'replace')
+    return redirect(f'{target}?{query}' if query else target, code=301)
+
+
+def _register_language_root_redirects():
+    """/no/, /fr, /de … 404'd for visitors guessing a language root; send them
+    to that language's landing page instead (both slash variants)."""
+    for lang in landing_pages_mod.LANGUAGE_ROOT_REDIRECTS:
+        view = (lambda lang=lang: _language_root_redirect(lang))
+        app.add_url_rule(f'/{lang}', f'language_root_{lang}', view)
+        app.add_url_rule(f'/{lang}/', f'language_root_{lang}_slash', view)
+
+
+_register_language_root_redirects()
 
 
 @app.after_request

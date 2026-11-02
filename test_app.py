@@ -21015,6 +21015,73 @@ def test_landing_page_renders_with_seo_basics(trial_on, path):
     assert 'btn btn-primary' in html
 
 
+def test_language_roots_redirect_to_their_landing_pages():
+    """/no/, /fr … used to 404 for visitors guessing a language root."""
+    c = A.app.test_client()
+    cases = {
+        '/no': '/no/podcast-til-tekst', '/no/': '/no/podcast-til-tekst',
+        '/nb': '/no/podcast-til-tekst', '/nb/': '/no/podcast-til-tekst',
+        '/fr': '/fr/transcrire-podcast', '/fr/': '/fr/transcrire-podcast',
+        '/de': '/de/podcast-transkribieren', '/de/': '/de/podcast-transkribieren',
+        '/es': '/es/transcribir-podcast', '/es/': '/es/transcribir-podcast',
+        '/pt': '/pt/transcrever-podcast', '/pt/': '/pt/transcrever-podcast',
+    }
+    for path, target in cases.items():
+        resp = c.get(path)
+        assert resp.status_code == 301, path
+        assert resp.headers['Location'].endswith(target), (path, resp.headers['Location'])
+        assert c.get(target).status_code == 200
+    resp = c.get('/fr?utm_source=chatgpt.com')
+    assert resp.headers['Location'].endswith('/fr/transcrire-podcast?utm_source=chatgpt.com')
+
+
+@pytest.mark.parametrize('path,lang,nav_word,footer_word,related_word', [
+    ('/no/podcast-til-tekst', 'nb', 'Priser', 'Personvern', '(engelsk)'),
+    ('/es/transcribir-podcast', 'es', 'Precios', 'Privacidad', '(en inglés)'),
+    ('/de/podcast-transkribieren', 'de', 'Preise', 'Datenschutz', '(Englisch)'),
+    ('/pt/transcrever-podcast', 'pt', 'Preços', 'Privacidade', '(em inglês)'),
+    ('/fr/transcrire-podcast', 'fr', 'Tarifs', 'Confidentialité', '(en anglais)'),
+])
+def test_language_landings_translate_nav_footer_and_more_ways(
+        trial_on, path, lang, nav_word, footer_word, related_word):
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(A.app.test_client().get(path).data.decode(), 'html.parser')
+    nav = soup.select_one('nav.nav-bar').get_text(' ', strip=True)
+    assert nav_word in nav and 'Pricing' not in nav and 'Log in' not in nav
+    footer = soup.select_one('footer.footer').get_text(' ', strip=True)
+    assert footer_word in footer and 'Privacy' not in footer and 'Terms' not in footer
+    related = soup.select('#landing-related + ul a')
+    english_targets = [a for a in related if a.get('hreflang') == 'en']
+    assert english_targets, 'English targets should be marked hreflang=en'
+    for a in english_targets:
+        assert related_word in a.get_text(), a
+
+
+def test_english_pages_keep_english_chrome(trial_on):
+    body = A.app.test_client().get('/spotify-podcast-transcript').data.decode()
+    assert '>Pricing' in body.replace('\n', '').replace('  ', '') or 'Pricing' in body
+    assert 'Personvern' not in body and 'Tarifs' not in body
+
+
+@pytest.mark.parametrize('lang,expected_lo,expected_top', [
+    ('en', '$1.50', '$11'), ('fr', '1,50 $', '11 $'), ('de', '1,50 $', '11 $'),
+    ('es', '1,50 $', '11 $'), ('nb', '1,50 $', '11 $'), ('pt', 'US$ 1,50', 'US$ 11'),
+])
+def test_landing_prices_use_the_page_locale(trial_on, monkeypatch, lang, expected_lo, expected_top):
+    """Prices come from the live helpers (pricing_volume via _landing_pack),
+    only the formatting follows the page language."""
+    import landing_pages as lp
+    import pricing_volume
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    pack = A._landing_pack()
+    assert pack['min_cents'] == pricing_volume.VOLUME_MIN_AMOUNT_CENTS
+    phrase = lp.pack_phrase(pack, lang)
+    assert lp._usd(pack['min_cents'], lang) in phrase
+    if pack['min_cents'] == 150 and pack['max_cents'] == 1100:
+        assert expected_lo in phrase and expected_top in phrase
+
+
 def test_landing_titles_and_descriptions_are_unique(trial_on):
     import re as _re
     client = A.app.test_client()
@@ -21242,16 +21309,16 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
     assert f'{trial} minutes gratuites' in fr
     en_phrase = ('from $1.50 for 60 minutes, cheaper per minute the more you buy '
                  '(1,200 min for $11), or just the minutes one episode needs')
-    nb_phrase = ('fra $1.50 for 60 minutter, billigere per minutt jo mer du kjøper '
-                 '(1 200 min for $11), eller bare minuttene én episode trenger')
-    es_phrase = ('desde $1.50 por 60 minutos, más barato por minuto cuanto más compras '
-                 '(1.200 min por $11), o solo los minutos que dura un episodio')
-    de_phrase = ('ab $1.50 für 60 Minuten, günstiger pro Minute, je mehr du kaufst '
-                 '(1.200 Min. für $11), oder nur die Minuten einer Folge')
-    pt_phrase = ('a partir de $1.50 por 60 minutos, mais barato por minuto quanto mais '
-                 'você compra (1.200 min por $11), ou só os minutos que um episódio precisa')
-    fr_phrase = ('à partir de $1.50 pour 60 minutes, moins cher à la minute plus vous '
-                 'achetez (1 200 min pour $11), ou seulement les minutes dont un '
+    nb_phrase = ('fra 1,50 $ for 60 minutter, billigere per minutt jo mer du kjøper '
+                 '(1 200 min for 11 $), eller bare minuttene én episode trenger')
+    es_phrase = ('desde 1,50 $ por 60 minutos, más barato por minuto cuanto más compras '
+                 '(1.200 min por 11 $), o solo los minutos que dura un episodio')
+    de_phrase = ('ab 1,50 $ für 60 Minuten, günstiger pro Minute, je mehr du kaufst '
+                 '(1.200 Min. für 11 $), oder nur die Minuten einer Folge')
+    pt_phrase = ('a partir de US$ 1,50 por 60 minutos, mais barato por minuto quanto mais '
+                 'você compra (1.200 min por US$ 11), ou só os minutos que um episódio precisa')
+    fr_phrase = ('à partir de 1,50 $ pour 60 minutes, moins cher à la minute plus vous '
+                 'achetez (1 200 min pour 11 $), ou seulement les minutes dont un '
                  'épisode a besoin')
     if volume:
         # Spotify uses per-episode offers instead of the pack phrase in the
