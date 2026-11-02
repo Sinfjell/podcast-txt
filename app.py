@@ -10435,6 +10435,43 @@ def safe_public_http_url(raw, *, max_len=1024):
     return cleaned if len(cleaned) <= max_len else None
 
 
+def browser_playable_audio_url(raw, *, max_len=1024):
+    """Return an audio URL safe for ``<audio src>`` on an https page, or None.
+
+    CSP ``media-src`` allows ``https:`` (and ``'self'`` / ``blob:``) but not
+    ``http:``, and browsers also block mixed-content media. Feed enclosures are
+    often still published as ``http://`` even when the host serves https
+    (BBC mediaselector is the known case — PODSKRIFT-1G).
+
+    Upgrades ``http://`` → ``https://`` for the in-page player only. Server-side
+    fetches keep the stored/original URL. Also rewrites BBC's path selector
+    ``/proto/http/`` → ``/proto/https/``: scheme alone still redirects to an
+    http CDN URL, which CSP would block again.
+    """
+    cleaned = safe_public_http_url(raw, max_len=max_len)
+    if not cleaned:
+        return None
+    parsed = urlparse(cleaned)
+    host = (parsed.hostname or '').lower()
+    if not host:
+        return None
+    # Always https for <audio src>. Drop :80/:443 so we never emit
+    # https://host:80/... (TLS on the wrong port).
+    port = parsed.port
+    netloc = host if port in (None, 80, 443) else f'{host}:{port}'
+    path = parsed.path or ''
+    # BBC mediaselector chooses the redirect scheme from this path segment;
+    # leaving proto/http yields an http CDN URL that CSP still blocks.
+    if '/proto/http/' in path:
+        path = path.replace('/proto/http/', '/proto/https/', 1)
+    upgraded = urlunparse((
+        'https', netloc, path, parsed.params, parsed.query, parsed.fragment,
+    ))
+    if upgraded == cleaned:
+        return cleaned
+    return upgraded if len(upgraded) <= max_len else None
+
+
 def canonical_spotify_episode_url(raw):
     """https://open.spotify.com/episode/<id> when raw is an episode link."""
     kind, spotify_id = parse_spotify_url(raw)
@@ -10576,7 +10613,9 @@ def listen_links_from_fields(*, spotify_url=None, apple_url=None,
             'label': "Listen on the podcast's website",
             'url': website,
         })
-    audio = safe_public_http_url(audio_url)
+    # Browser player only: upgrade http→https (CSP media-src / mixed content).
+    # Stored source_audio_url and server fetches stay on the original scheme.
+    audio = browser_playable_audio_url(audio_url)
     if audio:
         links.append({
             'platform': 'audio',

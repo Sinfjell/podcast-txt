@@ -14224,6 +14224,49 @@ def test_safe_public_http_url_rejects_non_http_schemes():
     assert A.safe_public_http_url(None) is None
 
 
+def test_browser_playable_audio_url_upgrades_http_to_https():
+    """In-page player needs https for CSP media-src / mixed content (PODSKRIFT-1G)."""
+    assert (A.browser_playable_audio_url('http://cdn.example.com/ep.mp3')
+            == 'https://cdn.example.com/ep.mp3')
+    assert (A.browser_playable_audio_url('https://cdn.example.com/ep.mp3')
+            == 'https://cdn.example.com/ep.mp3')
+    # Explicit :80 must not survive onto https (would hit TLS on port 80).
+    assert (A.browser_playable_audio_url('http://cdn.example.com:80/ep.mp3')
+            == 'https://cdn.example.com/ep.mp3')
+    # Non-default ports kept.
+    assert (A.browser_playable_audio_url('http://cdn.example.com:8080/ep.mp3')
+            == 'https://cdn.example.com:8080/ep.mp3')
+    # BBC mediaselector: proto/http in the path selects an http CDN redirect.
+    bbc = (
+        'http://open.live.bbc.co.uk/mediaselector/6/redir/version/2.0/'
+        'mediaset/audio-nondrm-download-rss/proto/http/vpid/p0m5t6hv.mp3'
+    )
+    assert A.browser_playable_audio_url(bbc) == (
+        'https://open.live.bbc.co.uk/mediaselector/6/redir/version/2.0/'
+        'mediaset/audio-nondrm-download-rss/proto/https/vpid/p0m5t6hv.mp3'
+    )
+    # https with proto/http still needs the path rewrite for the CDN redirect.
+    bbc_https_proto_http = bbc.replace('http://', 'https://', 1)
+    assert A.browser_playable_audio_url(bbc_https_proto_http) == (
+        'https://open.live.bbc.co.uk/mediaselector/6/redir/version/2.0/'
+        'mediaset/audio-nondrm-download-rss/proto/https/vpid/p0m5t6hv.mp3'
+    )
+    assert A.browser_playable_audio_url('javascript:alert(1)') is None
+    assert A.browser_playable_audio_url('ftp://cdn.example.com/ep.mp3') is None
+    assert A.browser_playable_audio_url('') is None
+    assert A.browser_playable_audio_url(None) is None
+
+
+def test_listen_links_upgrade_http_audio_for_browser_player():
+    links = A.listen_links_from_fields(
+        audio_url='http://cdn.example.com/ep.mp3?token=abc',
+    )
+    assert len(links) == 1
+    assert links[0]['platform'] == 'audio'
+    assert links[0]['url'] == 'https://cdn.example.com/ep.mp3?token=abc'
+    assert links[0]['is_audio'] is True
+
+
 def test_listen_links_from_fields_orders_platforms_and_skips_bad_urls():
     links = A.listen_links_from_fields(
         spotify_url=f'https://open.spotify.com/episode/{_SPOTIFY_EP}',
