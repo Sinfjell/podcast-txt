@@ -2,7 +2,7 @@
 """
 Podcast Transcriber Web App with OpenAI API
 
-A Flask web application for transcribing podcast episodes from RSS feeds using OpenAI's Whisper API.
+A Flask web application for transcribing podcast episodes from RSS feeds (speech-to-text via stt.py).
 Supports user accounts, saved RSS feeds, and self-serve API keys.
 """
 
@@ -3415,7 +3415,7 @@ def _cleanup_glob(pattern):
 
 def transcribe_audio(audio_file, task_id, openai_client, language=None,
                      key_source=None):
-    """Transcribe audio using OpenAI Whisper API.
+    """Transcribe audio via the configured speech-to-text provider (see stt.py).
 
     Progress is written as checkpoints (chunk index + when that chunk started);
     /status interpolates between them so the bar keeps moving while a single
@@ -12336,7 +12336,7 @@ def faq_entries():
                 f'your own OpenAI API key to finish (a 90-minute episode costs '
                 f'about {cost_90} at OpenAI\'s rate). Once the trial is used up, '
                 f'the same options apply.{pack_bit}')
-        need_key = ('Not to start. The free trial runs on ours, including a free '
+        need_key = ('Not to start. The free trial runs on our account, including a free '
                     'preview of the first stretch of a longer episode. Add your own '
                     'key when the trial runs out and there is no limit beyond what '
                     'you spend at OpenAI.')
@@ -12354,18 +12354,18 @@ def faq_entries():
     return [
         ('How do I transcribe a podcast episode to text?',
          'Paste a Spotify episode link, or search for the podcast or episode by name. '
-         'Podskrift downloads the audio and transcribes it with OpenAI Whisper. You get '
+         'Podskrift downloads the audio and transcribes it with modern speech recognition. You get '
          'the full text plus an .srt subtitle file. No file to upload and no feed URL to '
          'find first.'),
         ('Hvordan transkriberer jeg en norsk podcast til tekst?',
          'Lim inn en Spotify-lenke, eller søk opp podkasten eller episoden på navn. '
-         'Podskrift laster ned lyden og transkriberer den med OpenAI Whisper. Du får '
+         'Podskrift laster ned lyden og transkriberer den med moderne talegjenkjenning. Du får '
          'hele teksten og en .srt-fil med teksting. Velg norsk i språkvelgeren, så '
          'slipper du at den gjetter feil.'),
         ('Which languages does it handle well?',
          f'{len(LANGUAGE_ENGLISH_NAMES)} languages, from English, Spanish and Mandarin to '
          'Norwegian, Ukrainian and Vietnamese. You can name the language rather than relying '
-         'on auto-detect, which matters on short or accented audio: Whisper treats the '
+         'on auto-detect, which matters on short or accented audio: the speech model treats the '
          'choice as a constraint rather than a hint.'),
         ('Is it free?', free),
         ('Do I need an OpenAI API key?', need_key),
@@ -12496,7 +12496,7 @@ def _structured_data():
                 'applicationCategory': 'MultimediaApplication',
                 'operatingSystem': 'Any (web browser)',
                 'description': (
-                    f'Transcribes podcast episodes to text using OpenAI Whisper, in '
+                    f'Transcribes podcast episodes to text using modern speech recognition, in '
                     f'{len(LANGUAGE_ENGLISH_NAMES)} languages. Search any podcast or '
                     'episode by name, pick the episode, and get plain text and timestamped '
                     'subtitles. Name the language rather than relying on auto-detect, which '
@@ -13034,7 +13034,7 @@ Human setup pages: {public_url('guide_chatgpt')}, {public_url('guide_claude')},
     )
     header = f"""# Podskrift
 
-> Transcribes podcast episodes to text using OpenAI Whisper, in {lang_count}
+> Transcribes podcast episodes to text with modern speech recognition, in {lang_count}
 > languages. Paste a Spotify, Apple Podcasts, or RSS link — or search by show
 > or episode name. No file upload required. OpenAI API key is optional.
 
@@ -13057,7 +13057,7 @@ Made by Nettsmed (Fjellestad AS), Kristiansand, Norway.
 - Search podcast catalogues by show name or by individual episode title
 - Paste Spotify, Apple Podcasts, or RSS links (and direct audio URLs)
 - Transcribe an episode to plain text (.txt) and SubRip subtitles (.srt)
-- Pick the spoken language explicitly, or let Whisper detect it
+- Pick the spoken language explicitly, or let it be detected automatically
 - Follow progress live; the job keeps running if you close the page
 - Per-show landing pages at /podcasts for “transcript of [show]” queries
 - MCP connector for ChatGPT, Claude, Cursor and Claude Code (when enabled)
@@ -13067,9 +13067,9 @@ Made by Nettsmed (Fjellestad AS), Kristiansand, Norway.
 ## Languages
 {languages}
 
-{lang_count} languages in the picker (Whisper’s commonly used set). Auto-detect
+{lang_count} languages in the picker. Auto-detect
 is the default, but naming the language beats it on short or accented audio —
-Whisper takes the choice as a constraint rather than a hint.
+the speech model takes the choice as a constraint rather than a hint.
 
 ## What it costs
 {cost}
@@ -13127,7 +13127,7 @@ Nettsmed -- https://nettsmed.no
     landings_md = '\n\n---\n\n'.join(landing_full)
     return header + f"""
 ## What it does / does not
-Does: search catalogues; paste Spotify / Apple / RSS / direct audio; Whisper
+Does: search catalogues; paste Spotify / Apple / RSS / direct audio; speech-to-text
 transcription to .txt + .srt; language picker; live progress; show pages at
 /podcasts; MCP tools when enabled.
 
@@ -13842,8 +13842,8 @@ def load_customer_api_markdown():
     # markdown: quote what every new account actually gets.
     granted = advertised_trial_minutes()
     text = text.replace(
-        'New accounts get {trial_minutes} free trial minutes on our OpenAI key; after that, add your own.',
-        (f'New accounts get {granted} free trial minutes on our OpenAI key; after that, add your own.'
+        'New accounts get {trial_minutes} free trial minutes; after that, buy minutes or add your own OpenAI key.',
+        (f'New accounts get {granted} free trial minutes; after that, buy minutes or add your own OpenAI key.'
          if granted else 'Use your own OpenAI key, or buy minutes in Settings.'))
     # MCP connect docs are gated on MCP_ENABLED (default off).
     text = mcp_server_mod.filter_mcp_docs_section(

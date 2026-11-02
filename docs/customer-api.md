@@ -1,6 +1,6 @@
 # Podcast transcript API
 
-Podskrift’s podcast transcription API lets agents and scripts get a transcript over HTTP — the same path as the web UI. Resolve an episode by publisher/show and date (or URL), start Whisper, poll until ready, then fetch the plain-text transcript. New accounts get {trial_minutes} free trial minutes on our OpenAI key; after that, add your own. Create a `psk_…` key in Settings.
+Podskrift’s podcast transcription API lets agents and scripts get a transcript over HTTP — the same path as the web UI. Resolve an episode by publisher/show and date (or URL), start transcription, poll until ready, then fetch the plain-text transcript. New accounts get {trial_minutes} free trial minutes; after that, buy minutes or add your own OpenAI key. Create a `psk_…` key in Settings.
 
 ## Authentication
 
@@ -64,7 +64,7 @@ Not found / no public RSS → `404` with `error` and `"episode": null`.
 
 ## POST /api/v1/transcriptions
 
-Resolve (if needed) and enqueue Whisper for your account. Same trial path and
+Resolve (if needed) and enqueue transcription for your account. Same trial path and
 OpenAI key rules as the web UI.
 
 Request fields match resolve (`publisher`+`date` and/or `url`). You may also
@@ -243,7 +243,7 @@ as this HTTP API.
 | `list_episodes` | Recent episodes for a show name or feed URL |
 | `list_my_transcripts` | List *your* existing transcripts (History); filter/search/paginate |
 | `get_my_transcript` | Fetch one past transcript by `task_id` (never charges; supports paging) |
-| `get_transcript` | Return text if ready, or start Whisper and return a `job_id` |
+| `get_transcript` | Return text if ready, or start transcription and return a `job_id` |
 | `get_transcript_status` | Poll a `job_id` until `ready` / `failed` (waits briefly server-side) |
 
 When the user asks about past transcripts (“what have I transcribed?”), use

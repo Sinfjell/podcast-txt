@@ -35,7 +35,7 @@ THEME_COLOR = '#FFFFFF'
 THEME_COLOR_DARK = '#0A0F0D'
 SITE_NAME = 'Podskrift'
 SITE_DESCRIPTION = ('Transcribe any podcast or Spotify episode to text and .srt '
-                    'subtitles with OpenAI Whisper, in 28 languages.')
+                    'subtitles with modern speech recognition, in 28 languages.')
 CONTACT_URL = 'mailto:hello@podskrift.com'
 SKILL_NAME = 'podskrift-transcript-api'
 
@@ -354,7 +354,7 @@ description: Get the full text transcript of a podcast episode (including Spotif
 
 # Podskrift transcript API
 
-Podskrift transcribes podcast episodes with OpenAI Whisper (28 languages) and
+Podskrift transcribes podcast episodes with modern speech recognition (28 languages) and
 returns plain text plus .srt subtitles.
 
 ## When to use
