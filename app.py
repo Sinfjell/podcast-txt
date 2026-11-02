@@ -2,7 +2,7 @@
 """
 Podcast Transcriber Web App with OpenAI API
 
-A Flask web application for transcribing podcast episodes from RSS feeds using OpenAI's Whisper API.
+A Flask web application for transcribing podcast episodes from RSS feeds (speech-to-text via stt.py).
 Supports user accounts, saved RSS feeds, and self-serve API keys.
 """
 
@@ -326,6 +326,13 @@ COOKIE_CONSENT_ACCEPTED = 'accepted'
 #: Relative path to return to after Stripe Checkout (cancel / success CTA).
 #: Validated with safe_return_to(); never trust a raw absolute URL here.
 BILLING_RETURN_TO_KEY = 'billing_return_to'
+#: Episode a signed-in user tried to start when the paywall stopped them.
+#: Kept apart from PENDING_TRANSCRIPTION_KEY (which login/register resume) and
+#: only promoted to it by /billing/checkout, so buying minutes from any
+#: surface -- header pill, home error, episode list -- still starts that
+#: episode once paid. Expires so an old refusal cannot fire days later.
+PAYWALL_PENDING_KEY = 'paywall_pending'
+PAYWALL_PENDING_TTL_SECONDS = 2 * 3600
 
 
 def safe_next_url(candidate, default=None):
@@ -2420,6 +2427,10 @@ def partial_finish_offer(task, user):
         return None
     if getattr(user, 'openai_api_key', None):
         return None
+    # Already finished in full (a later run of the same audio): nothing to sell.
+    if completed_full_transcript(user.id, task.source_audio_url,
+                                 exclude_task_id=task.id) is not None:
+        return None
     n_min, m_min = partial_minutes_pair(meta)
     trial_left, paid_left = _platform_remaining_seconds(user.id)
     offer = episode_offer(m_min, (trial_left + paid_left) // 60)
@@ -3404,7 +3415,7 @@ def _cleanup_glob(pattern):
 
 def transcribe_audio(audio_file, task_id, openai_client, language=None,
                      key_source=None):
-    """Transcribe audio using OpenAI Whisper API.
+    """Transcribe audio via the configured speech-to-text provider (see stt.py).
 
     Progress is written as checkpoints (chunk index + when that chunk started);
     /status interpolates between them so the bar keeps moving while a single
@@ -6340,7 +6351,7 @@ def reset_password(token):
     return _password_reset_security_headers(resp)
 
 
-def _stash_pending_from_request():
+def _stash_pending_from_request(key=PENDING_TRANSCRIPTION_KEY):
     """Pull episode fields off the request into the session. Returns an error or None."""
     language = normalize_language_code(request.form.get('language', ''))
 
@@ -6383,9 +6394,94 @@ def _stash_pending_from_request():
     else:
         return 'Pick an episode first'
 
-    session[PENDING_TRANSCRIPTION_KEY] = pending
+    pending['stashed_at'] = time.time()
+    session[key] = pending
     session.modified = True
     return None
+
+
+def _fresh_paywall_pending():
+    """The paywall stash if it is recent enough to act on, else None (and drop it)."""
+    pending = session.get(PAYWALL_PENDING_KEY)
+    if not pending:
+        return None
+    try:
+        age = time.time() - float(pending.get('stashed_at') or 0)
+    except (TypeError, ValueError):
+        age = PAYWALL_PENDING_TTL_SECONDS + 1
+    if age > PAYWALL_PENDING_TTL_SECONDS or age < 0:
+        session.pop(PAYWALL_PENDING_KEY, None)
+        session.modified = True
+        return None
+    return pending
+
+
+def completed_full_transcript(user_id, source_audio_url, exclude_task_id=None):
+    """Newest finished, non-preview transcript of this audio for this user, or None.
+
+    Used so nobody is sold minutes for an episode they already have in full:
+    before checkout, on the partial-preview offer, and on email finish links.
+    """
+    if not user_id or not source_audio_url:
+        return None
+    q = (TranscriptionTask.query
+         .filter(TranscriptionTask.user_id == user_id,
+                 TranscriptionTask.source_audio_url == source_audio_url,
+                 TranscriptionTask.status == 'completed')
+         .order_by(TranscriptionTask.started_at.desc()))
+    for task in q.limit(20):
+        if exclude_task_id is not None and str(task.id) == str(exclude_task_id):
+            continue
+        if not task_is_partial(task):
+            return task
+    return None
+
+
+def _path_is_get_safe(path):
+    """True when a same-origin path can be opened with GET (no 404 / 405).
+
+    Stripe sends the buyer back with GET. The episode list is rendered by
+    POST /parse_rss, so returning there showed a 405 error page -- also on a
+    cancelled checkout.
+    """
+    from werkzeug.exceptions import HTTPException
+    from werkzeug.routing import RequestRedirect
+    try:
+        app.url_map.bind('localhost').match(urlparse(path).path or '/', method='GET')
+        return True
+    except RequestRedirect:
+        return True
+    except HTTPException:
+        return False
+
+
+def episode_return_path(pending):
+    """GET URL that reopens the stashed episode in its show's list, or None."""
+    if not pending:
+        return None
+    rss_url = pending.get('rss_url')
+    if not rss_url:
+        return None
+    if pending.get('episode_index') is not None:
+        return url_for('index', feed=rss_url, ep=pending['episode_index'])
+    if pending.get('audio_url'):
+        return url_for('index', feed=rss_url, ep_audio=pending['audio_url'])
+    return url_for('index', feed=rss_url)
+
+
+def _pending_audio_url(pending):
+    """Audio URL of a stashed pick (reads the feed for an RSS index)."""
+    if not pending:
+        return None
+    if pending.get('audio_url'):
+        return pending['audio_url']
+    try:
+        meta, _rss, _lang, error = _pending_transcription_meta(pending)
+    except Exception:  # noqa: BLE001 - a feed hiccup must not block checkout
+        return None
+    if error or not meta:
+        return None
+    return meta.get('audio_url')
 
 
 @app.route('/pending-transcription', methods=['POST'])
@@ -6507,8 +6603,10 @@ def _autostart_after_payment(session_id, balance_minutes):
     """Start the stashed episode once its purchase is confirmed paid.
 
     Called only from /billing/success after Stripe has said ``paid`` for a
-    session owned by this user. Returns a task id to redirect to, or None to
-    show the success page with its "Start transcript" button as before.
+    session owned by this user. Returns ``(task_id, existing)`` to redirect
+    to, or None to show the success page with the episode and its "Start
+    transcript" button. ``existing`` is True when the user already had this
+    transcript (enqueue's duplicate guard), so nothing was spent.
 
     At most one start per Checkout Session: the purchase row must exist
     (fulfilled by the success page or the webhook, whichever came first) and
@@ -6530,6 +6628,8 @@ def _autostart_after_payment(session_id, balance_minutes):
     # Balance must cover the whole episode: an unknown length or a shortfall
     # leaves the decision (and the button) with the user.
     if duration is None or math.ceil(float(duration)) > int(balance_minutes):
+        g.autostart_blocker = 'unknown_length' if duration is None else 'short'
+        g.autostart_minutes = None if duration is None else math.ceil(float(duration))
         return None
 
     claimed = db.session.execute(
@@ -6567,7 +6667,19 @@ def _autostart_after_payment(session_id, balance_minutes):
         'task_id': task_id,
         'existing': bool(payload.get('existing')),
     })
-    return task_id
+    return task_id, bool(payload.get('existing'))
+
+
+def _autostart_blocker(pending, balance_minutes):
+    """Why a paid pick did not start on its own: 'unknown_length', 'short', or None."""
+    if not pending:
+        return None
+    duration = _positive_float_or_none(pending.get('duration_min'))
+    if duration is None:
+        return 'unknown_length'
+    if math.ceil(duration) > int(balance_minutes or 0):
+        return 'short'
+    return None
 
 
 @app.route('/logout')
@@ -7483,6 +7595,13 @@ def _checkout_email_campaign():
     return campaign
 
 
+#: Buy surfaces that are about one specific episode (not a general top-up).
+EPISODE_BUY_SOURCES = frozenset({
+    'buy_modal_episode', 'home_error', 'partial_preview', 'episode_selection',
+    'episode_selection_error', 'result_offer',
+})
+
+
 @app.route('/billing/checkout', methods=['POST'])
 @login_required
 def billing_checkout():
@@ -7516,12 +7635,46 @@ def billing_checkout():
     paid_remaining_min = trial_ctx.get('paid_minutes')
 
 # Optional stash so /billing/success can offer "Start transcript: …".
-    if (request.form.get('rss_url') or request.form.get('audio_url')):
+    explicit_episode = bool(request.form.get('rss_url') or request.form.get('audio_url'))
+    if explicit_episode:
         _stash_pending_from_request()
+        session.pop(PAYWALL_PENDING_KEY, None)
+    else:
+        # Bought from a surface that does not know the episode (header pill,
+        # Settings): the pick the paywall refused a moment ago still starts.
+        paywall_pick = _fresh_paywall_pending()
+        if paywall_pick:
+            session[PENDING_TRANSCRIPTION_KEY] = dict(paywall_pick)
+            session.pop(PAYWALL_PENDING_KEY, None)
+            session.modified = True
+    pending_pick = session.get(PENDING_TRANSCRIPTION_KEY)
+
+    # Never sell an episode the user already has in full.
+    if pending_pick:
+        owned = completed_full_transcript(current_user.id, _pending_audio_url(pending_pick))
+        if owned is not None:
+            session.pop(PENDING_TRANSCRIPTION_KEY, None)
+            session.modified = True
+            episode_intent = (
+                explicit_episode
+                and ((request.form.get('price_source') or '') == 'episode'
+                     or (request.form.get('offer') or '') == 'remaining'
+                     or source in EPISODE_BUY_SOURCES
+                     or source.startswith('email_')))
+            if episode_intent:
+                product_analytics.capture('checkout_skipped_owned', current_user.id, {
+                    'source': source, 'task_id': owned.id})
+                flash('You already have the full transcript of this episode, '
+                      'so there is nothing to buy.', 'info')
+                return redirect(url_for('transcription_page', task_id=owned.id))
+            pending_pick = None
 
     # Prefer explicit return_to (buy modal / sticky bar); fall back to cancel_url.
     return_to = safe_return_to(
         request.form.get('return_to') or request.form.get('cancel_url') or '')
+    if return_to and not _path_is_get_safe(return_to):
+        # e.g. /parse_rss (POST only): Stripe's GET back there was a 405.
+        return_to = episode_return_path(pending_pick) or url_for('index')
     if return_to:
         session[BILLING_RETURN_TO_KEY] = return_to
         session.modified = True
@@ -7833,18 +7986,26 @@ def billing_success():
         if done is not None and done.autostart_task_id:
             return redirect(url_for('transcription_page', task_id=done.autostart_task_id))
         try:
-            task_id = _autostart_after_payment(session_id, balance_minutes)
+            started = _autostart_after_payment(session_id, balance_minutes)
         except Exception:  # noqa: BLE001 - the purchase is done; the button remains
             db.session.rollback()
             app.logger.exception('post-payment autostart failed for %s', session_id)
-            task_id = None
-        if task_id:
+            started = None
+        if started:
+            task_id, existing = started
             session.pop(BILLING_RETURN_TO_KEY, None)
-            flash(TRANSCRIPT_STARTED_FLASH, 'success')
+            if existing:
+                flash(f'Payment received: +{purchased_minutes} min. You already had '
+                      'this transcript, so no minutes were used.', 'success')
+            else:
+                flash(f'Payment received: +{purchased_minutes} min. '
+                      'Transcription started.', 'success')
             return redirect(url_for('transcription_page', task_id=task_id))
 
     pending_episode = session.get(PENDING_TRANSCRIPTION_KEY)
     return_to = safe_return_to(session.get(BILLING_RETURN_TO_KEY) or '')
+    if return_to and not _path_is_get_safe(return_to):
+        return_to = episode_return_path(pending_episode) or url_for('index')
 
     return render_template(
         'billing_success.html',
@@ -7854,6 +8015,13 @@ def billing_success():
         balance_minutes=balance_minutes,
         credit_pack_minutes=purchased_minutes,
         pending_episode=pending_episode,
+        pending_blocker=(getattr(g, 'autostart_blocker', None)
+                         or _autostart_blocker(pending_episode, balance_minutes)),
+        pending_minutes=(
+            getattr(g, 'autostart_minutes', None)
+            or (math.ceil(_positive_float_or_none(pending_episode.get('duration_min')))
+                if pending_episode and _positive_float_or_none(
+                    pending_episode.get('duration_min')) else None)),
         return_to=return_to,
     )
 
@@ -8117,6 +8285,15 @@ def checkout_recovery_click(token):
 
     minutes = data['m']
     price_source = data['ps']
+    if data.get('t'):
+        recovery_task = TranscriptionTask.query.filter_by(
+            id=data['t'], user_id=current_user.id).first()
+        owned = completed_full_transcript(
+            current_user.id, getattr(recovery_task, 'source_audio_url', None),
+            exclude_task_id=data['t']) if recovery_task is not None else None
+        if owned is not None:
+            flash('You already have the full transcript of this episode.', 'info')
+            return redirect(url_for('transcription_page', task_id=owned.id))
     finish = None
     if VOLUME_PRICING_ENABLED and data.get('t'):
         finish = checkout_recovery.finish_offer_for(data['t'], current_user)
@@ -8196,6 +8373,11 @@ def lifecycle_email_click(token):
     source = f'email_{campaign}'[:64]
 
     if action == lifecycle_emails.ACTION_FINISH and task is not None:
+        owned = completed_full_transcript(
+            current_user.id, task.source_audio_url, exclude_task_id=task.id)
+        if owned is not None:
+            flash('You already have the full transcript of this episode.', 'info')
+            return redirect(url_for('transcription_page', task_id=owned.id))
         partial = task_partial_meta(task)
         trial_left, paid_left = _platform_remaining_seconds(current_user.id)
         offer = None
@@ -8591,6 +8773,13 @@ def _capture_paid_minutes_exhausted(user_id, source):
 
 @app.route('/')
 def index():
+    feed = (request.args.get('feed') or '').strip()
+    if feed:
+        # GET-safe episode list (checkout return / cancel). Never indexed.
+        resp = make_response(_render_episode_selection(
+            feed, request.args.get('ep'), (request.args.get('ep_audio') or '').strip()))
+        resp.headers['X-Robots-Tag'] = 'noindex'
+        return resp
     first_run = False
     if current_user.is_authenticated:
         # No transcription rows yet → lead with "start your first transcript"
@@ -8654,7 +8843,15 @@ def _annotate_episodes_for_trial(episodes, rss_url=None):
 
 @app.route('/parse_rss', methods=['POST'])
 def parse_rss():
-    rss_url = request.form.get('rss_url')
+    return _render_episode_selection(
+        request.form.get('rss_url'),
+        request.form.get('episode_index'),
+        (request.form.get('episode_audio_url') or '').strip())
+
+
+def _render_episode_selection(rss_url, raw_idx, want_audio):
+    """Episode list for a feed. POST /parse_rss and GET /?feed=… (the URL
+    Stripe sends buyers back to) both render through here."""
     if not rss_url:
         flash('Please enter an RSS feed URL', 'error')
         return redirect(url_for('index'))
@@ -8668,8 +8865,6 @@ def parse_rss():
     episodes_to_show = episodes[:10]
     has_more = len(episodes) > 10
     preselected_index = None
-    raw_idx = request.form.get('episode_index')
-    want_audio = (request.form.get('episode_audio_url') or '').strip()
     if want_audio:
         # Show pages cache feeds for hours; a new release shifts indexes, so
         # match the exact episode by enclosure URL before trusting the index.
@@ -9417,6 +9612,13 @@ def start_transcription():
 
     payload, status = enqueue_transcription(
         current_user, meta, rss_url=rss_url, language=language)
+    if status == 402:
+        # Remember the pick server-side: whichever Buy button they use next,
+        # /billing/success can start this episode once the payment clears.
+        _stash_pending_from_request(PAYWALL_PENDING_KEY)
+    elif status == 200 and session.get(PAYWALL_PENDING_KEY):
+        session.pop(PAYWALL_PENDING_KEY, None)
+        session.modified = True
     return jsonify(payload), status
 
 
@@ -10104,7 +10306,14 @@ def get_status(task_id):
             result['can_finish_full'] = paid_left > 0 or bool(
                 getattr(current_user, 'openai_api_key', None))
             offer = None
-            if stripe_checkout_enabled():
+            owned_full = completed_full_transcript(
+                task.user_id, task.source_audio_url, exclude_task_id=task.id)
+            if owned_full is not None:
+                # Finished in full since: link there instead of selling it again.
+                result['full_transcript_url'] = url_for(
+                    'transcription_page', task_id=owned_full.id)
+                result['can_finish_full'] = False
+            if stripe_checkout_enabled() and owned_full is None:
                 result['buy_available'] = True
                 result['buy_label'] = UNLOCK_EPISODE_LABEL
                 result['unlock_label'] = UNLOCK_EPISODE_LABEL
@@ -12127,7 +12336,7 @@ def faq_entries():
                 f'your own OpenAI API key to finish (a 90-minute episode costs '
                 f'about {cost_90} at OpenAI\'s rate). Once the trial is used up, '
                 f'the same options apply.{pack_bit}')
-        need_key = ('Not to start. The free trial runs on ours, including a free '
+        need_key = ('Not to start. The free trial runs on our account, including a free '
                     'preview of the first stretch of a longer episode. Add your own '
                     'key when the trial runs out and there is no limit beyond what '
                     'you spend at OpenAI.')
@@ -12145,18 +12354,18 @@ def faq_entries():
     return [
         ('How do I transcribe a podcast episode to text?',
          'Paste a Spotify episode link, or search for the podcast or episode by name. '
-         'Podskrift downloads the audio and transcribes it with OpenAI Whisper. You get '
+         'Podskrift downloads the audio and transcribes it with modern speech recognition. You get '
          'the full text plus an .srt subtitle file. No file to upload and no feed URL to '
          'find first.'),
         ('Hvordan transkriberer jeg en norsk podcast til tekst?',
          'Lim inn en Spotify-lenke, eller søk opp podkasten eller episoden på navn. '
-         'Podskrift laster ned lyden og transkriberer den med OpenAI Whisper. Du får '
+         'Podskrift laster ned lyden og transkriberer den med moderne talegjenkjenning. Du får '
          'hele teksten og en .srt-fil med teksting. Velg norsk i språkvelgeren, så '
          'slipper du at den gjetter feil.'),
         ('Which languages does it handle well?',
          f'{len(LANGUAGE_ENGLISH_NAMES)} languages, from English, Spanish and Mandarin to '
          'Norwegian, Ukrainian and Vietnamese. You can name the language rather than relying '
-         'on auto-detect, which matters on short or accented audio: Whisper treats the '
+         'on auto-detect, which matters on short or accented audio: the speech model treats the '
          'choice as a constraint rather than a hint.'),
         ('Is it free?', free),
         ('Do I need an OpenAI API key?', need_key),
@@ -12287,7 +12496,7 @@ def _structured_data():
                 'applicationCategory': 'MultimediaApplication',
                 'operatingSystem': 'Any (web browser)',
                 'description': (
-                    f'Transcribes podcast episodes to text using OpenAI Whisper, in '
+                    f'Transcribes podcast episodes to text using modern speech recognition, in '
                     f'{len(LANGUAGE_ENGLISH_NAMES)} languages. Search any podcast or '
                     'episode by name, pick the episode, and get plain text and timestamped '
                     'subtitles. Name the language rather than relying on auto-detect, which '
@@ -12693,6 +12902,8 @@ def _render_landing(endpoint):
         price_line=price_line,
         hreflang=hreflang,
         related=landing_pages_mod.related_links(endpoint),
+        link_lang=landing_pages_mod.lang_of,
+        chrome=landing_pages_mod.CHROME.get(ui_lang),
         structured_data=_faq_page_structured_data(
             page_url, page['title'], page['meta'], page['faq'],
             howto={'name': page['h1'], 'description': page['lede'],
@@ -12707,6 +12918,24 @@ def _register_landing_routes():
 
 
 _register_landing_routes()
+
+
+def _language_root_redirect(lang):
+    target = url_for(landing_pages_mod.LANGUAGE_ROOT_REDIRECTS[lang])
+    query = request.query_string.decode('utf-8', 'replace')
+    return redirect(f'{target}?{query}' if query else target, code=301)
+
+
+def _register_language_root_redirects():
+    """/no/, /fr, /de … 404'd for visitors guessing a language root; send them
+    to that language's landing page instead (both slash variants)."""
+    for lang in landing_pages_mod.LANGUAGE_ROOT_REDIRECTS:
+        view = (lambda lang=lang: _language_root_redirect(lang))
+        app.add_url_rule(f'/{lang}', f'language_root_{lang}', view)
+        app.add_url_rule(f'/{lang}/', f'language_root_{lang}_slash', view)
+
+
+_register_language_root_redirects()
 
 
 @app.after_request
@@ -12831,7 +13060,7 @@ Human setup pages: {public_url('guide_chatgpt')}, {public_url('guide_claude')},
     )
     header = f"""# Podskrift
 
-> Transcribes podcast episodes to text using OpenAI Whisper, in {lang_count}
+> Transcribes podcast episodes to text with modern speech recognition, in {lang_count}
 > languages. Paste a Spotify, Apple Podcasts, or RSS link — or search by show
 > or episode name. No file upload required. OpenAI API key is optional.
 
@@ -12854,7 +13083,7 @@ Made by Nettsmed (Fjellestad AS), Kristiansand, Norway.
 - Search podcast catalogues by show name or by individual episode title
 - Paste Spotify, Apple Podcasts, or RSS links (and direct audio URLs)
 - Transcribe an episode to plain text (.txt) and SubRip subtitles (.srt)
-- Pick the spoken language explicitly, or let Whisper detect it
+- Pick the spoken language explicitly, or let it be detected automatically
 - Follow progress live; the job keeps running if you close the page
 - Per-show landing pages at /podcasts for “transcript of [show]” queries
 - MCP connector for ChatGPT, Claude, Cursor and Claude Code (when enabled)
@@ -12864,9 +13093,9 @@ Made by Nettsmed (Fjellestad AS), Kristiansand, Norway.
 ## Languages
 {languages}
 
-{lang_count} languages in the picker (Whisper’s commonly used set). Auto-detect
+{lang_count} languages in the picker. Auto-detect
 is the default, but naming the language beats it on short or accented audio —
-Whisper takes the choice as a constraint rather than a hint.
+the speech model takes the choice as a constraint rather than a hint.
 
 ## What it costs
 {cost}
@@ -12924,7 +13153,7 @@ Nettsmed -- https://nettsmed.no
     landings_md = '\n\n---\n\n'.join(landing_full)
     return header + f"""
 ## What it does / does not
-Does: search catalogues; paste Spotify / Apple / RSS / direct audio; Whisper
+Does: search catalogues; paste Spotify / Apple / RSS / direct audio; speech-to-text
 transcription to .txt + .srt; language picker; live progress; show pages at
 /podcasts; MCP tools when enabled.
 
@@ -13640,8 +13869,8 @@ def load_customer_api_markdown():
     # markdown: quote what every new account actually gets.
     granted = advertised_trial_minutes()
     text = text.replace(
-        'New accounts get {trial_minutes} free trial minutes on our OpenAI key; after that, add your own.',
-        (f'New accounts get {granted} free trial minutes on our OpenAI key; after that, add your own.'
+        'New accounts get {trial_minutes} free trial minutes; after that, buy minutes or add your own OpenAI key.',
+        (f'New accounts get {granted} free trial minutes; after that, buy minutes or add your own OpenAI key.'
          if granted else 'Use your own OpenAI key, or buy minutes in Settings.'))
     # MCP connect docs are gated on MCP_ENABLED (default off).
     text = mcp_server_mod.filter_mcp_docs_section(

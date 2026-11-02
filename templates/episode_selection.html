@@ -331,9 +331,17 @@ document.addEventListener('DOMContentLoaded', function() {
         return 'This episode uses ~' + n + ' min · you have ' + left + ' left';
     }
 
+    /* Stripe comes back with GET, and this list is a POST (/parse_rss):
+       return to the GET-safe /?feed=…&ep=… instead, with the episode picked. */
     function returnToForCheckout() {
-        var path = window.location.pathname + window.location.search;
-        return path;
+        var epForm = document.getElementById('episodeForm');
+        var rss = epForm ? (epForm.querySelector('[name="rss_url"]') || {}).value : '';
+        if (!rss) return '/';
+        var url = '/?feed=' + encodeURIComponent(rss);
+        if (episodeIndexInput && episodeIndexInput.value !== '') {
+            url += '&ep=' + encodeURIComponent(episodeIndexInput.value);
+        }
+        return url;
     }
 
     function openEpisodeBuyModal(needed) {
@@ -372,6 +380,24 @@ document.addEventListener('DOMContentLoaded', function() {
     function postBuyForm(source) {
         openEpisodeBuyModal(selectedDuration);
     }
+
+    /* Header "Buy minutes" on this page: buy for the picked episode and come
+       back to this list (see _buy_modal.html). */
+    window.podskriftBuyContext = function() {
+        var epForm = document.getElementById('episodeForm');
+        var ctx = { returnTo: returnToForCheckout() };
+        if (episodeIndexInput && episodeIndexInput.value !== '' && selectedTitle) {
+            ctx.needed = selectedDuration || null;
+            ctx.left = minutesLeft() || 0;
+            ctx.title = selectedTitle;
+            ctx.rssUrl = epForm ? (epForm.querySelector('[name="rss_url"]') || {}).value : '';
+            ctx.episodeIndex = episodeIndexInput.value;
+            ctx.podcastName = epForm ? (epForm.querySelector('[name="podcast_name"]') || {}).value : '';
+            ctx.artwork = FEED_ARTWORK || '';
+            ctx.language = languageSelect ? languageSelect.value : '';
+        }
+        return ctx;
+    };
 
     function setStartError(text, buyAvailable, paywallReason) {
         startError.classList.remove('hidden');

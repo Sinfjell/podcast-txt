@@ -3828,7 +3828,7 @@ def test_llms_txt_states_what_the_tool_is_for(trial_on):
     body = resp.data.decode()
     assert body.startswith('# Podskrift')
     assert '>' in body.split('\n')[2], 'no one-line summary blockquote'
-    for claim in ('Norwegian', 'Danish', 'Swedish', 'German', 'Whisper', '.srt'):
+    for claim in ('Norwegian', 'Danish', 'Swedish', 'German', 'speech recognition', '.srt'):
         assert claim in body, f'{claim} missing from llms.txt'
     # The trial length is generated, not typed, so it cannot drift from the code.
     # Asserting the right number is present is not enough -- the FAQ is embedded
@@ -6659,21 +6659,21 @@ def test_public_api_docs_seo_metadata_and_intro(trial_on):
     assert '<title>Podcast Transcript API — Get Transcript via HTTP | Podskrift</title>' in body
     assert (
         'content="Podcast transcription API for agents and scripts. '
-        'Resolve by show and date, start Whisper, fetch the transcript via HTTP. '
+        'Resolve by show and date, start transcription, fetch the transcript via HTTP. '
         f'Free {grant}-minute trial. API key in Settings."'
     ) in body
     assert 'content="Podcast Transcript API — Podskrift"' in body
     assert (
-        'content="HTTP endpoints to resolve a podcast episode, transcribe with Whisper, '
+        'content="HTTP endpoints to resolve a podcast episode, transcribe it, '
         'and get the transcript. Same free trial as the web UI."'
     ) in body
     assert '<h1>Podcast transcript API</h1>' in body
     intro = (
         'Podskrift’s podcast transcription API lets agents and scripts get a transcript '
         'over HTTP — the same path as the web UI. Resolve an episode by publisher/show '
-        'and date (or URL), start Whisper, poll until ready, then fetch the plain-text '
-        f'transcript. New accounts get {grant} free trial minutes on our OpenAI key; after that, '
-        'add your own. Create a <code>psk_…</code> key in Settings.'
+        'and date (or URL), start transcription, poll until ready, then fetch the plain-text '
+        f'transcript. New accounts get {grant} free trial minutes; after that, '
+        'buy minutes or add your own OpenAI key. Create a <code>psk_…</code> key in Settings.'
     )
     assert intro in body
     # Endpoint H2s stay intact and ordered (TSK-20504).
@@ -12615,19 +12615,37 @@ def test_billing_checkout_stores_safe_return_to(stripe_on):
     resp = client.post('/billing/checkout', data={
         'csrf_token': tok,
         'source': 'buy_modal_episode',
-        'return_to': '/parse_rss?feed=1',
+        'return_to': '/history?x=1',
     }, follow_redirects=False)
     assert resp.status_code in (302, 303)
     assert 'checkout.stripe.test' in resp.headers.get('Location', '')
     with client.session_transaction() as sess:
-        assert sess.get(A.BILLING_RETURN_TO_KEY) == '/parse_rss?feed=1'
+        assert sess.get(A.BILLING_RETURN_TO_KEY) == '/history?x=1'
     params = stripe_on['last_create_params']
-    assert params['metadata'].get('return_to') == '/parse_rss?feed=1'
+    assert params['metadata'].get('return_to') == '/history?x=1'
     # Cancel goes through /billing/cancel?next=<return_to>
     assert 'billing/cancel' in params['cancel_url']
-    assert 'parse_rss' in params['cancel_url']
+    assert 'history' in params['cancel_url']
     assert params['metadata'].get('location') == 'buy_modal_episode'
     assert params['metadata'].get('source') == 'buy_modal_episode'
+
+
+def test_billing_checkout_never_returns_to_post_only_parse_rss(stripe_on):
+    """/parse_rss is POST-only: Stripe's GET back there (success CTA or a
+    cancelled checkout) was a 405 error page."""
+    uid = _make_user('rto405@test.com', limit=600, used=0)
+    client = _login(uid)
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        tok = sess['_csrf_token']
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': tok, 'source': 'buy_modal_header', 'return_to': '/parse_rss',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    params = stripe_on['last_create_params']
+    assert 'parse_rss' not in params['cancel_url']
+    assert params['metadata'].get('return_to') == '/'
+    assert client.get('/billing/cancel?next=/').status_code in (302, 303)
 
 
 def test_billing_checkout_rejects_external_return_to(stripe_on):
@@ -17723,6 +17741,220 @@ def test_buy_modal_has_slider_with_flag(stripe_on, monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# Checkout return to the episode + never sell an owned episode
+# --------------------------------------------------------------------------
+_RET_FEED = 'https://feeds.example.com/ret.xml'
+_RET_AUDIO = 'https://cdn.example.com/ret-ep1.mp3'
+
+
+def _ret_episodes(*_a, **_k):
+    return [{
+        'index': 0, 'title': 'Return Ep', 'audio_url': _RET_AUDIO,
+        'duration_min': 30.0, 'podcast_name': 'Return Show', 'published': '',
+        'artwork': '', 'episode_link': '', 'show_link': '', 'language': 'en',
+    }], None
+
+
+def _add_task(task_id, uid, audio_url, *, status='completed', partial=None):
+    from models import TranscriptionTask
+    with A.app.app_context():
+        old = A.db.session.get(TranscriptionTask, task_id)
+        if old:
+            A.db.session.delete(old)
+            A.db.session.commit()
+        A.db.session.add(TranscriptionTask(
+            id=task_id, user_id=uid, episode_title='Return Ep', status=status,
+            source_audio_url=audio_url, rss_url=_RET_FEED,
+            started_at=A.datetime.now(A.timezone.utc),
+            partial_meta=(A.encode_partial_task_meta(*partial) if partial else None),
+        ))
+        A.db.session.commit()
+
+
+def _flashes(client):
+    with client.session_transaction() as s_:
+        return [m for _c, m in s_.get('_flashes', [])]
+
+
+def test_home_paywall_purchase_starts_the_episode_with_a_payment_banner(volume_on, monkeypatch):
+    """Home search -> Transcribe -> paywall -> Buy. The server remembers the
+    pick at the paywall, so after payment the buyer lands on the running job
+    with 'Payment received', not on a generic page where they search again."""
+    uid = _make_user('ret-home@test.com', limit=0, used=0)
+    _set_paid(uid, 0)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    client, token = _vol_csrf_client(uid)
+    home_fields = {
+        'audio_url': _RET_AUDIO, 'rss_url': _RET_FEED, 'episode_title': 'Return Ep',
+        'podcast_name': 'Return Show', 'duration_min': '30', 'language': 'en',
+    }
+    refused = client.post('/start_transcription', data=home_fields)
+    assert refused.status_code == 402
+    with client.session_transaction() as s_:
+        assert s_[A.PAYWALL_PENDING_KEY]['audio_url'] == _RET_AUDIO
+
+    # The home error's Buy button posts the same fields (index.html postBuyForm).
+    resp = client.post('/billing/checkout', data=dict(
+        home_fields, csrf_token=token, source='buy_modal_episode', minutes='75',
+        price_source='episode',
+        return_to='/?feed=https%3A%2F%2Ffeeds.example.com%2Fret.xml&ep_audio=x'))
+    assert resp.status_code == 303, (resp.headers.get('Location'), _flashes(client))
+    params = volume_on['last_create_params']
+    assert 'parse_rss' not in params['cancel_url']
+    with client.session_transaction() as s_:
+        assert s_[A.PENDING_TRANSCRIPTION_KEY]['audio_url'] == _RET_AUDIO
+        assert A.PAYWALL_PENDING_KEY not in s_
+
+    calls = []
+
+    def fake_enqueue(user, meta, rss_url=None, language='', source='web'):
+        calls.append(meta)
+        return {'task_id': 'task-ret-home'}, 200
+
+    monkeypatch.setattr(A, 'enqueue_transcription', fake_enqueue)
+    volume_on['sessions']['cs_ret_home'] = _volume_session(
+        uid, 75, 172,
+        session_id='cs_ret_home', price_source='episode')
+    success = client.get('/billing/success?session_id=cs_ret_home')
+    assert success.status_code == 302
+    assert success.headers['Location'].endswith('/transcription/task-ret-home')
+    assert len(calls) == 1 and calls[0]['audio_url'] == _RET_AUDIO
+    assert 'Payment received: +75 min. Transcription started.' in _flashes(client)
+
+
+def test_header_pill_purchase_after_a_paywall_still_starts_that_episode(volume_on, monkeypatch):
+    """Buy from a surface that does not know the episode (header pill): the
+    paywall stash is promoted, so the episode still starts once paid."""
+    uid = _make_user('ret-pill@test.com', limit=0, used=0)
+    _set_paid(uid, 0)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    client, token = _vol_csrf_client(uid)
+    assert client.post('/start_transcription', data={
+        'audio_url': _RET_AUDIO, 'episode_title': 'Return Ep', 'duration_min': '30',
+    }).status_code == 402
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'buy_modal_header', 'minutes': '60',
+        'price_source': 'slider', 'return_to': '/'})
+    assert resp.status_code == 303
+    with client.session_transaction() as s_:
+        assert s_[A.PENDING_TRANSCRIPTION_KEY]['audio_url'] == _RET_AUDIO
+        assert A.PAYWALL_PENDING_KEY not in s_
+
+
+def test_an_old_paywall_pick_is_not_promoted(volume_on, monkeypatch):
+    uid = _make_user('ret-stale@test.com', limit=0, used=0)
+    client, token = _vol_csrf_client(uid)
+    with client.session_transaction() as s_:
+        s_[A.PAYWALL_PENDING_KEY] = {
+            'audio_url': _RET_AUDIO, 'title': 'Old', 'rss_url': None, 'episode_index': None,
+            'stashed_at': A.time.time() - A.PAYWALL_PENDING_TTL_SECONDS - 60}
+    client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'settings', 'minutes': '60', 'price_source': 'slider'})
+    with client.session_transaction() as s_:
+        assert A.PENDING_TRANSCRIPTION_KEY not in s_
+        assert A.PAYWALL_PENDING_KEY not in s_
+
+
+def test_parse_rss_header_modal_purchase_returns_get_safe_and_autostarts(volume_on, monkeypatch):
+    """Episode list (POST /parse_rss) -> header 'Buy minutes'. The list now
+    tells the modal which episode is picked, cancel/return go to the GET-safe
+    /?feed=…&ep=…, and the episode starts once paid."""
+    uid = _make_user('ret-rss@test.com', limit=0, used=0)
+    _set_paid(uid, 0)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    monkeypatch.setattr(A, 'get_episodes_from_rss', _ret_episodes)
+    client, token = _vol_csrf_client(uid)
+
+    page = client.post('/parse_rss', data={'rss_url': _RET_FEED}).data.decode()
+    assert 'window.podskriftBuyContext' in page
+    assert "'/?feed=' + encodeURIComponent(rss)" in page
+
+    # Old clients still post return_to=/parse_rss; the server repairs it.
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'buy_modal_header', 'minutes': '75',
+        'price_source': 'episode', 'rss_url': _RET_FEED, 'episode_index': '0',
+        'episode_title': 'Return Ep', 'duration_min': '30', 'return_to': '/parse_rss'})
+    assert resp.status_code == 303
+    params = volume_on['last_create_params']
+    back = params['metadata']['return_to']
+    assert back.startswith('/?feed=') and 'ep=0' in back
+    assert 'parse_rss' not in params['cancel_url']
+
+    # The return URL is a real GET page: the list with the episode picked.
+    listing = client.get(back)
+    assert listing.status_code == 200
+    assert listing.headers.get('X-Robots-Tag') == 'noindex'
+    assert 'Return Ep' in listing.data.decode()
+
+    calls = []
+    monkeypatch.setattr(A, 'enqueue_transcription', lambda user, meta, rss_url=None, language='',
+                        source='web': (calls.append(meta) or ({'task_id': 'task-ret-rss'}, 200)))
+    volume_on['sessions']['cs_ret_rss'] = _volume_session(
+        uid, 75, 172, session_id='cs_ret_rss', price_source='episode')
+    success = client.get('/billing/success?session_id=cs_ret_rss')
+    assert success.status_code == 302
+    assert success.headers['Location'].endswith('/transcription/task-ret-rss')
+    assert calls and calls[0]['audio_url'] == _RET_AUDIO
+
+
+def test_success_page_explains_a_pick_that_could_not_start(volume_on, monkeypatch):
+    uid, client, calls = _autostart_setup(
+        volume_on, monkeypatch, 'ret-short@test.com', 'cs_ret_short', duration=80.0)
+    body = client.get('/billing/success?session_id=cs_ret_short').data.decode()
+    assert 'needs about 80 min' in body and 'did not start on its own' in body
+    assert 'Start transcript: Short Ep' in body
+
+
+def test_stale_finish_email_link_opens_the_owned_full_transcript(volume_on, monkeypatch):
+    """User 156 (1.11): the trial-ended email offered to finish a preview of
+    an episode they had already transcribed in full, and they paid again."""
+    import lifecycle_emails
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda url: True)
+    uid = _make_user('ret-email@test.com', limit=0, used=0)
+    _set_paid(uid, 0)
+    _add_task('ret-partial', uid, _RET_AUDIO, partial=(10 * 60, 67 * 60))
+    _add_task('ret-full', uid, _RET_AUDIO)
+    with A.app.app_context():
+        from models import TranscriptionTask, User
+        partial = A.db.session.get(TranscriptionTask, 'ret-partial')
+        user = A.db.session.get(User, uid)
+        assert A.partial_finish_offer(partial, user) is None
+    token = lifecycle_emails.make_click_token(
+        A.app.secret_key, user_id=uid, campaign=lifecycle_emails.TRIAL_ENDED_1H,
+        action=lifecycle_emails.ACTION_FINISH, task_id='ret-partial')
+    client, csrf = _vol_csrf_client(uid)
+    resp = client.get(f'/e/{token}?r=1')
+    assert resp.status_code == 302
+    assert resp.headers['Location'].endswith('/transcription/ret-full')
+
+    # A checkout posted for that episode anyway (old tab) is not sold.
+    volume_on['last_create_params'] = None
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': csrf, 'source': 'email_trial_ended_1h', 'minutes': '60',
+        'price_source': 'episode', 'offer': 'remaining', 'task_id': 'ret-partial',
+        'audio_url': _RET_AUDIO, 'episode_title': 'Return Ep', 'duration_min': '67'})
+    assert resp.status_code in (302, 303)
+    assert resp.headers['Location'].endswith('/transcription/ret-full')
+    assert volume_on['last_create_params'] is None
+
+    # The preview's own page links to the full transcript instead of a Buy offer.
+    status = client.get('/status/ret-partial').get_json()
+    assert status.get('full_transcript_url', '').endswith('/transcription/ret-full')
+    assert 'episode_offer' not in status
+
+
+def test_finish_offer_still_sold_when_only_the_preview_exists(volume_on, monkeypatch):
+    uid = _make_user('ret-email-2@test.com', limit=0, used=0)
+    _set_paid(uid, 0)
+    _add_task('ret-partial-2', uid, 'https://cdn.example.com/other.mp3',
+              partial=(10 * 60, 67 * 60))
+    with A.app.app_context():
+        from models import TranscriptionTask, User
+        partial = A.db.session.get(TranscriptionTask, 'ret-partial-2')
+        assert A.partial_finish_offer(partial, A.db.session.get(User, uid)) is not None
+
+
+# --------------------------------------------------------------------------
 # Post-payment auto-start (/billing/success)
 # --------------------------------------------------------------------------
 def _autostart_setup(volume_on, monkeypatch, email, session_id, minutes=75,
@@ -20817,6 +21049,73 @@ def test_landing_page_renders_with_seo_basics(trial_on, path):
     assert 'btn btn-primary' in html
 
 
+def test_language_roots_redirect_to_their_landing_pages():
+    """/no/, /fr … used to 404 for visitors guessing a language root."""
+    c = A.app.test_client()
+    cases = {
+        '/no': '/no/podcast-til-tekst', '/no/': '/no/podcast-til-tekst',
+        '/nb': '/no/podcast-til-tekst', '/nb/': '/no/podcast-til-tekst',
+        '/fr': '/fr/transcrire-podcast', '/fr/': '/fr/transcrire-podcast',
+        '/de': '/de/podcast-transkribieren', '/de/': '/de/podcast-transkribieren',
+        '/es': '/es/transcribir-podcast', '/es/': '/es/transcribir-podcast',
+        '/pt': '/pt/transcrever-podcast', '/pt/': '/pt/transcrever-podcast',
+    }
+    for path, target in cases.items():
+        resp = c.get(path)
+        assert resp.status_code == 301, path
+        assert resp.headers['Location'].endswith(target), (path, resp.headers['Location'])
+        assert c.get(target).status_code == 200
+    resp = c.get('/fr?utm_source=chatgpt.com')
+    assert resp.headers['Location'].endswith('/fr/transcrire-podcast?utm_source=chatgpt.com')
+
+
+@pytest.mark.parametrize('path,lang,nav_word,footer_word,related_word', [
+    ('/no/podcast-til-tekst', 'nb', 'Priser', 'Personvern', '(engelsk)'),
+    ('/es/transcribir-podcast', 'es', 'Precios', 'Privacidad', '(en inglés)'),
+    ('/de/podcast-transkribieren', 'de', 'Preise', 'Datenschutz', '(Englisch)'),
+    ('/pt/transcrever-podcast', 'pt', 'Preços', 'Privacidade', '(em inglês)'),
+    ('/fr/transcrire-podcast', 'fr', 'Tarifs', 'Confidentialité', '(en anglais)'),
+])
+def test_language_landings_translate_nav_footer_and_more_ways(
+        trial_on, path, lang, nav_word, footer_word, related_word):
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(A.app.test_client().get(path).data.decode(), 'html.parser')
+    nav = soup.select_one('nav.nav-bar').get_text(' ', strip=True)
+    assert nav_word in nav and 'Pricing' not in nav and 'Log in' not in nav
+    footer = soup.select_one('footer.footer').get_text(' ', strip=True)
+    assert footer_word in footer and 'Privacy' not in footer and 'Terms' not in footer
+    related = soup.select('#landing-related + ul a')
+    english_targets = [a for a in related if a.get('hreflang') == 'en']
+    assert english_targets, 'English targets should be marked hreflang=en'
+    for a in english_targets:
+        assert related_word in a.get_text(), a
+
+
+def test_english_pages_keep_english_chrome(trial_on):
+    body = A.app.test_client().get('/spotify-podcast-transcript').data.decode()
+    assert '>Pricing' in body.replace('\n', '').replace('  ', '') or 'Pricing' in body
+    assert 'Personvern' not in body and 'Tarifs' not in body
+
+
+@pytest.mark.parametrize('lang,expected_lo,expected_top', [
+    ('en', '$1.50', '$11'), ('fr', '1,50 $', '11 $'), ('de', '1,50 $', '11 $'),
+    ('es', '1,50 $', '11 $'), ('nb', '1,50 $', '11 $'), ('pt', 'US$ 1,50', 'US$ 11'),
+])
+def test_landing_prices_use_the_page_locale(trial_on, monkeypatch, lang, expected_lo, expected_top):
+    """Prices come from the live helpers (pricing_volume via _landing_pack),
+    only the formatting follows the page language."""
+    import landing_pages as lp
+    import pricing_volume
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    pack = A._landing_pack()
+    assert pack['min_cents'] == pricing_volume.VOLUME_MIN_AMOUNT_CENTS
+    phrase = lp.pack_phrase(pack, lang)
+    assert lp._usd(pack['min_cents'], lang) in phrase
+    if pack['min_cents'] == 150 and pack['max_cents'] == 1100:
+        assert expected_lo in phrase and expected_top in phrase
+
+
 def test_landing_titles_and_descriptions_are_unique(trial_on):
     import re as _re
     client = A.app.test_client()
@@ -21044,16 +21343,16 @@ def test_landing_and_llms_pricing_follow_volume_flag(trial_on, monkeypatch, volu
     assert f'{trial} minutes gratuites' in fr
     en_phrase = ('from $1.50 for 60 minutes, cheaper per minute the more you buy '
                  '(1,200 min for $11), or just the minutes one episode needs')
-    nb_phrase = ('fra $1.50 for 60 minutter, billigere per minutt jo mer du kjøper '
-                 '(1 200 min for $11), eller bare minuttene én episode trenger')
-    es_phrase = ('desde $1.50 por 60 minutos, más barato por minuto cuanto más compras '
-                 '(1.200 min por $11), o solo los minutos que dura un episodio')
-    de_phrase = ('ab $1.50 für 60 Minuten, günstiger pro Minute, je mehr du kaufst '
-                 '(1.200 Min. für $11), oder nur die Minuten einer Folge')
-    pt_phrase = ('a partir de $1.50 por 60 minutos, mais barato por minuto quanto mais '
-                 'você compra (1.200 min por $11), ou só os minutos que um episódio precisa')
-    fr_phrase = ('à partir de $1.50 pour 60 minutes, moins cher à la minute plus vous '
-                 'achetez (1 200 min pour $11), ou seulement les minutes dont un '
+    nb_phrase = ('fra 1,50 $ for 60 minutter, billigere per minutt jo mer du kjøper '
+                 '(1 200 min for 11 $), eller bare minuttene én episode trenger')
+    es_phrase = ('desde 1,50 $ por 60 minutos, más barato por minuto cuanto más compras '
+                 '(1.200 min por 11 $), o solo los minutos que dura un episodio')
+    de_phrase = ('ab 1,50 $ für 60 Minuten, günstiger pro Minute, je mehr du kaufst '
+                 '(1.200 Min. für 11 $), oder nur die Minuten einer Folge')
+    pt_phrase = ('a partir de US$ 1,50 por 60 minutos, mais barato por minuto quanto mais '
+                 'você compra (1.200 min por US$ 11), ou só os minutos que um episódio precisa')
+    fr_phrase = ('à partir de 1,50 $ pour 60 minutes, moins cher à la minute plus vous '
+                 'achetez (1 200 min pour 11 $), ou seulement les minutes dont un '
                  'épisode a besoin')
     if volume:
         # Spotify uses per-episode offers instead of the pack phrase in the
@@ -21987,3 +22286,20 @@ def test_trial_reuse_window_defaults_to_30_days(monkeypatch):
     assert TA.reuse_window() == timedelta(days=7)
     monkeypatch.setenv('TRIAL_REUSE_WINDOW_DAYS', 'junk')
     assert TA.reuse_window() == timedelta(days=30)
+
+
+def test_public_copy_does_not_claim_a_specific_stt_vendor(trial_on):
+    """Trial and paid minutes run on several speech-to-text providers, so public
+    pages must not say "powered by OpenAI Whisper" or "on our OpenAI key".
+    BYOK copy (the user's own OpenAI key) is fine and stays."""
+    client = A.app.test_client()
+    paths = ['/', '/pricing', '/spotify-podcast-transcript', '/podcast-transcript-generator',
+             '/llms.txt', '/llms-full.txt', '/docs/api', '/rss-help']
+    for path in paths:
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        body = resp.get_data(as_text=True)
+        for claim in ('powered by OpenAI Whisper', 'with OpenAI Whisper', 'using OpenAI Whisper',
+                      'runs OpenAI Whisper', 'our OpenAI key', 'uses OpenAI Whisper',
+                      'start Whisper', 'Whisper API'):
+            assert claim not in body, f'{path} still says {claim!r}'
