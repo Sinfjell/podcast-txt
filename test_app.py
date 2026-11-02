@@ -4595,6 +4595,40 @@ def test_numbered_feed_titles_still_match(monkeypatch):
     assert out['error'] is None and out['results'][0]['audio_url'] == 'https://cdn.example.com/0.mp3'
 
 
+def test_spotify_landing_shows_updated_date_platform_steps_and_troubleshooting(trial_on):
+    import json as _json
+    import landing_pages as lp
+    from bs4 import BeautifulSoup
+    html = A.app.test_client().get('/spotify-podcast-transcript').data.decode()
+    soup = BeautifulSoup(html, 'html.parser')
+    updated = soup.select_one('.ds-landing__updated time')
+    assert updated is not None and updated['datetime'] == lp.SPOTIFY_PAGE_UPDATED
+    assert updated.get_text().strip()[-4:] == lp.SPOTIFY_PAGE_UPDATED[:4]
+    webpage = None
+    for tag in soup.find_all('script', type='application/ld+json'):
+        for node in _json.loads(tag.string).get('@graph', []):
+            if node.get('@type') == 'WebPage':
+                webpage = node
+    assert webpage and webpage['dateModified'] == lp.SPOTIFY_PAGE_UPDATED
+    platforms = soup.select_one('#landing-platforms').parent.get_text(' ', strip=True)
+    for bit in ('iPhone', 'Android', 'Desktop app and web player', 'Copy link',
+                'Copy Episode Link', 'Share'):
+        assert bit in platforms, bit
+    table = soup.select_one('#landing-troubleshoot').parent
+    rows = [th.get_text(' ', strip=True) for th in table.select('tbody th[scope=row]')]
+    assert any('exclusive' in r for r in rows)
+    assert any('subscriber-only' in r for r in rows)
+    assert any('video-only' in r for r in rows)
+    assert any('spotify.link' in r for r in rows)
+    assert 'You see the episode and its price before you pay anything.' in html
+
+
+def test_only_pages_with_an_updated_date_get_date_modified(trial_on):
+    html = A.app.test_client().get('/apple-podcast-transcript').data.decode()
+    assert 'dateModified' not in html
+    assert 'ds-landing__updated' not in html
+
+
 def test_spotify_show_not_in_directory_softens_the_message(monkeypatch):
     _fake_web(monkeypatch,
               embed=_embed_page({'type': 'episode', 'name': 'Ep 1', 'subtitle': 'Only On Spotify'}),

@@ -19,6 +19,9 @@
 {% block content %}
 <article class="ds-guide ds-landing" data-landing="{{ landing_key }}">
   {{ page_header(page.h1, page.lede) }}
+  {% if page.updated %}
+  <p class="ds-guide__muted ds-landing__updated">Updated <time datetime="{{ page.updated }}">{{ page.updated_label }}</time></p>
+  {% endif %}
 
   {# GET to the home page: the home search box detects Spotify / Apple / RSS /
      audio links and runs the normal flow, so there is one paste path, not two. #}
@@ -49,6 +52,37 @@
       {% endfor %}
     </ol>
   </section>
+
+  {% if page.platform_steps %}
+  <section class="ds-guide__section" aria-labelledby="landing-platforms">
+    <h2 id="landing-platforms">{{ page.platform_steps_title }}</h2>
+    {% for platform, steps in page.platform_steps %}
+    <h3>{{ platform }}</h3>
+    <ol class="ds-guide__list">
+      {% for step in steps %}<li>{{ step }}</li>{% endfor %}
+    </ol>
+    {% endfor %}
+    {% if page.platform_steps_note %}<p class="ds-guide__muted">{{ page.platform_steps_note }}</p>{% endif %}
+  </section>
+  {% endif %}
+
+  {% if page.troubleshoot %}
+  <section class="ds-guide__section" aria-labelledby="landing-troubleshoot">
+    <h2 id="landing-troubleshoot">{{ page.troubleshoot_title }}</h2>
+    <div class="econ-table-wrap">
+      <table class="econ-table">
+        <thead>
+          <tr>{% for h in page.troubleshoot_head %}<th scope="col">{{ h }}</th>{% endfor %}</tr>
+        </thead>
+        <tbody>
+          {% for what, why, fix in page.troubleshoot %}
+          <tr><th scope="row">{{ what }}</th><td>{{ why }}</td><td>{{ fix }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
 
   {% if page.example_txt %}
   <section class="ds-guide__section" aria-labelledby="landing-example">
