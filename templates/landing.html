@@ -52,7 +52,7 @@
 
   {% if page.example_txt %}
   <section class="ds-guide__section" aria-labelledby="landing-example">
-    <h2 id="landing-example">What you get</h2>
+    <h2 id="landing-example">{{ ui.example }}</h2>
     <p class="ds-guide__muted">{{ page.example_label or 'Example format' }}</p>
     {{ snippet(page.example_txt ~ '\n\n--- .srt ---\n\n' ~ page.example_srt, copy_label='Copy', what='example') }}
     {% if page.ai_note %}
@@ -77,7 +77,8 @@
     <h2 id="landing-related">{{ ui.related }}</h2>
     <ul class="ds-guide__list">
       {% for endpoint, label in related %}
-      <li><a href="{{ url_for(endpoint) }}">{{ label }}</a></li>
+      {% set target_lang = link_lang(endpoint) %}
+      <li><a href="{{ url_for(endpoint) }}"{% if target_lang != page.lang %} hreflang="{{ target_lang }}"{% endif %}>{{ label }}</a></li>
       {% endfor %}
       {% for endpoint, label in page.also_related or [] %}
       <li><a href="{{ url_for(endpoint) }}">{{ label }}</a></li>

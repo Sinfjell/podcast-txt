@@ -165,11 +165,142 @@ def related_links(endpoint):
         if e not in seen and e != endpoint and page_is_public(e):
             seen.add(e)
             ordered.append(e)
-    return [(e, SHORT_LABELS[e]) for e in ordered]
+    labels = RELATED_LABELS.get(lang_of(endpoint), {})
+    return [(e, labels.get(e, SHORT_LABELS[e])) for e in ordered]
 
 
-def _usd(cents):
-    return f'${cents // 100}' if cents % 100 == 0 else f'${cents / 100:.2f}'
+#: "More ways" labels on the native-language landings. The targets are English
+#: pages, so each label says so in the reader's language.
+RELATED_LABELS = {
+    'nb': {
+        'landing_podcast_to_text': 'Podcast til tekst (engelsk)',
+        'landing_spotify': 'Transkriber en Spotify-podcast (engelsk)',
+        'landing_apple': 'Transkriber fra Apple Podcasts (engelsk)',
+        'landing_rss': 'RSS-feed til tekst (engelsk)',
+        'landing_free': 'Transkriber en podcast gratis (engelsk)',
+        'landing_generator': 'Generator for podcasttranskripsjon (engelsk)',
+        'landing_youtube_vs': 'YouTube eller podcast-transkripsjon (engelsk)',
+    },
+    'es': {
+        'landing_spotify': 'Transcribir un podcast de Spotify (en inglés)',
+        'landing_apple': 'Transcribir desde Apple Podcasts (en inglés)',
+        'landing_podcast_to_text': 'De podcast a texto (en inglés)',
+        'landing_rss': 'De feed RSS a texto (en inglés)',
+        'landing_free': 'Transcribir un podcast gratis (en inglés)',
+    },
+    'de': {
+        'landing_spotify': 'Spotify-Podcast transkribieren (Englisch)',
+        'landing_apple': 'Aus Apple Podcasts transkribieren (Englisch)',
+        'landing_podcast_to_text': 'Podcast zu Text (Englisch)',
+        'landing_rss': 'RSS-Feed zu Text (Englisch)',
+        'landing_free': 'Podcast kostenlos transkribieren (Englisch)',
+    },
+    'pt': {
+        'landing_spotify': 'Transcrever um podcast do Spotify (em inglês)',
+        'landing_apple': 'Transcrever do Apple Podcasts (em inglês)',
+        'landing_podcast_to_text': 'Podcast para texto (em inglês)',
+        'landing_rss': 'Feed RSS para texto (em inglês)',
+        'landing_free': 'Transcrever um podcast grátis (em inglês)',
+    },
+    'fr': {
+        'landing_spotify': 'Transcrire un podcast Spotify (en anglais)',
+        'landing_apple': 'Transcrire depuis Apple Podcasts (en anglais)',
+        'landing_podcast_to_text': 'Podcast en texte (en anglais)',
+        'landing_rss': 'Flux RSS en texte (en anglais)',
+        'landing_free': 'Transcrire un podcast gratuitement (en anglais)',
+    },
+}
+RELATED_LABELS['no'] = RELATED_LABELS['nb']
+
+
+#: Header and footer strings for the native-language landings. base.html falls
+#: back to English for any key missing here, and for every other page.
+CHROME = {
+    'nb': dict(pricing='Priser', help='Hjelp', login='Logg inn', start_free='Start gratis',
+               menu='Meny', new_transcript='Ny transkripsjon', history='Historikk',
+               settings='Innstillinger', logout='Logg ut', buy='Kjøp minutter',
+               tagline='Podcasttranskripsjoner du kan lese, søke i og bruke i KI.',
+               product='Produkt', transcribe='Transkriber', support='Støtte', legal='Juridisk',
+               podcasts='Podkaster', ai='Bruk i ChatGPT og Claude',
+               ai_guide='Guide: KI-transkripsjoner', whats_new='Nyheter',
+               contact='Kontakt', feedback='Tilbakemelding / ideer',
+               privacy='Personvern', terms='Vilkår', cookies='Informasjonskapsler',
+               footer_label='Bunntekst'),
+    'es': dict(pricing='Precios', help='Ayuda', login='Iniciar sesión', start_free='Empezar gratis',
+               menu='Menú', new_transcript='Nueva transcripción', history='Historial',
+               settings='Ajustes', logout='Cerrar sesión', buy='Comprar minutos',
+               tagline='Transcripciones de podcasts que puedes leer, buscar y usar con IA.',
+               product='Producto', transcribe='Transcribir', support='Soporte', legal='Legal',
+               podcasts='Podcasts', ai='Usar en ChatGPT y Claude',
+               ai_guide='Guía de transcripciones con IA', whats_new='Novedades',
+               contact='Contacto', feedback='Comentarios / ideas',
+               privacy='Privacidad', terms='Condiciones', cookies='Configurar cookies',
+               footer_label='Pie de página'),
+    'de': dict(pricing='Preise', help='Hilfe', login='Anmelden', start_free='Kostenlos starten',
+               menu='Menü', new_transcript='Neue Transkription', history='Verlauf',
+               settings='Einstellungen', logout='Abmelden', buy='Minuten kaufen',
+               tagline='Podcast-Transkripte zum Lesen, Durchsuchen und Nutzen mit KI.',
+               product='Produkt', transcribe='Transkribieren', support='Support', legal='Rechtliches',
+               podcasts='Podcasts', ai='In ChatGPT und Claude nutzen',
+               ai_guide='Leitfaden: KI-Transkripte', whats_new='Neuigkeiten',
+               contact='Kontakt', feedback='Feedback / Ideen',
+               privacy='Datenschutz', terms='AGB', cookies='Cookie-Einstellungen',
+               footer_label='Fußzeile'),
+    'pt': dict(pricing='Preços', help='Ajuda', login='Entrar', start_free='Começar grátis',
+               menu='Menu', new_transcript='Nova transcrição', history='Histórico',
+               settings='Configurações', logout='Sair', buy='Comprar minutos',
+               tagline='Transcrições de podcasts para ler, pesquisar e usar com IA.',
+               product='Produto', transcribe='Transcrever', support='Suporte', legal='Legal',
+               podcasts='Podcasts', ai='Usar no ChatGPT e no Claude',
+               ai_guide='Guia de transcrições com IA', whats_new='Novidades',
+               contact='Contato', feedback='Feedback / ideias',
+               privacy='Privacidade', terms='Termos', cookies='Configurações de cookies',
+               footer_label='Rodapé'),
+    'fr': dict(pricing='Tarifs', help='Aide', login='Se connecter', start_free='Commencer gratuitement',
+               menu='Menu', new_transcript='Nouvelle transcription', history='Historique',
+               settings='Paramètres', logout='Se déconnecter', buy='Acheter des minutes',
+               tagline='Des transcriptions de podcasts à lire, chercher et utiliser avec l’IA.',
+               product='Produit', transcribe='Transcrire', support='Assistance', legal='Mentions légales',
+               podcasts='Podcasts', ai='Utiliser dans ChatGPT et Claude',
+               ai_guide='Guide des transcriptions IA', whats_new='Nouveautés',
+               contact='Contact', feedback='Avis / idées',
+               privacy='Confidentialité', terms='Conditions', cookies='Paramètres des cookies',
+               footer_label='Pied de page'),
+}
+CHROME['no'] = CHROME['nb']
+
+#: Language-root URLs people type or guess (/no/, /fr …) → that language's landing.
+LANGUAGE_ROOT_REDIRECTS = {
+    'no': 'landing_no',
+    'nb': 'landing_no',
+    'fr': 'landing_fr',
+    'de': 'landing_de',
+    'es': 'landing_es',
+    'pt': 'landing_pt',
+}
+
+
+#: Languages that write a decimal comma and put the currency sign after the
+#: amount ("1,50 $"). Portuguese (Brazil) writes "US$ 1,50".
+_COMMA_DECIMAL_LANGS = ('no', 'nb', 'fr', 'de', 'es', 'pt')
+
+
+def _amount(value, lang='en'):
+    """Plain amount: 5 / 1.5 → '1.50' (en) or '1,50' (comma-decimal langs)."""
+    cents = int(round(float(value) * 100))
+    text = str(cents // 100) if cents % 100 == 0 else f'{cents / 100:.2f}'
+    return text.replace('.', ',') if lang in _COMMA_DECIMAL_LANGS else text
+
+
+def _usd(cents, lang='en'):
+    """USD amount in the page's convention: sign first (en), sign after with a
+    decimal comma (fr/de/es/nb), or "US$ " first with a decimal comma (pt)."""
+    amount = _amount(cents / 100, lang)
+    if lang == 'pt':
+        return f'US$ {amount}'
+    if lang in _COMMA_DECIMAL_LANGS:
+        return f'{amount} $'
+    return f'${amount}'
 
 
 def _fmt_minutes(n, lang='en'):
@@ -188,9 +319,9 @@ def _fmt_minutes(n, lang='en'):
 def pack_phrase(pack, lang='en'):
     """Price phrase for *pack* (see app._landing_pack). Matches /pricing tone."""
     if pack.get('volume'):
-        lo = _usd(pack['min_cents'])
+        lo = _usd(pack['min_cents'], lang)
         top_min = _fmt_minutes(pack['max_minutes'], lang)
-        top = _usd(pack['max_cents'])
+        top = _usd(pack['max_cents'], lang)
         if lang in ('no', 'nb'):
             return (f'fra {lo} for 60 minutter, billigere per minutt jo mer du kjøper '
                     f'({top_min} min for {top}), eller bare minuttene én episode trenger')
@@ -211,15 +342,15 @@ def pack_phrase(pack, lang='en'):
         return (f'from {lo} for 60 minutes, cheaper per minute the more you buy '
                 f'({top_min} min for {top}), or just the minutes one episode needs')
     if lang in ('no', 'nb'):
-        return f'{pack["price"]:g} dollar for {pack["minutes"]} minutter'
+        return f'{_amount(pack["price"], "nb")} dollar for {pack["minutes"]} minutter'
     if lang == 'es':
-        return f'{pack["price"]:g} dólares por {pack["minutes"]} minutos'
+        return f'{_amount(pack["price"], lang)} dólares por {pack["minutes"]} minutos'
     if lang == 'de':
-        return f'{pack["price"]:g} Dollar für {pack["minutes"]} Minuten'
+        return f'{_amount(pack["price"], "de")} Dollar für {pack["minutes"]} Minuten'
     if lang == 'pt':
-        return f'{pack["price"]:g} dólares por {pack["minutes"]} minutos'
+        return f'{_amount(pack["price"], lang)} dólares por {pack["minutes"]} minutos'
     if lang == 'fr':
-        return f'{pack["price"]:g} dollars pour {pack["minutes"]} minutes'
+        return f'{_amount(pack["price"], "fr")} dollars pour {pack["minutes"]} minutes'
     return f'${pack["price"]:g} for {pack["minutes"]} minutes'
 
 
@@ -1029,33 +1160,33 @@ UI = {
     'en': dict(how='How it works', faq='Questions', related='More ways to transcribe',
                ai='Use in ChatGPT & Claude', guides='Setup guides', rss_help='How to find an RSS feed',
                pricing='Pricing', shows='Popular podcasts',
-               note='Searching by podcast name works too.'),
+               note='Searching by podcast name works too.', example='What you get'),
     'nb': dict(how='Slik fungerer det', faq='Spørsmål og svar', related='Mer om Podskrift',
                ai='Bruk i ChatGPT og Claude', guides='Veiledninger', rss_help='Finn RSS-feeden',
                pricing='Priser', shows='Populære podkaster',
-               note='Du kan også søke etter navnet på podkasten.'),
+               note='Du kan også søke etter navnet på podkasten.', example='Dette får du'),
     'es': dict(how='Cómo funciona', faq='Preguntas', related='Más formas de transcribir',
                ai='Usar en ChatGPT y Claude', guides='Guías de configuración',
                rss_help='Cómo encontrar un feed RSS',
                pricing='Precios', shows='Podcasts populares',
-               note='También puedes buscar por el nombre del podcast.'),
+               note='También puedes buscar por el nombre del podcast.', example='Lo que recibes'),
     'de': dict(how='So funktioniert es', faq='Fragen', related='Weitere Wege zur Transkription',
                ai='In ChatGPT und Claude nutzen', guides='Einrichtungsanleitungen',
                rss_help='RSS-Feed finden',
                pricing='Preise', shows='Beliebte Podcasts',
-               note='Du kannst auch nach dem Podcastnamen suchen.'),
+               note='Du kannst auch nach dem Podcastnamen suchen.', example='Das bekommst du'),
     'pt': dict(how='Como funciona', faq='Perguntas frequentes',
                related='Outras formas de transcrever',
                ai='Usar no ChatGPT e no Claude', guides='Guias de configuração',
                rss_help='Como encontrar um feed RSS',
                pricing='Preços', shows='Podcasts populares',
-               note='Você também pode buscar pelo nome do podcast.'),
+               note='Você também pode buscar pelo nome do podcast.', example='O que você recebe'),
     'fr': dict(how='Comment ça marche', faq='Questions fréquentes',
                related='D’autres façons de transcrire',
                ai='Utiliser dans ChatGPT et Claude', guides='Guides de configuration',
                rss_help='Comment trouver un flux RSS',
                pricing='Tarifs', shows='Podcasts populaires',
-               note='Vous pouvez aussi chercher par le nom du podcast.'),
+               note='Vous pouvez aussi chercher par le nom du podcast.', example='Ce que vous obtenez'),
     'no': None,
 }
 UI['no'] = UI['nb']
