@@ -448,7 +448,16 @@
         while (actions.firstChild) actions.removeChild(actions.firstChild);
         show(el('resultOfferCard'), false);
 
-        if (d.can_finish_full && d.finish && d.finish.audio_url) {
+        if (d.full_transcript_url) {
+            // Finished in full since this preview: open that, never sell it again.
+            el('partialPreviewNote').textContent =
+                'This is the free preview. You already have the full transcript of this episode.';
+            var fullLink = document.createElement('a');
+            fullLink.href = d.full_transcript_url;
+            fullLink.className = 'btn btn-sm btn-primary';
+            fullLink.textContent = 'Open the full transcript';
+            actions.appendChild(fullLink);
+        } else if (d.can_finish_full && d.finish && d.finish.audio_url) {
             var finishBtn = document.createElement('button');
             finishBtn.type = 'button';
             finishBtn.className = 'btn btn-sm btn-primary';

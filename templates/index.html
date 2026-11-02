@@ -515,7 +515,18 @@
         resultsDiv.style.padding = '12px 0';
     }
 
-    function postBuyForm(source, neededMin, episodeTitle) {
+    /* GET-safe page to come back to after (or instead of) checkout: the
+       episode in its show's list when we know the feed, else this page. */
+    function buyReturnTo(fields) {
+        if (fields && fields.rss_url) {
+            var url = '/?feed=' + encodeURIComponent(fields.rss_url);
+            if (fields.audio_url) url += '&ep_audio=' + encodeURIComponent(fields.audio_url);
+            return url;
+        }
+        return window.location.pathname + window.location.search;
+    }
+
+    function postBuyForm(source, neededMin, episodeTitle, fields) {
         if (typeof window.openBuyModal === 'function') {
             var left = (Number(TRIAL_REMAINING_MIN) || 0) + (Number(PAID_REMAINING_MIN) || 0);
             window.openBuyModal({
@@ -523,7 +534,8 @@
                 left: TRIAL_REMAINING_MIN === null ? null : left,
                 title: episodeTitle || '',
                 source: source === 'home_error' ? 'buy_modal_episode' : (source || 'buy_modal_header'),
-                returnTo: window.location.pathname + window.location.search,
+                returnTo: buyReturnTo(fields),
+                fields: fields || null,
             });
             return;
         }
@@ -542,12 +554,17 @@
         var sid = '';
         try { if (window.posthog) sid = posthog.get_session_id() || ''; } catch (e) { sid = ''; }
         hidden('ph_sid', sid);
-        hidden('return_to', window.location.pathname + window.location.search);
+        hidden('return_to', buyReturnTo(fields));
+        if (fields) {
+            Object.keys(fields).forEach(function(k) {
+                if (fields[k] !== null && fields[k] !== undefined && fields[k] !== '') hidden(k, fields[k]);
+            });
+        }
         document.body.appendChild(form);
         if (form.requestSubmit) form.requestSubmit(); else form.submit();
     }
 
-    var lastEpisodeForBuy = { duration: null, title: '' };
+    var lastEpisodeForBuy = { duration: null, title: '', fields: null };
 
     function setError(text, actionUrl, actionLabel, buyAvailable, paywallReason, coverLine) {        clearResults();
         resultsDiv.style.color = 'var(--danger)';
@@ -580,7 +597,8 @@
                 if (typeof window.podskriftPaywallBuyClicked === 'function') {
                     window.podskriftPaywallBuyClicked('home_error', paywallReason || 'trial_exhausted');
                 }
-                postBuyForm('home_error', lastEpisodeForBuy.duration, lastEpisodeForBuy.title);
+                postBuyForm('home_error', lastEpisodeForBuy.duration, lastEpisodeForBuy.title,
+                            lastEpisodeForBuy.fields);
             });
             actions.appendChild(buyBtn);
             if (typeof window.podskriftPaywallShown === 'function') {
@@ -727,6 +745,7 @@
             lastEpisodeForBuy = {
                 duration: item.duration_min != null ? Number(item.duration_min) : null,
                 title: item.name || '',
+                fields: fields,
             };
             badge.textContent = 'Starting…';
             var body = new FormData();
