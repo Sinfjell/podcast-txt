@@ -78,6 +78,7 @@
             <input type="hidden" name="artwork" id="buyModalArtwork" value="">
             <input type="hidden" name="audio_url" id="buyModalAudioUrl" value="">
             <input type="hidden" name="language" id="buyModalLanguage" value="">
+            <div id="buyModalExtraFields" hidden></div>
             {% if volume_pricing_enabled %}
             <input type="hidden" name="minutes" id="buyModalMinutesInput" value="{{ volume_default_minutes }}">
             <input type="hidden" name="price_source" id="buyModalPriceSource" value="slider">
@@ -218,6 +219,32 @@
         setHidden('buyModalArtwork', opts.artwork);
         setHidden('buyModalAudioUrl', opts.audioUrl);
         setHidden('buyModalLanguage', opts.language);
+        /* opts.fields: the same episode fields the start request sent, so
+           /billing/checkout can stash the pick and /billing/success starts it.
+           Only episode fields; price, quantity and source stay ours. */
+        var extra = document.getElementById('buyModalExtraFields');
+        if (extra) {
+            while (extra.firstChild) extra.removeChild(extra.firstChild);
+            var form = document.getElementById('buyModalForm');
+            var EPISODE_FIELDS = ['audio_url', 'rss_url', 'episode_index', 'episode_title',
+                'podcast_name', 'artwork', 'published', 'duration_min', 'language',
+                'input_origin', 'spotify_url', 'apple_url', 'episode_link', 'show_link',
+                'website_url'];
+            var f = opts.fields || {};
+            EPISODE_FIELDS.forEach(function(name) {
+                if (f[name] == null || f[name] === '') return;
+                var existing = form ? form.querySelector('input[name="' + name + '"]') : null;
+                if (existing && existing.parentNode !== extra) {
+                    existing.value = String(f[name]);
+                    return;
+                }
+                var input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = name;
+                input.value = String(f[name]);
+                extra.appendChild(input);
+            });
+        }
 
         if (VOLUME && renderVolume(needed, left, epTitle)) {
             /* volume pricing rendered title, subline and the Buy button */
@@ -271,10 +298,17 @@
     document.querySelectorAll('[data-open-buy-modal]').forEach(function(el) {
         el.addEventListener('click', function(e) {
             e.preventDefault();
-            openBuyModal({
-                source: el.getAttribute('data-buy-source') || 'buy_modal_header',
-                returnTo: el.getAttribute('data-return-to') || undefined,
-            });
+            /* A page can say which episode is on screen (the episode list
+               does), so the header pill buys for it and returns to it. */
+            var ctx = null;
+            try {
+                if (typeof window.podskriftBuyContext === 'function') ctx = window.podskriftBuyContext();
+            } catch (err) { ctx = null; }
+            var opts = {};
+            if (ctx) Object.keys(ctx).forEach(function(k) { opts[k] = ctx[k]; });
+            opts.source = el.getAttribute('data-buy-source') || 'buy_modal_header';
+            opts.returnTo = el.getAttribute('data-return-to') || opts.returnTo || undefined;
+            openBuyModal(opts);
         });
     });
 })();

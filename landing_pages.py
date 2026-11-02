@@ -478,7 +478,7 @@ def _common_en(trial, pack, lang_count):
          'with timestamps, plus a reading view in the browser. Transcripts are '
          'private to your account unless you create a share link.'),
         ('Which languages work?',
-         f'{lang_count} languages, transcribed with OpenAI Whisper. Auto-detect is '
+         f'{lang_count} languages, transcribed with modern speech recognition. Auto-detect is '
          'the default; choosing the language yourself helps on short or accented audio.'),
     ]
 
@@ -505,7 +505,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
             h1='Podcast transcript generator',
             lede=('Turn any public podcast episode into text you can search, quote and '
                   'paste into ChatGPT or Claude. Paste a link or search by show name; '
-                  'Podskrift fetches the audio and runs OpenAI Whisper.'),
+                  'Podskrift fetches the audio and transcribes it with modern speech recognition.'),
             placeholder='Paste a Spotify, Apple or RSS link',
             input_label='Podcast or episode link',
             button=start,
@@ -519,7 +519,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
             ],
             faq=[
                 ('Is this an AI transcript generator?',
-                 'Yes — OpenAI Whisper turns the audio into text. You do not need to '
+                 'Yes — AI speech recognition turns the audio into text. You do not need to '
                  'upload a file; Podskrift downloads the episode from the show’s public feed.'),
                 ('Do I need to upload the audio?',
                  'No. If you only have a local file, host it somewhere with a direct URL '
@@ -660,7 +660,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
                  'No. Podskrift downloads the episode from the podcast’s public feed. If you '
                  'only have a file, host it somewhere and paste the direct audio URL.'),
                 ('How accurate is it?',
-                 'It uses OpenAI Whisper, which is good on clear speech. Crosstalk, heavy '
+                 'It uses modern AI speech recognition, which is good on clear speech. Crosstalk, heavy '
                  'accents and music beds reduce accuracy, and there is no speaker labelling yet.'),
                 ('How long does it take?',
                  'Usually a few minutes for an hour of audio. You can close the page; the job keeps going.'),

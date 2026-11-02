@@ -17,6 +17,15 @@
         {% endif %}
     </p>
     {% if pending_episode and pending_episode.title %}
+    <p class="form-hint billing-success-why">
+        {% if pending_blocker == 'short' and pending_minutes %}
+        “{{ pending_episode.title[:80] }}” needs about {{ pending_minutes }} min and your balance is {{ balance_minutes }} min, so it did not start on its own.
+        {% elif pending_blocker == 'unknown_length' %}
+        We could not tell how long “{{ pending_episode.title[:80] }}” is, so it did not start on its own. Press Start when you are ready.
+        {% else %}
+        “{{ pending_episode.title[:80] }}” did not start on its own. Press Start when you are ready.
+        {% endif %}
+    </p>
     <form method="POST" action="{{ url_for('resume_transcription') }}" style="margin-bottom: 12px;">
         <button type="submit" class="btn btn-primary btn-lg" style="width: 100%; justify-content: center;">
             Start transcript: {{ pending_episode.title[:80] }}{% if pending_episode.title|length > 80 %}…{% endif %}

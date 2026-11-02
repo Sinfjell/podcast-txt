@@ -671,7 +671,7 @@ def _tool_defs() -> list[dict]:
                     },
                     'language': {
                         'type': 'string',
-                        'description': 'Optional Whisper language code (e.g. no, en).',
+                        'description': 'Optional spoken-language code (e.g. no, en).',
                     },
                     'title': {
                         'type': 'string',

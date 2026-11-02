@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Podskrift{% endblock %}</title>
     {% if structured_data %}<script type="application/ld+json">{{ structured_data | safe }}</script>{% endif %}
-    <meta name="description" content="{% block meta_description %}Transcribe any podcast episode to text with OpenAI Whisper, in {{ language_count }} languages. Search by podcast or episode name, pick the episode, get .txt and .srt.{% endblock %}">
+    <meta name="description" content="{% block meta_description %}Transcribe any podcast episode to text with modern speech recognition, in {{ language_count }} languages. Search by podcast or episode name, pick the episode, get .txt and .srt.{% endblock %}">
     {% block canonical_link %}<link rel="canonical" href="{% block canonical_url %}{% if public_base_url %}{{ public_base_url }}{{ request.path }}{% else %}{{ request.base_url }}{% endif %}{% endblock %}">{% endblock %}
     <meta name="color-scheme" content="light dark">
     <meta name="theme-color" content="{{ theme_color }}" media="(prefers-color-scheme: light)">
@@ -17,7 +17,7 @@
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="Podskrift">
     <meta property="og:title" content="{% block og_title %}Podskrift — podcast to text{% endblock %}">
-    <meta property="og:description" content="{% block og_description %}Transcribe podcast episodes to text with OpenAI Whisper, in {{ language_count }} languages.{% endblock %}">
+    <meta property="og:description" content="{% block og_description %}Transcribe podcast episodes to text with modern speech recognition, in {{ language_count }} languages.{% endblock %}">
     <meta property="og:url" content="{% block og_url %}{% if public_base_url %}{{ public_base_url }}{{ request.path }}{% else %}{{ request.base_url }}{% endif %}{% endblock %}">
     {% block og_image_meta %}
     <meta property="og:image" content="{{ public_base_url or request.url_root.rstrip('/') }}{{ asset_url('og-image.png') }}">
@@ -30,7 +30,7 @@
     <meta property="og:locale:alternate" content="nb_NO">
     <meta name="twitter:card" content="{% block twitter_card %}summary_large_image{% endblock %}">
     <meta name="twitter:title" content="{% block twitter_title %}Podskrift — podcast to text{% endblock %}">
-    <meta name="twitter:description" content="{% block twitter_description %}Transcribe podcast episodes to text with OpenAI Whisper, in {{ language_count }} languages.{% endblock %}">
+    <meta name="twitter:description" content="{% block twitter_description %}Transcribe podcast episodes to text with modern speech recognition, in {{ language_count }} languages.{% endblock %}">
     <link rel="icon" type="image/svg+xml" href="{{ asset_url('favicon.svg') }}">
     <link rel="icon" href="/favicon.ico" sizes="32x32">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png">
