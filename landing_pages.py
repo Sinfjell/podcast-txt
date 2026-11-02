@@ -93,6 +93,9 @@ LANG_LABELS_EN = {
     'fr': 'French',
 }
 
+#: Last copy review of /spotify-podcast-transcript (ISO date, Europe/Oslo).
+SPOTIFY_PAGE_UPDATED = '2026-11-02'
+
 TITLE_SUFFIX = ' — Podskrift'
 TITLE_MAX = 60
 META_MAX = 160
@@ -567,7 +570,50 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
             button=start,
             will_work=('Works when the show also has a public RSS feed — most do. '
                        'Spotify Originals, exclusives and video-only shows don’t.'),
-            cta_note=('You create a free account after you pick the episode.'),
+            cta_note=('You see the episode and its price before you pay anything. '
+                      'You create a free account after you pick the episode.'),
+            # Bump when the page copy is reviewed; shown on the page and as
+            # dateModified in the JSON-LD.
+            updated=SPOTIFY_PAGE_UPDATED,
+            platform_steps_title='How to copy a Spotify episode link',
+            platform_steps=[
+                ('iPhone and iPad', [
+                    'Open the episode in the Spotify app (the episode page, not the show page).',
+                    'Tap ⋯ (More), then Share.',
+                    'Tap Copy link.',
+                ]),
+                ('Android', [
+                    'Open the episode in the Spotify app.',
+                    'Tap ⋮ or ⋯ (More), then Share.',
+                    'Tap Copy link.',
+                ]),
+                ('Desktop app and web player (open.spotify.com)', [
+                    'Open the episode, or find it in the show’s episode list.',
+                    'Click ⋯ (More options), then Share.',
+                    'Click Copy Episode Link. It starts with open.spotify.com/episode/.',
+                ]),
+            ],
+            platform_steps_note=('Menu names follow Spotify’s own help pages; they can move '
+                                 'between app versions. A show link works too: you pick the '
+                                 'episode from the list.'),
+            troubleshoot_title='When a Spotify link doesn’t work',
+            troubleshoot_head=('What you see', 'Why', 'What to do'),
+            troubleshoot=[
+                ('A Spotify exclusive or Original',
+                 'The show has no public RSS feed, so there is no audio Podskrift can fetch.',
+                 'Search the show name here or check Apple Podcasts. If nothing turns up, '
+                 'it can’t be transcribed.'),
+                ('A subscriber-only or paid episode',
+                 'The audio sits behind a subscription, not in the public feed.',
+                 'Not possible. Free episodes of the same show usually work.'),
+                ('A video-only episode',
+                 'There is no audio version in the show’s public feed.',
+                 'It works only if the show also publishes the episode as audio.'),
+                ('A short link (spotify.link/…)',
+                 'Short share links are not read yet.',
+                 'Open the short link in your browser, copy the open.spotify.com/episode/… '
+                 'address from the address bar, and paste that.'),
+            ],
             example_label='Example format',
             example_txt=example_txt,
             example_srt=example_srt,

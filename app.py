@@ -12869,6 +12869,11 @@ def _render_landing(endpoint):
     if not landing_pages_mod.page_is_public(endpoint):
         abort(404)
     page = landing_page_data(endpoint)
+    if page.get('updated'):
+        updated = date.fromisoformat(page['updated'])
+        month = ('January', 'February', 'March', 'April', 'May', 'June', 'July',
+                 'August', 'September', 'October', 'November', 'December')[updated.month - 1]
+        page = dict(page, updated_label=f'{updated.day} {month} {updated.year}')
     page_url = public_url(endpoint)
     trial = advertised_trial_minutes()
     pack = _landing_pack()
@@ -12902,7 +12907,8 @@ def _render_landing(endpoint):
         structured_data=_faq_page_structured_data(
             page_url, page['title'], page['meta'], page['faq'],
             howto={'name': page['h1'], 'description': page['lede'],
-                   'steps': [{'name': n, 'text': t} for n, t in page['steps']]}),
+                   'steps': [{'name': n, 'text': t} for n, t in page['steps']]},
+            date_modified=page.get('updated')),
     )
 
 
@@ -13369,7 +13375,7 @@ def guide_ai_faq_entries():
 
 
 def _faq_page_structured_data(page_url, page_name, page_description, faq_pairs,
-                              howto=None, prompt_groups=None):
+                              howto=None, prompt_groups=None, date_modified=None):
     """WebPage + FAQPage JSON-LD (optional HowTo / prompt ItemList).
 
     FAQ answers must match the visible copy. Optional ``prompt_groups``
@@ -13389,6 +13395,7 @@ def _faq_page_structured_data(page_url, page_name, page_description, faq_pairs,
                 'name': 'Podskrift',
                 'url': public_url('index'),
             },
+            **({'dateModified': date_modified} if date_modified else {}),
         },
         {
             '@type': 'FAQPage',

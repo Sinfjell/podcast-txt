@@ -1425,3 +1425,4 @@ body:has(.ds-signal) { overflow-x: clip; }
     .econ-kpi__value { font-size: 1.5rem; }
     .econ-bar { grid-template-columns: 90px 1fr auto; }
 }
+.ds-landing__updated { margin: calc(-1 * var(--space-3)) 0 var(--space-6); }
