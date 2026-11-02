@@ -3828,7 +3828,7 @@ def test_llms_txt_states_what_the_tool_is_for(trial_on):
     body = resp.data.decode()
     assert body.startswith('# Podskrift')
     assert '>' in body.split('\n')[2], 'no one-line summary blockquote'
-    for claim in ('Norwegian', 'Danish', 'Swedish', 'German', 'Whisper', '.srt'):
+    for claim in ('Norwegian', 'Danish', 'Swedish', 'German', 'speech recognition', '.srt'):
         assert claim in body, f'{claim} missing from llms.txt'
     # The trial length is generated, not typed, so it cannot drift from the code.
     # Asserting the right number is present is not enough -- the FAQ is embedded
@@ -6625,21 +6625,21 @@ def test_public_api_docs_seo_metadata_and_intro(trial_on):
     assert '<title>Podcast Transcript API — Get Transcript via HTTP | Podskrift</title>' in body
     assert (
         'content="Podcast transcription API for agents and scripts. '
-        'Resolve by show and date, start Whisper, fetch the transcript via HTTP. '
+        'Resolve by show and date, start transcription, fetch the transcript via HTTP. '
         f'Free {grant}-minute trial. API key in Settings."'
     ) in body
     assert 'content="Podcast Transcript API — Podskrift"' in body
     assert (
-        'content="HTTP endpoints to resolve a podcast episode, transcribe with Whisper, '
+        'content="HTTP endpoints to resolve a podcast episode, transcribe it, '
         'and get the transcript. Same free trial as the web UI."'
     ) in body
     assert '<h1>Podcast transcript API</h1>' in body
     intro = (
         'Podskrift’s podcast transcription API lets agents and scripts get a transcript '
         'over HTTP — the same path as the web UI. Resolve an episode by publisher/show '
-        'and date (or URL), start Whisper, poll until ready, then fetch the plain-text '
-        f'transcript. New accounts get {grant} free trial minutes on our OpenAI key; after that, '
-        'add your own. Create a <code>psk_…</code> key in Settings.'
+        'and date (or URL), start transcription, poll until ready, then fetch the plain-text '
+        f'transcript. New accounts get {grant} free trial minutes; after that, '
+        'buy minutes or add your own OpenAI key. Create a <code>psk_…</code> key in Settings.'
     )
     assert intro in body
     # Endpoint H2s stay intact and ordered (TSK-20504).
@@ -21953,3 +21953,20 @@ def test_trial_reuse_window_defaults_to_30_days(monkeypatch):
     assert TA.reuse_window() == timedelta(days=7)
     monkeypatch.setenv('TRIAL_REUSE_WINDOW_DAYS', 'junk')
     assert TA.reuse_window() == timedelta(days=30)
+
+
+def test_public_copy_does_not_claim_a_specific_stt_vendor(trial_on):
+    """Trial and paid minutes run on several speech-to-text providers, so public
+    pages must not say "powered by OpenAI Whisper" or "on our OpenAI key".
+    BYOK copy (the user's own OpenAI key) is fine and stays."""
+    client = A.app.test_client()
+    paths = ['/', '/pricing', '/spotify-podcast-transcript', '/podcast-transcript-generator',
+             '/llms.txt', '/llms-full.txt', '/docs/api', '/rss-help']
+    for path in paths:
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        body = resp.get_data(as_text=True)
+        for claim in ('powered by OpenAI Whisper', 'with OpenAI Whisper', 'using OpenAI Whisper',
+                      'runs OpenAI Whisper', 'our OpenAI key', 'uses OpenAI Whisper',
+                      'start Whisper', 'Whisper API'):
+            assert claim not in body, f'{path} still says {claim!r}'

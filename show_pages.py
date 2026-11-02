@@ -461,7 +461,7 @@ def show_faq_entries(show_name: str, *, trial_minutes: int, credit_pack_price: s
     """Show-page FAQ — answers visible on the page (and mirrored in JSON-LD)."""
     free = (
         f'New Podskrift accounts get {trial_minutes} free minutes of transcription '
-        f'on our OpenAI key. After that, buy a one-time pack '
+        f'on our account. After that, buy a one-time pack '
         f'(${credit_pack_price} for {credit_pack_minutes} minutes) or add your own '
         f'OpenAI key. There is no subscription.'
         if trial_minutes > 0 else
@@ -490,7 +490,7 @@ def show_faq_entries(show_name: str, *, trial_minutes: int, credit_pack_price: s
         ),
         (
             'Which languages are supported?',
-            f'Podskrift uses OpenAI Whisper and supports {language_count} languages '
+            f'Podskrift uses modern speech recognition and supports {language_count} languages '
             f'in the language picker, including English, Norwegian, German, Spanish, '
             f'and many more. You can name the language or leave auto-detect on.',
         ),

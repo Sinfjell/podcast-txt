@@ -2,7 +2,7 @@
 {% from "components/macros.html" import snippet, button, proof_list, announce, command_bar, inline_select, works_with, signal_wave, transcript_window, notice %}
 
 {% block title %}Spotify & podcast transcripts — Podskrift{% endblock %}
-{% block meta_description %}Paste a Spotify episode link or search any podcast, and get the full transcript as text and .srt. {{ language_count }} languages, powered by OpenAI Whisper.{% if trial_minutes %} First {{ trial_minutes }} minutes free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.{% endif %}{% endblock %}
+{% block meta_description %}Paste a Spotify episode link or search any podcast, and get the full transcript as text and .srt. {{ language_count }} languages, modern speech recognition.{% if trial_minutes %} First {{ trial_minutes }} minutes free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.{% endif %}{% endblock %}
 {% block og_title %}Spotify & podcast transcripts — Podskrift{% endblock %}
 {% block og_description %}Paste a Spotify link or search any podcast — get the full transcript.{% if trial_minutes %} First {{ trial_minutes }} minutes free.{% endif %}{% endblock %}
 {% block container_class %}container-wide{% endblock %}
@@ -199,7 +199,7 @@
                Logged-in users have their own grant and a balance banner above. #}
             {% if not app_hero %}
             {% set assure = ['No card, no OpenAI key needed' if trial_minutes else 'Text and .srt subtitles',
-                             language_count ~ ' languages, powered by OpenAI Whisper',
+                             language_count ~ ' languages, modern speech recognition',
                              'Keeps running if you close the page'] %}
             {{ proof_list(assure, class='ds-proof--inline', attrs='aria-label="Why Podskrift"') }}
             {% endif %}

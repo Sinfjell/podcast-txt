@@ -770,12 +770,12 @@
             return ['Downloading audio', total];
         }
         if (phase === 'splitting') {
-            return ['Preparing audio', 'Splitting into chunks small enough for the Whisper API.'];
+            return ['Preparing audio', 'Splitting into chunks for transcription.'];
         }
         if (String(phase).indexOf('transcribing') !== -1) {
             var detail = d.chunk_total > 1
                 ? 'Chunk ' + ((d.chunk_index || 0) + 1) + ' of ' + d.chunk_total
-                : 'Sending audio to Whisper — this is the slow part.';
+                : 'Transcribing the audio — this is the slow part.';
             return ['Transcribing', detail];
         }
         return ['Working', ''];
