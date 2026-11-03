@@ -55,5 +55,9 @@ Thumbs.db
 .playwright-mcp/
 chatgpt-shots/
 
+# verify-podskrift evidence + local logs (secrets never belong here either)
+.verify/
+.verify-home-test/
+
 # Local DB backups
 data/backups/

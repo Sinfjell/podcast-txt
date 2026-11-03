@@ -5,6 +5,9 @@ Hetzner/Plesk under systemd,
 `gunicorn -c gunicorn.conf.py --bind 127.0.0.1:5002 app:app`
 (workers 2, threads 4, timeout 300, graceful_timeout 120).
 
+**Verifisering:** bruk [`.claude/skills/verify-podskrift/`](.claude/skills/verify-podskrift/)
+(`bin/verify-podskrift`). Lokal SQLite + stub STT; aldri prod-DB, SSH eller deploy.
+
 ## Invariants
 
 Changes touching any of these need `/code-review` **and** `review-against-plan`
