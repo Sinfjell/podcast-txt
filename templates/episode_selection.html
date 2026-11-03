@@ -369,9 +369,20 @@ document.addEventListener('DOMContentLoaded', function() {
         if (form) {
             var rt = document.getElementById('buyFormReturnTo');
             if (rt) rt.value = returnToForCheckout();
-            var ph = form.querySelector('input[name="ph_sid"]');
-            if (ph) {
-                try { if (window.posthog) ph.value = posthog.get_session_id() || ''; } catch (e) { ph.value = ''; }
+            if (typeof window.podskriftAppendPosthogIds === 'function') {
+                // Ensures ph_sid/ph_did exist on the fallback checkout form.
+                var ids = window.podskriftPosthogBrowserIds
+                    ? window.podskriftPosthogBrowserIds() : {sid: '', did: ''};
+                [['ph_sid', ids.sid], ['ph_did', ids.did]].forEach(function(pair) {
+                    var el = form.querySelector('input[name="' + pair[0] + '"]');
+                    if (!el) {
+                        el = document.createElement('input');
+                        el.type = 'hidden';
+                        el.name = pair[0];
+                        form.appendChild(el);
+                    }
+                    el.value = pair[1] || '';
+                });
             }
             if (form.requestSubmit) form.requestSubmit(); else form.submit();
         }
@@ -718,7 +729,11 @@ document.addEventListener('DOMContentLoaded', function() {
         stickyBtn.textContent = 'Starting...';
         clearStartError();
 
-        fetch('/start_transcription', { method: 'POST', body: new FormData(this) })
+        var startBody = new FormData(this);
+        if (typeof window.podskriftAppendPosthogIds === 'function') {
+            window.podskriftAppendPosthogIds(startBody);
+        }
+        fetch('/start_transcription', { method: 'POST', body: startBody })
             .then(function(r) { return r.json().then(function(data) {
                 return { status: r.status, data: data };
             }); })

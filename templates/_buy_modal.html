@@ -70,6 +70,7 @@
             <input type="hidden" name="source" id="buyModalSource" value="buy_modal_header">
             <input type="hidden" name="return_to" id="buyModalReturnTo" value="">
             <input type="hidden" name="ph_sid" id="buyModalPhSid" value="">
+            <input type="hidden" name="ph_did" id="buyModalPhDid" value="">
             <input type="hidden" name="rss_url" id="buyModalRssUrl" value="">
             <input type="hidden" name="episode_index" id="buyModalEpisodeIndex" value="">
             <input type="hidden" name="episode_title" id="buyModalEpisodeTitle" value="">
@@ -203,8 +204,13 @@
         sourceEl.value = source;
         returnEl.value = returnTo;
         try {
+            var ids = (typeof window.podskriftPosthogBrowserIds === 'function')
+                ? window.podskriftPosthogBrowserIds()
+                : {sid: '', did: ''};
             var phEl = document.getElementById('buyModalPhSid');
-            if (phEl && window.posthog) phEl.value = posthog.get_session_id() || '';
+            if (phEl) phEl.value = ids.sid || '';
+            var phDid = document.getElementById('buyModalPhDid');
+            if (phDid) phDid.value = ids.did || '';
         } catch (e) { /* ignore */ }
 
         function setHidden(id, val) {

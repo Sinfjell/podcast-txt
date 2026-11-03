@@ -14,10 +14,12 @@ Accept. Decline keeps capturing off. See static/cookie-consent.js and
 templates/base.html.
 
 Server-side capture() never reads browser cookies. It keys events on the
-authenticated internal user id. Optional $session_id is only attached when
-checkout stamps ph_sid — and app.py ignores ph_sid unless the consent cookie
-is 'accepted'. Stripe webhook metadata therefore cannot invent a cookie id
-without a prior consented checkout.
+authenticated internal user id. Optional $session_id is attached when the
+client stamps consent-gated ph_sid (forms/fetch) — app.py ignores ph_sid
+unless the consent cookie is 'accepted'. Browser distinct_id (ph_did) is
+aliased onto the user id so server events join the same person. Stripe
+webhook metadata therefore cannot invent a cookie id without a prior
+consented checkout.
 """
 
 import logging
@@ -132,6 +134,29 @@ def capture(event, distinct_id, properties=None, uuid=None):
         client.capture(event, **kwargs)
     except Exception:  # noqa: BLE001 - analytics must never break a request
         logging.getLogger(__name__).exception('posthog capture failed for %s', event)
+
+
+def alias(previous_id, distinct_id):
+    """Link a browser anonymous distinct_id to the internal user id.
+
+    Never raises. No-op when disabled, when either id is missing, or when
+    they already match. Call only with consent-gated browser ids from the
+    client (see app._consented_posthog_distinct_id).
+    """
+    if not previous_id or not distinct_id:
+        return
+    prev = str(previous_id).strip()
+    dest = str(distinct_id).strip()
+    if not prev or not dest or prev == dest:
+        return
+    try:
+        client = get_client()
+        if client is None:
+            return
+        client.alias(previous_id=prev, distinct_id=dest)
+    except Exception:  # noqa: BLE001 - analytics must never break a request
+        logging.getLogger(__name__).exception(
+            'posthog alias failed for %s → %s', prev, dest)
 
 
 def openai_error_code(exc):

@@ -551,9 +551,10 @@
         }
         hidden('csrf_token', CSRF_TOKEN);
         hidden('source', source || 'home_error');
-        var sid = '';
-        try { if (window.posthog) sid = posthog.get_session_id() || ''; } catch (e) { sid = ''; }
-        hidden('ph_sid', sid);
+        var ids = (typeof window.podskriftPosthogBrowserIds === 'function')
+            ? window.podskriftPosthogBrowserIds() : {sid: '', did: ''};
+        hidden('ph_sid', ids.sid || '');
+        hidden('ph_did', ids.did || '');
         hidden('return_to', buyReturnTo(fields));
         if (fields) {
             Object.keys(fields).forEach(function(k) {
@@ -750,6 +751,9 @@
             badge.textContent = 'Starting…';
             var body = new FormData();
             Object.keys(fields).forEach(function(k) { body.append(k, fields[k]); });
+            if (typeof window.podskriftAppendPosthogIds === 'function') {
+                window.podskriftAppendPosthogIds(body);
+            }
 
             fetch(START_URL, { method: 'POST', body: body })
                 .then(function(r) { return r.json().then(function(data) {
