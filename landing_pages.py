@@ -357,26 +357,59 @@ def pack_phrase(pack, lang='en'):
     return f'${pack["price"]:g} for {pack["minutes"]} minutes'
 
 
-def _start_button(trial, lang='en'):
+def _start_button(trial, lang='en', free_trial=False):
+    offer = bool(trial) or free_trial
     if lang in ('no', 'nb'):
-        return 'Start gratis transkripsjon' if trial else 'Start transkripsjon'
+        return 'Start gratis transkripsjon' if offer else 'Start transkripsjon'
     if lang == 'es':
-        return 'Empezar transcripción gratis' if trial else 'Empezar transcripción'
+        return 'Empezar transcripción gratis' if offer else 'Empezar transcripción'
     if lang == 'de':
-        return 'Kostenlos transkribieren' if trial else 'Transkription starten'
+        return 'Kostenlos transkribieren' if offer else 'Transkription starten'
     if lang == 'pt':
-        return 'Começar transcrição grátis' if trial else 'Começar transcrição'
+        return 'Começar transcrição grátis' if offer else 'Começar transcrição'
     if lang == 'fr':
-        return ('Commencer la transcription gratuite' if trial
+        return ('Commencer la transcription gratuite' if offer
                 else 'Commencer la transcription')
-    return 'Start free transcript' if trial else 'Start transcript'
+    return 'Start free transcript' if offer else 'Start transcript'
 
 
-def _price_en(trial, pack):
+def _free_bit(trial, free_trial, lang='en'):
+    """Short free-offer phrase for meta/title — never invents a minute count."""
+    if isinstance(trial, int) and trial > 0:
+        return {
+            'en': f'{trial} minutes free',
+            'nb': f'{trial} gratisminutter',
+            'es': f'{trial} minutos gratis',
+            'de': f'{trial} Minuten gratis',
+            'pt': f'{trial} minutos grátis',
+            'fr': f'{trial} minutes gratuites',
+        }.get(lang, f'{trial} minutes free')
+    if free_trial or trial:
+        return {
+            'en': 'free to start',
+            'nb': 'gratis å starte',
+            'es': 'gratis para empezar',
+            'de': 'kostenlos starten',
+            'pt': 'grátis para começar',
+            'fr': 'gratuit pour commencer',
+        }.get(lang, 'free to start')
+    return {
+        'en': 'a free account',
+        'nb': 'gratis konto',
+        'es': 'cuenta gratuita',
+        'de': 'Kostenloses Konto',
+        'pt': 'conta gratuita',
+        'fr': 'compte gratuit',
+    }.get(lang, 'a free account')
+
+
+def _price_en(trial, pack, free_trial=False):
     """One honest sentence on cost, in English."""
     parts = []
-    if trial:
+    if isinstance(trial, int) and trial > 0:
         parts.append(f'New accounts get {trial} minutes free, no card needed.')
+    elif free_trial:
+        parts.append('Start free, no card needed.')
     if pack:
         parts.append(f'After that, minutes are a one-time purchase: '
                      f'{pack_phrase(pack)}. No subscription.')
@@ -385,7 +418,7 @@ def _price_en(trial, pack):
     return ' '.join(parts)
 
 
-def _spotify_whole_episode_cost(trial, pack, episode_prices):
+def _spotify_whole_episode_cost(trial, pack, episode_prices, free_trial=False):
     """Spotify FAQ: live per-episode prices, or pack_phrase when volume is off.
 
     episode_prices maps episode length (minutes) → price string from
@@ -397,7 +430,7 @@ def _spotify_whole_episode_cost(trial, pack, episode_prices):
             price = episode_prices.get(ep)
             if not price:
                 continue
-            if trial:
+            if isinstance(trial, int) and trial > 0:
                 bits.append(f'{ep} min: first {trial} min free, the rest {price}')
             else:
                 bits.append(f'{ep} min: {price}')
@@ -409,13 +442,16 @@ def _spotify_whole_episode_cost(trial, pack, episode_prices):
         return ('What does a whole episode cost?',
                 f'Minutes are a one-time purchase: {pack_phrase(pack)}. '
                 'One-time, VAT included, minutes never expire, no subscription.')
-    return ('What does a whole episode cost?', _price_en(trial, pack))
+    return ('What does a whole episode cost?',
+            _price_en(trial, pack, free_trial=free_trial))
 
 
-def _price_no(trial, pack):
+def _price_no(trial, pack, free_trial=False):
     parts = []
-    if trial:
+    if isinstance(trial, int) and trial > 0:
         parts.append(f'Nye kontoer får {trial} gratisminutter, uten kort.')
+    elif free_trial:
+        parts.append('Start gratis, uten kort.')
     if pack:
         parts.append(f'Deretter kjøper du minutter én gang: '
                      f'{pack_phrase(pack, "nb")}. Uten abonnement.')
@@ -424,10 +460,12 @@ def _price_no(trial, pack):
     return ' '.join(parts)
 
 
-def _price_es(trial, pack):
+def _price_es(trial, pack, free_trial=False):
     parts = []
-    if trial:
+    if isinstance(trial, int) and trial > 0:
         parts.append(f'Las cuentas nuevas reciben {trial} minutos gratis, sin tarjeta.')
+    elif free_trial:
+        parts.append('Empieza gratis, sin tarjeta.')
     if pack:
         parts.append(f'Después compras minutos con un pago único: '
                      f'{pack_phrase(pack, "es")}. Sin suscripción.')
@@ -436,10 +474,12 @@ def _price_es(trial, pack):
     return ' '.join(parts)
 
 
-def _price_de(trial, pack):
+def _price_de(trial, pack, free_trial=False):
     parts = []
-    if trial:
+    if isinstance(trial, int) and trial > 0:
         parts.append(f'Neue Konten erhalten {trial} Minuten gratis, ohne Kreditkarte.')
+    elif free_trial:
+        parts.append('Kostenlos starten, ohne Kreditkarte.')
     if pack:
         parts.append(f'Danach kaufst du Minuten per Einmalzahlung: '
                      f'{pack_phrase(pack, "de")}. Ohne Abo.')
@@ -448,10 +488,12 @@ def _price_de(trial, pack):
     return ' '.join(parts)
 
 
-def _price_pt(trial, pack):
+def _price_pt(trial, pack, free_trial=False):
     parts = []
-    if trial:
+    if isinstance(trial, int) and trial > 0:
         parts.append(f'Novas contas ganham {trial} minutos grátis, sem cartão.')
+    elif free_trial:
+        parts.append('Comece grátis, sem cartão.')
     if pack:
         parts.append(f'Depois você compra minutos com um pagamento único: '
                      f'{pack_phrase(pack, "pt")}. Sem assinatura.')
@@ -460,11 +502,13 @@ def _price_pt(trial, pack):
     return ' '.join(parts)
 
 
-def _price_fr(trial, pack):
+def _price_fr(trial, pack, free_trial=False):
     parts = []
-    if trial:
+    if isinstance(trial, int) and trial > 0:
         parts.append(f'Les nouveaux comptes reçoivent {trial} minutes gratuites, '
                      'sans carte.')
+    elif free_trial:
+        parts.append('Commencez gratuitement, sans carte.')
     if pack:
         parts.append(f'Ensuite vous achetez des minutes en un seul paiement : '
                      f'{pack_phrase(pack, "fr")}. Sans abonnement.')
@@ -473,9 +517,9 @@ def _price_fr(trial, pack):
     return ' '.join(parts)
 
 
-def _common_en(trial, pack, lang_count):
+def _common_en(trial, pack, lang_count, free_trial=False):
     return [
-        ('What does it cost?', _price_en(trial, pack)),
+        ('What does it cost?', _price_en(trial, pack, free_trial=free_trial)),
         ('What do I get back?',
          'The full transcript as plain text (.txt) and as SubRip subtitles (.srt) '
          'with timestamps, plus a reading view in the browser. Transcripts are '
@@ -486,17 +530,21 @@ def _common_en(trial, pack, lang_count):
     ]
 
 
-def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
+def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
+          free_trial=False):
     """Return the page dict for one landing endpoint.
 
-    trial: advertised new-account free minutes, or None when the trial is off.
+    trial: advertised new-account free minutes, or None when the trial is off
+    or when TRIAL_AB hides the minute count.
+    free_trial: True when signup still grants free minutes but the count must
+    not be quoted (TRIAL_AB_ENABLED).
     pack: app._landing_pack() dict (volume or legacy) when checkout is on, else None.
     episode_prices: optional {90|120|180: price_str} from app.episode_offer for
         Spotify cost copy; omit or pass None when volume pricing is off.
     """
-    free_en = f'{trial} minutes free' if trial else 'a free account'
-    common = _common_en(trial, pack, lang_count)
-    start = _start_button(trial)
+    free_en = _free_bit(trial, free_trial, 'en')
+    common = _common_en(trial, pack, lang_count, free_trial=free_trial)
+    start = _start_button(trial, free_trial=free_trial)
     episode_prices = episode_prices or {}
 
     if endpoint == 'landing_generator':
@@ -536,10 +584,14 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
         )
 
     if endpoint == 'landing_spotify':
-        if trial:
+        if isinstance(trial, int) and trial > 0:
             spotify_meta = (f'Paste a Spotify episode link and get the transcript as .txt '
                             f'and .srt. Works when the show has a public RSS feed. '
                             f'{trial} minutes free.')
+        elif free_trial:
+            spotify_meta = ('Paste a Spotify episode link and get the transcript as .txt '
+                            'and .srt. Works when the show has a public RSS feed. '
+                            'Try it free, no card needed.')
         else:
             spotify_meta = ('Paste a Spotify episode link and get the transcript as .txt '
                             'and .srt. Works when the show has a public RSS feed.')
@@ -554,7 +606,8 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
             '00:12:31,200 --> 00:12:35,900\n'
             'Anyway — back to the story.'
         )
-        cost_faq = _spotify_whole_episode_cost(trial, pack, episode_prices)
+        cost_faq = _spotify_whole_episode_cost(
+            trial, pack, episode_prices, free_trial=free_trial)
         # Drop the generic "What does it cost?" — Spotify has the episode FAQ.
         common_rest = [qa for qa in common if qa[0] != 'What does it cost?']
         return dict(
@@ -753,12 +806,17 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
         )
 
     if endpoint == 'landing_free':
-        if trial:
+        if isinstance(trial, int) and trial > 0:
             free_answer = (f'New accounts get {trial} minutes of transcription free, no card '
                            'needed. A longer first episode still starts: you get the first '
                            f'{trial} minutes as a preview and can buy minutes to finish it.')
             h1 = f'Transcribe a podcast free: {trial} minutes on us'
             title = f'Transcribe a Podcast Free: {trial} Minutes, No Card'
+        elif free_trial:
+            free_answer = ('New accounts can start free, no card needed. Longer episodes still '
+                           'start as a free preview; buy minutes or add your own key to finish.')
+            h1 = 'Transcribe a podcast free — no card needed'
+            title = 'Transcribe a Podcast Free, No Card'
         else:
             free_answer = ('There is no free trial right now. You can still transcribe at cost '
                            'by adding your own OpenAI API key.')
@@ -774,7 +832,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
                   'at the end of an episode.'),
             placeholder='Paste a Spotify, Apple or RSS link',
             input_label='Podcast or episode link',
-            button='Try it free' if trial else 'Start transcript',
+            button='Try it free' if (trial or free_trial) else 'Start transcript',
             steps=[
                 ('Paste a link', 'Spotify, Apple Podcasts or RSS. Searching by name works too.'),
                 ('Create an account', 'Email and password. No card for the free minutes.'),
@@ -782,7 +840,8 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
             ],
             faq=[
                 ('Is it really free?', free_answer),
-                ('What happens when the free minutes run out?', _price_en(None, pack)),
+                ('What happens when the free minutes run out?',
+                 _price_en(None, pack, free_trial=False)),
                 ('Is there a subscription?',
                  'No. Minutes are a one-time purchase; nothing renews.'),
                 ('Are there free alternatives?',
@@ -831,9 +890,9 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
         )
 
     if endpoint == 'landing_no':
-        free_no = f'{trial} gratisminutter' if trial else 'gratis konto'
+        free_no = _free_bit(trial, free_trial, 'nb')
         faq = [
-            ('Hva koster det?', _price_no(trial, pack)),
+            ('Hva koster det?', _price_no(trial, pack, free_trial=free_trial)),
             ('Hvor godt fungerer det på norsk?',
              'Godt på tydelig tale. Sterke dialekter, folk som snakker i munnen på '
              'hverandre og musikk under praten gir flere feil. Velg «Norsk» som språk i '
@@ -860,7 +919,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
                   'trenger ikke finne og laste opp lydfilen selv.'),
             placeholder='Lim inn lenke fra Spotify, Apple eller RSS',
             input_label='Lenke til podkast eller episode',
-            button=_start_button(trial, 'nb'),
+            button=_start_button(trial, 'nb', free_trial=free_trial),
             steps=[
                 ('Kopier lenken', 'I Spotify eller Apple Podcasts: Del, deretter Kopier lenke.'),
                 ('Lim den inn', 'Velg episoden og gjerne «Norsk» som språk.'),
@@ -871,9 +930,9 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
 
     if endpoint == 'landing_es':
         # Neutral Spanish for Spain and Latin America; Spotify-first (≈89% of jobs).
-        free_es = f'{trial} minutos gratis' if trial else 'cuenta gratuita'
+        free_es = _free_bit(trial, free_trial, 'es')
         faq = [
-            ('¿Cuánto cuesta?', _price_es(trial, pack)),
+            ('¿Cuánto cuesta?', _price_es(trial, pack, free_trial=free_trial)),
             ('¿Funciona bien en español?',
              'Sí, cuando se habla con claridad, tanto en España como en Latinoamérica. Si el episodio '
              'mezcla español e inglés, hay acentos marcados o varias personas hablan a la vez, '
@@ -904,7 +963,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
                   'que puedes copiar y descargar.'),
             placeholder='Pega el enlace de Spotify o Apple Podcasts',
             input_label='Enlace de Spotify, Apple Podcasts o RSS',
-            button=_start_button(trial, 'es'),
+            button=_start_button(trial, 'es', free_trial=free_trial),
             steps=[
                 ('Copia el enlace',
                  'En Spotify o Apple Podcasts: «Compartir» y luego «Copiar enlace».'),
@@ -917,9 +976,9 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
         )
 
     if endpoint == 'landing_de':
-        free_de = f'{trial} Minuten gratis' if trial else 'Kostenloses Konto'
+        free_de = _free_bit(trial, free_trial, 'de')
         faq = [
-            ('Was kostet es?', _price_de(trial, pack)),
+            ('Was kostet es?', _price_de(trial, pack, free_trial=free_trial)),
             ('Wie gut funktioniert es auf Deutsch?',
              'Gut, wenn deutlich gesprochen wird. Starker Dialekt, Durcheinanderreden und '
              'Hintergrundmusik führen zu mehr Fehlern. Wähle „Deutsch“ statt der '
@@ -953,7 +1012,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
                   'Audio Text zum Kopieren und Herunterladen.'),
             placeholder='Spotify- oder Apple-Podcasts-Link einfügen',
             input_label='Spotify-, Apple-Podcasts- oder RSS-Link',
-            button=_start_button(trial, 'de'),
+            button=_start_button(trial, 'de', free_trial=free_trial),
             steps=[
                 ('Link kopieren',
                  'In Spotify oder Apple Podcasts: Teilen, dann Link kopieren.'),
@@ -968,7 +1027,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
     if endpoint == 'landing_summarize':
         # Auto-summary is gated by SUMMARY_ENABLED (production on). Facts match
         # summary.py + templates/transcription.html renderSummary.
-        free_bit = f'{trial} minutes free' if trial else 'a free account'
+        free_bit = _free_bit(trial, free_trial, 'en')
         return dict(
             lang='en',
             title='Summarize a Podcast Episode from a Link',
@@ -1001,7 +1060,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
                  'key points and up to a few short quotes. Copy or download .txt / .srt.'),
             ],
             faq=[
-                ('What does it cost?', _price_en(trial, pack)),
+                ('What does it cost?', _price_en(trial, pack, free_trial=free_trial)),
                 ('Does every show work?',
                  'Most do, when the show also has a public RSS feed. Spotify exclusives, '
                  'subscriber-only episodes and video-only shows have no public feed, so '
@@ -1035,9 +1094,9 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
 
     if endpoint == 'landing_pt':
         # Brazilian Portuguese, Spotify-first; hreflang "pt" (group pattern).
-        free_pt = f'{trial} minutos grátis' if trial else 'conta gratuita'
+        free_pt = _free_bit(trial, free_trial, 'pt')
         faq = [
-            ('Quanto custa?', _price_pt(trial, pack)),
+            ('Quanto custa?', _price_pt(trial, pack, free_trial=free_trial)),
             ('Funciona bem em português?',
              'Sim, quando a fala está clara — no Brasil e em Portugal. Se o episódio '
              'mistura português e inglês, tem sotaque bem marcado ou várias pessoas '
@@ -1069,7 +1128,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
                   'em texto que você pode copiar e baixar.'),
             placeholder='Cole o link do episódio do Spotify ou Apple Podcasts',
             input_label='Link do Spotify, Apple Podcasts ou RSS',
-            button=_start_button(trial, 'pt'),
+            button=_start_button(trial, 'pt', free_trial=free_trial),
             steps=[
                 ('Copie o link',
                  'No Spotify ou Apple Podcasts: toque em Compartilhar e depois em '
@@ -1086,7 +1145,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
         # Honest about the real flow: show/feed → episode list → one episode at
         # a time (episode_selection.html is single-select). No bulk button.
         # MCP list_episodes + get_transcript can chain several via /ai.
-        free_bit = f'{trial} minutes free' if trial else 'a free account'
+        free_bit = _free_bit(trial, free_trial, 'en')
         return dict(
             lang='en',
             title='Transcribe a Whole Podcast from Its Feed',
@@ -1122,7 +1181,8 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
                 ('What does it cost for a whole show?',
                  'Minutes are charged per episode length — a two-hour episode uses about '
                  'two hours of minutes. '
-                 + (_price_en(trial, pack) if (trial or pack) else
+                 + (_price_en(trial, pack, free_trial=free_trial)
+                    if (isinstance(trial, int) and trial > 0) or free_trial or pack else
                     'Buy minutes once; no subscription.')
                  + (' Minutes never expire.' if pack else '')),
                 ('Can ChatGPT or Claude fetch several episodes for me?',
@@ -1150,9 +1210,9 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
 
     if endpoint == 'landing_fr':
         # Native French (vous-form), Spotify-first; hreflang "fr".
-        free_fr = f'{trial} minutes gratuites' if trial else 'compte gratuit'
+        free_fr = _free_bit(trial, free_trial, 'fr')
         faq = [
-            ('Combien ça coûte ?', _price_fr(trial, pack)),
+            ('Combien ça coûte ?', _price_fr(trial, pack, free_trial=free_trial)),
             ('Faut-il choisir « Français » plutôt que la détection auto ?',
              'Oui, de préférence. La détection automatique marche souvent, mais '
              'choisir « Français » donne en général un meilleur résultat, surtout '
@@ -1187,7 +1247,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None):
                   'l’audio en texte que vous pouvez copier et télécharger.'),
             placeholder='Collez le lien de l’épisode Spotify ou Apple Podcasts',
             input_label='Lien Spotify, Apple Podcasts ou RSS',
-            button=_start_button(trial, 'fr'),
+            button=_start_button(trial, 'fr', free_trial=free_trial),
             steps=[
                 ('Copiez le lien',
                  'Dans Spotify ou Apple Podcasts : Partager, puis Copier le lien.'),

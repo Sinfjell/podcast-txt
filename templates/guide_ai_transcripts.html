@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Podcast Transcripts in ChatGPT and Claude | Podskrift{% endblock %}
-{% block meta_description %}Get podcast transcripts in ChatGPT and Claude: connect Podskrift at podskrift.com/mcp, ask for any episode and let the chat summarise it.{% if trial_minutes %} {{ trial_minutes }} free minutes.{% endif %}{% endblock %}
+{% block meta_description %}Get podcast transcripts in ChatGPT and Claude: connect Podskrift at podskrift.com/mcp, ask for any episode and let the chat summarise it.{% if trial_minutes %} {{ trial_minutes }} free minutes.{% elif free_trial_offered %} Start free, no card needed.{% endif %}{% endblock %}
 {% block og_title %}Podcast Transcripts in ChatGPT and Claude | Podskrift{% endblock %}
 {% block og_description %}Connect Podskrift to ChatGPT or Claude, ask for any episode by name, and let the chat summarise the transcript.{% endblock %}
 {% block canonical_url %}{% if public_base_url %}{{ public_base_url }}/guides/podcast-transcripts-in-chatgpt-and-claude{% else %}{{ request.base_url }}{% endif %}{% endblock %}
@@ -22,6 +22,8 @@
         Transcription uses your Podskrift minutes.
         {% if trial_minutes %}
         New accounts get {{ trial_minutes }} free minutes, and
+        {% elif free_trial_offered %}
+        New accounts can start free, and
         {% endif %}
         episodes you've already transcribed cost nothing to fetch again.
     </p>
@@ -122,6 +124,8 @@
         <tbody>
             {% if trial_minutes %}
             <tr><td>Free trial</td><td>{{ trial_minutes }} minutes on signup</td></tr>
+            {% elif free_trial_offered %}
+            <tr><td>Free trial</td><td>Start free, no card needed</td></tr>
             {% endif %}
             {% if stripe_configured %}
             <tr><td>Minute pack</td><td>${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} minutes, one-time</td></tr>

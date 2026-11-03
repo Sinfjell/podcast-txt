@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Podcast Transcript API — Get Transcript via HTTP | Podskrift{% endblock %}
-{% block meta_description %}Podcast transcription API for agents and scripts. Resolve by show and date, start transcription, fetch the transcript via HTTP.{% if trial_minutes %} Free {{ trial_minutes }}-minute trial.{% endif %} API key in Settings.{% endblock %}
+{% block meta_description %}Podcast transcription API for agents and scripts. Resolve by show and date, start transcription, fetch the transcript via HTTP.{% if trial_minutes %} Free {{ trial_minutes }}-minute trial.{% elif free_trial_offered %} Start free, no card needed.{% endif %} API key in Settings.{% endblock %}
 {% block og_title %}Podcast Transcript API — Podskrift{% endblock %}
 {% block og_description %}HTTP endpoints to resolve a podcast episode, transcribe it, and get the transcript. Same free trial as the web UI.{% endblock %}
 
@@ -63,6 +63,12 @@
     <p class="docs-callout">
         Same free trial as the web UI: <strong>{{ trial_minutes }} minutes</strong>
         of audio on signup. Create a key in
+        <a href="{{ url_for('settings') }}">Settings</a>, then call the endpoints below.
+    </p>
+    {% elif free_trial_offered %}
+    <p class="docs-callout">
+        Same free trial as the web UI: start free, no card needed.
+        Create a key in
         <a href="{{ url_for('settings') }}">Settings</a>, then call the endpoints below.
     </p>
     {% else %}

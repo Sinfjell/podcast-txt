@@ -509,6 +509,7 @@ a request to Soniox. Confirm account retention settings before enabling.
 | `NEW_USER_TRIAL_MINUTES` | `120` | Stamped on `trial_seconds_limit` at registration when the split is off. |
 | `TRIAL_SPLIT_ENABLED` | on | When on, new signups get a deterministic hash-of-id variant from `TRIAL_SPLIT_VARIANTS` (stored on `users.trial_variant`). Existing rows keep NULL variant and their current limit. |
 | `TRIAL_SPLIT_VARIANTS` | `60,120` | Comma-separated minute labels for the split (equal buckets). |
+| `TRIAL_AB_ENABLED` | off | When on, new signups get `control` (60 min) or `trial30` (30 min) instead of the split — see `docs/experiments/trial-ab-30-vs-60.md`. |
 | `TRIAL_ENABLED` | on | Kill switch for handing out the platform key. |
 | `CHECKOUT_EXPIRES_HOURS` | `2` | Stripe Checkout Session TTL (1–24). Shorter than Stripe’s 24h default so abandoned-checkout recovery can email the same day. |
 | `CHECKOUT_RECOVERY_ENABLED` | off | Stripe’s own recovery emails (`after_expiration.recovery.enabled`). Leave off — Norway rejects promotions consent, and we send our own mail instead. |

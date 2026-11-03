@@ -457,17 +457,27 @@ def group_shows_by_letter(shows: list[dict]) -> list[tuple[str, list[dict]]]:
 
 
 def show_faq_entries(show_name: str, *, trial_minutes: int, credit_pack_price: str,
-                     credit_pack_minutes: int, language_count: int) -> list[tuple[str, str]]:
+                     credit_pack_minutes: int, language_count: int,
+                     free_trial: bool = False) -> list[tuple[str, str]]:
     """Show-page FAQ — answers visible on the page (and mirrored in JSON-LD)."""
-    free = (
-        f'New Podskrift accounts get {trial_minutes} free minutes of transcription '
-        f'on our account. After that, buy a one-time pack '
-        f'(${credit_pack_price} for {credit_pack_minutes} minutes) or add your own '
-        f'OpenAI key. There is no subscription.'
-        if trial_minutes > 0 else
-        'Podskrift itself is free. Add your own OpenAI API key and pay OpenAI '
-        'directly, or buy a one-time minute pack. There is no subscription.'
-    )
+    if trial_minutes > 0:
+        free = (
+            f'New Podskrift accounts get {trial_minutes} free minutes of transcription '
+            f'on our account. After that, buy a one-time pack '
+            f'(${credit_pack_price} for {credit_pack_minutes} minutes) or add your own '
+            f'OpenAI key. There is no subscription.'
+        )
+    elif free_trial:
+        free = (
+            'New Podskrift accounts can start free, no card needed. After that, buy a '
+            f'one-time pack (${credit_pack_price} for {credit_pack_minutes} minutes) or '
+            'add your own OpenAI key. There is no subscription.'
+        )
+    else:
+        free = (
+            'Podskrift itself is free. Add your own OpenAI API key and pay OpenAI '
+            'directly, or buy a one-time minute pack. There is no subscription.'
+        )
     return [
         (
             f'Can I get a transcript of {show_name} episodes?',

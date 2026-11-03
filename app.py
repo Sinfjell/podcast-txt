@@ -940,6 +940,7 @@ TRIAL_DEFAULT_SECONDS = _env_minutes('TRIAL_MINUTES', 180) * 60
 NEW_USER_TRIAL_SECONDS = _env_minutes('NEW_USER_TRIAL_MINUTES', 120) * 60
 #: A/B new-user trial grant. Hash of user id → one of TRIAL_SPLIT_VARIANTS.
 #: Off → stamp NEW_USER_TRIAL_MINUTES and leave trial_variant NULL.
+#: Superseded for new signups when TRIAL_AB_ENABLED is on.
 TRIAL_SPLIT_ENABLED = os.getenv('TRIAL_SPLIT_ENABLED', '1').strip().lower() not in (
     '0', 'false', 'no', 'off')
 
@@ -968,6 +969,16 @@ def _parse_trial_split_variants(raw):
 
 TRIAL_SPLIT_VARIANTS = _parse_trial_split_variants(
     os.getenv('TRIAL_SPLIT_VARIANTS', '60,120'))
+#: Off-by-default 30 vs 60 trial experiment (docs/experiments/trial-ab-30-vs-60.md).
+#: When on, new signups get control (60 min) or trial30 (30 min) 50/50 by
+#: user-id hash; TRIAL_SPLIT is ignored for those rows. Merging with the
+#: default off changes nothing.
+TRIAL_AB_ENABLED = os.getenv('TRIAL_AB_ENABLED', '0').strip().lower() in (
+    '1', 'true', 'yes', 'on')
+TRIAL_AB_CONTROL_MINUTES = max(1, _env_minutes('TRIAL_AB_CONTROL_MINUTES', 60))
+TRIAL_AB_TRIAL30_MINUTES = max(1, _env_minutes('TRIAL_AB_TRIAL30_MINUTES', 30))
+TRIAL_AB_CONTROL_LABEL = 'control'
+TRIAL_AB_TRIAL30_LABEL = 'trial30'
 #: The 60-minute signup grant (PR #54) ran from 2026-10-09 ~06:40 UTC until
 #: the 120-minute default shipped. raise_60_minute_trial_cohort() lifts those
 #: rows once at boot. Bounds are UTC, matching how users.created_at is stored;
@@ -1309,8 +1320,13 @@ def advertised_trial_minutes():
     Distinct from TRIAL_DEFAULT_SECONDS (NULL-limit fallback for existing rows).
     Marketing quotes NEW_USER_TRIAL_MINUTES; after signup, user-facing copy
     must use the account's stamped trial_seconds_limit (see trial_status).
+
+    When TRIAL_AB_ENABLED, returns None so pre-signup surfaces never quote a
+    specific 30/60 figure — use free_trial_offered() + neutral copy instead.
     """
     if not trial_available() or NEW_USER_TRIAL_SECONDS <= 0:
+        return None
+    if TRIAL_AB_ENABLED:
         return None
     if TRIAL_SPLIT_ENABLED and TRIAL_SPLIT_VARIANTS:
         # A/B on: a visitor cannot know which arm they will land in, so only
@@ -1320,13 +1336,32 @@ def advertised_trial_minutes():
     return NEW_USER_TRIAL_SECONDS // 60
 
 
+def free_trial_offered():
+    """True when signup still grants free minutes (count may be hidden in AB)."""
+    if not trial_available():
+        return False
+    if TRIAL_AB_ENABLED:
+        return True
+    return advertised_trial_minutes() is not None
+
+
 def assign_trial_variant(user_id):
     """Deterministic (variant_label, seconds) for a new signup.
 
-    When TRIAL_SPLIT_ENABLED, hash the user id into TRIAL_SPLIT_VARIANTS
-    (stable across processes). When off, return (None, NEW_USER_TRIAL_SECONDS)
-    so legacy behaviour and NULL trial_variant are preserved.
+    Precedence:
+    1. TRIAL_AB_ENABLED → ('control'| 'trial30', matching seconds).
+    2. TRIAL_SPLIT_ENABLED → (minute-label, seconds) from TRIAL_SPLIT_VARIANTS.
+    3. Else → (None, NEW_USER_TRIAL_SECONDS) so legacy NULL variant is kept.
+
+    Assignment is signup-only; existing rows are never rewritten.
     """
+    if TRIAL_AB_ENABLED:
+        digest = hashlib.sha256(
+            f'podskrift-trial-ab-30-vs-60:{int(user_id)}'.encode('utf-8')
+        ).digest()
+        if int.from_bytes(digest[:8], 'big') % 2 == 0:
+            return TRIAL_AB_CONTROL_LABEL, TRIAL_AB_CONTROL_MINUTES * 60
+        return TRIAL_AB_TRIAL30_LABEL, TRIAL_AB_TRIAL30_MINUTES * 60
     if not TRIAL_SPLIT_ENABLED or not TRIAL_SPLIT_VARIANTS:
         return None, NEW_USER_TRIAL_SECONDS
     digest = hashlib.sha256(
@@ -6135,6 +6170,14 @@ def register():
         _apply_posthog_browser_context(
             signup_props, user.id, sid=ph_sid, did=ph_did)
         product_analytics.capture('user_signed_up', user.id, signup_props)
+        if TRIAL_AB_ENABLED and variant in (
+                TRIAL_AB_CONTROL_LABEL, TRIAL_AB_TRIAL30_LABEL):
+            ab_props = {
+                'trial_variant': variant,
+                'trial_granted_min': granted_min,
+                '$set': {'trial_variant': variant},
+            }
+            product_analytics.capture('trial_ab_assigned', user.id, ab_props)
         if denied_reason:
             flash(f'Account created. {TRIAL_DENIED_NOTE}', 'success')
         elif session.get(PENDING_TRANSCRIPTION_KEY):
@@ -9179,6 +9222,7 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
         ph_sid, ph_did = _request_posthog_browser_ids()
         _apply_posthog_browser_context(
             ph_props, user_id, sid=ph_sid, did=ph_did)
+    ph_props.update(trial_variant_props(user))
 
     # Over the length limit by the feed's own account: refuse now, before a
     # slot, a reservation or a download. Only ever a refusal -- the stated
@@ -12386,19 +12430,28 @@ def faq_entries():
     # trial_available() is the predicate the code actually enforces. Copy that
     # promises free minutes while the kill switch is on is a promise the app
     # then refuses at /start_transcription.
+    pack_bit_trial = (
+        f' Or buy minutes once: {_faq_pack_phrase()}, '
+        f'VAT included, paid via Stripe — no subscription.'
+        if stripe_checkout_enabled() else ''
+    )
     if trial_available() and minutes > 0:
         hours_bit = (f' (about {minutes // 60} hours)' if minutes >= 120 else '')
-        pack_bit = (
-            f' Or buy minutes once: {_faq_pack_phrase()}, '
-            f'VAT included, paid via Stripe — no subscription.'
-            if stripe_checkout_enabled() else ''
-        )
         free = (f'New accounts get {minutes} minutes of audio free'
                 f'{hours_bit}. Longer episodes still start free — you get the '
                 f'first {minutes} minutes as a preview, then buy minutes or add '
                 f'your own OpenAI API key to finish (a 90-minute episode costs '
                 f'about {cost_90} at OpenAI\'s rate). Once the trial is used up, '
-                f'the same options apply.{pack_bit}')
+                f'the same options apply.{pack_bit_trial}')
+        need_key = ('Not to start. The free trial runs on our account, including a free '
+                    'preview of the first stretch of a longer episode. Add your own '
+                    'key when the trial runs out and there is no limit beyond what '
+                    'you spend at OpenAI.')
+    elif free_trial_offered():
+        free = ('New accounts can start free, no card needed. Longer episodes still '
+                'start as a free preview; buy minutes or add your own OpenAI API key '
+                f'to finish (a 90-minute episode costs about {cost_90} at OpenAI\'s '
+                f'rate).{pack_bit_trial}')
         need_key = ('Not to start. The free trial runs on our account, including a free '
                     'preview of the first stretch of a longer episode. Add your own '
                     'key when the trial runs out and there is no limit beyond what '
@@ -12495,6 +12548,10 @@ def inject_trial_badge():
             user_trial_variant(current_user)
             if current_user.is_authenticated else None
         ),
+        # True when signup still grants free minutes; during TRIAL_AB the
+        # minute count is hidden (trial_minutes is None) and templates use
+        # neutral "Try it free" copy instead of a number.
+        'free_trial_offered': free_trial_offered(),
         'csrf_token': generate_csrf_token,
     }
 
@@ -12581,7 +12638,9 @@ def _structured_data():
                     'priceCurrency': 'USD',
                     'description': (
                         (f'{advertised_trial_minutes()} minutes of audio free on signup. '
-                         'After that, ' if advertised_trial_minutes() else '')
+                         'After that, ' if advertised_trial_minutes() else
+                         ('Start free, no card needed. After that, '
+                          if free_trial_offered() else ''))
                         + (
                             f'buy a one-time pack ({DEFAULT_PACK_PRICE} for '
                             f'{CREDIT_PACK_MINUTES} minutes, VAT included) via Stripe, or '
@@ -12710,6 +12769,7 @@ def podcast_show(slug):
         credit_pack_price=DEFAULT_PACK_PRICE.lstrip('$'),
         credit_pack_minutes=CREDIT_PACK_MINUTES,
         language_count=len(LANGUAGE_ENGLISH_NAMES),
+        free_trial=free_trial_offered(),
     )
     page_url = public_url('podcast_show', slug=show['slug'])
     # Analytics: coarse referrer bucket only (no full URL / PII).
@@ -12806,6 +12866,8 @@ def _spotify_price_line(trial, pack):
                 f'{landing_pages_mod.pack_phrase(pack)}. One-time, minutes '
                 f'never expire, no subscription.')
     bits = [f'{trial} minutes free.'] if trial else []
+    if not trial and free_trial_offered():
+        bits = ['Try it free, no card needed.']
     if pack:
         bits.append(f'Then {landing_pages_mod.pack_phrase(pack)}, no subscription.')
     return ' '.join(bits)
@@ -12818,33 +12880,49 @@ def landing_page_data(endpoint):
         endpoint, trial=trial, pack=_landing_pack(),
         lang_count=len(LANGUAGE_ENGLISH_NAMES),
         episode_prices=_landing_episode_prices(trial),
+        free_trial=free_trial_offered(),
     )
 
 
 def _landing_price_line(ui_lang, trial, pack):
     """Muted cost line under the landing input; branches on page language."""
+    neutral = {
+        'nb': 'Prøv gratis, uten kort.',
+        'no': 'Prøv gratis, uten kort.',
+        'es': 'Pruébalo gratis, sin tarjeta.',
+        'de': 'Kostenlos starten, ohne Karte.',
+        'pt': 'Experimente grátis, sem cartão.',
+        'fr': 'Essayez gratuitement, sans carte.',
+        'en': 'Try it free, no card needed.',
+    }
     if ui_lang in ('no', 'nb'):
-        bits = [f'{trial} gratisminutter.'] if trial else []
+        bits = [f'{trial} gratisminutter.'] if trial else (
+            [neutral['nb']] if free_trial_offered() else [])
         if pack:
             bits.append('Deretter ' + landing_pages_mod.pack_phrase(pack, 'nb') + '.')
     elif ui_lang == 'es':
-        bits = [f'{trial} minutos gratis.'] if trial else []
+        bits = [f'{trial} minutos gratis.'] if trial else (
+            [neutral['es']] if free_trial_offered() else [])
         if pack:
             bits.append('Después ' + landing_pages_mod.pack_phrase(pack, 'es') + '.')
     elif ui_lang == 'de':
-        bits = [f'{trial} Minuten gratis.'] if trial else []
+        bits = [f'{trial} Minuten gratis.'] if trial else (
+            [neutral['de']] if free_trial_offered() else [])
         if pack:
             bits.append('Danach ' + landing_pages_mod.pack_phrase(pack, 'de') + '.')
     elif ui_lang == 'pt':
-        bits = [f'{trial} minutos grátis.'] if trial else []
+        bits = [f'{trial} minutos grátis.'] if trial else (
+            [neutral['pt']] if free_trial_offered() else [])
         if pack:
             bits.append('Depois ' + landing_pages_mod.pack_phrase(pack, 'pt') + '.')
     elif ui_lang == 'fr':
-        bits = [f'{trial} minutes gratuites.'] if trial else []
+        bits = [f'{trial} minutes gratuites.'] if trial else (
+            [neutral['fr']] if free_trial_offered() else [])
         if pack:
             bits.append('Ensuite ' + landing_pages_mod.pack_phrase(pack, 'fr') + '.')
     else:
-        bits = [f'{trial} minutes free.'] if trial else []
+        bits = [f'{trial} minutes free.'] if trial else (
+            [neutral['en']] if free_trial_offered() else [])
         if pack:
             bits.append(f'Then {landing_pages_mod.pack_phrase(pack)}, no subscription.')
     return ' '.join(bits)
@@ -13066,17 +13144,24 @@ def _llms_body(*, full=False):
         for code, native in SUPPORTED_LANGUAGES if code)
     faq = '\n\n'.join(f'**{q}**\n\n{a}' for q, a in faq_entries())
     grant = advertised_trial_minutes()
-    signup_blurb = (f'free account, {grant} free minutes, no card'
-                    if grant else 'free account')
+    offer = free_trial_offered()
+    signup_blurb = (
+        f'free account, {grant} free minutes, no card' if grant else
+        ('free account, start free, no card' if offer else 'free account')
+    )
     cost_lines = []
     if grant:
         cost_lines.append(
             f'- Free trial: new accounts get {grant} minutes of audio free. No card and '
             f'no API key needed. A longer first episode still starts; the first {grant} '
             f'minutes are a free preview.')
+    elif offer:
+        cost_lines.append(
+            '- Free trial: new accounts can start free, no card and no API key needed. '
+            'A longer first episode still starts as a free preview.')
     if stripe_checkout_enabled():
         cost_lines.append(
-            f'- Buy minutes{" after the trial" if grant else ""}: '
+            f'- Buy minutes{" after the trial" if (grant or offer) else ""}: '
             + (landing_pages_mod.pack_phrase(_landing_pack())
                if VOLUME_PRICING_ENABLED else
                f'${CREDIT_PACK_AMOUNT_CENTS / 100:.0f} for {CREDIT_PACK_MINUTES} minutes '
@@ -13934,7 +14019,10 @@ def load_customer_api_markdown():
     text = text.replace(
         'New accounts get {trial_minutes} free trial minutes; after that, buy minutes or add your own OpenAI key.',
         (f'New accounts get {granted} free trial minutes; after that, buy minutes or add your own OpenAI key.'
-         if granted else 'Use your own OpenAI key, or buy minutes in Settings.'))
+         if granted else
+         ('Start free, no card needed; after that, buy minutes or add your own OpenAI key.'
+          if free_trial_offered() else
+          'Use your own OpenAI key, or buy minutes in Settings.')))
     # MCP connect docs are gated on MCP_ENABLED (default off).
     text = mcp_server_mod.filter_mcp_docs_section(
         text, enabled=mcp_server_mod.mcp_enabled())

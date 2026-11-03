@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Pricing — Podskrift{% endblock %}
-{% block meta_description %}Free trial{% if trial_minutes %} ({{ trial_minutes }} min){% endif %}, then buy only the minutes you need: from $1.50 for 60 minutes, cheaper per minute the more you buy. No subscription.{% endblock %}
+{% block meta_description %}{% if free_trial_offered and not trial_minutes %}Start free, no card needed, then buy only the minutes you need: from $1.50 for 60 minutes, cheaper per minute the more you buy. No subscription.{% else %}Free trial{% if trial_minutes %} ({{ trial_minutes }} min){% endif %}, then buy only the minutes you need: from $1.50 for 60 minutes, cheaper per minute the more you buy. No subscription.{% endif %}{% endblock %}
 {% block og_title %}Pricing — Podskrift{% endblock %}
 {% block og_description %}Free trial, one-time credit pack, or your own OpenAI key. No subscription.{% endblock %}
 
@@ -40,6 +40,15 @@
             <p>
                 No card required, and nothing to set up. The trial runs on our account until it is used up.
                 Longer episodes get the first {{ trial_minutes }} minutes free as a preview — buy a pack or add your own key to finish the rest.
+            </p>
+        </section>
+        {% elif free_trial_offered %}
+        <section class="pr-plan" aria-labelledby="planTrial">
+            <h2 id="planTrial">Free trial</h2>
+            <div class="pr-figure">Start free <small>no card needed</small></div>
+            <p>
+                No card required, and nothing to set up. The trial runs on our account until it is used up.
+                Longer episodes still start as a free preview — buy a pack or add your own key to finish the rest.
             </p>
         </section>
         {% endif %}

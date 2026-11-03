@@ -67,6 +67,8 @@
         Create a free account to get this transcript
         {% elif trial_minutes %}
         Create your free account · {{ trial_minutes }} free minutes
+        {% elif free_trial_offered %}
+        Create your free account · start free, no card needed
         {% else %}
         Create your free account
         {% endif %}
@@ -98,9 +100,13 @@
                 {{ pending.duration_min|round|int }} min
                 {% if trial_minutes %}
                 · ~{{ pending.duration_min|round|int }} min of your {{ trial_minutes }} free
+                {% elif free_trial_offered %}
+                · starts on your free trial
                 {% endif %}
                 {% elif trial_minutes %}
                 Uses your {{ trial_minutes }} free minutes
+                {% elif free_trial_offered %}
+                Starts on your free trial
                 {% endif %}
             </div>
         </div>

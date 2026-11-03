@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Transcripts for {{ show.name }} — Podskrift{% endblock %}
-{% block meta_description %}Transcribe {{ show.name }} episodes to text with Podskrift. Private .txt and .srt transcripts{% if trial_minutes %}; {{ trial_minutes }} free minutes for new accounts{% endif %}.{% endblock %}
+{% block meta_description %}Transcribe {{ show.name }} episodes to text with Podskrift. Private .txt and .srt transcripts{% if trial_minutes %}; {{ trial_minutes }} free minutes for new accounts{% elif free_trial_offered %}; start free, no card needed{% endif %}.{% endblock %}
 {% block og_title %}Transcripts for {{ show.name }} — Podskrift{% endblock %}
 {% block og_description %}Get a private transcript of recent {{ show.name }} episodes. Paste Spotify or Apple links, or pick an episode below.{% endblock %}
 
@@ -234,7 +234,7 @@
         <h2>How it works</h2>
         <ol class="show-steps">
             <li>Choose an episode above (or paste a Spotify / Apple / RSS link on the home page).</li>
-            <li>Create a free account if you don’t have one — new accounts get {% if trial_minutes %}{{ trial_minutes }} free minutes{% else %}transcription with your own OpenAI key{% endif %}.</li>
+            <li>Create a free account if you don’t have one — new accounts get {% if trial_minutes %}{{ trial_minutes }} free minutes{% elif free_trial_offered %}a free start, no card needed{% else %}transcription with your own OpenAI key{% endif %}.</li>
             <li>Podskrift downloads the audio and transcribes it with modern speech recognition. Download .txt or .srt when it’s done.</li>
         </ol>
         <p class="show-note">
