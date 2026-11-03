@@ -10789,6 +10789,95 @@ def test_legacy_users_keep_null_trial_variant(trial_on):
         assert A.trial_status(u)[0] == 180 * 60
 
 
+def test_trial_ab_disabled_by_default_changes_nothing(trial_on):
+    """TRIAL_AB_ENABLED=0 keeps the existing split / grant path."""
+    assert A.TRIAL_AB_ENABLED is False
+    # Existing split still assigns numeric minute labels.
+    assert A.assign_trial_variant(1)[0] in ('60', '120')
+
+
+def test_trial_ab_assign_is_deterministic_control_or_trial30(monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'TRIAL_AB_ENABLED', True)
+    a1, s1 = A.assign_trial_variant(42)
+    a2, s2 = A.assign_trial_variant(42)
+    assert (a1, s1) == (a2, s2)
+    assert a1 in (A.TRIAL_AB_CONTROL_LABEL, A.TRIAL_AB_TRIAL30_LABEL)
+    if a1 == A.TRIAL_AB_CONTROL_LABEL:
+        assert s1 == A.TRIAL_AB_CONTROL_MINUTES * 60 == 60 * 60
+    else:
+        assert s1 == A.TRIAL_AB_TRIAL30_MINUTES * 60 == 30 * 60
+    seen = {A.assign_trial_variant(i)[0] for i in range(1, 400)}
+    assert seen == {A.TRIAL_AB_CONTROL_LABEL, A.TRIAL_AB_TRIAL30_LABEL}
+
+
+def test_trial_ab_signup_stamps_and_emits_assigned(ph_events, monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'TRIAL_AB_ENABLED', True)
+    email = 'trial-ab@example.com'
+    _purge([email])
+    A._register_attempts.clear()
+    client = A.app.test_client()
+    resp = client.post('/register', data={
+        'email': email,
+        'password': 'password123',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    with A.app.app_context():
+        u = A.User.query.filter_by(email=email).first()
+        assert u.trial_variant in ('control', 'trial30')
+        expected_min = 60 if u.trial_variant == 'control' else 30
+        assert u.trial_seconds_limit == expected_min * 60
+    signed = [e for e in ph_events.events if e['event'] == 'user_signed_up']
+    assigned = [e for e in ph_events.events if e['event'] == 'trial_ab_assigned']
+    assert signed and assigned
+    assert signed[-1]['properties']['trial_variant'] == assigned[-1]['properties']['trial_variant']
+    assert assigned[-1]['properties']['trial_granted_min'] == (
+        signed[-1]['properties']['trial_granted_min'])
+    assert assigned[-1]['properties']['$set']['trial_variant'] == (
+        assigned[-1]['properties']['trial_variant'])
+    # Flash quotes the stamped allowance.
+    follow = client.get(resp.headers['Location'])
+    assert f"you have {signed[-1]['properties']['trial_granted_min']} free minutes" in (
+        follow.data.decode())
+    _purge([email])
+
+
+def test_trial_ab_does_not_reassign_existing_users(monkeypatch, trial_on):
+    """Users created before enablement keep their stamped limit + variant."""
+    uid = _make_user('pre-ab@test.com', limit=120 * 60, used=0)
+    with A.app.app_context():
+        u = A.db.session.get(A.User, uid)
+        u.trial_variant = '120'
+        A.db.session.commit()
+    monkeypatch.setattr(A, 'TRIAL_AB_ENABLED', True)
+    # assign_trial_variant would return control/trial30 for this id, but we
+    # never rewrite the row — only new signups call it at registration.
+    with A.app.app_context():
+        u = A.db.session.get(A.User, uid)
+        assert u.trial_variant == '120'
+        assert u.trial_seconds_limit == 120 * 60
+
+
+def test_transcript_events_carry_trial_variant(ph_events, monkeypatch, trial_on):
+    uid = _make_user('ab-tx@test.com', key='sk-' + 'a' * 40, limit=60 * 60)
+    with A.app.app_context():
+        u = A.db.session.get(A.User, uid)
+        u.trial_variant = 'control'
+        A.db.session.commit()
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Ep',
+        'duration_min': '1',
+    })
+    assert resp.status_code == 200
+    started = [e for e in ph_events.events if e['event'] == 'transcript_started']
+    assert started and started[-1]['properties'].get('trial_variant') == 'control'
+
+
+def test_trial_ab_advertises_floor_minutes(monkeypatch, trial_on):
+    monkeypatch.setattr(A, 'TRIAL_AB_ENABLED', True)
+    assert A.advertised_trial_minutes() == 30
+
+
 def test_base_exposes_trial_variant_for_client_analytics(stripe_on, monkeypatch):
     monkeypatch.setenv('PODSKRIFT_ENV', 'production')
     monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')

@@ -940,6 +940,7 @@ TRIAL_DEFAULT_SECONDS = _env_minutes('TRIAL_MINUTES', 180) * 60
 NEW_USER_TRIAL_SECONDS = _env_minutes('NEW_USER_TRIAL_MINUTES', 120) * 60
 #: A/B new-user trial grant. Hash of user id → one of TRIAL_SPLIT_VARIANTS.
 #: Off → stamp NEW_USER_TRIAL_MINUTES and leave trial_variant NULL.
+#: Superseded for new signups when TRIAL_AB_ENABLED is on.
 TRIAL_SPLIT_ENABLED = os.getenv('TRIAL_SPLIT_ENABLED', '1').strip().lower() not in (
     '0', 'false', 'no', 'off')
 
@@ -968,6 +969,16 @@ def _parse_trial_split_variants(raw):
 
 TRIAL_SPLIT_VARIANTS = _parse_trial_split_variants(
     os.getenv('TRIAL_SPLIT_VARIANTS', '60,120'))
+#: Off-by-default 30 vs 60 trial experiment (docs/experiments/trial-ab-30-vs-60.md).
+#: When on, new signups get control (60 min) or trial30 (30 min) 50/50 by
+#: user-id hash; TRIAL_SPLIT is ignored for those rows. Merging with the
+#: default off changes nothing.
+TRIAL_AB_ENABLED = os.getenv('TRIAL_AB_ENABLED', '0').strip().lower() in (
+    '1', 'true', 'yes', 'on')
+TRIAL_AB_CONTROL_MINUTES = max(1, _env_minutes('TRIAL_AB_CONTROL_MINUTES', 60))
+TRIAL_AB_TRIAL30_MINUTES = max(1, _env_minutes('TRIAL_AB_TRIAL30_MINUTES', 30))
+TRIAL_AB_CONTROL_LABEL = 'control'
+TRIAL_AB_TRIAL30_LABEL = 'trial30'
 #: The 60-minute signup grant (PR #54) ran from 2026-10-09 ~06:40 UTC until
 #: the 120-minute default shipped. raise_60_minute_trial_cohort() lifts those
 #: rows once at boot. Bounds are UTC, matching how users.created_at is stored;
@@ -1312,6 +1323,9 @@ def advertised_trial_minutes():
     """
     if not trial_available() or NEW_USER_TRIAL_SECONDS <= 0:
         return None
+    if TRIAL_AB_ENABLED:
+        # Promise only what every arm gets (trial30 is the floor).
+        return min(TRIAL_AB_CONTROL_MINUTES, TRIAL_AB_TRIAL30_MINUTES)
     if TRIAL_SPLIT_ENABLED and TRIAL_SPLIT_VARIANTS:
         # A/B on: a visitor cannot know which arm they will land in, so only
         # promise what every arm gets. Quoting NEW_USER_TRIAL_MINUTES (120)
@@ -1323,10 +1337,20 @@ def advertised_trial_minutes():
 def assign_trial_variant(user_id):
     """Deterministic (variant_label, seconds) for a new signup.
 
-    When TRIAL_SPLIT_ENABLED, hash the user id into TRIAL_SPLIT_VARIANTS
-    (stable across processes). When off, return (None, NEW_USER_TRIAL_SECONDS)
-    so legacy behaviour and NULL trial_variant are preserved.
+    Precedence:
+    1. TRIAL_AB_ENABLED → ('control'| 'trial30', matching seconds).
+    2. TRIAL_SPLIT_ENABLED → (minute-label, seconds) from TRIAL_SPLIT_VARIANTS.
+    3. Else → (None, NEW_USER_TRIAL_SECONDS) so legacy NULL variant is kept.
+
+    Assignment is signup-only; existing rows are never rewritten.
     """
+    if TRIAL_AB_ENABLED:
+        digest = hashlib.sha256(
+            f'podskrift-trial-ab-30-vs-60:{int(user_id)}'.encode('utf-8')
+        ).digest()
+        if int.from_bytes(digest[:8], 'big') % 2 == 0:
+            return TRIAL_AB_CONTROL_LABEL, TRIAL_AB_CONTROL_MINUTES * 60
+        return TRIAL_AB_TRIAL30_LABEL, TRIAL_AB_TRIAL30_MINUTES * 60
     if not TRIAL_SPLIT_ENABLED or not TRIAL_SPLIT_VARIANTS:
         return None, NEW_USER_TRIAL_SECONDS
     digest = hashlib.sha256(
@@ -6135,6 +6159,14 @@ def register():
         _apply_posthog_browser_context(
             signup_props, user.id, sid=ph_sid, did=ph_did)
         product_analytics.capture('user_signed_up', user.id, signup_props)
+        if TRIAL_AB_ENABLED and variant in (
+                TRIAL_AB_CONTROL_LABEL, TRIAL_AB_TRIAL30_LABEL):
+            ab_props = {
+                'trial_variant': variant,
+                'trial_granted_min': granted_min,
+                '$set': {'trial_variant': variant},
+            }
+            product_analytics.capture('trial_ab_assigned', user.id, ab_props)
         if denied_reason:
             flash(f'Account created. {TRIAL_DENIED_NOTE}', 'success')
         elif session.get(PENDING_TRANSCRIPTION_KEY):
@@ -9179,6 +9211,7 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
         ph_sid, ph_did = _request_posthog_browser_ids()
         _apply_posthog_browser_context(
             ph_props, user_id, sid=ph_sid, did=ph_did)
+    ph_props.update(trial_variant_props(user))
 
     # Over the length limit by the feed's own account: refuse now, before a
     # slot, a reservation or a download. Only ever a refusal -- the stated
