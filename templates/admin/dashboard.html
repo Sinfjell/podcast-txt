@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "components/macros.html" import chip, tabs, tab_panel %}
+{% from "components/macros.html" import chip, tabs, tab_panel, notice %}
 {% block title %}Admin — Podskrift{% endblock %}
 {% block meta_description %}Internal admin dashboard. Not for public indexing.{% endblock %}
 {% block robots_meta %}<meta name="robots" content="noindex, nofollow">{% endblock %}
@@ -209,28 +209,6 @@
     .status-pill.failed, .status-pill.canceled {
         background: var(--danger-tint); color: var(--on-danger-tint);
     }
-    .costs-note {
-        font-size: 13px; color: var(--muted); margin: -4px 0 14px; max-width: 62ch;
-    }
-    .costs-grid {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 10px; margin-bottom: 16px;
-    }
-    @media (max-width: 900px) {
-        .costs-grid { grid-template-columns: 1fr 1fr; }
-    }
-    @media (max-width: 520px) {
-        .costs-grid { grid-template-columns: 1fr; }
-    }
-    .cost-card {
-        background: var(--surface); border: 1px solid var(--line);
-        border-radius: var(--radius); padding: 12px 14px;
-    }
-    .cost-card h3 {
-        font-size: 12px; font-weight: 700; color: var(--muted);
-        margin-bottom: 8px;
-    }
     .est-badge {
         font-size: 12px; font-weight: 700; color: var(--on-warning-tint);
         background: var(--warning-tint); padding: 2px 8px;
@@ -247,31 +225,20 @@
     }
     .admin-flex-between h2 { margin: 0; }
     .money-muted { color: var(--muted); }
-    .cost-filter {
-        display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px;
-        margin: 8px 0 16px;
-    }
-    .cost-filter label { display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: var(--muted); }
-    .cost-filter select, .cost-filter input[type="date"] {
-        min-height: 44px; padding: 0 12px; border: 1px solid var(--line-strong);
-        border-radius: var(--radius-sm); background: var(--bg); color: var(--ink); font: inherit;
-    }
-    .actual-figure { font-size: 22px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
-    .actual-sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
-    .actual-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
-    .actual-table th, .actual-table td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); }
-    .actual-table th:first-child, .actual-table td:first-child { text-align: left; }
-    .actual-table tr.contrib-total td { font-weight: 700; border-top: 2px solid var(--line-strong); }
-    .actual-table-wrap { max-height: 360px; overflow: auto; margin-top: 16px; }
+    .admin-economics-note { margin-bottom: 16px; }
     .admin-empty { color: var(--muted); }
 </style>
 
-{% set cost_tab_open = request.args.get('cost_range') is not none %}
 <div class="admin-wrap ph-no-capture">
     <div class="admin-header">
         <h1>Admin</h1>
-        <span class="admin-meta">Times in {{ admin_tz_name }} · read-only · <a href="{{ url_for('admin.economy') }}">Economy</a></span>
+        <span class="admin-meta">Times in {{ admin_tz_name }} · read-only</span>
     </div>
+
+    {% call notice(variant='info', class='admin-economics-note', attrs='id="economics-notion" data-admin="economics-notion"') %}
+    Economics (revenue, cost, margin) live in Notion:
+    <a href="{{ notion_metrics_url }}" rel="noopener noreferrer" target="_blank">Podskrift daily metrics</a>.
+    {% endcall %}
 
     <div class="kpi-grid" id="adminKpis" role="group" aria-label="Headline metrics">
         <button type="button" class="kpi" data-series="api_cost" data-kpi="api_cost"
@@ -341,17 +308,16 @@
 
     <nav class="admin-nav" aria-label="Admin sections">
         {{ tabs("Admin sections", [
-            {"id": "admin-overview", "label": "Overview", "selected": not cost_tab_open},
+            {"id": "admin-overview", "label": "Overview", "selected": true},
             {"id": "admin-signups", "label": "Signups"},
             {"id": "admin-users", "label": "Users"},
             {"id": "admin-transcripts", "label": "Transcripts"},
-            {"id": "admin-costs", "label": "Costs", "selected": cost_tab_open},
             {"id": "admin-payments", "label": "Payments"},
             {"id": "admin-mcp", "label": "MCP"},
         ]) }}
     </nav>
 
-    {% call tab_panel('admin-overview', selected=not cost_tab_open) %}
+    {% call tab_panel('admin-overview', selected=True) %}
     <section class="admin-section" id="adminOverview">
         <div class="admin-flex-between">
             <h2>Overview</h2>
@@ -542,246 +508,6 @@
     </section>
     {% endcall %}
 
-    {% call tab_panel('admin-costs', selected=cost_tab_open) %}
-    <section class="admin-section" id="adminCosts" data-costs="section">
-        <h2>Costs <span class="est-badge">estimate</span></h2>
-        {% if costs.error %}
-        <div class="stripe-error" role="alert">{{ costs.error }}</div>
-        {% else %}
-        <p class="costs-note" data-costs="note">
-            {{ costs.note }}
-            {% if costs.fixed_monthly_usd %}
-            Fixed opex ${{ '%.2f'|format(costs.fixed_monthly_usd) }}/mo
-            (~${{ '%.2f'|format(costs.fixed_daily_usd) }}/day)
-            {% if costs.fixed_breakdown %}
-            —
-            {% for item in costs.fixed_breakdown %}
-            {{ item.name }} ${{ '%.2f'|format(item.usd) }}{% if not loop.last %}, {% endif %}
-            {% endfor %}
-            {% endif %}
-            ·
-            {% endif %}
-            As of {{ costs.as_of_oslo }} ({{ admin_tz_name }}).
-        </p>
-
-        <div class="costs-grid" data-costs="windows">
-            {% for key, title in [('today', 'Today'), ('7d', 'Last 7 days'), ('30d', 'Last 30 days'), ('all', 'All time')] %}
-            {% set w = costs.windows[key] %}
-            <div class="cost-card" data-costs-window="{{ key }}">
-                <h3>{{ title }}</h3>
-                <div class="money-row"><span class="label">Est. OpenAI (trial)</span><span>${{ '%.2f'|format(w.openai_trial_usd) }}</span></div>
-                <div class="money-row"><span class="label">Est. OpenAI (paid)</span><span>${{ '%.2f'|format(w.openai_paid_usd) }}</span></div>
-                <div class="money-row"><span class="label">Est. summaries</span><span>${{ '%.2f'|format(w.openai_summary_usd) }}</span></div>
-                <div class="money-row"><span class="label">Fixed (prorated)</span><span>${{ '%.2f'|format(w.fixed_usd) }}</span></div>
-                <div class="money-row net"><span class="label">Est. total cost</span><span>${{ '%.2f'|format(w.total_usd) }}</span></div>
-                <div class="money-row"><span class="label">Revenue (credits)</span><span>${{ '%.2f'|format(w.revenue_usd) }}</span></div>
-                <div class="money-row"><span class="label">Gross margin</span>
-                    <span>
-                        ${{ '%.2f'|format(w.gross_margin_usd) }}
-                        {% if w.gross_margin_pct is not none %}
-                        ({{ '%.1f'|format(w.gross_margin_pct) }}%)
-                        {% endif %}
-                    </span>
-                </div>
-                <div class="money-row"><span class="label">Trial minutes</span><span>{{ w.platform_trial_minutes }}</span></div>
-                <div class="money-row"><span class="label">Paid minutes</span><span>{{ w.platform_paid_minutes }}</span></div>
-                <div class="money-row"><span class="label">BYOK minutes (excl.)</span><span>{{ w.byok_minutes }}</span></div>
-                <div class="money-row"><span class="label">Failed w/ OpenAI hit</span><span>{{ w.failed_with_openai_count }}</span></div>
-                <div class="money-row"><span class="label">Cost / active user</span>
-                    <span>{% if w.cost_per_active_user_usd is not none %}${{ '%.2f'|format(w.cost_per_active_user_usd) }}{% else %}—{% endif %}</span>
-                </div>
-                <div class="money-row"><span class="label">Cost / paid user</span>
-                    <span>{% if w.cost_per_paid_user_usd is not none %}${{ '%.2f'|format(w.cost_per_paid_user_usd) }}{% else %}—{% endif %}</span>
-                </div>
-            </div>
-            {% endfor %}
-        </div>
-
-        <div class="chart-card" data-costs="daily-chart">
-            <h3>Estimated cost per day (30d)</h3>
-            <canvas id="chartCostsDaily" height="180"></canvas>
-        </div>
-        {% endif %}
-    </section>
-
-    <section class="admin-section" id="adminActualCosts" data-costs="actual">
-        <h2>Actual OpenAI cost vs estimate</h2>
-        {% set ac = actual_costs %}
-        {% if ac.fatal %}
-        <div class="stripe-error" role="alert">{{ ac.error }}</div>
-        {% else %}
-        <form class="cost-filter" method="get" action="#adminActualCosts" data-costs="filter">
-            <label>Period
-                <select name="cost_range" data-costs="range">
-                    {% for p, lab in [('today','Today'),('7d','Last 7 days'),('30d','Last 30 days'),('90d','Last 90 days'),('custom','Custom range')] %}
-                    <option value="{{ p }}"{% if ac.preset == p %} selected{% endif %}>{{ lab }}</option>
-                    {% endfor %}
-                </select>
-            </label>
-            <label>From <input type="date" name="cost_from" value="{{ ac.start }}"></label>
-            <label>To <input type="date" name="cost_to" value="{{ ac.end }}"></label>
-            <label>Cost type
-                <select name="cost_type">
-                    {% for c, lab in [('all','All OpenAI'),('transcription','Transcription'),('summary','Summaries')] %}
-                    <option value="{{ c }}"{% if ac.cost_type == c %} selected{% endif %}>{{ lab }}</option>
-                    {% endfor %}
-                </select>
-            </label>
-            <button type="submit" class="btn btn-secondary">Apply</button>
-        </form>
-        <p class="costs-note">
-            {{ ac.start }} → {{ ac.end }} (UTC days, as OpenAI bills them). Actual comes from
-            the OpenAI Costs API and lags a few hours, so today is partial.
-            {% if ac.fetched_at_oslo %}Fetched {{ ac.fetched_at_oslo }} ({{ admin_tz_name }}){% if ac.cached %}, cached up to 15 min{% endif %}.{% endif %}
-            {% if ac.ok and not ac.project_scoped %}Covers the whole OpenAI organization (set OPENAI_COST_PROJECT_ID to limit it to Podskrift).{% endif %}
-        </p>
-        {% if ac.missing_key %}
-        <div class="stripe-error" role="status" data-costs="missing-key">
-            Actual cost needs an OpenAI <strong>Admin key</strong>. Create one at
-            platform.openai.com → Settings → Organization → Admin keys and add it to the
-            server as <code>OPENAI_ADMIN_KEY</code>. Estimates are shown until then.
-        </div>
-        {% elif not ac.ok %}
-        <div class="stripe-error" role="alert">{{ ac.error }}</div>
-        {% endif %}
-        <div class="costs-grid actual-totals" data-costs="actual-totals">
-            <div class="cost-card"><h3>Actual today (UTC, partial)</h3>
-                <div class="actual-figure">{% if ac.ok and ac.today %}${{ '%.2f'|format(ac.today.actual_usd or 0) }}{% else %}—{% endif %}</div>
-                <div class="actual-sub">Est. {% if ac.today %}${{ '%.2f'|format(ac.today.estimated_usd) }}{% else %}— (today not in range){% endif %}</div></div>
-            <div class="cost-card"><h3>Actual in period</h3>
-                <div class="actual-figure">{% if ac.total_actual_usd is not none %}${{ '%.2f'|format(ac.total_actual_usd) }}{% else %}—{% endif %}</div>
-                <div class="actual-sub">OpenAI invoice basis</div></div>
-            <div class="cost-card"><h3>Estimated in period</h3>
-                <div class="actual-figure">${{ '%.2f'|format(ac.total_estimated_usd) }}</div>
-                <div class="actual-sub">From stored audio seconds</div></div>
-            <div class="cost-card"><h3>Actual − estimate</h3>
-                <div class="actual-figure">{% if ac.diff_usd is not none %}{{ '+' if ac.diff_usd >= 0 else '−' }}${{ '%.2f'|format(ac.diff_usd|abs) }}{% else %}—{% endif %}</div>
-                <div class="actual-sub">Positive = estimate is too low</div></div>
-        </div>
-        <div class="chart-card" data-costs="actual-chart">
-            <h3>Actual vs estimated per day</h3>
-            <canvas id="chartCostsActual" height="180"></canvas>
-        </div>
-        {% if ac.line_items %}
-        <div class="actual-table-wrap">
-            <table class="actual-table" data-costs="line-items">
-                <thead><tr><th>OpenAI line item (period)</th><th>Actual</th></tr></thead>
-                <tbody>{% for li in ac.line_items %}<tr><td>{{ li.name }}</td><td>${{ '%.2f'|format(li.usd) }}</td></tr>{% endfor %}</tbody>
-            </table>
-        </div>
-        {% endif %}
-        <div class="actual-table-wrap">
-            <table class="actual-table" data-costs="daily-table">
-                <thead><tr><th>Day (UTC)</th><th>Actual</th><th>Estimated</th><th>Diff</th></tr></thead>
-                <tbody>
-                {% for r in ac.rows %}
-                <tr><td>{{ r.day }}{% if r.partial %} <span class="est-badge">partial</span>{% endif %}</td>
-                    <td>{% if r.actual_usd is not none %}${{ '%.2f'|format(r.actual_usd) }}{% else %}—{% endif %}</td>
-                    <td>${{ '%.2f'|format(r.estimated_usd) }}</td>
-                    <td>{% if r.actual_usd is not none %}{{ '%+.2f'|format(r.actual_usd - r.estimated_usd) }}{% else %}—{% endif %}</td></tr>
-                {% endfor %}
-                </tbody>
-            </table>
-        </div>
-        {% endif %}
-    </section>
-
-    <section class="admin-section" id="adminMargin" data-costs="margin">
-        <h2>Daily margin (USD)</h2>
-        {% set mg = margin %}
-        {% if mg.fatal %}
-        <div class="stripe-error" role="alert">{{ mg.error }}</div>
-        {% else %}
-        <p class="costs-note">
-            Same period as the filter above ({{ actual_costs.start }} → {{ actual_costs.end }}).
-            Days are <strong>UTC</strong> days (OpenAI bills per UTC day), so a day here runs
-            02:00–02:00 Oslo time; Stripe income is bucketed the same way. Income = Stripe net
-            after fees, tax and refunds, converted at each charge's own rate. Today is partial.
-        </p>
-        {% if not mg.cost_ok %}<div class="stripe-error" role="status">Actual cost unavailable: {{ mg.cost_error }}</div>{% endif %}
-        {% if not mg.stripe_ok %}<div class="stripe-error" role="status">Stripe unavailable, income shows $0.</div>{% endif %}
-        <div class="costs-grid">
-            <div class="cost-card"><h3>Income in period</h3><div class="actual-figure">${{ '%.2f'|format(mg.daily.total_income_usd) }}</div><div class="actual-sub">Stripe net</div></div>
-            <div class="cost-card"><h3>Actual API cost</h3><div class="actual-figure">{% if mg.daily.total_cost_usd is not none %}${{ '%.2f'|format(mg.daily.total_cost_usd) }}{% else %}—{% endif %}</div><div class="actual-sub">OpenAI billing</div></div>
-            <div class="cost-card"><h3>Margin</h3><div class="actual-figure">{% if mg.daily.total_margin_usd is not none %}{{ '−' if mg.daily.total_margin_usd < 0 else '' }}${{ '%.2f'|format(mg.daily.total_margin_usd|abs) }}{% else %}—{% endif %}</div><div class="actual-sub">income − actual cost</div></div>
-            <div class="cost-card"><h3>Cost per minute</h3><div class="actual-figure">${{ '%.4f'|format(mg.cost_per_min_usd) }}</div><div class="actual-sub">{% if mg.cost_per_min_source == 'actual' %}actual cost{% elif mg.cost_per_min_source == 'list_implausible' %}list price (actual ÷ minutes was implausible){% else %}list price{% endif %} / {{ mg.transcribed_minutes }} min transcribed · list ${{ '%.3f'|format(mg.whisper_list_usd_per_min) }}</div></div>
-        </div>
-        <div class="chart-card" data-costs="margin-chart">
-            <h3>Income, actual cost and margin per UTC day</h3>
-            <canvas id="chartMarginDaily" height="180"></canvas>
-        </div>
-        <div class="actual-table-wrap">
-            <table class="actual-table" data-costs="margin-table">
-                <thead><tr><th>Day (UTC)</th><th>Income</th><th>Actual cost</th><th>Margin</th></tr></thead>
-                <tbody>{% for r in mg.daily.rows|reverse %}
-                <tr><td>{{ r.day }}{% if r.partial %} <span class="est-badge">partial</span>{% endif %}</td>
-                    <td>${{ '%.2f'|format(r.income_usd) }}</td>
-                    <td>{% if r.cost_usd is not none %}${{ '%.2f'|format(r.cost_usd) }}{% else %}—{% endif %}</td>
-                    <td>{% if r.margin_usd is not none %}{{ '%+.2f'|format(r.margin_usd) }}{% else %}—{% endif %}</td></tr>
-                {% endfor %}</tbody>
-            </table>
-        </div>
-    </section>
-
-    <section class="admin-section" id="adminContribution" data-costs="contribution">
-        <h2>Contribution margin per plan</h2>
-        {% set c = mg.contribution %}
-        <p class="costs-note">
-            Counted purchases only (completed, not refunded or disputed; internal/test users excluded).
-            Gross is price paid incl. VAT; ex VAT is shown under each gross figure.
-            Fees and tax are the real Stripe figures for each payment.
-            Cost = minutes × ${{ '%.4f'|format(mg.cost_per_min_usd) }}/min (actual cost ÷ minutes transcribed in the period).
-            "All used" assumes every sold minute gets transcribed; "used so far" uses each buyer's share of
-            paid minutes already spent. Contribution % is of gross.
-            {% if c.totals.refund_count or c.totals.dispute_count %}
-            Refunds/disputes in period (not in totals): {{ c.totals.refund_count }} refund{{ '' if c.totals.refund_count == 1 else 's' }}{% if c.totals.dispute_count %}, {{ c.totals.dispute_count }} dispute{{ '' if c.totals.dispute_count == 1 else 's' }}{% endif %} · ${{ '%.2f'|format(c.totals.refunds_disputes_usd) }}.
-            {% endif %}
-        </p>
-        <div class="actual-table-wrap">
-            <table class="actual-table" data-costs="contribution-table">
-                <thead><tr><th>Plan</th><th>Buys</th><th>Gross (incl. VAT)</th><th>Fees + tax</th><th>Net</th><th>Min sold</th><th>Cost (all used)</th><th>Contribution (all used)</th><th>Min used</th><th>Cost (so far)</th><th>Contribution (so far)</th></tr></thead>
-                <tbody>
-                {% for g in c.plans %}
-                <tr data-plan="{{ g.plan }}"><td>{{ g.label }}</td><td>{{ g.count }}</td>
-                    <td>${{ '%.2f'|format(g.gross_usd) }}<br><span class="money-muted">${{ '%.2f'|format(g.ex_vat_usd) }} ex VAT</span></td>
-                    <td>${{ '%.2f'|format(g.fees_usd + g.tax_usd) }}</td>
-                    <td>${{ '%.2f'|format(g.net_usd) }}</td>
-                    <td>{{ '%.0f'|format(g.minutes_sold) }}</td>
-                    <td>${{ '%.2f'|format(g.cost_all_used_usd) }}</td>
-                    <td>{{ '%+.2f'|format(g.db_all_used_usd) }}{% if g.db_pct_all_used is not none %} ({{ g.db_pct_all_used }}%){% endif %}<br><span class="money-muted">{{ '%+.2f'|format(g.db_per_purchase_all_used_usd) }}/buy</span></td>
-                    <td>{{ '%.0f'|format(g.minutes_used) }}</td>
-                    <td>${{ '%.2f'|format(g.cost_used_so_far_usd) }}</td>
-                    <td>{{ '%+.2f'|format(g.db_used_so_far_usd) }}{% if g.db_pct_used_so_far is not none %} ({{ g.db_pct_used_so_far }}%){% endif %}<br><span class="money-muted">{{ '%+.2f'|format(g.db_per_purchase_used_so_far_usd) }}/buy</span></td></tr>
-                {% else %}
-                <tr><td colspan="11" class="admin-empty">No purchases in this period.</td></tr>
-                {% endfor %}
-                <tr data-plan="trial"><td>{{ c.trial.label }}</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>
-                    <td>{{ '%.0f'|format(c.trial.minutes_used) }}</td><td>${{ '%.2f'|format(c.trial.cost_usd) }}</td><td>−${{ '%.2f'|format(c.trial.cost_usd) }}</td></tr>
-                <tr class="contrib-total"><td><strong>Total</strong></td><td>{{ c.totals.count|int }}</td>
-                    <td>${{ '%.2f'|format(c.totals.gross_usd) }}<br><span class="money-muted">${{ '%.2f'|format(c.totals.ex_vat_usd) }} ex VAT</span></td><td>${{ '%.2f'|format(c.totals.fees_usd + c.totals.tax_usd) }}</td>
-                    <td>${{ '%.2f'|format(c.totals.net_usd) }}</td><td></td><td>${{ '%.2f'|format(c.totals.cost_all_used_usd) }}</td>
-                    <td>{{ '%+.2f'|format(c.totals.db_all_used_usd) }}</td><td></td><td>${{ '%.2f'|format(c.totals.cost_used_so_far_usd) }}</td>
-                    <td>{{ '%+.2f'|format(c.totals.db_used_so_far_usd) }}<br><span class="money-muted">after trial: {{ '%+.2f'|format(c.totals.db_after_trial_usd) }}</span></td></tr>
-                </tbody>
-            </table>
-        </div>
-
-        <h3 class="costs-note" style="margin-top:16px;color:var(--ink);font-weight:700;">Per price point (vol_v1, if all minutes are used)</h3>
-        <div class="actual-table-wrap">
-            <table class="actual-table" data-costs="theoretical-table">
-                <thead><tr><th>Pack</th><th>Price</th><th>Fees + tax{% if mg.observed_fee_tax_pct is not none %} ({{ mg.observed_fee_tax_pct }}% seen){% endif %}</th><th>Fee model (30¢ + 6.4%)</th><th>Cost (actual/min)</th><th>Cost (list $0.006)</th><th>Contribution</th></tr></thead>
-                <tbody>{% for t in mg.theoretical %}
-                <tr><td>{{ t.minutes }} min</td><td>${{ '%.2f'|format(t.price_usd) }}</td><td>${{ '%.2f'|format(t.fee_tax_usd) }}</td><td>${{ '%.2f'|format(t.model_fee_usd) }}</td>
-                    <td>${{ '%.2f'|format(t.cost_usd) }}</td><td>${{ '%.2f'|format(t.cost_list_usd) }}</td>
-                    <td>{{ '%+.2f'|format(t.db_usd) }}{% if t.db_pct is not none %} ({{ t.db_pct }}%){% endif %}</td></tr>
-                {% endfor %}</tbody>
-            </table>
-        </div>
-        {% endif %}
-    </section>
-
-    {% endcall %}
-
     {% call tab_panel('admin-payments') %}
     <section class="admin-section" id="adminStripeRevenue">
         <h2>Revenue &amp; payouts</h2>
@@ -912,15 +638,6 @@
 {% if stripe_revenue.ok %}
 <script type="application/json" id="adminStripeWeekly">{{ stripe_revenue.weekly_net | tojson }}</script>
 {% endif %}
-{% if margin and margin.daily %}
-<script type="application/json" id="adminMarginChart">{{ margin.daily.chart | tojson }}</script>
-{% endif %}
-{% if actual_costs and actual_costs.chart %}
-<script type="application/json" id="adminActualCostsChart">{{ actual_costs.chart | tojson }}</script>
-{% endif %}
-{% if costs and not costs.error %}
-<script type="application/json" id="adminCostsChart">{{ costs.chart | tojson }}</script>
-{% endif %}
 {# Self-hosted (CSP script-src 'self'); Chart.js 4.4.7, MIT, see static/vendor/chart.js-LICENSE.md #}
 <script src="{{ url_for('static', filename='vendor/chart-4.4.7.umd.min.js') }}"></script>
 <script>
@@ -934,7 +651,6 @@
         fill: token('--accent-tint'),
         fail: token('--danger'),
         funnel: [token('--accent'), token('--accent-hover'), token('--muted')],
-        costFixed: token('--muted'),
     };
 
     /* ---- Tabs: open the right panel when arriving with ?q= / tasks_page ---- */
@@ -1121,118 +837,6 @@
     var data = JSON.parse(dataEl.textContent);
     var charts = {};
 
-
-    var actualEl = document.getElementById('adminActualCostsChart');
-    var actx = document.getElementById('chartCostsActual');
-    if (actualEl && actx && typeof Chart !== 'undefined') {
-        try {
-            var ad = JSON.parse(actualEl.textContent);
-            new Chart(actx, {
-                type: 'bar',
-                data: {
-                    labels: ad.labels,
-                    datasets: [
-                        { label: 'Actual (OpenAI)', data: ad.actual_usd, backgroundColor: palette.line, borderRadius: 2 },
-                        { label: 'Estimated', data: ad.estimated_usd, backgroundColor: palette.costFixed, borderRadius: 2 },
-                    ],
-                },
-                options: {
-                    responsive: true, maintainAspectRatio: false,
-                    plugins: { legend: { display: true, labels: { color: palette.text, boxWidth: 12, font: { size: 11 } } } },
-                    scales: {
-                        x: { ticks: { color: palette.text, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 12 } }, grid: { display: false } },
-                        y: { beginAtZero: true, ticks: { color: palette.text, font: { size: 12 }, callback: function (v) { return '$' + v; } }, grid: { color: palette.grid } },
-                    },
-                },
-            });
-        } catch (e) { /* ignore chart parse errors */ }
-    }
-
-    var mEl = document.getElementById('adminMarginChart');
-    var mctx = document.getElementById('chartMarginDaily');
-    if (mEl && mctx && typeof Chart !== 'undefined') {
-        try {
-            var md = JSON.parse(mEl.textContent);
-            new Chart(mctx, {
-                type: 'bar',
-                data: {
-                    labels: md.labels,
-                    datasets: [
-                        { label: 'Income (Stripe net)', data: md.income_usd, backgroundColor: palette.line, borderRadius: 2 },
-                        { label: 'Actual cost', data: md.cost_usd, backgroundColor: palette.costFixed, borderRadius: 2 },
-                        { type: 'line', label: 'Margin', data: md.margin_usd, borderColor: palette.fail, backgroundColor: 'transparent', pointRadius: 0, borderWidth: 2, tension: 0.2 },
-                    ],
-                },
-                options: {
-                    responsive: true, maintainAspectRatio: false,
-                    plugins: { legend: { display: true, labels: { color: palette.text, boxWidth: 12, font: { size: 11 } } } },
-                    scales: {
-                        x: { ticks: { color: palette.text, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 12 } }, grid: { display: false } },
-                        y: { ticks: { color: palette.text, font: { size: 12 }, callback: function (v) { return '$' + v; } }, grid: { color: palette.grid } },
-                    },
-                },
-            });
-        } catch (e) { /* ignore chart parse errors */ }
-    }
-    var costsEl = document.getElementById('adminCostsChart');
-    if (costsEl) {
-        try {
-            var costsChart = JSON.parse(costsEl.textContent);
-            var cctx = document.getElementById('chartCostsDaily');
-            if (cctx) {
-                new Chart(cctx, {
-                    type: 'line',
-                    data: {
-                        labels: costsChart.labels,
-                        datasets: [
-                            {
-                                label: 'OpenAI (est.)',
-                                data: costsChart.openai_usd,
-                                borderColor: palette.line,
-                                backgroundColor: palette.fill,
-                                fill: true,
-                                tension: 0.25,
-                                pointRadius: 0,
-                                borderWidth: 2,
-                            },
-                            {
-                                label: 'Fixed (prorated)',
-                                data: costsChart.fixed_usd,
-                                borderColor: palette.costFixed,
-                                backgroundColor: 'transparent',
-                                fill: false,
-                                tension: 0,
-                                pointRadius: 0,
-                                borderWidth: 1.5,
-                                borderDash: [4, 3],
-                            },
-                        ],
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: {
-                            legend: {
-                                display: true,
-                                labels: { color: palette.text, boxWidth: 12, font: { size: 11 } },
-                            },
-                        },
-                        scales: {
-                            x: {
-                                ticks: { color: palette.text, maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 12 } },
-                                grid: { color: palette.grid },
-                            },
-                            y: {
-                                beginAtZero: true,
-                                ticks: { color: palette.text, font: { size: 12 } },
-                                grid: { color: palette.grid },
-                            },
-                        },
-                    },
-                });
-            }
-        } catch (e) { /* ignore chart parse errors */ }
-    }
 
     function baseOpts() {
         return {
