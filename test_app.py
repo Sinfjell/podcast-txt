@@ -10873,9 +10873,84 @@ def test_transcript_events_carry_trial_variant(ph_events, monkeypatch, trial_on)
     assert started and started[-1]['properties'].get('trial_variant') == 'control'
 
 
-def test_trial_ab_advertises_floor_minutes(monkeypatch, trial_on):
+def test_trial_ab_hides_advertised_minutes(monkeypatch, trial_on):
+    """Pre-signup surfaces must not quote 30 or 60 while the AB is on."""
     monkeypatch.setattr(A, 'TRIAL_AB_ENABLED', True)
-    assert A.advertised_trial_minutes() == 30
+    assert A.advertised_trial_minutes() is None
+    assert A.free_trial_offered() is True
+
+
+def test_trial_ab_off_keeps_numeric_marketing_copy(trial_on):
+    """Flag off: home/pricing/landings still quote the advertised grant."""
+    assert A.TRIAL_AB_ENABLED is False
+    grant = A.advertised_trial_minutes()
+    assert grant and grant > 0
+    assert A.free_trial_offered() is True
+    client = A.app.test_client()
+    home = client.get('/').data.decode()
+    assert f'{grant} min free' in home
+    assert f'{grant} minutes free' in home or f'First {grant} minutes' in home
+    assert 'Try it free · then' not in home
+    pricing = client.get('/pricing').data.decode()
+    assert f'{grant} minutes' in pricing
+    assert 'Start free <small>no card needed</small>' not in pricing
+    free = client.get('/transcribe-podcast-free').data.decode()
+    assert f'{grant} minutes free' in free
+    assert 'Try it free, no card needed' not in free
+
+
+def _assert_no_ab_trial_minute_counts(body):
+    """Logged-out marketing must not quote the 30/60 AB arm sizes."""
+    for n in (30, 60):
+        for phrase in (
+            f'{n} min free', f'{n} minutes free', f'First {n} minutes',
+            f'{n} free minutes', f'{n} minutes</small>', f'{n} minutes <small>',
+            f'{n} minutos gratis', f'{n} Minuten gratis',
+            f'{n} gratisminutter', f'{n} minutos grátis',
+            f'{n} minutes gratuites',
+        ):
+            assert phrase not in body, phrase
+
+
+def test_trial_ab_on_uses_neutral_presignup_copy(monkeypatch, trial_on):
+    """Flag on: logged-out pages never mention 30 or 60 free minutes."""
+    monkeypatch.setattr(A, 'TRIAL_AB_ENABLED', True)
+    assert A.advertised_trial_minutes() is None
+    client = A.app.test_client()
+    home = client.get('/').data.decode()
+    _assert_no_ab_trial_minute_counts(home)
+    assert 'Try it free · then' in home or 'Start free, no card needed' in home
+    pricing = client.get('/pricing').data.decode()
+    _assert_no_ab_trial_minute_counts(pricing)
+    assert 'Start free' in pricing and 'no card needed' in pricing
+    free = client.get('/transcribe-podcast-free').data.decode()
+    _assert_no_ab_trial_minute_counts(free)
+    assert 'Try it free' in free or 'no card needed' in free
+    for path in (
+        '/spotify-podcast-transcript', '/podcast-transcript-generator',
+        '/no/podcast-til-tekst', '/es/transcribir-podcast',
+        '/de/podcast-transkribieren', '/pt/transcrever-podcast',
+        '/fr/transcrire-podcast', '/register', '/pricing',
+        '/guides/podcast-transcripts-in-chatgpt-and-claude',
+        '/llms.txt',
+    ):
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        _assert_no_ab_trial_minute_counts(resp.data.decode())
+    # After signup, flash quotes the stamped arm (30 or 60), not a floor.
+    email = 'ab-copy-signup@example.com'
+    _purge([email])
+    A._register_attempts.clear()
+    resp = client.post('/register', data={
+        'email': email, 'password': 'password123',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    follow = client.get(resp.headers['Location']).data.decode()
+    with A.app.app_context():
+        u = A.User.query.filter_by(email=email).first()
+        granted = u.trial_seconds_limit // 60
+    assert f'you have {granted} free minutes' in follow
+    _purge([email])
 
 
 def test_base_exposes_trial_variant_for_client_analytics(stripe_on, monkeypatch):

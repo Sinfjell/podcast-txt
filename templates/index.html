@@ -2,9 +2,9 @@
 {% from "components/macros.html" import snippet, button, proof_list, announce, command_bar, inline_select, works_with, signal_wave, transcript_window, notice %}
 
 {% block title %}Spotify & podcast transcripts — Podskrift{% endblock %}
-{% block meta_description %}Paste a Spotify episode link or search any podcast, and get the full transcript as text and .srt. {{ language_count }} languages, modern speech recognition.{% if trial_minutes %} First {{ trial_minutes }} minutes free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.{% endif %}{% endblock %}
+{% block meta_description %}Paste a Spotify episode link or search any podcast, and get the full transcript as text and .srt. {{ language_count }} languages, modern speech recognition.{% if trial_minutes %} First {{ trial_minutes }} minutes free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.{% elif free_trial_offered %} Start free, no card needed.{% endif %}{% endblock %}
 {% block og_title %}Spotify & podcast transcripts — Podskrift{% endblock %}
-{% block og_description %}Paste a Spotify link or search any podcast — get the full transcript.{% if trial_minutes %} First {{ trial_minutes }} minutes free.{% endif %}{% endblock %}
+{% block og_description %}Paste a Spotify link or search any podcast — get the full transcript.{% if trial_minutes %} First {{ trial_minutes }} minutes free.{% elif free_trial_offered %} Start free, no card needed.{% endif %}{% endblock %}
 {% block container_class %}container-wide{% endblock %}
 
 {% block head_links %}
@@ -156,7 +156,7 @@
         {% else %}
         {{ announce('Ask Claude or ChatGPT for any transcript', '#use-in-ai', short='Use it in Claude and ChatGPT') }}
         <h1 class="hp-title">Any podcast episode as text, <span class="ds-hero__soft">even on Spotify</span></h1>
-        <p class="hp-price-line" data-testid="hero-price-line">{% if trial_minutes %}{{ trial_minutes }} min free · then {% endif %}${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min</p>
+        <p class="hp-price-line" data-testid="hero-price-line">{% if trial_minutes %}{{ trial_minutes }} min free · then {% elif free_trial_offered %}Try it free · then {% endif %}${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min</p>
         <p class="ds-hero__lede">Paste a Spotify link or search a podcast. The full transcript with timestamps, ready to read, search and quote in a few minutes.</p>
         {% endif %}
 
@@ -189,7 +189,7 @@
             {# Signup-trial marketing, anonymous only, next to the button it de-risks.
                Logged-in users have their own grant and a balance banner above. #}
             {% if not app_hero %}
-            {% set assure = ['No card, no OpenAI key needed' if trial_minutes else 'Text and .srt subtitles',
+            {% set assure = ['No card, no OpenAI key needed' if (trial_minutes or free_trial_offered) else 'Text and .srt subtitles',
                              language_count ~ ' languages, modern speech recognition',
                              'Keeps running if you close the page'] %}
             {{ proof_list(assure, class='ds-proof--inline', attrs='aria-label="Why Podskrift"') }}
@@ -235,7 +235,8 @@
     {% endif %}
 
     {# Fine print for anonymous visitors, after the action and the reasons to take it. #}
-    {% if trial_minutes and not current_user.is_authenticated %}
+    {% if not current_user.is_authenticated %}
+    {% if trial_minutes %}
     <p class="form-hint hp-fine">
         First {{ trial_minutes }} minutes of audio free{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}, with no card.
         The free trial covers {{ trial_minutes }} minutes of audio in total{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.
@@ -248,6 +249,18 @@
         {% endif %}
         <a href="{{ url_for('pricing') }}">See pricing</a>.
     </p>
+    {% elif free_trial_offered %}
+    <p class="form-hint hp-fine">
+        Start free, no card needed. Longer episodes still start as a free preview — buy minutes or add your own key to finish.
+        {% if stripe_buy_enabled %}
+        One-time pack: ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (VAT included).
+        A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
+        {% else %}
+        A 90-minute episode on your own key is about ${{ openai_90min_cost }} at OpenAI's rate.
+        {% endif %}
+        <a href="{{ url_for('pricing') }}">See pricing</a>.
+    </p>
+    {% endif %}
     {% endif %}
 </section>
 
@@ -265,6 +278,8 @@
             <p>
                 {% if trial_minutes %}
                 Create a free account and press Transcribe. Your first {{ trial_minutes }} minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %} run on our key — including a free preview of longer episodes.
+                {% elif free_trial_offered %}
+                Create a free account and press Transcribe. Start free on our key — including a free preview of longer episodes.
                 {% else %}
                 Create a free account, add your OpenAI key, and press Transcribe.
                 {% endif %}
@@ -311,7 +326,7 @@
 {# Three ways to use it. The trial card follows the conditions the page already
    used: anonymous visitors see the advertised grant; logged-in users only see it
    while their own trial is neither used up nor replaced by their own key. #}
-{% set show_trial_card = (trial_minutes and not current_user.is_authenticated)
+{% set show_trial_card = ((trial_minutes or free_trial_offered) and not current_user.is_authenticated)
     or (current_user.is_authenticated and trial and not trial.on_own_key and not trial.exhausted) %}
 <section class="hp-section" id="pricing" aria-labelledby="pricingHeading">
     <div>
@@ -323,7 +338,9 @@
         <div class="hp-plan">
             <div class="hp-plan-label">Free trial</div>
             <div class="hp-plan-figure">
-                {% if current_user.is_authenticated %}{{ trial.limit_minutes }}{% else %}{{ trial_minutes }}{% endif %} minutes
+                {% if current_user.is_authenticated %}{{ trial.limit_minutes }} minutes
+                {% elif trial_minutes %}{{ trial_minutes }} minutes
+                {% else %}Start free{% endif %}
             </div>
             <p>No card, no OpenAI key needed to start. Longer episodes get the free minutes as a preview.</p>
         </div>
@@ -355,6 +372,15 @@
         <p>
             {% if trial_minutes %}
             Free account, {{ trial_minutes }} free minutes{% if trial_minutes >= 120 %} (about {{ trial_minutes // 60 }} hours){% endif %}.
+            {% if stripe_buy_enabled %}
+            After that, buy ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (one-time, VAT included),
+            or add your own OpenAI key (~${{ openai_hourly_cost }}/h billed by OpenAI). No subscription.
+            {% else %}
+            After that, add your own OpenAI key
+            and pay OpenAI directly — about ${{ openai_hourly_cost }} per hour of audio. No subscription.
+            {% endif %}
+            {% elif free_trial_offered %}
+            Free account — start free, no card needed.
             {% if stripe_buy_enabled %}
             After that, buy ${{ credit_pack_price_usd }} for {{ credit_pack_minutes }} min (one-time, VAT included),
             or add your own OpenAI key (~${{ openai_hourly_cost }}/h billed by OpenAI). No subscription.
