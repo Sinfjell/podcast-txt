@@ -166,7 +166,11 @@
                 <span class="form-hint" style="display: block; margin: 4px 0 2px;">{{ credit_pack_payment_hint }}</span>
                 <span style="display: block; margin: 0 0 8px;">{{ credit_pack_subline }}</span>
                 {% endif %}
-                <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="episode_selection">Add your own OpenAI key</a>
+                <span class="paywall-byok-alt">
+                    <a href="{{ url_for('settings') }}#openai" data-paywall-byok="episode_selection">
+                        Have an OpenAI API key? Use it instead
+                    </a>
+                </span>
             </p>
         </div>
     </div>

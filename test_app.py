@@ -12412,7 +12412,41 @@ def test_episode_paywall_buy_is_primary(stripe_on, monkeypatch):
     btn_at = body.index('id="paywallBuyBtn"')
     assert 'btn-primary' in body[btn_at - 160:btn_at]
     assert 'data-paywall-byok="episode_selection"' in body
-    assert 'ds-link-button' in body
+    assert 'Have an OpenAI API key? Use it instead' in body
+    assert 'paywall-byok-alt' in body
+
+
+def test_buy_modal_and_result_offer_demote_byok(stripe_on):
+    """BYOK is a quiet secondary line under Buy — not a peer CTA."""
+    uid = _make_user('byok-demote@test.com', limit=600, used=0)
+    client = _login(uid)
+    home = client.get('/').data.decode()
+    assert 'data-paywall-byok="buy_modal"' in home
+    assert 'Have an OpenAI API key? Use it instead' in home
+    assert 'buy-modal-alt' in home
+    # Result page offer: Buy primary, BYOK under it via paywall-byok-alt.
+    from models import db, TranscriptionTask
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='byok-demote-1', user_id=uid, episode_title='Ep',
+            status='completed', phase='completed',
+            transcript_text='hello from demote',
+        ))
+        db.session.commit()
+    result = client.get('/transcription/byok-demote-1').data.decode()
+    assert 'data-testid="result-offer"' in result
+    assert 'id="resultOfferBuyBtn"' in result
+    assert 'btn-primary' in result[result.index('id="resultOfferBuyBtn"') - 80:
+                                   result.index('id="resultOfferBuyBtn"') + 40]
+    assert 'data-paywall-byok="result_offer"' in result
+    assert 'paywall-byok-alt' in result
+    assert 'Have an OpenAI API key? Use it instead' in result
+    # BYOK must not sit as a flex peer ds-link-button next to Buy.
+    offer_chunk = result[result.index('data-testid="result-offer"'):
+                         result.index('data-testid="result-offer"') + 900]
+    assert 'id="resultOfferByokLink"' in offer_chunk
+    assert 'ds-link-button' not in offer_chunk
+    assert 'paywall-byok-alt' in offer_chunk
 
 
 def test_status_partial_unlock_and_full_result_offer(stripe_on):
