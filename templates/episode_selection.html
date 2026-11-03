@@ -348,7 +348,8 @@ document.addEventListener('DOMContentLoaded', function() {
         return url;
     }
 
-    function openEpisodeBuyModal(needed) {
+    function openEpisodeBuyModal(needed, paywallOpts) {
+        paywallOpts = paywallOpts || {};
         var left = minutesLeft() || 0;
         var epForm = document.getElementById('episodeForm');
         var lang = languageSelect ? languageSelect.value : '';
@@ -356,7 +357,9 @@ document.addEventListener('DOMContentLoaded', function() {
             needed: needed || selectedDuration || 0,
             left: left,
             title: selectedTitle,
-            source: 'buy_modal_episode',
+            source: paywallOpts.source || 'buy_modal_episode',
+            surface: paywallOpts.surface || undefined,
+            reason: paywallOpts.reason || undefined,
             returnTo: returnToForCheckout(),
             rssUrl: epForm ? (epForm.querySelector('[name="rss_url"]') || {}).value : '',
             episodeIndex: episodeIndexInput ? episodeIndexInput.value : '',
@@ -704,7 +707,11 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!episodeNeedsOwnKey(selectedDuration)) return false;
         if (!STRIPE_BUY) return false;
         e.preventDefault();
-        openEpisodeBuyModal(selectedDuration);
+        openEpisodeBuyModal(selectedDuration, {
+            source: 'empty_balance',
+            surface: 'empty_balance',
+            reason: 'low_balance',
+        });
         return true;
     }
 
@@ -751,7 +758,11 @@ document.addEventListener('DOMContentLoaded', function() {
                         res.data.paywall_reason
                     );
                     if (res.data.buy_available && STRIPE_BUY) {
-                        openEpisodeBuyModal(selectedDuration);
+                        openEpisodeBuyModal(selectedDuration, {
+                            source: 'empty_balance',
+                            surface: 'empty_balance',
+                            reason: res.data.paywall_reason || 'trial_exhausted',
+                        });
                     }
                     transcribeBtn.disabled = false;
                     stickyBtn.disabled = false;

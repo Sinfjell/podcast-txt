@@ -291,7 +291,16 @@
                 });
             }
             if (typeof window.podskriftPaywallShown === 'function') {
-                window.podskriftPaywallShown('buy_modal_' + source, 'manual');
+                var surface = opts.surface || ('buy_modal_' + source);
+                var reason = opts.reason || 'manual';
+                var shownProps = {surface: surface};
+                if (opts.trial_remaining_min != null) {
+                    shownProps.trial_remaining_min = opts.trial_remaining_min;
+                }
+                if (opts.paid_remaining_min != null) {
+                    shownProps.paid_remaining_min = opts.paid_remaining_min;
+                }
+                window.podskriftPaywallShown(surface, reason, shownProps);
             }
         } catch (e) { /* ignore */ }
     }
