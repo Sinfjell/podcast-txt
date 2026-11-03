@@ -85,35 +85,26 @@
         Today's free minutes are used up — they refill at midnight (Norway time).
         {% if trial.stripe_buy %}
         Buy {{ credit_pack_minutes }} min for ${{ credit_pack_price_usd }} to continue now.
-        <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;" data-paywall-buy="home_banner">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="source" value="home_banner">
-            <input type="hidden" name="ph_sid" value="">
-            <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
-        </form>
+        <a href="{{ url_for('pricing') }}" class="btn btn-sm btn-primary" style="margin: 0 6px;"
+           data-open-buy-modal data-buy-source="home_banner"
+           data-paywall-buy="home_banner">{{ trial.buy_label }}</a>
         {% endif %}
         <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_banner">Add your own OpenAI key</a>
         {% elif trial.exhausted %}
         Your free trial is used up.
         {% if trial.stripe_buy %}
-        <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;" data-paywall-buy="home_banner">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="source" value="home_banner">
-            <input type="hidden" name="ph_sid" value="">
-            <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
-        </form>
+        <a href="{{ url_for('pricing') }}" class="btn btn-sm btn-primary" style="margin: 0 6px;"
+           data-open-buy-modal data-buy-source="home_banner"
+           data-paywall-buy="home_banner">{{ trial.buy_label }}</a>
         <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
         {% endif %}
         <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_banner">Add your own OpenAI key</a>
         {% elif trial.low_balance %}
         Running low — <strong>{{ trial.total_minutes }} minutes</strong> left.
         {% if trial.stripe_buy %}
-        <form method="POST" action="{{ url_for('billing_checkout') }}" style="display: inline;" data-paywall-buy="home_low_balance">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="source" value="home_low_balance">
-            <input type="hidden" name="ph_sid" value="">
-            <button type="submit" class="btn btn-sm btn-primary" style="margin: 0 6px;">{{ trial.buy_label }}</button>
-        </form>
+        <a href="{{ url_for('pricing') }}" class="btn btn-sm btn-primary" style="margin: 0 6px;"
+           data-open-buy-modal data-buy-source="home_low_balance"
+           data-paywall-buy="home_low_balance">{{ trial.buy_label }}</a>
         <span class="form-hint" style="display: inline; margin: 0 6px 0 0;">{{ credit_pack_subline }}</span>
         {% endif %}
         <a href="{{ url_for('settings') }}#openai" class="ds-link-button" data-paywall-byok="home_low_balance">Add your own OpenAI key</a>
@@ -566,7 +557,41 @@
 
     var lastEpisodeForBuy = { duration: null, title: '', fields: null };
 
-    function setError(text, actionUrl, actionLabel, buyAvailable, paywallReason, coverLine) {        clearResults();
+    /* Header / banner Buy: prefer the episode the user just tried so checkout
+       returns and auto-starts it (PR #182 paywall_pending / stash path). */
+    window.podskriftBuyContext = function() {
+        var ep = lastEpisodeForBuy || {};
+        if (!ep.fields && ep.duration == null) return null;
+        var left = (Number(TRIAL_REMAINING_MIN) || 0) + (Number(PAID_REMAINING_MIN) || 0);
+        return {
+            needed: ep.duration,
+            left: TRIAL_REMAINING_MIN === null ? null : left,
+            title: ep.title || '',
+            fields: ep.fields || null,
+            returnTo: buyReturnTo(ep.fields),
+        };
+    };
+
+    function openEmptyBalancePaywall(paywallReason) {
+        if (!(STRIPE_BUY && typeof window.openBuyModal === 'function')) return false;
+        var left = (Number(TRIAL_REMAINING_MIN) || 0) + (Number(PAID_REMAINING_MIN) || 0);
+        window.openBuyModal({
+            needed: lastEpisodeForBuy.duration,
+            left: TRIAL_REMAINING_MIN === null ? null : left,
+            title: lastEpisodeForBuy.title || '',
+            source: 'empty_balance',
+            surface: 'empty_balance',
+            reason: paywallReason || 'trial_exhausted',
+            returnTo: buyReturnTo(lastEpisodeForBuy.fields),
+            fields: lastEpisodeForBuy.fields || null,
+            trial_remaining_min: TRIAL_REMAINING_MIN,
+            paid_remaining_min: PAID_REMAINING_MIN,
+        });
+        return true;
+    }
+
+    function setError(text, actionUrl, actionLabel, buyAvailable, paywallReason, coverLine) {
+        clearResults();
         resultsDiv.style.color = 'var(--danger)';
         resultsDiv.style.padding = '12px 0';
         var wrap = document.createElement('div');
@@ -588,24 +613,32 @@
         actions.style.alignItems = 'center';
         actions.style.gap = '12px';
         var showBuy = (typeof buyAvailable === 'boolean') ? buyAvailable : false;
+        var openedModal = false;
         if (showBuy && STRIPE_BUY) {
+            // Auto-open the episode-aware buy modal so empty balance is not a
+            // silent dead end. Inline Buy remains as a fallback / re-open.
+            openedModal = openEmptyBalancePaywall(paywallReason);
             var buyBtn = document.createElement('button');
             buyBtn.type = 'button';
             buyBtn.className = 'btn btn-sm btn-primary';
             buyBtn.textContent = BUY_LABEL;
             buyBtn.addEventListener('click', function() {
                 if (typeof window.podskriftPaywallBuyClicked === 'function') {
-                    window.podskriftPaywallBuyClicked('home_error', paywallReason || 'trial_exhausted');
+                    window.podskriftPaywallBuyClicked(
+                        'empty_balance', paywallReason || 'trial_exhausted');
                 }
-                postBuyForm('home_error', lastEpisodeForBuy.duration, lastEpisodeForBuy.title,
-                            lastEpisodeForBuy.fields);
+                openEmptyBalancePaywall(paywallReason);
             });
             actions.appendChild(buyBtn);
-            if (typeof window.podskriftPaywallShown === 'function') {
+            if (!openedModal && typeof window.podskriftPaywallShown === 'function') {
                 window.podskriftPaywallShown(
-                    'home_error',
+                    'empty_balance',
                     paywallReason || 'trial_exhausted',
-                    {trial_remaining_min: TRIAL_REMAINING_MIN, paid_remaining_min: PAID_REMAINING_MIN}
+                    {
+                        surface: 'empty_balance',
+                        trial_remaining_min: TRIAL_REMAINING_MIN,
+                        paid_remaining_min: PAID_REMAINING_MIN
+                    }
                 );
             }
         }

@@ -12054,7 +12054,8 @@ def test_buy_modal_tracks_open_and_close_not_header_pill_click(stripe_on, monkey
     assert "posthog.capture('buy_modal_opened'" in body
     assert "posthog.capture('buy_modal_closed'" in body
     assert "open_ms" in body
-    assert "podskriftPaywallShown('buy_modal_' + source, 'manual')" in body
+    assert 'podskriftPaywallShown(surface, reason, shownProps)' in body
+    assert 'opts.surface' in body
     assert 'closeMobileNav' in body
     # Header pill must not fire buy_clicked on click — that event means checkout submit.
     assert "location: 'header_pill'" not in body
@@ -12257,17 +12258,41 @@ def test_home_paywall_buy_is_primary_byok_is_text_link(stripe_on):
     assert 'Your free trial is used up.' in body
     assert A.CREDIT_PACK_LABEL in body
     assert 'data-paywall-buy="home_banner"' in body
+    assert 'data-open-buy-modal' in body
+    assert 'data-buy-source="home_banner"' in body
     assert 'data-paywall-byok="home_banner"' in body
     assert 'ds-link-button' in body
-    # Buy is the filled CTA; BYOK is a text link, not btn-secondary.
+    # Buy opens the episode-aware modal; BYOK stays a text link.
     buy_at = body.index('data-paywall-buy="home_banner"')
-    chunk = body[buy_at:buy_at + 400]
+    chunk = body[max(0, buy_at - 200):buy_at + 200]
     assert 'btn-primary' in chunk
+    assert 'data-open-buy-modal' in chunk
     byok_at = body.index('data-paywall-byok="home_banner"')
     byok_chunk = body[max(0, byok_at - 80):byok_at + 120]
     assert 'ds-link-button' in byok_chunk
     assert 'btn-secondary' not in byok_chunk
     assert 'btn-primary' not in byok_chunk
+
+
+def test_home_and_episode_empty_balance_opens_buy_modal(stripe_on):
+    """Empty/insufficient balance must surface the buy modal, not a dead end."""
+    uid = _make_user('empty-bal-ui@test.com', limit=600, used=600)
+    home = _login(uid).get('/').data.decode()
+    assert 'openEmptyBalancePaywall' in home
+    assert "surface: 'empty_balance'" in home
+    assert 'podskriftBuyContext' in home
+    # Low-balance banner also routes through the modal.
+    low = _make_user('low-bal-modal@test.com', limit=180 * 60, used=160 * 60)
+    low_body = _login(low).get('/').data.decode()
+    assert 'data-buy-source="home_low_balance"' in low_body
+    assert 'data-open-buy-modal' in low_body
+
+
+def test_buy_modal_forwards_empty_balance_surface(stripe_on):
+    uid = _make_user('modal-surface@test.com', limit=600, used=0)
+    body = _login(uid).get('/').data.decode()
+    assert 'opts.surface' in body
+    assert "podskriftPaywallShown(surface, reason, shownProps)" in body
 
 
 def test_episode_paywall_buy_is_primary(stripe_on, monkeypatch):
@@ -17343,7 +17368,10 @@ def test_signed_in_home_offers_buying_minutes_in_header_and_hero(stripe_on):
     assert header.has_attr('data-open-buy-modal')
     hero = page.select_one('.hp-hero .hp-balance a[data-open-buy-modal]')
     assert hero is not None and 'Buy more minutes' in hero.get_text()
-    assert page.select_one('form[data-paywall-buy="home_banner"] button[type="submit"]')
+    # Exhausted banner Buy opens the episode-aware modal (not a bare checkout POST).
+    banner_buy = page.select_one('[data-paywall-buy="home_banner"][data-open-buy-modal]')
+    assert banner_buy is not None and banner_buy.name == 'a'
+    assert 'btn-primary' in (banner_buy.get('class') or [])
     assert page.select_one('#buyModal, .buy-modal, [id^="buyModal"]') is not None
 
 
