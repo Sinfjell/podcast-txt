@@ -37,6 +37,9 @@
         btn.disabled = true;
         btn.textContent = 'Starting…';
         var body = new FormData(form);
+        if (typeof window.podskriftAppendPosthogIds === 'function') {
+            window.podskriftAppendPosthogIds(body);
+        }
         fetch(form.action, { method: 'POST', body: body })
             .then(function(r) { return r.json().then(function(data) {
                 return { status: r.status, data: data };

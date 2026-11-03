@@ -1741,26 +1741,61 @@
             }
         } catch (e) { /* ignore */ }
 
-        // Buy form: stamp ph_sid only after Accept (cookie session id).
+        // Consent-gated browser PostHog ids for server-side capture/alias.
+        // Empty when Decline / pending so the server never invents a cookie id.
+        window.podskriftPosthogBrowserIds = function () {
+            var sid = '', did = '';
+            if (choice() !== 'accepted' || !window.posthog) return {sid: sid, did: did};
+            try { sid = posthog.get_session_id() || ''; } catch (e) { sid = ''; }
+            try { did = posthog.get_distinct_id() || ''; } catch (e) { did = ''; }
+            return {sid: sid, did: did};
+        };
+
+        function stampPosthogIdsOnForm(form) {
+            if (!form) return;
+            var ids = window.podskriftPosthogBrowserIds
+                ? window.podskriftPosthogBrowserIds() : {sid: '', did: ''};
+            [['ph_sid', ids.sid], ['ph_did', ids.did]].forEach(function (pair) {
+                var name = pair[0], val = pair[1] || '';
+                var el = form.querySelector('input[name="' + name + '"]');
+                if (!el) {
+                    el = document.createElement('input');
+                    el.type = 'hidden';
+                    el.name = name;
+                    form.appendChild(el);
+                }
+                el.value = val;
+            });
+        }
+
+        window.podskriftAppendPosthogIds = function (body) {
+            // FormData or plain object used by fetch(/start_transcription).
+            var ids = window.podskriftPosthogBrowserIds
+                ? window.podskriftPosthogBrowserIds() : {sid: '', did: ''};
+            if (!body) return ids;
+            if (typeof body.append === 'function') {
+                body.append('ph_sid', ids.sid || '');
+                body.append('ph_did', ids.did || '');
+            } else {
+                body.ph_sid = ids.sid || '';
+                body.ph_did = ids.did || '';
+            }
+            return ids;
+        };
+
+        // Buy + register forms: stamp ph_sid / ph_did only after Accept.
         // buy_clicked itself may fire anonymously in cookieless mode.
         document.addEventListener('submit', function (ev) {
             try {
                 var form = ev.target;
                 if (!form || !form.getAttribute) return;
                 var action = form.getAttribute('action') || '';
-                if (action.indexOf('/billing/checkout') === -1) return;
-                var sid = '';
-                if (choice() === 'accepted') {
-                    try { sid = posthog.get_session_id() || ''; } catch (e) { sid = ''; }
-                }
-                var ph = form.querySelector('input[name="ph_sid"]');
-                if (!ph) {
-                    ph = document.createElement('input');
-                    ph.type = 'hidden';
-                    ph.name = 'ph_sid';
-                    form.appendChild(ph);
-                }
-                ph.value = sid;
+                var isCheckout = action.indexOf('/billing/checkout') !== -1;
+                var isRegister = form.id === 'registerForm'
+                    || action.indexOf('/register') !== -1;
+                if (!isCheckout && !isRegister) return;
+                stampPosthogIdsOnForm(form);
+                if (!isCheckout) return;
                 if (!window.posthog) return;
                 var sourceEl = form.querySelector('input[name="source"]');
                 var loc = sourceEl ? sourceEl.value : '';

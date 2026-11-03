@@ -6129,6 +6129,11 @@ def register():
         if country:
             signup_props['country'] = country
         signup_props.update(_first_touch_analytics_props(utm=utm))
+        # Browser session + distinct_id (consent-gated) so this server event
+        # joins the same PostHog person/session as the client SDK.
+        ph_sid, ph_did = _request_posthog_browser_ids()
+        _apply_posthog_browser_context(
+            signup_props, user.id, sid=ph_sid, did=ph_did)
         product_analytics.capture('user_signed_up', user.id, signup_props)
         if denied_reason:
             flash(f'Account created. {TRIAL_DENIED_NOTE}', 'success')
@@ -6918,6 +6923,52 @@ def _consented_posthog_session_id(raw):
     return (raw or '').strip()[:128]
 
 
+def _consented_posthog_distinct_id(raw):
+    """Return a browser PostHog distinct_id only when analytics consent is on.
+
+    Used to alias the anonymous client id onto the authenticated user id so
+    server events join the same person as browser events. Dropped without
+    Accept — same gate as ``_consented_posthog_session_id``.
+    """
+    if not has_request_context():
+        return ''
+    if request.cookies.get(COOKIE_CONSENT_NAME) != COOKIE_CONSENT_ACCEPTED:
+        return ''
+    return (raw or '').strip()[:128]
+
+
+def _request_posthog_browser_ids():
+    """Consent-gated (session_id, distinct_id) from form fields or headers.
+
+    Clients stamp ``ph_sid`` / ``ph_did`` (forms) or send
+    ``X-PostHog-Session-Id`` / ``X-PostHog-Distinct-Id`` (fetch). Empty when
+    consent is not Accept.
+    """
+    if not has_request_context():
+        return '', ''
+    sid_raw = request.form.get('ph_sid') or request.headers.get(
+        'X-PostHog-Session-Id')
+    did_raw = request.form.get('ph_did') or request.headers.get(
+        'X-PostHog-Distinct-Id')
+    return (
+        _consented_posthog_session_id(sid_raw),
+        _consented_posthog_distinct_id(did_raw),
+    )
+
+
+def _apply_posthog_browser_context(props, user_id, *, sid=None, did=None):
+    """Attach ``$session_id`` and alias browser distinct_id → user id.
+
+    Mutates and returns ``props``. Analytics-only — never touches money flow.
+    """
+    out = props if props is not None else {}
+    if sid:
+        out['$session_id'] = sid
+    if did and str(did) != str(user_id):
+        product_analytics.alias(did, user_id)
+    return out
+
+
 def _capture_purchase_failed(reason, *, stage, user_id=None, session_id=None,
                              extra=None):
     """purchase_failed — never include email/key/card. Anonymous → stripe:<cs_id>."""
@@ -7142,6 +7193,7 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
     payment_intent = _session_payment_intent_id(d)
     location = (metadata.get('location') or metadata.get('source') or '')[:64] or None
     ph_sid = (metadata.get('ph_sid') or '')[:128] or None
+    ph_did = (metadata.get('ph_did') or '')[:128] or None
     email_campaign = metadata.get('email_campaign') or None
     if email_campaign not in lifecycle_emails.CAMPAIGNS and (
             email_campaign != checkout_recovery.CAMPAIGN):
@@ -7234,8 +7286,9 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
         '$set': person_set,
     }
     completed_props.update(variant_props)
-    if ph_sid:
-        completed_props['$session_id'] = ph_sid
+    # Webhook has no consent cookie; ph_sid/ph_did were gated at checkout create.
+    _apply_posthog_browser_context(
+        completed_props, user_id, sid=ph_sid, did=ph_did)
     product_analytics.capture(
         'purchase_completed',
         user_id,
@@ -7629,7 +7682,7 @@ def billing_checkout():
             return redirect(url_for('settings'))
 
     source = (request.form.get('source') or 'settings').strip()[:64]
-    ph_sid = _consented_posthog_session_id(request.form.get('ph_sid'))
+    ph_sid, ph_did = _request_posthog_browser_ids()
     trial_ctx = _trial_context() or {}
     trial_remaining_min = trial_ctx.get('remaining_minutes')
     paid_remaining_min = trial_ctx.get('paid_minutes')
@@ -7791,6 +7844,8 @@ def billing_checkout():
             meta['missing_minutes'] = str(remaining_offer['missing_minutes'])
     if ph_sid:
         meta['ph_sid'] = ph_sid
+    if ph_did:
+        meta['ph_did'] = ph_did
     email_campaign = _checkout_email_campaign()
     if email_campaign:
         meta['email_campaign'] = email_campaign
@@ -7805,6 +7860,8 @@ def billing_checkout():
     }
     if ph_sid:
         pi_meta['ph_sid'] = ph_sid
+    if ph_did:
+        pi_meta['ph_did'] = ph_did
 
     # Shorter than Stripe's 24h default so abandoned-checkout recovery emails
     # can fire the same day. expires_at is a Unix timestamp (seconds).
@@ -7888,8 +7945,8 @@ def billing_checkout():
         'email_campaign': email_campaign,
     }
     started_props.update(trial_variant_props(current_user))
-    if ph_sid:
-        started_props['$session_id'] = ph_sid
+    _apply_posthog_browser_context(
+        started_props, current_user.id, sid=ph_sid, did=ph_did)
     product_analytics.capture(
         'checkout_started',
         current_user.id,
@@ -9116,6 +9173,12 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
         'podcast_name': podcast_name,
         'nth_transcript': nth_transcript,
     }
+    # Snapshot consented browser session/distinct_id now (worker has no
+    # request). Attaches $session_id to started/completed/partial_preview.
+    if has_request_context():
+        ph_sid, ph_did = _request_posthog_browser_ids()
+        _apply_posthog_browser_context(
+            ph_props, user_id, sid=ph_sid, did=ph_did)
 
     # Over the length limit by the feed's own account: refuse now, before a
     # slot, a reservation or a download. Only ever a refusal -- the stated

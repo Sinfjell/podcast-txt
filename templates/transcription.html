@@ -396,9 +396,10 @@
         }
         hidden('csrf_token', CSRF_TOKEN);
         hidden('source', source || 'transcription_error');
-        var sid = '';
-        try { if (window.posthog) sid = posthog.get_session_id() || ''; } catch (e) { sid = ''; }
-        hidden('ph_sid', sid);
+        var ids = (typeof window.podskriftPosthogBrowserIds === 'function')
+            ? window.podskriftPosthogBrowserIds() : {sid: '', did: ''};
+        hidden('ph_sid', ids.sid || '');
+        hidden('ph_did', ids.did || '');
         if (returnTo) hidden('return_to', returnTo);
         if (extra) {
             Object.keys(extra).forEach(function(k) {
@@ -607,6 +608,9 @@
         if (finish.rss_url) form.append('rss_url', finish.rss_url);
         if (finish.duration_min) form.append('duration_min', finish.duration_min);
         if (finish.language) form.append('language', finish.language);
+        if (typeof window.podskriftAppendPosthogIds === 'function') {
+            window.podskriftAppendPosthogIds(form);
+        }
         fetch(START_URL, { method: 'POST', body: form })
             .then(function(r) { return r.json().then(function(data) { return { status: r.status, data: data }; }); })
             .then(function(res) {
@@ -710,6 +714,9 @@
         if (retry.rss_url) form.append('rss_url', retry.rss_url);
         if (retry.duration_min) form.append('duration_min', retry.duration_min);
         if (retry.language) form.append('language', retry.language);
+        if (typeof window.podskriftAppendPosthogIds === 'function') {
+            window.podskriftAppendPosthogIds(form);
+        }
         fetch('{{ url_for("start_transcription") }}', { method: 'POST', body: form })
             .then(function(r) { return r.json().then(function(data) { return { status: r.status, data: data }; }); })
             .then(function(res) {
@@ -1208,6 +1215,9 @@
         form.append('artwork', ep.artwork || '');
         form.append('published', ep.published || '');
         if (ep.duration_min) form.append('duration_min', ep.duration_min);
+        if (typeof window.podskriftAppendPosthogIds === 'function') {
+            window.podskriftAppendPosthogIds(form);
+        }
         fetch(START_URL, { method: 'POST', body: form })
             .then(function(r) { return r.json().then(function(data) { return { status: r.status, data: data }; }); })
             .then(function(res) {

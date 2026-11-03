@@ -8734,6 +8734,7 @@ class _FakePosthog:
 
     def __init__(self):
         self.events = []
+        self.aliases = []
 
     def capture(self, event, distinct_id=None, properties=None, uuid=None, **kwargs):
         self.events.append({
@@ -8741,6 +8742,12 @@ class _FakePosthog:
             'distinct_id': distinct_id,
             'properties': dict(properties or {}),
             'uuid': uuid,
+        })
+
+    def alias(self, previous_id=None, distinct_id=None, **kwargs):
+        self.aliases.append({
+            'previous_id': previous_id,
+            'distinct_id': distinct_id,
         })
 
 
@@ -9006,6 +9013,132 @@ def test_checkout_drops_ph_sid_without_consent(stripe_on, ph_events):
     kw = stripe_on['last_create_params']
     assert kw['metadata']['ph_sid'] == 'ph_keep_me'
     assert kw['payment_intent_data']['metadata']['ph_sid'] == 'ph_keep_me'
+
+
+def test_signup_attaches_session_and_aliases_browser_distinct_id(ph_events):
+    """Consented ph_sid/$session_id + ph_did alias on user_signed_up."""
+    A._register_attempts.clear()
+    client = A.app.test_client()
+    client.set_cookie(A.COOKIE_CONSENT_NAME, 'accepted')
+    resp = client.post('/register', data={
+        'email': 'phsid-signup@example.com',
+        'password': 'password123',
+        'password2': 'password123',
+        'ph_sid': 'ph_sess_signup_1',
+        'ph_did': 'anon-browser-abc',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    events = [e for e in ph_events.events if e['event'] == 'user_signed_up']
+    assert len(events) == 1
+    assert events[0]['properties'].get('$session_id') == 'ph_sess_signup_1'
+    assert ph_events.aliases
+    assert ph_events.aliases[-1]['previous_id'] == 'anon-browser-abc'
+    assert ph_events.aliases[-1]['distinct_id'] == events[0]['distinct_id']
+
+
+def test_signup_drops_ph_ids_without_consent(ph_events):
+    A._register_attempts.clear()
+    client = A.app.test_client()
+    resp = client.post('/register', data={
+        'email': 'phsid-noconsent@example.com',
+        'password': 'password123',
+        'password2': 'password123',
+        'ph_sid': 'ph_should_drop',
+        'ph_did': 'anon-should-drop',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    events = [e for e in ph_events.events if e['event'] == 'user_signed_up']
+    assert events
+    assert '$session_id' not in events[-1]['properties']
+    assert ph_events.aliases == []
+
+
+def test_transcript_started_attaches_session_from_form(ph_events, monkeypatch, trial_on):
+    """ph_sid on /start_transcription reaches transcript_started as $session_id."""
+    uid = _make_user('phsid-start@test.com', key='sk-' + 's' * 40)
+    import types
+    monkeypatch.setattr(A.threading, 'Thread',
+                        lambda *a, **kw: types.SimpleNamespace(
+                            daemon=True, start=lambda: None))
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+    client = A.app.test_client()
+    client.set_cookie(A.COOKIE_CONSENT_NAME, 'accepted')
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    resp = client.post('/start_transcription', data={
+        'audio_url': 'https://example.com/ep.mp3',
+        'episode_title': 'Ep',
+        'duration_min': '1',
+        'ph_sid': 'ph_sess_start_1',
+        'ph_did': 'browser-did-1',
+    })
+    assert resp.status_code == 200
+    started = [e for e in ph_events.events if e['event'] == 'transcript_started']
+    assert started
+    assert started[-1]['properties'].get('$session_id') == 'ph_sess_start_1'
+    assert any(a['previous_id'] == 'browser-did-1'
+               and a['distinct_id'] == str(uid) for a in ph_events.aliases)
+
+
+def test_transcript_started_accepts_posthog_headers(ph_events, monkeypatch, trial_on):
+    uid = _make_user('phsid-hdr@test.com', key='sk-' + 't' * 40)
+    import types
+    monkeypatch.setattr(A.threading, 'Thread',
+                        lambda *a, **kw: types.SimpleNamespace(
+                            daemon=True, start=lambda: None))
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+    client = A.app.test_client()
+    client.set_cookie(A.COOKIE_CONSENT_NAME, 'accepted')
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(uid)
+        sess['_fresh'] = True
+    resp = client.post(
+        '/start_transcription',
+        data={
+            'audio_url': 'https://example.com/ep.mp3',
+            'episode_title': 'Ep',
+            'duration_min': '1',
+        },
+        headers={
+            'X-PostHog-Session-Id': 'ph_sess_hdr',
+            'X-PostHog-Distinct-Id': 'hdr-did',
+        },
+    )
+    assert resp.status_code == 200
+    started = [e for e in ph_events.events if e['event'] == 'transcript_started']
+    assert started[-1]['properties'].get('$session_id') == 'ph_sess_hdr'
+    assert any(a['previous_id'] == 'hdr-did' for a in ph_events.aliases)
+
+
+def test_checkout_forwards_ph_did_and_aliases(stripe_on, ph_events):
+    uid = _make_user('phdid-checkout@test.com', limit=600, used=0)
+    client = _login(uid)
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    client.set_cookie(A.COOKIE_CONSENT_NAME, 'accepted')
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token,
+        'source': 'settings',
+        'ph_sid': 'ph_sess_did',
+        'ph_did': 'browser-checkout-did',
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    kw = stripe_on['last_create_params']
+    assert kw['metadata']['ph_did'] == 'browser-checkout-did'
+    assert kw['payment_intent_data']['metadata']['ph_did'] == 'browser-checkout-did'
+    assert any(a['previous_id'] == 'browser-checkout-did'
+               and a['distinct_id'] == str(uid) for a in ph_events.aliases)
+
+
+def test_base_exposes_posthog_browser_id_helpers(monkeypatch):
+    monkeypatch.setenv('PODSKRIFT_ENV', 'production')
+    monkeypatch.setenv('POSTHOG_KEY', 'phc_test_public_key')
+    monkeypatch.setenv('POSTHOG_HOST', 'https://eu.i.posthog.com')
+    body = A.app.test_client().get('/').data.decode()
+    assert 'podskriftPosthogBrowserIds' in body
+    assert 'podskriftAppendPosthogIds' in body
 
 
 def test_openai_key_field_is_marked_for_replay_masking():
