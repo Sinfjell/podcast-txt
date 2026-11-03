@@ -14,7 +14,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from flask import Blueprint, abort, current_app, jsonify, render_template, request
+from flask import (
+    Blueprint, abort, current_app, jsonify, redirect, render_template, request,
+    url_for,
+)
 from flask_login import current_user
 from sqlalchemy import text
 from zoneinfo import ZoneInfo
@@ -1635,8 +1638,8 @@ def dashboard():
             'cached': False,
             'fetched_at_oslo': format_oslo(datetime.now(timezone.utc)),
         }
-    # Cost estimates (local SQLite) feed headline KPIs only — Costs tab removed;
-    # full revenue/cost/CM lives in Notion (ops/unit_economics).
+    # Cost estimates (local SQLite) feed headline KPIs only. Full revenue/cost/CM
+    # lives in Notion (ops/unit_economics); OpenAI Costs API figures are gone.
     try:
         from admin_costs import collect_costs
         costs = collect_costs(db, chart_days=30)
@@ -1654,15 +1657,8 @@ def dashboard():
             'note': '',
             'as_of_oslo': format_oslo(datetime.now(timezone.utc)),
         }
-    try:
-        from admin_actual_costs import actual_cost_windows
-        actual_kpi = actual_cost_windows(db)
-    except Exception:  # noqa: BLE001
-        current_app.logger.exception('admin actual cost KPI failed')
-        actual_kpi = {'ok': False}
     kpis = collect_headline_kpis(
-        db, trial_daily, costs=costs, stripe_revenue=stripe_revenue,
-        actual_cost=actual_kpi)
+        db, trial_daily, costs=costs, stripe_revenue=stripe_revenue)
     try:
         mcp_stats = collect_mcp_stats(db)
     except Exception as exc:  # noqa: BLE001
@@ -1703,21 +1699,8 @@ def series_api():
 
 @admin_bp.route('/economy')
 def economy():
-    """Revenue, income, cost and result over time, with activity charts."""
-    from models import db
-    try:
-        stripe_revenue = collect_stripe_revenue()
-    except Exception:  # noqa: BLE001
-        current_app.logger.exception('admin economy: Stripe revenue failed')
-        stripe_revenue = {'ok': False}
-    try:
-        from admin_economy import collect_economy
-        eco = collect_economy(db, stripe_revenue)
-    except Exception:  # noqa: BLE001
-        current_app.logger.exception('admin economy failed')
-        eco = None
-    from admin_margin import PLAN_LABELS
-    return render_template('admin/economy.html', eco=eco, plan_labels=PLAN_LABELS)
+    """Old economics page — redirect to the dashboard Notion notice."""
+    return redirect(url_for('admin.dashboard') + '#economics-notion', code=302)
 
 
 @admin_bp.route('/users/<int:user_id>')

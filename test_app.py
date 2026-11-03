@@ -17230,7 +17230,7 @@ def test_admin_collect_costs_prorates_fixed_monthly(monkeypatch):
 
 
 def test_admin_dashboard_has_no_costs_tab_points_to_notion(monkeypatch):
-    """Costs/margin tab is gone; economics live in Notion daily metrics."""
+    """Costs/margin tab and Economy page are gone; economics live in Notion."""
     import admin_dashboard as AD
 
     monkeypatch.setenv('ADMIN_EMAILS', 'costs-admin@test.com')
@@ -17242,6 +17242,9 @@ def test_admin_dashboard_has_no_costs_tab_points_to_notion(monkeypatch):
     assert 'admin-costs' not in body
     assert 'Daily margin (USD)' not in body
     assert 'chartCostsDaily' not in body
+    assert 'href="/admin/economy"' not in body
+    assert '>Economy</a>' not in body
+    assert 'id="economics-notion"' in body
     assert 'data-admin="economics-notion"' in body
     assert 'Economics (revenue, cost, margin) live in Notion' in body
     assert 'Podskrift daily metrics' in body
@@ -17260,6 +17263,24 @@ def test_admin_notion_metrics_url_prefers_env(monkeypatch):
     assert AD.notion_daily_metrics_url().endswith(
         AD._DEFAULT_NOTION_METRICS_DATABASE_ID
     )
+
+
+def test_admin_economy_redirects_to_dashboard_notion_notice(monkeypatch):
+    """Old /admin/economy bookmarks land on the dashboard Notion notice."""
+    monkeypatch.setenv('ADMIN_EMAILS', 'economy-redir@test.com')
+    anon = A.app.test_client()
+    assert anon.get('/admin/economy').status_code == 404
+
+    client, _uid = _admin_login('economy-redir@test.com')
+    resp = client.get('/admin/economy')
+    assert resp.status_code == 302
+    loc = resp.headers.get('Location', '')
+    assert loc.endswith('/admin#economics-notion') or loc.endswith(
+        '/admin/#economics-notion'
+    )
+
+    other_uid = _make_user('economy-pleb@test.com')
+    assert _login(other_uid).get('/admin/economy').status_code == 404
 
 
 def test_admin_costs_still_404_for_non_admin():
