@@ -158,7 +158,9 @@ def build_verify_environ(
     env['PODSKRIFT_ENV'] = 'dev'
     env['PODSKRIFT_VERIFY'] = '1'
     env['PODSKRIFT_VERIFY_STT'] = stt_mode
-    env['TZ'] = 'Europe/Oslo'
+    # Match production process TZ (Etc/UTC). App day boundaries still use
+    # ZoneInfo('Europe/Oslo') in code — that is independent of process TZ.
+    env['TZ'] = 'UTC'
     env['DATABASE_URL'] = f'sqlite:///{db}'
     env['SECRET_KEY'] = 'podskrift-verify-local-not-for-prod'
     env['PUBLIC_BASE_URL'] = f'http://127.0.0.1:{port}'

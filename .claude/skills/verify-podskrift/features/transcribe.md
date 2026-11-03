@@ -32,8 +32,11 @@ bin/verify-podskrift shot transcribe
 Fixture audio: `http://127.0.0.1:<stub_port>/audio.mp3` (SSRF guard relaxed only
 for that stub port while `PODSKRIFT_VERIFY=1`).
 
-Full (explicit): `up --stt full` with `OPENAI_API_KEY` in the **process** env,
-audio &lt;30 s, refused when `CI`/`GITHUB_ACTIONS` is set. Max one call.
+Full (explicit): `up --stt full` with `OPENAI_API_KEY` in the **process** env.
+`transcribe --stt full` hard-stops (non-zero + JSON error) unless duration is
+measured under 30 s (ffprobe/mutagen; unknown duration refused), and at most
+one real provider call is recorded in the verify state dir for the run.
+Also refused when `CI`/`GITHUB_ACTIONS` is set.
 
 ## Gotchas
 

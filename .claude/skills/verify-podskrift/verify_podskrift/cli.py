@@ -23,6 +23,10 @@ from .env import (
     scrub_secrets,
     sqlite_file_from_url,
 )
+from .full_stt import (
+    assert_full_stt_transcribe_allowed,
+    record_full_stt_call,
+)
 from .paths import (
     PORT_MAX,
     PORT_MIN,
@@ -178,7 +182,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     checks['worktree_id'] = worktree_id()
     checks['durable_root'] = str(durable_root())
     checks['evidence_dir'] = str(evidence_dir())
-    checks['tz_expected'] = 'Europe/Oslo'
+    checks['tz_expected'] = 'UTC'
     checks['ffmpeg'] = bool(subprocess.call(
         ['ffmpeg', '-version'], stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL) == 0)
@@ -545,9 +549,23 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             'stt': state.get('stt', 'stub'),
         })
 
+    measured_duration = None
     if state.get('stt') == 'full':
-        # Refuse oversized audio for full mode
-        _err('full STT: max one call, audio must be <30s')
+        # Hard stop: measure input, refuse ≥30s / unknown duration, and
+        # reserve the single allowed provider call in the verify state dir
+        # *before* the API request that would hit Whisper.
+        try:
+            measured_duration = assert_full_stt_transcribe_allowed(
+                audio_url, state=state)
+            record_full_stt_call()
+        except GuardError as exc:
+            return _emit({
+                'ok': False,
+                'command': 'transcribe',
+                'error': str(exc),
+                'stt': 'full',
+                'audio_url': audio_url,
+            }, ok=False)
 
     body = json.dumps({
         'audio_url': audio_url,
@@ -555,7 +573,10 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         'episode_title': title,
         'publisher': 'Verify Stub Show',
         'podcast_name': 'Verify Stub Show',
-        'duration_min': 0.05,
+        'duration_min': (
+            round(measured_duration / 60.0, 4)
+            if measured_duration is not None else 0.05
+        ),
         'language': 'en',
     }).encode()
     st, payload = _http_json(

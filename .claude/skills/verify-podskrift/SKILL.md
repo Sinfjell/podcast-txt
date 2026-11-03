@@ -52,7 +52,8 @@ bin/verify-podskrift down                # SIGTERM only our PID; evidence kept
 Ready signal: `/health` → `{"ok": true, …}`. Data under
 `~/.local/share/podskrift-verify/worktrees/<id>/` (override with
 `PODSKRIFT_VERIFY_HOME`). Evidence under repo `.verify/evidence/<id>/`
-(gitignored). TZ forced to `Europe/Oslo` (trial day + admin).
+(gitignored). Process `TZ` forced to `UTC` (matches production `Etc/UTC`);
+app code still uses `ZoneInfo('Europe/Oslo')` for trial/admin day boundaries.
 
 ## Doctor
 
@@ -115,6 +116,8 @@ confirm with `ls -la .verify/evidence/...` after cleanup.
 - `DATABASE_URL` SQLite path must sit under the verify durable dir.
 - Stripe: allow `sk_test_` / `rk_test_`; refuse `sk_live_` / `rk_live_`.
 - Seed from fixtures only — never copy `data/podcast.db`.
-- Default STT is stub; `--stt full` = max one call, &lt;30 s audio, process env key, no CI.
+- Default STT is stub; `--stt full` hard-stops unless audio is measured
+  under 30 s (unknown duration refused), at most one provider call is
+  recorded in the verify state dir, process-env key is set, and not CI.
 - Do not change STT shadow comparison code/config used in prod.
 - No SSH, Hetzner, deploy, or new CI job.
