@@ -112,12 +112,14 @@
             Transcribe your next episode: {{ credit_pack_minutes }} min for ${{ credit_pack_price_usd }}
         </p>
         <div class="result-offer-actions">
-            <button type="button" class="btn btn-sm btn-secondary" id="resultOfferBuyBtn">
+            <button type="button" class="btn btn-sm btn-primary" id="resultOfferBuyBtn">
                 {{ credit_pack_label }}
             </button>
-            <a href="{{ url_for('settings') }}#openai" class="ds-link-button" id="resultOfferByokLink"
-               data-paywall-byok="result_offer">Add your own OpenAI key</a>
         </div>
+        <p class="paywall-byok-alt">
+            <a href="{{ url_for('settings') }}#openai" id="resultOfferByokLink"
+               data-paywall-byok="result_offer">Have an OpenAI API key? Use it instead</a>
+        </p>
     </div>
 </div>
 
@@ -172,6 +174,14 @@
     .result-offer-actions {
         display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
     }
+    /* Secondary BYOK under the purchase CTA — not a peer button. */
+    .paywall-byok-alt {
+        margin: 12px 0 0; font-size: 13px; line-height: 1.45; color: var(--muted);
+    }
+    .paywall-byok-alt a {
+        color: var(--muted); text-decoration: underline; text-underline-offset: 2px;
+    }
+    .paywall-byok-alt a:hover { color: var(--accent); }
 </style>
 
 <!-- A Podskrift limit (episode too long / too large), not a crash: said as
@@ -522,12 +532,16 @@
             actions.appendChild(buyBtn);
         }
 
+        // BYOK is a quiet secondary line under the purchase CTA — not a peer button.
+        var byokWrap = document.createElement('p');
+        byokWrap.className = 'paywall-byok-alt';
         var keyLink = document.createElement('a');
         keyLink.href = SETTINGS_OPENAI;
-        keyLink.className = 'ds-link-button';
-        keyLink.textContent = card_t.byok || 'Add OpenAI key →';
+        keyLink.textContent = card_t.byok_alt
+            || 'Have an OpenAI API key? Use it instead';
         keyLink.setAttribute('data-paywall-byok', 'partial_preview');
-        actions.appendChild(keyLink);
+        byokWrap.appendChild(keyLink);
+        actions.parentNode.insertBefore(byokWrap, actions.nextSibling);
         show(card, true);
         if (!partialPreviewShown) {
             partialPreviewShown = true;

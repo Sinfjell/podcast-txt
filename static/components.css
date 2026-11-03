@@ -90,6 +90,20 @@
     font-family: inherit;
 }
 .ds-link-button:hover { color: var(--accent-hover); }
+/* Quiet secondary BYOK under a purchase CTA — muted, not a peer button. */
+.paywall-byok-alt {
+    display: block;
+    margin: 12px 0 0;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--muted);
+}
+.paywall-byok-alt a {
+    color: var(--muted);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+.paywall-byok-alt a:hover { color: var(--accent); }
 /* A link styled as a button cannot take [disabled]; match the disabled look. */
 .btn[aria-disabled="true"] {
     background: var(--surface);

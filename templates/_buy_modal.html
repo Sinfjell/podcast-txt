@@ -45,9 +45,13 @@
     }
     .buy-modal-alt {
         display: block; text-align: center; margin-top: 14px;
-        font-size: 13px; color: var(--muted);
+        font-size: 13px; color: var(--muted); line-height: 1.45;
     }
-    .buy-modal-alt a { color: var(--accent); }
+    .buy-modal-alt a {
+        color: var(--muted); text-decoration: underline;
+        text-underline-offset: 2px;
+    }
+    .buy-modal-alt a:hover { color: var(--accent); }
 </style>
 <div class="buy-modal-scrim" id="buyModalScrim" role="dialog" aria-modal="true"
      aria-labelledby="buyModalTitle" hidden>
@@ -98,7 +102,9 @@
         <p class="buy-modal-foot">{{ credit_pack_payment_hint }}</p>
         <p class="buy-modal-foot">One-time · VAT included · minutes never expire · Stripe</p>
         <p class="buy-modal-alt">
-            <a href="{{ url_for('settings') }}#openai">Use my own OpenAI key instead</a>
+            <a href="{{ url_for('settings') }}#openai" data-paywall-byok="buy_modal">
+                Have an OpenAI API key? Use it instead
+            </a>
         </p>
     </div>
 </div>
