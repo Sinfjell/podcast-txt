@@ -7,15 +7,19 @@ Off-by-default experiment. Merging the code changes nothing until
 
 | Variant (`users.trial_variant`) | Grant | Notes |
 | --- | --- | --- |
-| `control` | 60 minutes | Matches the advertised / lower current new-user floor while the live 60/120 split is on. |
+| `control` | 60 minutes | Baseline grant while the experiment runs. |
 | `trial30` | 30 minutes | Treatment. |
 
 Assignment is deterministic 50/50 at signup from
 `sha256("podskrift-trial-ab-30-vs-60:{user_id}")`. Existing users (NULL
 `trial_variant`, or rows stamped before enablement) are never rewritten.
 
-When the flag is off, signup behaviour is unchanged (existing
-`TRIAL_SPLIT_ENABLED` / `NEW_USER_TRIAL_MINUTES` path).
+When the flag is on, `advertised_trial_minutes()` returns `None` so
+logged-out marketing never quotes 30 or 60 — templates use neutral
+“start free / try it free” copy. After signup/login, UI shows the
+account’s stamped allowance. When the flag is off, signup behaviour and
+marketing copy are unchanged (existing `TRIAL_SPLIT_ENABLED` /
+`NEW_USER_TRIAL_MINUTES` path).
 
 ## Env
 
