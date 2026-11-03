@@ -28,7 +28,17 @@ from verify_podskrift.env import (  # noqa: E402
     assert_stripe_keys_safe,
     build_verify_environ,
 )
-from verify_podskrift.paths import PORT_MAX, PORT_MIN, default_port  # noqa: E402
+from verify_podskrift.full_stt import (  # noqa: E402
+    FULL_STT_MAX_SECONDS,
+    assert_full_stt_transcribe_allowed,
+    materialize_audio,
+    probe_duration_seconds,
+    record_full_stt_call,
+)
+from verify_podskrift.paths import (  # noqa: E402
+    FIXTURES, PORT_MAX, PORT_MIN, default_port,
+)
+from verify_podskrift.state import load_state, save_state  # noqa: E402
 
 
 def test_port_range_is_reserved_and_unused_by_siblings():
@@ -90,7 +100,7 @@ def test_build_verify_environ_blanks_vendor_keys(tmp_path, monkeypatch):
     assert env['SONIOX_API_KEY'] == ''
     assert env['GROQ_API_KEY'] == ''
     assert env['OPENAI_API_KEY'].startswith('sk-verify-stub')
-    assert env['TZ'] == 'Europe/Oslo'
+    assert env['TZ'] == 'UTC'
     assert env['STT_SHADOW_RATE'] == '0'
     assert env['SCRIBE_SHADOW_PCT'] == '0'
     assert_sqlite_inside_verify_dir(env['DATABASE_URL'], verify_root=vh)
@@ -197,7 +207,7 @@ def test_cli_help_and_dry_run_up(tmp_path):
     payload = json.loads(dry.stdout)
     assert payload['ok'] is True
     assert payload['dry_run'] is True
-    assert payload['would_start']['tz'] == 'Europe/Oslo'
+    assert payload['would_start']['tz'] == 'UTC'
 
 
 def test_cli_source_has_no_pkill_ssh_or_hetzner():
@@ -208,3 +218,75 @@ def test_cli_source_has_no_pkill_ssh_or_hetzner():
     # start_new_session is fine; bare ssh must not appear as a tool.
     assert 'ssh ' not in text
     assert 'scp ' not in text
+
+
+def test_full_stt_refuses_audio_over_30s(tmp_path, monkeypatch):
+    vh = (tmp_path / 'vh').resolve()
+    monkeypatch.setenv('PODSKRIFT_VERIFY_HOME', str(vh))
+    for key in ('CI', 'GITHUB_ACTIONS'):
+        monkeypatch.delenv(key, raising=False)
+    audio = tmp_path / 'long.mp3'
+    audio.write_bytes(b'fake')
+    monkeypatch.setattr(
+        'verify_podskrift.full_stt.probe_duration_seconds',
+        lambda _p: FULL_STT_MAX_SECONDS + 5.0,
+    )
+    with pytest.raises(GuardError, match='under 30'):
+        assert_full_stt_transcribe_allowed(str(audio), state={})
+
+
+def test_full_stt_refuses_unknown_duration(tmp_path, monkeypatch):
+    vh = (tmp_path / 'vh').resolve()
+    monkeypatch.setenv('PODSKRIFT_VERIFY_HOME', str(vh))
+    for key in ('CI', 'GITHUB_ACTIONS'):
+        monkeypatch.delenv(key, raising=False)
+    audio = tmp_path / 'mystery.bin'
+    audio.write_bytes(b'not-audio')
+    monkeypatch.setattr(
+        'verify_podskrift.full_stt.probe_duration_seconds',
+        lambda _p: None,
+    )
+    with pytest.raises(GuardError, match='could not determine audio duration'):
+        assert_full_stt_transcribe_allowed(str(audio), state={})
+
+
+def test_full_stt_refuses_second_provider_call(tmp_path, monkeypatch):
+    vh = (tmp_path / 'vh').resolve()
+    monkeypatch.setenv('PODSKRIFT_VERIFY_HOME', str(vh))
+    for key in ('CI', 'GITHUB_ACTIONS'):
+        monkeypatch.delenv(key, raising=False)
+    save_state({'full_stt_calls': 1})
+    assert load_state()['full_stt_calls'] == 1
+    short = FIXTURES / 'short-3s.mp3'
+    assert short.is_file()
+    with pytest.raises(GuardError, match='one allowed provider call'):
+        assert_full_stt_transcribe_allowed(str(short), state=load_state())
+
+
+def test_full_stt_records_call_in_verify_state(tmp_path, monkeypatch):
+    vh = (tmp_path / 'vh').resolve()
+    monkeypatch.setenv('PODSKRIFT_VERIFY_HOME', str(vh))
+    for key in ('CI', 'GITHUB_ACTIONS'):
+        monkeypatch.delenv(key, raising=False)
+    short = FIXTURES / 'short-3s.mp3'
+    assert short.is_file()
+    duration = assert_full_stt_transcribe_allowed(str(short), state={})
+    assert 0 < duration < FULL_STT_MAX_SECONDS
+    n = record_full_stt_call()
+    assert n == 1
+    assert load_state()['full_stt_calls'] == 1
+    with pytest.raises(GuardError, match='one allowed provider call'):
+        assert_full_stt_transcribe_allowed(str(short), state=load_state())
+
+
+def test_probe_duration_seconds_reads_fixture():
+    short = FIXTURES / 'short-3s.mp3'
+    assert short.is_file()
+    dur = probe_duration_seconds(short)
+    assert dur is not None
+    assert 2.0 <= dur <= 5.0
+
+
+def test_materialize_maps_stub_audio_url_to_fixture():
+    path = materialize_audio('http://127.0.0.1:6502/audio.mp3')
+    assert path == (FIXTURES / 'short-3s.mp3').resolve()
