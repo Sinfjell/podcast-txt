@@ -55,6 +55,8 @@ STRIPE_ADMIN_CACHE_TTL_SEC = 300
 STRIPE_ADMIN_BT_MAX = 5000
 STRIPE_ADMIN_PAYOUT_LIMIT = 20
 STRIPE_ADMIN_WEEKLY_WEEKS = 16
+# Same default as ops/notion-daily-metrics.py — revenue/cost/CM live there.
+_DEFAULT_NOTION_METRICS_DATABASE_ID = '0d846d9fc2a4441ba5d542eb4e7609da'
 # Balance-transaction types that count toward revenue (exclude payouts).
 _REVENUE_BT_TYPES = frozenset({
     'charge', 'payment', 'payment_refund', 'refund', 'adjustment',
@@ -77,6 +79,19 @@ def admin_emails():
     """Case-insensitive allowlist from ADMIN_EMAILS (comma-separated)."""
     raw = os.getenv('ADMIN_EMAILS', _DEFAULT_ADMIN_EMAILS)
     return {e.strip().lower() for e in raw.split(',') if e.strip()}
+
+
+def notion_daily_metrics_url():
+    """Notion URL for Podskrift daily metrics (ops/unit_economics upserts).
+
+    Prefers ``NOTION_METRICS_DATABASE_ID`` when set; otherwise the same default
+    database id as ``ops/notion-daily-metrics.py``.
+    """
+    db_id = (
+        os.environ.get('NOTION_METRICS_DATABASE_ID', '').strip()
+        or _DEFAULT_NOTION_METRICS_DATABASE_ID
+    )
+    return f'https://www.notion.so/{db_id}'
 
 
 def is_admin_user(user=None):
@@ -1620,7 +1635,8 @@ def dashboard():
             'cached': False,
             'fetched_at_oslo': format_oslo(datetime.now(timezone.utc)),
         }
-    # Cost estimates are local SQLite only — never fail the page.
+    # Cost estimates (local SQLite) feed headline KPIs only — Costs tab removed;
+    # full revenue/cost/CM lives in Notion (ops/unit_economics).
     try:
         from admin_costs import collect_costs
         costs = collect_costs(db, chart_days=30)
@@ -1638,34 +1654,6 @@ def dashboard():
             'note': '',
             'as_of_oslo': format_oslo(datetime.now(timezone.utc)),
         }
-    # Actual OpenAI spend (Costs API, admin key) vs estimate — never fails the page.
-    try:
-        from admin_actual_costs import collect_actual_vs_estimated
-        actual_costs = collect_actual_vs_estimated(
-            db,
-            preset=request.args.get('cost_range'),
-            start=request.args.get('cost_from'),
-            end=request.args.get('cost_to'),
-            cost_type=request.args.get('cost_type'),
-        )
-        if actual_costs.get('fetched_at'):
-            actual_costs['fetched_at_oslo'] = format_oslo(actual_costs['fetched_at'])
-    except Exception as exc:  # noqa: BLE001
-        current_app.logger.exception('admin actual costs panel failed')
-        actual_costs = {'ok': False, 'fatal': True, 'rows': [],
-                        'error': 'Actual costs unavailable (' + type(exc).__name__ + ')'}
-    # Daily margin + contribution per plan, same range as the actual-cost panel.
-    try:
-        from admin_margin import collect_margin
-        from admin_actual_costs import resolve_range
-        _p, m_start, m_end = resolve_range(
-            request.args.get('cost_range'), request.args.get('cost_from'),
-            request.args.get('cost_to'))
-        margin = collect_margin(db, stripe_revenue, m_start, m_end)
-    except Exception as exc:  # noqa: BLE001
-        current_app.logger.exception('admin margin panel failed')
-        margin = {'fatal': True,
-                  'error': 'Margin unavailable (' + type(exc).__name__ + ')'}
     try:
         from admin_actual_costs import actual_cost_windows
         actual_kpi = actual_cost_windows(db)
@@ -1694,10 +1682,8 @@ def dashboard():
         tasks_table=tasks,
         trial_default_minutes=trial_default // 60,
         stripe_revenue=stripe_revenue,
-        costs=costs,
-        actual_costs=actual_costs,
-        margin=margin,
         mcp_stats=mcp_stats,
+        notion_metrics_url=notion_daily_metrics_url(),
     )
 
 

@@ -17229,18 +17229,37 @@ def test_admin_collect_costs_prorates_fixed_monthly(monkeypatch):
     assert costs['windows']['7d']['fixed_usd'] == pytest.approx(daily * 7, abs=0.001)
 
 
-def test_admin_costs_section_renders_for_allowlisted(monkeypatch):
+def test_admin_dashboard_has_no_costs_tab_points_to_notion(monkeypatch):
+    """Costs/margin tab is gone; economics live in Notion daily metrics."""
+    import admin_dashboard as AD
+
     monkeypatch.setenv('ADMIN_EMAILS', 'costs-admin@test.com')
     client, _uid = _admin_login('costs-admin@test.com')
     resp = client.get('/admin')
     assert resp.status_code == 200
     body = resp.data.decode()
-    assert 'id="adminCosts"' in body
-    assert 'data-costs="windows"' in body
-    assert 'Est. total cost' in body
-    assert 'BYOK minutes (excl.)' in body
-    assert 'estimate' in body.lower()
-    assert 'chartCostsDaily' in body
+    assert 'id="adminCosts"' not in body
+    assert 'admin-costs' not in body
+    assert 'Daily margin (USD)' not in body
+    assert 'chartCostsDaily' not in body
+    assert 'data-admin="economics-notion"' in body
+    assert 'Economics (revenue, cost, margin) live in Notion' in body
+    assert 'Podskrift daily metrics' in body
+    assert AD.notion_daily_metrics_url() in body
+    assert '0d846d9fc2a4441ba5d542eb4e7609da' in body
+
+
+def test_admin_notion_metrics_url_prefers_env(monkeypatch):
+    import admin_dashboard as AD
+
+    monkeypatch.setenv('NOTION_METRICS_DATABASE_ID', 'abcdef0123456789abcdef0123456789')
+    assert AD.notion_daily_metrics_url() == (
+        'https://www.notion.so/abcdef0123456789abcdef0123456789'
+    )
+    monkeypatch.delenv('NOTION_METRICS_DATABASE_ID', raising=False)
+    assert AD.notion_daily_metrics_url().endswith(
+        AD._DEFAULT_NOTION_METRICS_DATABASE_ID
+    )
 
 
 def test_admin_costs_still_404_for_non_admin():

@@ -120,19 +120,21 @@ def test_theoretical_table_covers_every_anchor():
     assert obs[3]['db_usd'] == pytest.approx(11 - 2.2 - 7.2)
 
 
-def test_admin_page_renders_margin_panels_and_purchase_wording(monkeypatch):
+def test_admin_page_no_longer_embeds_margin_panels(monkeypatch):
+    """Costs/margin tab removed; purchase wording still on overview KPIs."""
     import test_app as TA
     monkeypatch.setenv('ADMIN_EMAILS', 'admin-margin@test.com')
     monkeypatch.delenv('OPENAI_ADMIN_KEY', raising=False)
     client, _uid = TA._admin_login('admin-margin@test.com')
     body = client.get('/admin?cost_range=7d').data.decode()
-    assert 'Contribution margin per plan' in body
-    assert 'Margin unavailable' not in body
-    assert 'Per price point (vol_v1' in body
+    assert 'Contribution margin per plan' not in body
+    assert 'Daily margin (USD)' not in body
+    assert 'Per price point (vol_v1' not in body
+    assert 'data-admin="economics-notion"' in body
+    assert 'Podskrift daily metrics' in body
     assert 'paid incl. VAT' in body
     assert 'ex VAT' in body
     assert ' credited</div>' not in body
-    assert 'UTC' in body and 'partial' in body
 
 
 def test_cost_per_minute_uses_all_transcribed_minutes():
