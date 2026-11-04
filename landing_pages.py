@@ -94,7 +94,19 @@ LANG_LABELS_EN = {
 }
 
 #: Last copy review of /spotify-podcast-transcript (ISO date, Europe/Oslo).
-SPOTIFY_PAGE_UPDATED = '2026-11-02'
+SPOTIFY_PAGE_UPDATED = '2026-11-04'
+
+#: Endpoints that publish an explicit ``dateModified`` / ``page.updated``.
+#: Used by the sitemap ``<lastmod>`` without building the full page copy.
+DECLARED_UPDATED = {
+    'landing_spotify': SPOTIFY_PAGE_UPDATED,
+}
+
+
+def declared_updated(endpoint):
+    """ISO date this landing already declares as modified, or None."""
+    return DECLARED_UPDATED.get(endpoint)
+
 
 TITLE_SUFFIX = ' — Podskrift'
 TITLE_MAX = 60
@@ -584,40 +596,48 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
         )
 
     if endpoint == 'landing_spotify':
-        if isinstance(trial, int) and trial > 0:
-            spotify_meta = (f'Paste a Spotify episode link and get the transcript as .txt '
-                            f'and .srt. Works when the show has a public RSS feed. '
-                            f'{trial} minutes free.')
-        elif free_trial:
-            spotify_meta = ('Paste a Spotify episode link and get the transcript as .txt '
-                            'and .srt. Works when the show has a public RSS feed. '
-                            'Try it free, no card needed.')
+        if free_trial or (isinstance(trial, int) and trial > 0):
+            spotify_meta = ('Spotify podcast transcript you can copy and download as '
+                            '.txt and .srt. Free trial minutes when a public feed exists. '
+                            'Works even when Spotify shows none.')
         else:
-            spotify_meta = ('Paste a Spotify episode link and get the transcript as .txt '
-                            'and .srt. Works when the show has a public RSS feed.')
-        # Invented sample — not from a real show.
+            spotify_meta = ('Spotify podcast transcript you can copy and download as '
+                            '.txt and .srt. Works when the show has a public RSS feed, '
+                            'even if Spotify shows none.')
+        # Illustrative format sample — not from a real show or any user account.
         example_txt = (
-            'And then she said the quiet part out loud.\n'
-            'We sat with that for a moment.\n'
-            'Anyway — back to the story.'
+            '[Illustrative example — not a real episode]\n'
+            'Welcome back. Today we are talking about how teams ship quietly.\n'
+            'The interesting part is what happened after the launch.\n'
+            'We will get to the numbers in a minute.'
         )
         example_srt = (
-            '12\n'
-            '00:12:31,200 --> 00:12:35,900\n'
-            'Anyway — back to the story.'
+            '1\n'
+            '00:00:04,100 --> 00:00:08,400\n'
+            'Welcome back. Today we are talking about how teams ship quietly.\n'
+            '\n'
+            '2\n'
+            '00:00:08,400 --> 00:00:11,200\n'
+            'The interesting part is what happened after the launch.'
         )
         cost_faq = _spotify_whole_episode_cost(
             trial, pack, episode_prices, free_trial=free_trial)
         # Drop the generic "What does it cost?" — Spotify has the episode FAQ.
         common_rest = [qa for qa in common if qa[0] != 'What does it cost?']
+        free_lede = (
+            ' Paste a link and use free trial minutes when the show has a public feed — '
+            'no card needed to start.'
+            if (free_trial or (isinstance(trial, int) and trial > 0)) else ''
+        )
         return dict(
             lang='en',
-            title='Transcribe a Spotify Podcast to Text',
+            title='Spotify Podcast Transcript – Free (2026)',
             meta=spotify_meta,
-            h1='Transcribe a Spotify podcast from a link',
+            h1='Spotify Podcast Transcript – Free, Copy & Download (2026)',
             lede=('Paste an open.spotify.com episode or show link. Podskrift finds the '
                   'same episode in the show’s public RSS feed and turns the audio into '
-                  'text you can copy and download.'),
+                  'text you can copy, search in your library, and download as .txt or .srt.'
+                  + free_lede),
             placeholder='https://open.spotify.com/episode/…',
             input_label='Spotify episode or show link',
             button=start,
@@ -628,6 +648,32 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
             # Bump when the page copy is reviewed; shown on the page and as
             # dateModified in the JSON-LD.
             updated=SPOTIFY_PAGE_UPDATED,
+            compare_title='Spotify’s transcript vs Podskrift',
+            compare_head=('Feature', 'Spotify Read Along',
+                          'Spotify for Creators', 'Podskrift'),
+            compare=[
+                ('Read while listening', 'Yes, when Spotify has one',
+                 'Creators can review episode transcripts',
+                 'Yes, in your browser after transcription'),
+                ('Copy the full text', 'No — listeners cannot copy the full transcript',
+                 'Creators can work with their own files',
+                 'Yes — copy from the result page'),
+                ('Download .txt / .srt', 'No export for listeners',
+                 'Eligible creators can download or upload transcript files',
+                 'Yes — .txt and .srt'),
+                ('Search across your episodes', 'Follow-along in that episode only',
+                 'Creator tools for their catalogue',
+                 'Yes — search your transcript library'),
+                ('When Spotify shows no transcript', 'Nothing to read in the app',
+                 'Depends on eligibility and creator settings',
+                 'Still works if a public RSS/audio feed exists'),
+                ('Speaker labels', 'Not a named-speaker export for listeners',
+                 'Creator tooling varies',
+                 'Not yet — one continuous transcript with timestamps'),
+            ],
+            compare_note=('Podskrift does not claim Spotify’s in-app text as its own: it '
+                          'transcribes the public audio. No summaries on this page — you can '
+                          'paste the text into ChatGPT or Claude yourself.'),
             platform_steps_title='How to copy a Spotify episode link',
             platform_steps=[
                 ('iPhone and iPad', [
@@ -667,7 +713,8 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
                  'Open the short link in your browser, copy the open.spotify.com/episode/… '
                  'address from the address bar, and paste that.'),
             ],
-            example_label='Example format',
+            example_label=('Illustrative example — sample .txt / .srt format only. '
+                           'Not from a real show or any user’s transcript.'),
             example_txt=example_txt,
             example_srt=example_srt,
             ai_note=('Paste it into ChatGPT or Claude to summarise or ask questions, '
@@ -679,6 +726,10 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
                  'Podskrift matches the episode in the show’s public RSS feed and lists it.'),
                 ('Read or download',
                  'Transcription usually takes a few minutes. Download .txt or .srt.'),
+            ],
+            also_related=[
+                ('guide_spotify_transcript',
+                 'Guide: how to get a Spotify podcast transcript'),
             ],
             faq=[
                 ('Does every Spotify podcast work?',
@@ -695,8 +746,12 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
                  'No. Podskrift makes its own transcript from the audio, so it also works '
                  'for shows where Spotify shows none, and you can copy and download it.'),
                 ('Can I download the transcript Spotify shows in the app?',
-                 'No — Spotify doesn’t export it. Paste the link here to get your own '
-                 'copy as .txt and .srt.'),
+                 'No — Spotify doesn’t export the listener transcript. Paste the link here '
+                 'to get your own copy as .txt and .srt.'),
+                ('Is it free?',
+                 'New accounts get free trial minutes when a trial is offered — no card '
+                 'needed to start. Longer episodes show the exact price before you pay. '
+                 'We do not list a fixed free-minute count here because the grant can vary.'),
                 cost_faq,
             ] + common_rest,
         )
