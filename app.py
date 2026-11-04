@@ -5986,8 +5986,12 @@ def apply_attribution_to_user(user):
     """Stamp first-/last-touch JSON onto a newly created User (signup only).
 
     Idempotent when columns already hold values. Safe with missing session.
-    Call before commit on every path that creates a user (today: email
-    ``/register`` only — Google/MCP OAuth authorize existing accounts).
+
+    Call before commit on **every** path that creates a ``User``. Today the
+    only visitor-reachable factory is email ``POST /register`` — there is no
+    magic-link, Google/social OAuth signup, checkout-created account, or
+    admin create-user route; MCP/OAuth authorize existing accounts only
+    (see ``test_only_email_register_creates_users_in_production_code``).
     """
     if user is None:
         return

@@ -14570,6 +14570,98 @@ def test_first_touch_kept_last_touch_updates_with_click_ids():
         assert len(first['gclid']) == attr.MAX_CLICK_ID_LEN
 
 
+def test_only_email_register_creates_users_in_production_code():
+    """Invariant: POST /register is the sole visitor-reachable User factory.
+
+    Scans app modules (not tests / verify seeds) for ``User(...)`` calls and
+    raw ``INSERT INTO users``. Magic-link, Google/OAuth login, MCP authorize,
+    checkout, and admin do not create accounts — they look up existing ones.
+    If a new signup path is added, this test fails until it also calls
+    ``apply_attribution_to_user`` and emits ``user_signed_up``.
+    """
+    import ast as _ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent
+    skip_parts = {
+        'test_app.py', 'test_design_system.py', 'test_email.py',
+        'test_lifecycle_emails.py', 'test_podcast_optout.py',
+        'test_posthog_daily_health.py', 'test_summary.py',
+        'test_unit_economics.py', 'test_admin_purchases.py',
+        'test_checkout_recovery.py', 'test_ops_backup.py',
+        'test_site_standards.py', 'test_verify_podskrift.py',
+        'conftest.py',
+    }
+    skip_dirs = {'.venv', 'venv', 'node_modules', '.git',
+                 'verify_podskrift', '__pycache__', 'ops'}
+    constructions = []
+    raw_inserts = []
+    for path in root.rglob('*.py'):
+        if any(part in skip_dirs for part in path.parts):
+            continue
+        if path.name in skip_parts or path.name.startswith('test_'):
+            continue
+        src = path.read_text(encoding='utf-8')
+        if 'INSERT INTO users' in src.upper().replace('\n', ' '):
+            # Allow mentioned only in comments/docs of this invariant test's
+            # sibling modules — production must not INSERT users via SQL.
+            for i, line in enumerate(src.splitlines(), 1):
+                stripped = line.lstrip()
+                if stripped.startswith('#') or stripped.startswith('"""') or stripped.startswith("'''"):
+                    continue
+                if 'INSERT INTO users' in line.upper():
+                    raw_inserts.append(f'{path.name}:{i}')
+        try:
+            tree = _ast.parse(src, filename=str(path))
+        except SyntaxError:
+            continue
+
+        class _Finder(_ast.NodeVisitor):
+            def __init__(self):
+                self.func_stack = []
+
+            def visit_FunctionDef(self, node):
+                self.func_stack.append(node.name)
+                self.generic_visit(node)
+                self.func_stack.pop()
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Call(self, node):
+                name = None
+                if isinstance(node.func, _ast.Name) and node.func.id == 'User':
+                    name = 'User'
+                elif (isinstance(node.func, _ast.Attribute)
+                      and node.func.attr == 'User'):
+                    name = 'User'
+                if name == 'User':
+                    constructions.append((
+                        path.name,
+                        self.func_stack[-1] if self.func_stack else '<module>',
+                        node.lineno,
+                    ))
+                self.generic_visit(node)
+
+        _Finder().visit(tree)
+
+    assert raw_inserts == [], (
+        f'raw INSERT INTO users in production code: {raw_inserts}')
+    assert len(constructions) == 1, (
+        f'expected exactly one User(...) in production code; found {constructions}')
+    path_name, func_name, _lineno = constructions[0]
+    assert path_name == 'app.py' and func_name == 'register', (
+        f'User(...) must live in app.register; found {constructions[0]}')
+    # The only factory must stamp attribution + fire the signup event.
+    register_text = (root / 'app.py').read_text(encoding='utf-8')
+    reg_node = next(
+        n for n in _ast.walk(_ast.parse(register_text))
+        if isinstance(n, _ast.FunctionDef) and n.name == 'register')
+    body = '\n'.join(register_text.splitlines()[
+        reg_node.lineno - 1: reg_node.end_lineno])
+    assert 'apply_attribution_to_user(user)' in body
+    assert 'user_signed_up' in body
+
+
 def test_signup_persists_first_and_last_touch_attribution(ph_events, trial_on):
     """Email register writes attribution JSON onto the user and signup event."""
     import json
