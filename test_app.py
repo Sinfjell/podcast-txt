@@ -21675,6 +21675,88 @@ def test_youtube_vs_landing_does_not_claim_youtube_support(trial_on):
     assert 'youtube.com' in html
 
 
+@pytest.mark.parametrize('path', [
+    '/spotify-episode-without-rss',
+    '/spotify-transcript-not-available',
+    '/video-podcast-transcript',
+])
+def test_intent_landings_render_canonical_sitemap_llms_and_jsonld(trial_on, path):
+    """New ChatGPT-intent landings: 200, canonical, sitemap, llms.txt, FAQ JSON-LD."""
+    import json as _json
+    import re as _re
+    import landing_pages as lp
+    from bs4 import BeautifulSoup
+    client = A.app.test_client()
+    resp = client.get(path)
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    canon = _re.search(r'<link rel="canonical" href="([^"]+)"', html).group(1)
+    assert canon.endswith(path)
+    assert 'dateModified' in html
+    soup = BeautifulSoup(html, 'html.parser')
+    updated = soup.select_one('.ds-landing__updated time')
+    assert updated is not None and updated['datetime'] == lp.INTENT_PAGES_UPDATED
+    data = _landing_jsonld(html)
+    types = {n['@type'] for n in data['@graph']}
+    assert 'FAQPage' in types and 'HowTo' in types and 'WebPage' in types
+    webpage = next(n for n in data['@graph'] if n['@type'] == 'WebPage')
+    assert webpage['dateModified'] == lp.INTENT_PAGES_UPDATED
+    faq = next(n for n in data['@graph'] if n['@type'] == 'FAQPage')
+    assert len(faq['mainEntity']) >= 3
+    sitemap = client.get('/sitemap.xml').data.decode()
+    assert path in sitemap
+    llms = client.get('/llms.txt').data.decode()
+    assert path in llms
+    full = client.get('/llms-full.txt').data.decode()
+    assert path in full
+    # Cross-link to the main Spotify landing (and related intent pages).
+    assert 'href="/spotify-podcast-transcript"' in html
+
+
+def test_spotify_no_rss_landing_is_honest_about_exclusives(trial_on):
+    from bs4 import BeautifulSoup
+    html = A.app.test_client().get('/spotify-episode-without-rss').data.decode()
+    article = BeautifulSoup(html, 'html.parser').select_one('article.ds-landing').get_text(' ', strip=True).lower()
+    assert 'cannot be transcribed' in article or "can't transcribe" in article or 'cannot transcribe' in article
+    assert 'public rss' in article or 'public feed' in article
+    assert 'never scrapes' in article or 'private audio' in article or 'private stream' in article
+    assert 'workaround that downloads spotify' in article or 'no workaround' in article
+    # FAQ asks about upload and answers no — do not claim an upload path.
+    assert 'no file upload' in article
+    assert 'whisper-1' not in article and 'openai whisper' not in article
+
+
+def test_spotify_no_transcript_landing_explains_in_app_limit(trial_on):
+    from bs4 import BeautifulSoup
+    html = A.app.test_client().get('/spotify-transcript-not-available').data.decode()
+    article = BeautifulSoup(html, 'html.parser').select_one('article.ds-landing').get_text(' ', strip=True).lower()
+    assert ('does not offer' in article or 'does not let you export' in article
+            or 'cannot be exported' in article)
+    assert '.txt' in article and '.srt' in article
+    assert 'public' in article and ('rss' in article or 'feed' in article)
+    assert 'whisper-1' not in article and 'openai whisper' not in article
+
+
+def test_video_podcast_landing_rejects_youtube_urls(trial_on):
+    from bs4 import BeautifulSoup
+    html = A.app.test_client().get('/video-podcast-transcript').data.decode()
+    soup = BeautifulSoup(html, 'html.parser')
+    article = soup.select_one('article.ds-landing').get_text(' ', strip=True).lower()
+    assert 'does not accept youtube' in article or 'not accept youtube' in article
+    assert 'youtube.com' in article
+    assert 'spotify video' in article or 'video-only' in article
+    assert 'whisper-1' not in article and 'openai whisper' not in article
+    # Links to the YouTube-vs page for the complementary intent.
+    assert soup.select_one('a[href="/youtube-vs-podcast-transcript"]')
+
+
+def test_spotify_landing_links_to_intent_pages(trial_on):
+    html = A.app.test_client().get('/spotify-podcast-transcript').data.decode()
+    for path in ('/spotify-episode-without-rss', '/spotify-transcript-not-available',
+                 '/video-podcast-transcript'):
+        assert f'href="{path}"' in html
+
+
 def test_landing_pages_in_sitemap_and_footer(trial_on):
     client = A.app.test_client()
     xml = client.get('/sitemap.xml').data.decode()
@@ -21727,7 +21809,8 @@ def test_help_and_ai_link_to_landings(trial_on):
     help_html = A.app.test_client().get('/help').data.decode()
     ai_html = A.app.test_client().get('/ai').data.decode()
     for path in ('/podcast-transcript-generator', '/spotify-podcast-transcript',
-                 '/apple-podcast-transcript'):
+                 '/apple-podcast-transcript', '/spotify-episode-without-rss',
+                 '/spotify-transcript-not-available', '/video-podcast-transcript'):
         assert f'href="{path}"' in help_html
         assert f'href="{path}"' in ai_html
 
