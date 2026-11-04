@@ -48,6 +48,7 @@ ENDPOINT_SOURCES: dict[str, str] = {
     'guide_chatgpt': 'templates/guides/chatgpt.html',
     'guide_claude': 'templates/guides/claude.html',
     'guide_ai_transcripts': 'templates/guide_ai_transcripts.html',
+    'guide_spotify_transcript': 'templates/guides/how_to_get_spotify_podcast_transcript.html',
     'contact': 'templates/contact.html',
     'whats_new': 'changelog.json',
     'api_docs': 'docs/customer-api.md',
@@ -58,6 +59,12 @@ ENDPOINT_SOURCES: dict[str, str] = {
     'register': 'templates/register.html',
     'llms_txt': 'app.py',
     'llms_full_txt': 'app.py',
+}
+
+#: Guides (and similar) that publish an explicit JSON-LD dateModified.
+#: Kept here so sitemap lastmod matches the page without importing app.
+DECLARED_GUIDE_UPDATED: dict[str, str] = {
+    'guide_spotify_transcript': '2026-11-04',
 }
 
 _LANDING_SOURCE = 'landing_pages.py'
@@ -163,6 +170,10 @@ def lastmod_for_endpoint(endpoint: str) -> str:
         if declared:
             return declared
 
+    declared_guide = DECLARED_GUIDE_UPDATED.get(endpoint)
+    if declared_guide and is_w3c_date(declared_guide):
+        return declared_guide
+
     if endpoint.startswith('landing_'):
         declared = declared_landing_updated(endpoint)
         if declared and is_w3c_date(declared):
@@ -171,7 +182,7 @@ def lastmod_for_endpoint(endpoint: str) -> str:
         return git or FALLBACK_LANDING
 
     if endpoint in ('guide_chatgpt', 'guide_claude', 'guide_ai_transcripts',
-                    'guides_index'):
+                    'guide_spotify_transcript', 'guides_index'):
         source = ENDPOINT_SOURCES.get(endpoint)
         if source:
             git = _git_commit_date(source)

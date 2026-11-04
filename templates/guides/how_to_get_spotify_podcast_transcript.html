@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import button, link_button, page_header, notice %}
+
+{% block title %}How to Get a Spotify Podcast Transcript — Podskrift{% endblock %}
+{% block meta_description %}Find Spotify’s Read Along transcript on mobile and desktop, why it’s missing, why you can’t export it, and how to get .txt / .srt when a public feed exists.{% endblock %}
+{% block og_title %}How to Get a Spotify Podcast Transcript{% endblock %}
+{% block og_description %}Spotify’s in-app transcript, why it may be missing, and honest alternatives — including Podskrift when a public feed exists.{% endblock %}
+
+{% block content %}
+<article class="ds-guide">
+  {{ page_header(
+    "How to get a Spotify podcast transcript",
+    "Spotify can show a Read Along transcript for some episodes. Here is where to find it, why it is often missing, why you cannot export it, and what to do instead."
+  ) }}
+  <p class="ds-guide__muted ds-landing__updated">Updated <time datetime="{{ guide_updated }}">{{ guide_updated_label }}</time></p>
+
+  <div class="ds-mcp-start">
+    {{ button("Get a downloadable Spotify transcript", variant="primary", href=url_for('landing_spotify')) }}
+    <p class="ds-guide__muted">
+      Podskrift pastes an open.spotify.com link and returns .txt / .srt when the show has a public RSS feed.
+      {% if trial_offered %}
+      New accounts get free trial minutes — no card needed to start.
+      {% endif %}
+    </p>
+  </div>
+
+  {% call notice(variant="info") %}
+    This guide describes Spotify’s listener transcript as Spotify documents it in Help and Community answers.
+    Menu labels move between app versions. Podskrift does not use or re-host Spotify’s in-app text — it transcribes public audio.
+  {% endcall %}
+
+  <section class="ds-guide__section" aria-labelledby="spotify-mobile">
+    <h2 id="spotify-mobile">On iPhone and Android</h2>
+    <ol class="ds-guide__steps">
+      <li class="ds-guide__step">
+        <h3>Play the episode</h3>
+        <p>Open the episode in the Spotify app and start playback. The transcript only appears once the episode is playing or loaded in Now Playing.</p>
+      </li>
+      <li class="ds-guide__step">
+        <h3>Open full-screen Now Playing</h3>
+        <p>Tap the mini player at the bottom so the episode fills the screen.</p>
+      </li>
+      <li class="ds-guide__step">
+        <h3>Scroll to the transcript</h3>
+        <p>
+          Scroll down past the controls. On some versions a transcript / Read Along card replaces the cover art;
+          on others it sits under <strong>About this episode</strong>. Tap the card to read along while the audio plays.
+        </p>
+      </li>
+    </ol>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="spotify-desktop">
+    <h2 id="spotify-desktop">On desktop and the web player</h2>
+    <ol class="ds-guide__list">
+      <li>Play the episode in the Spotify desktop app or at open.spotify.com.</li>
+      <li>Open the <strong>Now Playing</strong> panel on the right (the control near the bottom-right of the player).</li>
+      <li>Scroll that panel. Where a transcript exists, Read Along / Episode transcript appears there.</li>
+    </ol>
+    <p class="ds-guide__muted">
+      Some auto-generated transcripts are available on mobile only. If you see one on your phone and nothing on desktop, that can be expected.
+    </p>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="spotify-missing">
+    <h2 id="spotify-missing">Why the transcript is missing</h2>
+    <ul class="ds-guide__list">
+      <li><strong>Eligibility</strong> — Spotify generates transcripts only for select shows, not the whole catalogue.</li>
+      <li><strong>Language</strong> — auto transcripts cover a limited set of languages (Spotify for Creators lists eligibility for select English, French, German, Spanish and Portuguese shows).</li>
+      <li><strong>Creator turned it off</strong> — in Spotify for Creators, publishers can disable transcripts per episode or for the show.</li>
+      <li><strong>Desktop limits</strong> — not every transcript that appears on mobile is shown on desktop or the web player.</li>
+      <li><strong>App version</strong> — older clients may hide the control; update Spotify and try again before concluding there is none.</li>
+    </ul>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="spotify-export">
+    <h2 id="spotify-export">You cannot copy or export Spotify’s listener transcript</h2>
+    <p>
+      Spotify’s Read Along text is for following along in the app. Listeners cannot select the full transcript,
+      download .txt or .srt, or export it into another tool. Spotify may offer sharing a short quote from Read Along;
+      that is not a full-episode export.
+    </p>
+    <p class="ds-guide__muted">
+      Creators with access to <a href="https://creators.spotify.com" rel="noopener" target="_blank">Spotify for Creators</a>
+      can view, download or upload transcripts for <em>their own</em> eligible episodes — that path is for show owners, not listeners.
+    </p>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="spotify-alternatives">
+    <h2 id="spotify-alternatives">Alternatives</h2>
+    <ul class="ds-guide__list">
+      <li>
+        <strong>Podskrift</strong> —
+        Paste the Spotify episode or show link.
+        When the show also publishes a public RSS feed (most do), you get a transcript you can copy and download as .txt and .srt —
+        including episodes where Spotify shows no Read Along.
+        <a href="{{ url_for('landing_spotify') }}">Spotify podcast transcript</a>.
+      </li>
+      <li>
+        <strong>Apple Podcasts or the public RSS feed</strong> —
+        If the show is listed outside Spotify, you can paste that link instead.
+        See <a href="{{ url_for('landing_apple') }}">Apple Podcasts</a> or
+        <a href="{{ url_for('rss_help') }}">how to find an RSS feed</a>.
+      </li>
+      <li>
+        <strong>Spotify exclusives / subscriber-only</strong> —
+        No public feed means no audio Podskrift can fetch. Those episodes cannot be transcribed here.
+        See <a href="{{ url_for('landing_spotify_no_rss') }}">Spotify episode without RSS</a>.
+      </li>
+      <li>
+        <strong>Spotify shows no Read Along</strong> —
+        When the app has no transcript but a public feed exists,
+        <a href="{{ url_for('landing_spotify_no_transcript') }}">Spotify transcript not available</a>.
+      </li>
+      <li>
+        <strong>Video podcasts</strong> —
+        Only via a public audio feed — not by pasting a YouTube or Spotify video URL.
+        See <a href="{{ url_for('landing_video_podcast') }}">video podcast transcript</a>.
+      </li>
+    </ul>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="spotify-guide-faq">
+    <h2 id="spotify-guide-faq">FAQ</h2>
+    <div class="ds-guide__faq">
+      {% for question, answer in guide_faq %}
+      <details>
+        <summary>{{ question }}</summary>
+        <p>{{ answer }}</p>
+      </details>
+      {% endfor %}
+    </div>
+  </section>
+
+  <nav class="ds-guide__section" aria-labelledby="spotify-guide-related">
+    <h2 id="spotify-guide-related">Related</h2>
+    <ul class="ds-guide__list">
+      <li><a href="{{ url_for('landing_spotify') }}">Spotify podcast transcript</a></li>
+      <li><a href="{{ url_for('landing_spotify_no_transcript') }}">Spotify transcript not available</a></li>
+      <li><a href="{{ url_for('landing_spotify_no_rss') }}">Spotify episode without RSS</a></li>
+      <li><a href="{{ url_for('landing_video_podcast') }}">Video podcast transcript</a></li>
+      <li><a href="{{ url_for('guides_index') }}">All guides</a></li>
+      <li><a href="{{ url_for('ai_landing') }}">Use transcripts in ChatGPT and Claude</a></li>
+      <li><a href="{{ url_for('help_page') }}">Help</a></li>
+      <li><a href="{{ url_for('pricing') }}">Pricing</a></li>
+    </ul>
+  </nav>
+
+  <div class="ds-guide__cta">
+    {{ link_button("Open the Spotify transcript page", href=url_for('landing_spotify')) }}
+  </div>
+</article>
+{% endblock %}

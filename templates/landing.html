@@ -41,6 +41,28 @@
     {% endif %}
   </form>
 
+  {% if page.compare %}
+  <section class="ds-guide__section ds-landing__compare" aria-labelledby="landing-compare">
+    <h2 id="landing-compare">{{ page.compare_title }}</h2>
+    <div class="econ-table-wrap">
+      <table class="econ-table">
+        <thead>
+          <tr>{% for h in page.compare_head %}<th scope="col">{{ h }}</th>{% endfor %}</tr>
+        </thead>
+        <tbody>
+          {% for row in page.compare %}
+          <tr>
+            <th scope="row">{{ row[0] }}</th>
+            {% for cell in row[1:] %}<td>{{ cell }}</td>{% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if page.compare_note %}<p class="ds-guide__muted">{{ page.compare_note }}</p>{% endif %}
+  </section>
+  {% endif %}
+
   <section class="ds-guide__section" aria-labelledby="landing-how">
     <h2 id="landing-how">{{ ui.how }}</h2>
     <ol class="ds-guide__steps">

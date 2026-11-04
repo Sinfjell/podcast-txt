@@ -28,6 +28,13 @@
       {{ link_button("Open Claude guide", href=url_for('guide_claude')) }}
     {% endcall %}
 
+    {% call section(title="How to get a Spotify podcast transcript", variant="bordered") %}
+      <p class="ds-guide__muted">
+        Find Spotify’s Read Along on mobile and desktop, why it is missing, and how to get a downloadable .txt / .srt.
+      </p>
+      {{ link_button("Open Spotify transcript guide", href=url_for('guide_spotify_transcript')) }}
+    {% endcall %}
+
     {% call section(title="Podcast transcripts in ChatGPT and Claude", variant="bordered") %}
       <p class="ds-guide__muted">
         Longer overview: how the tools work, pricing, Cursor / VS Code / Claude Code, and FAQ.

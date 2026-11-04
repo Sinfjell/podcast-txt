@@ -3899,6 +3899,7 @@ def test_the_sitemap_lists_the_public_pages(trial_on):
     assert any(u.endswith('/guides/chatgpt') for u in locs)
     assert any(u.endswith('/guides/claude') for u in locs)
     assert any(u.endswith('/guides/podcast-transcripts-in-chatgpt-and-claude') for u in locs)
+    assert any(u.endswith('/guides/how-to-get-spotify-podcast-transcript') for u in locs)
     assert any(u.endswith('/register') for u in locs)
     assert not any('/settings' in u or '/history' in u for u in locs), (
         'a session-only page is in the sitemap'
@@ -3934,6 +3935,9 @@ def test_sitemap_entries_have_stable_w3c_lastmod(trial_on):
         datetime.strptime(lastmod, '%Y-%m-%d')
     spotify = [m for loc, m in first if loc.endswith('/spotify-podcast-transcript')]
     assert spotify == [A.landing_pages_mod.SPOTIFY_PAGE_UPDATED]
+    guide = [m for loc, m in first
+             if loc.endswith('/guides/how-to-get-spotify-podcast-transcript')]
+    assert guide == [A.SPOTIFY_GUIDE_UPDATED]
 
 
 def test_indexnow_key_route_requires_env(monkeypatch, trial_on):
@@ -4112,14 +4116,17 @@ def test_guides_chatgpt_and_claude_pages(trial_on):
     assert hub.status_code == 200
     hub_body = hub.data.decode()
     assert '/guides/chatgpt' in hub_body and '/guides/claude' in hub_body
+    assert '/guides/how-to-get-spotify-podcast-transcript' in hub_body
     assert hub_body.count('class="btn btn-primary"') == 1
 
     sitemap = client.get('/sitemap.xml').data.decode()
     assert '/guides/chatgpt' in sitemap
     assert '/guides/claude' in sitemap
+    assert '/guides/how-to-get-spotify-podcast-transcript' in sitemap
     assert '/guides<' in sitemap or '/guides</loc>' in sitemap or sitemap.count('/guides') >= 3
     llms = client.get('/llms.txt').data.decode()
     assert '/guides/chatgpt' in llms and '/guides/claude' in llms
+    assert '/guides/how-to-get-spotify-podcast-transcript' in llms
 
 
 def test_guide_ai_transcripts_page_renders(trial_on):
@@ -4690,13 +4697,29 @@ def test_spotify_landing_shows_updated_date_platform_steps_and_troubleshooting(t
     soup = BeautifulSoup(html, 'html.parser')
     updated = soup.select_one('.ds-landing__updated time')
     assert updated is not None and updated['datetime'] == lp.SPOTIFY_PAGE_UPDATED
-    assert updated.get_text().strip()[-4:] == lp.SPOTIFY_PAGE_UPDATED[:4]
+    assert updated.get_text().strip() == '4 November 2026'
     webpage = None
     for tag in soup.find_all('script', type='application/ld+json'):
         for node in _json.loads(tag.string).get('@graph', []):
             if node.get('@type') == 'WebPage':
                 webpage = node
     assert webpage and webpage['dateModified'] == lp.SPOTIFY_PAGE_UPDATED
+    assert lp.SPOTIFY_PAGE_UPDATED == '2026-11-04'
+    h1 = soup.find('h1').get_text(' ', strip=True)
+    assert 'Spotify Podcast Transcript' in h1 and 'Free' in h1 and '2026' in h1
+    assert 'Copy' in h1 and 'Download' in h1
+    # SEO free claim: trial minutes, never a fixed minute count in title/meta/lede.
+    title = soup.find('title').get_text()
+    meta = soup.find('meta', attrs={'name': 'description'})['content']
+    lede = soup.select_one('.ds-page-header__lede')
+    lede_text = (lede.get_text(' ', strip=True) if lede else '')
+    for surface in (title, meta, h1, lede_text):
+        assert not re.search(r'\b\d+\s+minutes?\s+free\b', surface, re.I), surface
+    if A.advertised_trial_minutes() or A.free_trial_offered():
+        assert 'free trial minutes' in (meta + ' ' + lede_text).lower()
+    compare = soup.select_one('#landing-compare').parent
+    assert 'Spotify Read Along' in compare.get_text()
+    assert 'Podskrift' in compare.get_text()
     platforms = soup.select_one('#landing-platforms').parent.get_text(' ', strip=True)
     for bit in ('iPhone', 'Android', 'Desktop app and web player', 'Copy link',
                 'Copy Episode Link', 'Share'):
@@ -4708,6 +4731,71 @@ def test_spotify_landing_shows_updated_date_platform_steps_and_troubleshooting(t
     assert any('video-only' in r for r in rows)
     assert any('spotify.link' in r for r in rows)
     assert 'You see the episode and its price before you pay anything.' in html
+
+
+def test_spotify_transcript_guide_has_article_faq_jsonld_and_discovery(trial_on):
+    """Honest Spotify transcript guide: Article + FAQPage, sitemap, llms, cross-links."""
+    import json as _json
+    from bs4 import BeautifulSoup
+
+    path = '/guides/how-to-get-spotify-podcast-transcript'
+    client = A.app.test_client()
+    resp = client.get(path)
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    soup = BeautifulSoup(body, 'html.parser')
+    assert soup.find('link', rel='canonical')['href'].endswith(path)
+    assert body.count('class="btn btn-primary"') == 1
+    assert 'ds-guide' in body
+    updated = soup.select_one('.ds-landing__updated time')
+    assert updated is not None and updated['datetime'] == A.SPOTIFY_GUIDE_UPDATED
+    assert updated.get_text(strip=True) == '4 November 2026'
+    for needle in (
+        'Now Playing', 'Read Along', 'desktop', 'eligible', 'language',
+        'turned it off', 'cannot export', 'Spotify for Creators',
+        'public RSS', 'free trial minutes',
+    ):
+        assert needle.lower() in body.lower(), needle
+    faq_pairs = A.guide_spotify_transcript_faq_entries()
+    for question, answer in faq_pairs:
+        assert question in body
+        assert answer in body
+    data = None
+    for tag in soup.find_all('script', type='application/ld+json'):
+        data = _json.loads(tag.string)
+        break
+    assert data and '@graph' in data
+    types = {n['@type'] for n in data['@graph']}
+    assert types >= {'Article', 'FAQPage', 'WebPage'}, types
+    article = next(n for n in data['@graph'] if n['@type'] == 'Article')
+    assert article['dateModified'] == A.SPOTIFY_GUIDE_UPDATED
+    assert article['datePublished'] == A.SPOTIFY_GUIDE_UPDATED
+    faq = next(n for n in data['@graph'] if n['@type'] == 'FAQPage')
+    assert len(faq['mainEntity']) == len(faq_pairs)
+    for entry, (question, answer) in zip(faq['mainEntity'], faq_pairs):
+        assert entry['name'] == question
+        assert entry['acceptedAnswer']['text'] == answer
+    # Guide article copy: no STT provider names; no invented product claims.
+    article_html = soup.select_one('article.ds-guide').get_text(' ', strip=True).lower()
+    for banned in ('whisper', 'deepgram', 'assemblyai', 'rev.ai',
+                   'speaker labels included', 'automatic summary included',
+                   'named speakers'):
+        assert banned not in article_html, banned
+    sitemap = client.get('/sitemap.xml').data.decode()
+    assert path in sitemap and f'<lastmod>{A.SPOTIFY_GUIDE_UPDATED}</lastmod>' in sitemap
+    llms = client.get('/llms.txt').data.decode()
+    assert path in llms
+    assert f'href="{path}"' in client.get('/guides').data.decode()
+    help_html = client.get('/help').data.decode()
+    assert f'href="{path}"' in help_html
+    assert 'href="/spotify-transcript-not-available"' in help_html
+    assert f'href="{path}"' in client.get('/spotify-podcast-transcript').data.decode()
+    assert 'href="/spotify-episode-without-rss"' in body
+    assert 'href="/spotify-transcript-not-available"' in body
+    assert 'href="/video-podcast-transcript"' in body
+    # Intent landing from #194 also points back at this guide.
+    no_tx = client.get('/spotify-transcript-not-available').data.decode()
+    assert f'href="{path}"' in no_tx
 
 
 def test_only_pages_with_an_updated_date_get_date_modified(trial_on):
@@ -10143,6 +10231,19 @@ def test_homepage_copy_leads_with_spotify(trial_on):
     assert 'Download .txt or .srt transcript' not in body
     assert f'${A.openai_whisper_cost_usd(90):.2f}' in body
     assert f'${A.openai_whisper_cost_usd(60):.2f}' in body
+
+
+def test_homepage_links_spotify_podcast_transcript_anchor(trial_on):
+    """Exact-anchor homepage link to the Spotify keyword landing (not hero clutter)."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(A.app.test_client().get('/').data.decode(), 'html.parser')
+    matches = [a for a in soup.find_all('a', href=True)
+               if a.get_text(strip=True) == 'Spotify podcast transcript'
+               and a['href'].endswith('/spotify-podcast-transcript')]
+    assert matches, 'homepage must link with exact anchor text Spotify podcast transcript'
+    # Lives in How it works, not the hero.
+    hero = soup.select_one('.hp-hero')
+    assert hero is None or all(a not in hero.descendants for a in matches)
 
 
 def test_homepage_anon_sees_new_signup_trial_copy(trial_on):
@@ -22607,15 +22708,20 @@ def test_spotify_landing_will_work_line_and_cta_note(trial_on):
     assert 'public RSS feed' in form
     assert 'Originals' in form
     assert 'You create a free account after you pick the episode.' in form
-    assert 'What you get' in html and 'Example format' in html
+    assert 'What you get' in html and 'Illustrative example' in html
+    assert 'landing-compare' in html
+    assert 'Spotify Read Along' in html and 'Spotify for Creators' in html
+    assert 'Speaker labels' in html and 'Not yet' in html
     # Jinja escapes --> inside the snippet; the copy button still yields real SRT.
-    assert '00:12:31,200 --&gt; 00:12:35,900' in html
+    assert '00:00:04,100 --&gt; 00:00:08,400' in html
     assert 'href="/ai"' in html
+    assert 'href="/guides/how-to-get-spotify-podcast-transcript"' in html
     # Other landings stay free of Spotify-only chrome.
     other = A.app.test_client().get('/podcast-to-text').data.decode()
     assert 'What you get' not in other
     assert 'cta-note' not in other
     assert 'You create a free account after you pick the episode.' not in other
+    assert 'landing-compare' not in other
 
 
 def test_spotify_landing_cost_faq_uses_live_episode_offer(trial_on, monkeypatch):

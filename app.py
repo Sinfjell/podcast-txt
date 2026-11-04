@@ -47,6 +47,7 @@ from flask import (Flask, render_template, request, jsonify, send_file, flash,
                    make_response, abort)
 import show_pages as show_pages_mod
 import landing_pages as landing_pages_mod
+import sitemap_dates
 import podcast_optout
 import sitemap_dates
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
@@ -13460,10 +13461,11 @@ the speech model takes the choice as a constraint rather than a hint.
 - [Podcasts]({public_url('podcasts_index')}): show landing pages for popular podcasts
 - [Pricing]({public_url('pricing')}): free trial, one-time minute packs, optional own OpenAI key
 - [Use in ChatGPT & Claude]({public_url('ai_landing')}): connect Podskrift MCP (`/mcp`) in ChatGPT, Claude, Cursor or Claude Code; copyable prompts for your library, marketing, research and routines
-- [Guides]({public_url('guides_index')}): setup walkthroughs for ChatGPT, Claude, and the long-form overview
+- [Guides]({public_url('guides_index')}): setup walkthroughs for ChatGPT, Claude, Spotify transcripts, and the long-form overview
 - [Connect Podskrift to ChatGPT]({public_url('guide_chatgpt')}): Plugins → custom MCP server → OAuth
 - [Connect Podskrift to Claude]({public_url('guide_claude')}): Customize → Connectors → custom connector
 - [Guide: podcast transcripts in ChatGPT and Claude]({public_url('guide_ai_transcripts')}): step-by-step connector setup, example asks, and what it costs
+- [How to get a Spotify podcast transcript]({public_url('guide_spotify_transcript')}): Spotify Read Along on mobile/desktop, why it is missing, and downloadable alternatives
 - [Help]({public_url('help_page')})
 - [Contact]({public_url('contact')}): hello@podskrift.com — we reply fast
 - [What's new]({public_url('whats_new')}): dated feature list, newest first (build in public)
@@ -13573,7 +13575,8 @@ def sitemap_xml():
     for endpoint in (
             'index', 'podcasts_index', 'pricing', 'ai_landing',
             'guides_index', 'guide_chatgpt', 'guide_claude',
-            'guide_ai_transcripts', 'contact', 'whats_new', 'api_docs',
+            'guide_ai_transcripts', 'guide_spotify_transcript',
+            'contact', 'whats_new', 'api_docs',
             'help_page', 'rss_help', 'privacy', 'terms', 'register',
             'llms_txt', 'llms_full_txt'):
         entries.append((public_url(endpoint),
@@ -13747,12 +13750,14 @@ def guide_ai_faq_entries():
 
 
 def _faq_page_structured_data(page_url, page_name, page_description, faq_pairs,
-                              howto=None, prompt_groups=None, date_modified=None):
-    """WebPage + FAQPage JSON-LD (optional HowTo / prompt ItemList).
+                              howto=None, prompt_groups=None, date_modified=None,
+                              article=None):
+    """WebPage + FAQPage JSON-LD (optional HowTo / Article / prompt ItemList).
 
     FAQ answers must match the visible copy. Optional ``prompt_groups``
     (from ``ai_ask_prompt_groups``) add an ItemList of example asks so
-    assistants can surface concrete prompts.
+    assistants can surface concrete prompts. Optional ``article`` is a dict
+    with ``headline`` / ``date_published`` / ``date_modified`` for guide pages.
     """
     import json as _json
     graph = [
@@ -13782,6 +13787,23 @@ def _faq_page_structured_data(page_url, page_name, page_description, faq_pairs,
             ],
         },
     ]
+    if article:
+        art_modified = article.get('date_modified') or date_modified
+        art_published = article.get('date_published') or art_modified
+        graph.insert(0, {
+            '@type': 'Article',
+            '@id': page_url + '#article',
+            'headline': article.get('headline') or page_name,
+            'description': article.get('description') or page_description,
+            'url': page_url,
+            'mainEntityOfPage': page_url,
+            'author': {'@type': 'Organization', 'name': 'Podskrift',
+                       'url': public_url('index')},
+            'publisher': {'@type': 'Organization', 'name': 'Podskrift',
+                          'url': public_url('index')},
+            **({'datePublished': art_published} if art_published else {}),
+            **({'dateModified': art_modified} if art_modified else {}),
+        })
     if howto:
         howto_node = {
             '@type': 'HowTo',
@@ -13944,10 +13966,107 @@ def ai_landing():
     )
 
 
+#: Last copy review of /guides/how-to-get-spotify-podcast-transcript.
+SPOTIFY_GUIDE_UPDATED = sitemap_dates.DECLARED_GUIDE_UPDATED[
+    'guide_spotify_transcript']
+
+
+def guide_spotify_transcript_faq_entries():
+    """FAQ on the Spotify transcript guide (mirrored in FAQPage JSON-LD)."""
+    return [
+        (
+            'Where is the Spotify podcast transcript on mobile?',
+            'Play the episode, open the full-screen Now Playing view, and scroll '
+            'down. On some app versions the transcript (sometimes labelled Read '
+            'Along) replaces the cover art; on others it sits under About this '
+            'episode. It only appears once the episode is playing or loaded in '
+            'Now Playing.',
+        ),
+        (
+            'Where is it on desktop or the web player?',
+            'Play the episode, then open the Now Playing panel on the right. '
+            'Scroll that panel to find Read Along or the transcript. The web '
+            'player at open.spotify.com uses the same layout. Some auto-generated '
+            'transcripts are mobile-only.',
+        ),
+        (
+            'Why is there no transcript for my episode?',
+            'Coverage is partial. Spotify generates transcripts only for eligible '
+            'shows and languages; creators can turn them off for an episode or '
+            'the whole show; and desktop may not show every transcript that '
+            'appears on mobile. If nothing appears after you scroll Now Playing, '
+            'that episode likely has no Spotify transcript.',
+        ),
+        (
+            'Can I copy or download Spotify’s in-app transcript?',
+            'No. Listeners cannot export the full text as a file. Spotify may let '
+            'you share a short quote from Read Along, but there is no .txt or .srt '
+            'download for listeners.',
+        ),
+        (
+            'What are the alternatives?',
+            'If the show publishes a public RSS or Apple Podcasts feed, paste the '
+            'Spotify (or Apple) link into Podskrift to get a copyable transcript '
+            'as .txt and .srt — including when Spotify shows none. Spotify for '
+            'Creators can download or upload transcripts for eligible creators of '
+            'their own shows. Exclusives and subscriber-only episodes without a '
+            'public feed cannot be transcribed by Podskrift.',
+        ),
+        (
+            'Is Podskrift free?',
+            'New accounts get free trial minutes when a trial is offered — no card '
+            'needed to start. We do not list a fixed free-minute count here because '
+            'the grant can vary. Longer episodes show the exact price before you pay.',
+        ),
+    ]
+
+
 @app.route('/guides')
 def guides_index():
-    """Hub for setup guides (ChatGPT, Claude, and the long-form overview)."""
+    """Hub for setup guides (ChatGPT, Claude, Spotify, and the long-form overview)."""
     return render_template('guides/index.html')
+
+
+@app.route('/guides/how-to-get-spotify-podcast-transcript')
+def guide_spotify_transcript():
+    """Honest guide: Spotify’s own transcript, why it’s missing, and alternatives."""
+    faq = guide_spotify_transcript_faq_entries()
+    page_url = public_url('guide_spotify_transcript')
+    title = 'How to Get a Spotify Podcast Transcript'
+    description = (
+        'Find Spotify’s Read Along transcript on mobile and desktop, why it’s '
+        'missing, why you can’t export it, and how to get .txt / .srt when a '
+        'public feed exists.'
+    )
+    return render_template(
+        'guides/how_to_get_spotify_podcast_transcript.html',
+        guide_faq=faq,
+        guide_updated=SPOTIFY_GUIDE_UPDATED,
+        guide_updated_label=_guide_updated_label(SPOTIFY_GUIDE_UPDATED),
+        trial_offered=bool(advertised_trial_minutes()) or free_trial_offered(),
+        structured_data=_faq_page_structured_data(
+            page_url,
+            title,
+            description,
+            faq,
+            date_modified=SPOTIFY_GUIDE_UPDATED,
+            article={
+                'headline': title,
+                'description': description,
+                'date_published': SPOTIFY_GUIDE_UPDATED,
+                'date_modified': SPOTIFY_GUIDE_UPDATED,
+            },
+        ),
+    )
+
+
+def _guide_updated_label(iso_date):
+    """Human date for guide ``Updated`` lines (Europe/Oslo calendar date)."""
+    updated = date.fromisoformat(iso_date)
+    month = ('January', 'February', 'March', 'April', 'May', 'June', 'July',
+             'August', 'September', 'October', 'November', 'December')[
+                 updated.month - 1]
+    return f'{updated.day} {month} {updated.year}'
 
 
 @app.route('/guides/chatgpt')
