@@ -48,6 +48,7 @@ from flask import (Flask, render_template, request, jsonify, send_file, flash,
 import show_pages as show_pages_mod
 import landing_pages as landing_pages_mod
 import podcast_optout
+import sitemap_dates
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from urllib.parse import parse_qs, urljoin, urlparse, urlunparse, unquote
 import uuid
@@ -13358,37 +13359,57 @@ def llms_full_txt():
 
 @app.route('/sitemap.xml')
 def sitemap_xml():
-    """Public pages worth indexing, including curated show landings."""
+    """Public pages worth indexing, including curated show landings.
+
+    Each ``<url>`` carries a stable W3C ``<lastmod>`` derived from the page's
+    declared dateModified / content file git date / group fallback — never
+    from the current request time (that claimed every page changed daily).
+    """
     from xml.sax.saxutils import escape
-    pages = [public_url('index'),
-             public_url('podcasts_index'),
-             public_url('pricing'),
-             public_url('ai_landing'),
-             public_url('guides_index'),
-             public_url('guide_chatgpt'),
-             public_url('guide_claude'),
-             public_url('guide_ai_transcripts'),
-             public_url('contact'),
-             public_url('whats_new'),
-             public_url('api_docs'),
-             public_url('help_page'),
-             public_url('rss_help'),
-             public_url('privacy'),
-             public_url('terms'),
-             public_url('register'),
-             public_url('llms_txt'),
-             public_url('llms_full_txt')]
-    pages += [public_url(endpoint) for endpoint, _ in landing_pages_mod.public_pages()]
+    entries = []  # (url, lastmod) — order is part of the public contract
+    for endpoint in (
+            'index', 'podcasts_index', 'pricing', 'ai_landing',
+            'guides_index', 'guide_chatgpt', 'guide_claude',
+            'guide_ai_transcripts', 'contact', 'whats_new', 'api_docs',
+            'help_page', 'rss_help', 'privacy', 'terms', 'register',
+            'llms_txt', 'llms_full_txt'):
+        entries.append((public_url(endpoint),
+                        sitemap_dates.lastmod_for_endpoint(endpoint)))
+    for endpoint, _ in landing_pages_mod.public_pages():
+        entries.append((public_url(endpoint),
+                        sitemap_dates.lastmod_for_endpoint(endpoint)))
     # Curated show pages only — community slugs can churn with the DB.
+    show_lastmod = sitemap_dates.lastmod_for_show_page()
     for show in show_pages_mod.load_curated_shows():
-        pages.append(public_url('podcast_show', slug=show['slug']))
-    # No lastmod: it was emitting today's date on every fetch, which claims all
-    # pages change daily. That is a discount signal, not a freshness one.
-    urls = '\n'.join(f'  <url><loc>{escape(u)}</loc></url>' for u in pages)
+        entries.append((public_url('podcast_show', slug=show['slug']),
+                        show_lastmod))
+    urls = '\n'.join(
+        f'  <url><loc>{escape(u)}</loc><lastmod>{escape(m)}</lastmod></url>'
+        for u, m in entries)
     xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
            f'{urls}\n</urlset>\n')
     return Response(xml, mimetype='application/xml')
+
+
+def indexnow_key() -> str:
+    """IndexNow ownership key from ``INDEXNOW_KEY``, or empty when unset."""
+    return (os.environ.get('INDEXNOW_KEY') or '').strip()
+
+
+@app.route('/<key>.txt')
+def indexnow_key_file(key):
+    """Serve the IndexNow key file at ``/<key>.txt`` when ``INDEXNOW_KEY`` matches.
+
+    Unset or mismatched key → 404. Never invents a key at runtime. Exact
+    routes like ``/llms.txt`` / ``/robots.txt`` stay registered separately and
+    take precedence over this pattern.
+    """
+    expected = indexnow_key()
+    if not expected or key != expected:
+        abort(404)
+    # IndexNow: UTF-8 body is the key string alone.
+    return Response(expected, mimetype='text/plain; charset=utf-8')
 
 
 def _mcp_connector_url():

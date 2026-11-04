@@ -96,6 +96,17 @@ LANG_LABELS_EN = {
 #: Last copy review of /spotify-podcast-transcript (ISO date, Europe/Oslo).
 SPOTIFY_PAGE_UPDATED = '2026-11-02'
 
+#: Endpoints that publish an explicit ``dateModified`` / ``page.updated``.
+#: Used by the sitemap ``<lastmod>`` without building the full page copy.
+DECLARED_UPDATED = {
+    'landing_spotify': SPOTIFY_PAGE_UPDATED,
+}
+
+
+def declared_updated(endpoint):
+    """ISO date this landing already declares as modified, or None."""
+    return DECLARED_UPDATED.get(endpoint)
+
 TITLE_SUFFIX = ' — Podskrift'
 TITLE_MAX = 60
 META_MAX = 160
