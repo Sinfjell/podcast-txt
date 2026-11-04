@@ -82,6 +82,7 @@ import mail as mailer
 import stt as stt_mod
 import summary as summary_mod
 import trial_abuse
+import attribution as attribution_mod
 import pricing_volume
 import paywall_i18n
 import runtime_env as runtime_env_mod
@@ -2150,10 +2151,14 @@ UTM_SESSION_KEY = '_utm_source'
 FIRST_LANDING_SESSION_KEY = '_first_landing'
 FIRST_REFERRER_SESSION_KEY = '_first_referrer'
 FIRST_UTM_SESSION_KEY = '_first_utm'
+#: Full first-/last-touch dicts (utm_* + click ids + referrer_host + path + ts).
+#: Kept in the Flask session (strictly necessary for signup), not analytics cookies.
+FIRST_TOUCH_SESSION_KEY = '_attr_first'
+LAST_TOUCH_SESSION_KEY = '_attr_last'
 #: utm_* query keys we keep for first-touch (never invent values).
-FIRST_TOUCH_UTM_KEYS = (
-    'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
-)
+FIRST_TOUCH_UTM_KEYS = attribution_mod.UTM_KEYS
+#: Click-id query keys (gclid etc.) captured alongside utm_*.
+FIRST_TOUCH_CLICK_KEYS = attribution_mod.CLICK_ID_KEYS
 #: Session short-circuit for user_active_day (Oslo YYYY-MM-DD).
 ACTIVE_DAY_SESSION_KEY = '_active_day'
 
@@ -5802,52 +5807,121 @@ def _analytics_anon_id():
 
 
 def _first_touch_utm_from_args():
-    """utm_* present on this request, truncated; empty dict if none."""
-    out = {}
-    for key in FIRST_TOUCH_UTM_KEYS:
-        val = (request.args.get(key) or '').strip()
-        if val:
-            out[key] = val[:64]
-    return out
+    """utm_* + click ids present on this request, truncated; empty if none."""
+    return attribution_mod.extract_query_attrs(request.args)
+
+
+def _attribution_own_hosts():
+    """Hostnames treated as first-party (skip for referrer_host)."""
+    hosts = {'podskrift.com', 'www.podskrift.com'}
+    try:
+        netloc = (request.host or '').split(':', 1)[0].lower()
+        if netloc:
+            hosts.add(netloc)
+    except RuntimeError:
+        pass
+    return frozenset(hosts)
+
+
+def _is_navigable_attribution_request():
+    """True for human page GETs that may be acquisition landings."""
+    if request.method not in ('GET', 'HEAD'):
+        return False
+    path = request.path or '/'
+    if path.startswith('/static/') or _canonical_host_exempt(path):
+        return False
+    if path.startswith('/admin') or path.startswith('/design'):
+        return False
+    return True
 
 
 def _stash_utm_from_request():
     """Legacy helper — first-touch stash owns utm. Write-once only."""
-    if FIRST_LANDING_SESSION_KEY in session or UTM_SESSION_KEY in session:
+    if (FIRST_LANDING_SESSION_KEY in session
+            or UTM_SESSION_KEY in session
+            or FIRST_TOUCH_SESSION_KEY in session):
         return
-    src = (request.args.get('utm_source') or '').strip()
+    src = attribution_mod.sanitize_attr_value(
+        request.args.get('utm_source'), max_len=attribution_mod.MAX_UTM_LEN)
     if not src:
         return
-    session[UTM_SESSION_KEY] = src[:64]
+    session[UTM_SESSION_KEY] = src
+
+
+def _sync_legacy_first_touch_keys(touch):
+    """Keep legacy session keys in sync for older signup helpers / tests."""
+    if not touch:
+        return
+    landing = touch.get('landing_path')
+    if landing:
+        session[FIRST_LANDING_SESSION_KEY] = landing
+    # Full Referer URL is no longer stored; keep a host-only stand-in so
+    # referrer_source() still classifies google/chatgpt/etc.
+    host = touch.get('referrer_host') or ''
+    session[FIRST_REFERRER_SESSION_KEY] = (
+        f'https://{host}/' if host else '')[:512]
+    params = {
+        k: touch[k] for k in attribution_mod.TRACKED_QUERY_KEYS if touch.get(k)
+    }
+    if params:
+        session[FIRST_UTM_SESSION_KEY] = params
+        src = params.get('utm_source')
+        if src:
+            session[UTM_SESSION_KEY] = src
 
 
 def _stash_first_touch_from_request():
-    """Remember first landing path + Referer + utm_* once per browser session.
+    """Remember first-touch once and refresh last-touch on tracked landings.
 
-    Runs on the first navigable GET of any page (not only /register), so a
-    visitor who lands on /?utm_source=chatgpt.com then signs up keeps that
-    attribution. Skips probes, webhooks, static assets, and non-GET so
-    bots/health checks do not lock an empty first touch. Path only — never
-    the query string — for first_landing; utm_* are stored separately.
+    Runs on navigable GETs (not only /register). First-touch is write-once so
+    a ChatGPT land on /?utm_source=chatgpt.com still attributes after the
+    visitor reaches /register. Last-touch updates whenever utm_* / click-id
+    query params appear. Stored in the Flask session (signup-necessary), not
+    gated on analytics cookie consent.
     """
-    if FIRST_LANDING_SESSION_KEY in session:
-        return
-    if request.method not in ('GET', 'HEAD'):
+    if not _is_navigable_attribution_request():
         return
     path = request.path or '/'
-    if path.startswith('/static/') or _canonical_host_exempt(path):
-        return
-    # Admin/debug surfaces are not acquisition landings.
-    if path.startswith('/admin') or path.startswith('/design'):
-        return
-    session[FIRST_LANDING_SESSION_KEY] = path[:128]
-    session[FIRST_REFERRER_SESSION_KEY] = (request.referrer or '')[:512]
-    utm = _first_touch_utm_from_args()
-    if utm:
-        session[FIRST_UTM_SESSION_KEY] = utm
-        src = utm.get('utm_source')
-        if src:
-            session[UTM_SESSION_KEY] = src
+    own = _attribution_own_hosts()
+    params = attribution_mod.extract_query_attrs(request.args)
+
+    if FIRST_TOUCH_SESSION_KEY not in session and FIRST_LANDING_SESSION_KEY not in session:
+        first = attribution_mod.build_touch(
+            path=path,
+            referrer=request.referrer,
+            args=request.args,
+            own_hosts=own,
+            include_referrer_without_params=True,
+        )
+        session[FIRST_TOUCH_SESSION_KEY] = first
+        _sync_legacy_first_touch_keys(first)
+    elif FIRST_TOUCH_SESSION_KEY not in session and FIRST_LANDING_SESSION_KEY in session:
+        # Session from before this PR: rebuild a first-touch dict once.
+        legacy_utm = dict(session.get(FIRST_UTM_SESSION_KEY) or {})
+        rebuilt = {
+            'landing_path': str(session.get(FIRST_LANDING_SESSION_KEY) or '/')[:128],
+            'touched_at': attribution_mod.utc_now_iso(),
+        }
+        rebuilt.update(legacy_utm)
+        host = attribution_mod.referrer_host(
+            session.get(FIRST_REFERRER_SESSION_KEY), own_hosts=own)
+        if host:
+            rebuilt['referrer_host'] = host
+        session[FIRST_TOUCH_SESSION_KEY] = rebuilt
+
+    if params:
+        last = attribution_mod.build_touch(
+            path=path,
+            referrer=request.referrer,
+            args=request.args,
+            own_hosts=own,
+            include_referrer_without_params=False,
+        )
+        if last:
+            session[LAST_TOUCH_SESSION_KEY] = last
+            # If first-touch was recorded without params (organic land) and
+            # this later hit has params, still do NOT overwrite first-touch.
+            # Last-touch alone captures the paid click.
 
 
 def _signup_country():
@@ -5879,35 +5953,137 @@ def _card_locale():
     return paywall_i18n.card_locale(langs)
 
 
+def _session_first_touch_dict():
+    """Current first-touch dict from session (legacy keys reconciled)."""
+    touch = dict(session.get(FIRST_TOUCH_SESSION_KEY) or {})
+    if touch:
+        return touch
+    landing = session.get(FIRST_LANDING_SESSION_KEY)
+    if not landing and FIRST_UTM_SESSION_KEY not in session and UTM_SESSION_KEY not in session:
+        return {}
+    touch = {
+        'landing_path': str(landing or '/')[:128],
+        'touched_at': attribution_mod.utc_now_iso(),
+    }
+    touch.update(dict(session.get(FIRST_UTM_SESSION_KEY) or {}))
+    host = attribution_mod.referrer_host(
+        session.get(FIRST_REFERRER_SESSION_KEY),
+        own_hosts=_attribution_own_hosts(),
+    )
+    if host:
+        touch['referrer_host'] = host
+    src = session.get(UTM_SESSION_KEY)
+    if src and 'utm_source' not in touch:
+        touch['utm_source'] = str(src)[:64]
+    return touch
+
+
+def _session_last_touch_dict():
+    return dict(session.get(LAST_TOUCH_SESSION_KEY) or {})
+
+
+def apply_attribution_to_user(user):
+    """Stamp first-/last-touch JSON onto a newly created User (signup only).
+
+    Idempotent when columns already hold values. Safe with missing session.
+    Call before commit on every path that creates a user (today: email
+    ``/register`` only — Google/MCP OAuth authorize existing accounts).
+    """
+    if user is None:
+        return
+    if getattr(user, 'attribution_first', None):
+        return
+    first = _session_first_touch_dict()
+    last = _session_last_touch_dict() or first
+    try:
+        user.attribution_first = attribution_mod.dumps_touch(first)
+        user.attribution_last = attribution_mod.dumps_touch(last)
+    except Exception:  # noqa: BLE001 - attribution must never block signup
+        app.logger.exception('apply_attribution_to_user failed')
+
+
+def attribution_event_props_for_user(user) -> dict:
+    """First-touch props (+ ``$set_once`` initial_*) for server events.
+
+    Returns {} when the user has no stored attribution. Never raises.
+    """
+    try:
+        if user is None:
+            return {}
+        touch = attribution_mod.loads_touch(
+            getattr(user, 'attribution_first', None))
+        if not touch:
+            return {}
+        props = attribution_mod.event_props_from_first_touch(touch)
+        set_once = attribution_mod.set_once_from_first_touch(touch)
+        # Coarse bucket for dashboards that already use first_referrer_source.
+        ref_host = touch.get('referrer_host') or ''
+        ref_url = f'https://{ref_host}/' if ref_host else ''
+        props['first_referrer_source'] = show_pages_mod.referrer_source(
+            ref_url, touch.get('utm_source') or '')
+        if set_once:
+            set_once['first_referrer_source'] = props['first_referrer_source']
+            props['$set_once'] = set_once
+        return props
+    except Exception:  # noqa: BLE001
+        app.logger.exception('attribution_event_props_for_user failed')
+        return {}
+
+
+def _merge_attribution_into_event_props(props, user):
+    """Attach stored first-touch attribution onto an event props dict in place."""
+    if props is None or user is None:
+        return props
+    extra = attribution_event_props_for_user(user)
+    if not extra:
+        return props
+    set_once = dict(props.get('$set_once') or {})
+    incoming_once = extra.pop('$set_once', None) or {}
+    for key, val in extra.items():
+        props.setdefault(key, val)
+    if incoming_once:
+        for key, val in incoming_once.items():
+            set_once.setdefault(key, val)
+        props['$set_once'] = set_once
+    return props
+
+
 def _first_touch_analytics_props(*, utm=None):
     """Consume stashed first landing/referrer/utm into signup + person props."""
-    if (FIRST_LANDING_SESSION_KEY not in session
+    if (FIRST_TOUCH_SESSION_KEY not in session
+            and FIRST_LANDING_SESSION_KEY not in session
             and FIRST_REFERRER_SESSION_KEY not in session
             and FIRST_UTM_SESSION_KEY not in session
             and UTM_SESSION_KEY not in session):
         return {}
-    props = {}
+    touch = _session_first_touch_dict()
+    # Consume so a second signup attempt in the same session does not re-use.
+    session.pop(FIRST_TOUCH_SESSION_KEY, None)
+    session.pop(LAST_TOUCH_SESSION_KEY, None)
     landing = session.pop(FIRST_LANDING_SESSION_KEY, None)
     ref = session.pop(FIRST_REFERRER_SESSION_KEY, None) or ''
     first_utm = dict(session.pop(FIRST_UTM_SESSION_KEY, None) or {})
     session.pop(UTM_SESSION_KEY, None)
-    if utm and 'utm_source' not in first_utm:
-        first_utm['utm_source'] = str(utm)[:64]
+    if not touch.get('landing_path') and landing:
+        touch['landing_path'] = str(landing)[:128]
+    if utm and 'utm_source' not in touch:
+        touch['utm_source'] = str(utm)[:64]
     for key, val in first_utm.items():
-        if val:
-            props[key] = str(val)[:64]
-    if landing:
-        props['first_landing'] = str(landing)[:128]
-    effective_utm = first_utm.get('utm_source') or utm or ''
+        touch.setdefault(key, val)
+    if not touch.get('referrer_host') and ref:
+        host = attribution_mod.referrer_host(ref, own_hosts=_attribution_own_hosts())
+        if host:
+            touch['referrer_host'] = host
+
+    props = attribution_mod.event_props_from_first_touch(touch)
+    effective_utm = touch.get('utm_source') or utm or ''
+    ref_for_bucket = ref
+    if not ref_for_bucket and touch.get('referrer_host'):
+        ref_for_bucket = f"https://{touch['referrer_host']}/"
     props['first_referrer_source'] = show_pages_mod.referrer_source(
-        ref, effective_utm)
-    set_once = {}
-    if landing:
-        set_once['first_landing'] = props['first_landing']
+        ref_for_bucket, effective_utm)
+    set_once = attribution_mod.set_once_from_first_touch(touch)
     set_once['first_referrer_source'] = props['first_referrer_source']
-    for key in FIRST_TOUCH_UTM_KEYS:
-        if key in props:
-            set_once[key] = props[key]
     if set_once:
         props['$set_once'] = set_once
     return props
@@ -5915,13 +6091,20 @@ def _first_touch_analytics_props(*, utm=None):
 
 def _utm_source_for_signup():
     """utm_source from first-touch stash or the signup form/query, if any."""
+    touch = session.get(FIRST_TOUCH_SESSION_KEY) or {}
     first_utm = session.get(FIRST_UTM_SESSION_KEY) or {}
-    src = session.pop(UTM_SESSION_KEY, None) or first_utm.get('utm_source')
+    src = (
+        session.get(UTM_SESSION_KEY)
+        or touch.get('utm_source')
+        or first_utm.get('utm_source')
+    )
     if not src:
         src = (request.values.get('utm_source') or '').strip() or None
     if not src:
         return None
-    return str(src)[:64]
+    return attribution_mod.sanitize_attr_value(
+        src, max_len=attribution_mod.MAX_UTM_LEN)
+
 
 
 def _should_count_active_day_web():
@@ -6138,6 +6321,9 @@ def register():
             user.trial_denied_reason = denied_reason
         user.trial_seconds_limit = grant_seconds
         user.trial_variant = variant
+        # Persist first-/last-touch from the Flask session before commit so
+        # purchase events later can attribute without the browser session.
+        apply_attribution_to_user(user)
         db.session.commit()
         created = True
         if denied_reason:
@@ -7021,6 +7207,8 @@ def _capture_purchase_failed(reason, *, stage, user_id=None, session_id=None,
         props.update(extra)
     if user_id is not None:
         distinct_id = user_id
+        buyer = db.session.get(User, user_id)
+        _merge_attribution_into_event_props(props, buyer)
     elif session_id:
         distinct_id = f'stripe:{session_id}'
         props['$process_person_profile'] = False
@@ -7041,6 +7229,9 @@ def _capture_checkout_returned(status, *, user_id, session_id=None, location=Non
         props['location'] = location
     if extra:
         props.update(extra)
+    if user_id is not None:
+        buyer = db.session.get(User, user_id)
+        _merge_attribution_into_event_props(props, buyer)
     product_analytics.capture('checkout_returned', user_id, props)
 
 
@@ -7076,6 +7267,8 @@ def _capture_checkout_expired(obj):
     if ref.isdigit():
         distinct_id = int(ref)
         props.update(_balance_analytics_props(distinct_id))
+        _merge_attribution_into_event_props(
+            props, db.session.get(User, distinct_id))
     else:
         distinct_id = f'stripe:{cs_id or "unknown"}'
         props['$process_person_profile'] = False
@@ -7172,6 +7365,8 @@ def _capture_refund_processed(purchase, *, kind, refund_delta_cents,
     }
     if kind == 'dispute':
         refunded_props['reason'] = 'dispute'
+    buyer = db.session.get(User, purchase.user_id)
+    _merge_attribution_into_event_props(refunded_props, buyer)
     product_analytics.capture(
         'purchase_refunded', purchase.user_id, refunded_props, uuid=event_uuid)
 
@@ -7330,6 +7525,9 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
         '$set': person_set,
     }
     completed_props.update(variant_props)
+    # First-touch attribution from the user row (session may be gone by webhook).
+    buyer = db.session.get(User, user_id)
+    _merge_attribution_into_event_props(completed_props, buyer)
     # Webhook has no consent cookie; ph_sid/ph_did were gated at checkout create.
     _apply_posthog_browser_context(
         completed_props, user_id, sid=ph_sid, did=ph_did)
@@ -7989,6 +8187,7 @@ def billing_checkout():
         'email_campaign': email_campaign,
     }
     started_props.update(trial_variant_props(current_user))
+    _merge_attribution_into_event_props(started_props, current_user)
     _apply_posthog_browser_context(
         started_props, current_user.id, sid=ph_sid, did=ph_did)
     product_analytics.capture(
