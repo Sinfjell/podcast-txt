@@ -107,6 +107,17 @@ SPOTIFY_PAGE_UPDATED = '2026-11-02'
 #: Shared dateModified for the Nov 2026 intent landings (Europe/Oslo).
 INTENT_PAGES_UPDATED = '2026-11-04'
 
+#: Endpoints that publish an explicit ``dateModified`` / ``page.updated``.
+#: Used by the sitemap ``<lastmod>`` without building the full page copy.
+DECLARED_UPDATED = {
+    'landing_spotify': SPOTIFY_PAGE_UPDATED,
+}
+
+
+def declared_updated(endpoint):
+    """ISO date this landing already declares as modified, or None."""
+    return DECLARED_UPDATED.get(endpoint)
+
 TITLE_SUFFIX = ' — Podskrift'
 TITLE_MAX = 60
 META_MAX = 160
