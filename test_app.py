@@ -14529,6 +14529,364 @@ def test_first_touch_stash_is_write_once_on_any_page():
             'utm_source') == 'chatgpt.com'
 
 
+def test_first_touch_kept_last_touch_updates_with_click_ids():
+    """First-touch is write-once; last-touch refreshes on later tracked params."""
+    import attribution as attr
+    client = A.app.test_client()
+    client.get(
+        '/?utm_source=google&utm_medium=cpc&gclid=FIRST_GCLID',
+        headers={'Referer': 'https://www.google.com/aclk'},
+    )
+    with client.session_transaction() as sess:
+        first = sess.get(A.FIRST_TOUCH_SESSION_KEY) or {}
+        assert first.get('utm_source') == 'google'
+        assert first.get('gclid') == 'FIRST_GCLID'
+        assert first.get('landing_path') == '/'
+        assert first.get('referrer_host') == 'www.google.com'
+        assert first.get('touched_at')
+        last = sess.get(A.LAST_TOUCH_SESSION_KEY) or {}
+        assert last.get('gclid') == 'FIRST_GCLID'
+    client.get('/pricing?utm_source=newsletter&utm_medium=email&gclid=SECOND')
+    with client.session_transaction() as sess:
+        first = sess.get(A.FIRST_TOUCH_SESSION_KEY) or {}
+        assert first.get('utm_source') == 'google'
+        assert first.get('gclid') == 'FIRST_GCLID'
+        last = sess.get(A.LAST_TOUCH_SESSION_KEY) or {}
+        assert last.get('utm_source') == 'newsletter'
+        assert last.get('gclid') == 'SECOND'
+        assert last.get('landing_path') == '/pricing'
+    # Organic navigation without params must not wipe last-touch.
+    client.get('/settings')
+    with client.session_transaction() as sess:
+        last = sess.get(A.LAST_TOUCH_SESSION_KEY) or {}
+        assert last.get('gclid') == 'SECOND'
+    # Oversized values are truncated.
+    huge = 'x' * 500
+    client2 = A.app.test_client()
+    client2.get(f'/?utm_source={huge}&gclid={huge}')
+    with client2.session_transaction() as sess:
+        first = sess.get(A.FIRST_TOUCH_SESSION_KEY) or {}
+        assert len(first['utm_source']) == attr.MAX_UTM_LEN
+        assert len(first['gclid']) == attr.MAX_CLICK_ID_LEN
+
+
+def test_only_email_register_creates_users_in_production_code():
+    """Invariant: POST /register is the sole visitor-reachable User factory.
+
+    Scans app modules (not tests / verify seeds) for ``User(...)`` calls and
+    raw ``INSERT INTO users``. Magic-link, Google/OAuth login, MCP authorize,
+    checkout, and admin do not create accounts — they look up existing ones.
+    If a new signup path is added, this test fails until it also calls
+    ``apply_attribution_to_user`` and emits ``user_signed_up``.
+    """
+    import ast as _ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent
+    skip_parts = {
+        'test_app.py', 'test_design_system.py', 'test_email.py',
+        'test_lifecycle_emails.py', 'test_podcast_optout.py',
+        'test_posthog_daily_health.py', 'test_summary.py',
+        'test_unit_economics.py', 'test_admin_purchases.py',
+        'test_checkout_recovery.py', 'test_ops_backup.py',
+        'test_site_standards.py', 'test_verify_podskrift.py',
+        'conftest.py',
+    }
+    skip_dirs = {'.venv', 'venv', 'node_modules', '.git',
+                 'verify_podskrift', '__pycache__', 'ops'}
+    constructions = []
+    raw_inserts = []
+    for path in root.rglob('*.py'):
+        if any(part in skip_dirs for part in path.parts):
+            continue
+        if path.name in skip_parts or path.name.startswith('test_'):
+            continue
+        src = path.read_text(encoding='utf-8')
+        if 'INSERT INTO users' in src.upper().replace('\n', ' '):
+            # Allow mentioned only in comments/docs of this invariant test's
+            # sibling modules — production must not INSERT users via SQL.
+            for i, line in enumerate(src.splitlines(), 1):
+                stripped = line.lstrip()
+                if stripped.startswith('#') or stripped.startswith('"""') or stripped.startswith("'''"):
+                    continue
+                if 'INSERT INTO users' in line.upper():
+                    raw_inserts.append(f'{path.name}:{i}')
+        try:
+            tree = _ast.parse(src, filename=str(path))
+        except SyntaxError:
+            continue
+
+        class _Finder(_ast.NodeVisitor):
+            def __init__(self):
+                self.func_stack = []
+
+            def visit_FunctionDef(self, node):
+                self.func_stack.append(node.name)
+                self.generic_visit(node)
+                self.func_stack.pop()
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Call(self, node):
+                name = None
+                if isinstance(node.func, _ast.Name) and node.func.id == 'User':
+                    name = 'User'
+                elif (isinstance(node.func, _ast.Attribute)
+                      and node.func.attr == 'User'):
+                    name = 'User'
+                if name == 'User':
+                    constructions.append((
+                        path.name,
+                        self.func_stack[-1] if self.func_stack else '<module>',
+                        node.lineno,
+                    ))
+                self.generic_visit(node)
+
+        _Finder().visit(tree)
+
+    assert raw_inserts == [], (
+        f'raw INSERT INTO users in production code: {raw_inserts}')
+    assert len(constructions) == 1, (
+        f'expected exactly one User(...) in production code; found {constructions}')
+    path_name, func_name, _lineno = constructions[0]
+    assert path_name == 'app.py' and func_name == 'register', (
+        f'User(...) must live in app.register; found {constructions[0]}')
+    # The only factory must stamp attribution + fire the signup event.
+    register_text = (root / 'app.py').read_text(encoding='utf-8')
+    reg_node = next(
+        n for n in _ast.walk(_ast.parse(register_text))
+        if isinstance(n, _ast.FunctionDef) and n.name == 'register')
+    body = '\n'.join(register_text.splitlines()[
+        reg_node.lineno - 1: reg_node.end_lineno])
+    assert 'apply_attribution_to_user(user)' in body
+    assert 'user_signed_up' in body
+
+
+def test_signup_persists_first_and_last_touch_attribution(ph_events, trial_on):
+    """Email register writes attribution JSON onto the user and signup event."""
+    import json
+    import attribution as attr
+    A._register_attempts.clear()
+    client = A.app.test_client()
+    client.get(
+        '/?utm_source=google&utm_campaign=brand&gclid=abc123'
+        '&utm_medium=cpc&fbclid=fb1',
+        headers={'Referer': 'https://www.google.com/'},
+    )
+    client.get('/pricing?utm_source=retarget&gclid=later')
+    resp = client.post(
+        '/register',
+        data={'email': 'attr-persist@example.com', 'password': 'password123'},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (302, 303)
+    with A.app.app_context():
+        from models import User
+        u = User.query.filter_by(email='attr-persist@example.com').one()
+        first = attr.loads_touch(u.attribution_first)
+        last = attr.loads_touch(u.attribution_last)
+        assert first['utm_source'] == 'google'
+        assert first['gclid'] == 'abc123'
+        assert first['fbclid'] == 'fb1'
+        assert first['landing_path'] == '/'
+        assert first['referrer_host'] == 'www.google.com'
+        assert first['touched_at']
+        assert last['utm_source'] == 'retarget'
+        assert last['gclid'] == 'later'
+        # Round-trip JSON stays compact.
+        assert len(u.attribution_first) < 4096
+        json.loads(u.attribution_first)
+    events = [e for e in ph_events.events if e['event'] == 'user_signed_up']
+    assert len(events) == 1
+    props = events[0]['properties']
+    assert props['utm_source'] == 'google'
+    assert props['gclid'] == 'abc123'
+    assert props['landing_path'] == '/'
+    assert props['referrer_host'] == 'www.google.com'
+    assert props['first_touch_at']
+    set_once = props.get('$set_once') or {}
+    assert set_once.get('initial_utm_source') == 'google'
+    assert set_once.get('initial_gclid') == 'abc123'
+    assert set_once.get('initial_landing_path') == '/'
+    assert set_once.get('initial_referrer_host') == 'www.google.com'
+    assert set_once.get('utm_source') == 'google'  # legacy key kept
+
+
+def test_signup_without_attribution_still_succeeds(ph_events, trial_on):
+    """Missing attribution must not break register or the signup event."""
+    A._register_attempts.clear()
+    client = A.app.test_client()
+    # Hit a non-navigable path first so no first-touch is locked empty? Health
+    # is exempt; go straight to POST without a prior GET.
+    resp = client.post(
+        '/register',
+        data={'email': 'no-attr@example.com', 'password': 'password123'},
+        follow_redirects=False,
+    )
+    assert resp.status_code in (302, 303)
+    with A.app.app_context():
+        from models import User
+        u = User.query.filter_by(email='no-attr@example.com').one()
+        # POST alone does not stash first-touch (GET-only); columns stay NULL.
+        assert u.attribution_first is None
+        assert u.attribution_last is None
+    events = [e for e in ph_events.events if e['event'] == 'user_signed_up']
+    assert len(events) == 1
+    assert 'email' not in events[0]['properties']
+
+
+def test_purchase_events_carry_stored_attribution(stripe_on, ph_events):
+    """purchase_completed / checkout_started read first-touch from the user."""
+    import attribution as attr
+    uid = _make_user('attr-buy@example.com', limit=600, used=600)
+    with A.app.app_context():
+        u = A.db.session.get(A.User, uid)
+        first = {
+            'utm_source': 'google',
+            'utm_medium': 'cpc',
+            'utm_campaign': 'spring',
+            'gclid': 'purchase-gclid',
+            'referrer_host': 'www.google.com',
+            'landing_path': '/pricing',
+            'touched_at': '2026-11-01T12:00:00+00:00',
+        }
+        u.attribution_first = attr.dumps_touch(first)
+        u.attribution_last = attr.dumps_touch({
+            **first, 'utm_source': 'email', 'gclid': 'later'})
+        A.db.session.commit()
+
+    client = _login(uid)
+    client.get('/')
+    with client.session_transaction() as sess:
+        token = sess.get('_csrf_token')
+    client.post('/billing/checkout', data={
+        'csrf_token': token, 'source': 'settings',
+    })
+    started = [e for e in ph_events.events if e['event'] == 'checkout_started']
+    assert started
+    sprops = started[-1]['properties']
+    assert sprops['utm_source'] == 'google'
+    assert sprops['gclid'] == 'purchase-gclid'
+    assert sprops['landing_path'] == '/pricing'
+    assert sprops['first_touch_at'] == '2026-11-01T12:00:00+00:00'
+    assert (sprops.get('$set_once') or {}).get('initial_gclid') == 'purchase-gclid'
+
+    sess = _pack_session(uid, session_id='cs_attr_buy')
+    assert _register_and_post(stripe_on, sess).status_code == 200
+    purchased = [e for e in ph_events.events if e['event'] == 'purchase_completed']
+    assert purchased
+    pprops = purchased[-1]['properties']
+    assert pprops['utm_source'] == 'google'
+    assert pprops['gclid'] == 'purchase-gclid'
+    assert pprops['referrer_host'] == 'www.google.com'
+    assert pprops['landing_path'] == '/pricing'
+    assert pprops['first_touch_at'] == '2026-11-01T12:00:00+00:00'
+    # Existing session-id behaviour (may be absent without consent) still ok.
+    assert 'amount_cents' in pprops
+
+
+def test_purchase_without_attribution_still_completes(stripe_on, ph_events):
+    uid = _make_user('attr-none-buy@example.com', limit=600, used=600)
+    _set_paid(uid, 0)
+    sess = _pack_session(uid, session_id='cs_attr_none')
+    assert _register_and_post(stripe_on, sess).status_code == 200
+    assert _paid(uid) == A.CREDIT_PACK_MINUTES * 60
+    purchased = [e for e in ph_events.events if e['event'] == 'purchase_completed']
+    assert purchased
+    props = purchased[-1]['properties']
+    assert 'utm_source' not in props
+    assert 'gclid' not in props
+    assert props.get('minutes') == A.CREDIT_PACK_MINUTES
+
+
+def test_attribution_values_are_sanitized_and_truncated():
+    import attribution as attr
+    assert attr.sanitize_attr_value('  hi\x00there  ', max_len=64) == 'hithere'
+    assert attr.sanitize_attr_value('a' * 100, max_len=10) == 'a' * 10
+    assert attr.sanitize_attr_value('   ', max_len=64) is None
+    assert attr.referrer_host('https://www.google.com/search?q=x') == 'www.google.com'
+    assert attr.referrer_host('https://podskrift.com/pricing') is None
+    assert attr.referrer_host('') is None
+    touch = attr.build_touch(
+        path='/' + 'p' * 200,
+        referrer='https://bing.com/',
+        args={'utm_source': 'x' * 200, 'gclid': 'g' * 500},
+        include_referrer_without_params=True,
+    )
+    assert len(touch['landing_path']) == attr.MAX_PATH_LEN
+    assert len(touch['utm_source']) == attr.MAX_UTM_LEN
+    assert len(touch['gclid']) == attr.MAX_CLICK_ID_LEN
+    assert touch['referrer_host'] == 'bing.com'
+
+
+def test_attribution_columns_migration_idempotent_on_schema_copy(trial_on):
+    """Additive users.attribution_* on a prod-like schema that lacks them."""
+    with A.app.app_context():
+        assert 'attribution_first' in A._live_columns('users')
+        A.db.session.execute(A.text('PRAGMA foreign_keys=OFF'))
+        A.db.session.execute(A.text('ALTER TABLE users RENAME TO users_old'))
+        # Schema shape just before this PR (has transcription_model, no attr).
+        A.db.session.execute(A.text("""
+            CREATE TABLE users (
+                id INTEGER NOT NULL PRIMARY KEY,
+                email VARCHAR(255) NOT NULL UNIQUE,
+                password_hash VARCHAR(255) NOT NULL,
+                openai_api_key VARCHAR(255),
+                created_at DATETIME,
+                trial_seconds_limit INTEGER,
+                trial_seconds_used INTEGER NOT NULL DEFAULT 0,
+                trial_variant VARCHAR(16),
+                paid_seconds_balance INTEGER NOT NULL DEFAULT 0,
+                api_key_hash VARCHAR(64),
+                api_key_prefix VARCHAR(16),
+                api_key_created_at DATETIME,
+                email_transcript_ready BOOLEAN NOT NULL DEFAULT 1,
+                email_normalized VARCHAR(255),
+                signup_ip_hash VARCHAR(64),
+                signup_device_id VARCHAR(64),
+                trial_denied_reason VARCHAR(32),
+                email_unsubscribed_at DATETIME,
+                session_version INTEGER NOT NULL DEFAULT 0,
+                last_active_day VARCHAR(10),
+                transcription_model VARCHAR(32)
+            )
+        """))
+        A.db.session.execute(A.text("""
+            INSERT INTO users (
+                id, email, password_hash, openai_api_key, created_at,
+                trial_seconds_limit, trial_seconds_used, trial_variant,
+                paid_seconds_balance, api_key_hash, api_key_prefix,
+                api_key_created_at, email_transcript_ready, email_normalized,
+                signup_ip_hash, signup_device_id, trial_denied_reason,
+                email_unsubscribed_at, session_version, last_active_day,
+                transcription_model
+            )
+            SELECT
+                id, email, password_hash, openai_api_key, created_at,
+                trial_seconds_limit, trial_seconds_used, trial_variant,
+                paid_seconds_balance, api_key_hash, api_key_prefix,
+                api_key_created_at, email_transcript_ready, email_normalized,
+                signup_ip_hash, signup_device_id, trial_denied_reason,
+                email_unsubscribed_at, session_version, last_active_day,
+                transcription_model
+            FROM users_old
+        """))
+        A.db.session.execute(A.text('DROP TABLE users_old'))
+        A.db.session.execute(A.text('PRAGMA foreign_keys=ON'))
+        A.db.session.commit()
+        A.db.session.remove()
+        A.db.engine.dispose()
+        assert 'attribution_first' not in A._live_columns('users')
+        assert 'attribution_last' not in A._live_columns('users')
+        added = A.apply_column_migrations()
+        assert 'users.attribution_first' in added
+        assert 'users.attribution_last' in added
+        assert 'attribution_first' in A._live_columns('users')
+        assert 'attribution_last' in A._live_columns('users')
+        # Idempotent second pass (two gunicorn workers).
+        assert A.apply_column_migrations() == []
+
+
 def test_user_active_day_once_per_oslo_day_web(ph_events, trial_on):
     uid = _make_user('active-day-web@example.com', limit=3600)
     client = _login(uid)

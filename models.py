@@ -73,6 +73,11 @@ class User(UserMixin, db.Model):
     signup_device_id = db.Column(db.String(64), nullable=True)
     trial_denied_reason = db.Column(db.String(32), nullable=True)
 
+    # First- / last-touch acquisition (JSON). Written once at signup from the
+    # Flask session stash; never rewritten later. See attribution.py.
+    attribution_first = db.Column(db.Text, nullable=True)
+    attribution_last = db.Column(db.Text, nullable=True)
+
     feeds = db.relationship('SavedFeed', backref='user', lazy=True, cascade='all, delete-orphan')
     tasks = db.relationship('TranscriptionTask', backref='user', lazy=True, cascade='all, delete-orphan')
     credit_purchases = db.relationship('CreditPurchase', backref='user', lazy=True,
@@ -430,6 +435,8 @@ USER_COLUMN_MIGRATIONS = {
     'session_version': 'INTEGER NOT NULL DEFAULT 0',
     'last_active_day': 'VARCHAR(10)',
     'transcription_model': 'VARCHAR(32)',
+    'attribution_first': 'TEXT',
+    'attribution_last': 'TEXT',
 }
 
 #: Additive columns for password_reset_tokens. Applied by
