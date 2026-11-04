@@ -3905,6 +3905,93 @@ def test_the_sitemap_lists_the_public_pages(trial_on):
     )
 
 
+_SITEMAP_NS = '{http://www.sitemaps.org/schemas/sitemap/0.9}'
+_LASTMOD_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _sitemap_url_entries(xml_bytes):
+    from xml.etree import ElementTree
+    root = ElementTree.fromstring(xml_bytes)
+    out = []
+    for url_el in root.findall(f'{_SITEMAP_NS}url'):
+        loc = url_el.findtext(f'{_SITEMAP_NS}loc')
+        lastmod = url_el.findtext(f'{_SITEMAP_NS}lastmod')
+        out.append((loc, lastmod))
+    return out
+
+
+def test_sitemap_entries_have_stable_w3c_lastmod(trial_on):
+    """Every <url> has a real YYYY-MM-DD lastmod that does not drift per request."""
+    client = A.app.test_client()
+    first = _sitemap_url_entries(client.get('/sitemap.xml').data)
+    second = _sitemap_url_entries(client.get('/sitemap.xml').data)
+    assert first, 'sitemap is empty'
+    assert first == second, 'lastmod (or URL set) changed between two requests'
+    for loc, lastmod in first:
+        assert lastmod and _LASTMOD_RE.match(lastmod), (
+            f'{loc} lastmod {lastmod!r} is not W3C YYYY-MM-DD')
+        # Calendar-valid, not just a digit pattern.
+        datetime.strptime(lastmod, '%Y-%m-%d')
+    spotify = [m for loc, m in first if loc.endswith('/spotify-podcast-transcript')]
+    assert spotify == [A.landing_pages_mod.SPOTIFY_PAGE_UPDATED]
+
+
+def test_indexnow_key_route_requires_env(monkeypatch, trial_on):
+    client = A.app.test_client()
+    monkeypatch.delenv('INDEXNOW_KEY', raising=False)
+    assert client.get('/missing-indexnow-key.txt').status_code == 404
+    monkeypatch.setenv('INDEXNOW_KEY', 'PodskriftIndexNowKey1')
+    miss = client.get('/other-key-entirely.txt')
+    assert miss.status_code == 404
+    hit = client.get('/PodskriftIndexNowKey1.txt')
+    assert hit.status_code == 200
+    assert hit.data == b'PodskriftIndexNowKey1'
+    assert hit.mimetype.startswith('text/plain')
+    # Exact public .txt routes must not be swallowed by the key pattern.
+    assert client.get('/llms.txt').status_code == 200
+    assert client.get('/robots.txt').status_code == 200
+
+
+def test_indexnow_submit_dry_run_builds_payload(monkeypatch, capsys):
+    import ops.indexnow_submit as indexnow_submit
+
+    sample = (
+        b'<?xml version="1.0" encoding="UTF-8"?>\n'
+        b'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        b'  <url><loc>https://podskrift.com/</loc>'
+        b'<lastmod>2026-11-02</lastmod></url>\n'
+        b'  <url><loc>https://podskrift.com/spotify-podcast-transcript</loc>'
+        b'<lastmod>2026-11-02</lastmod></url>\n'
+        b'</urlset>\n'
+    )
+    monkeypatch.setattr(indexnow_submit, 'fetch_sitemap',
+                        lambda url, timeout=30.0: sample)
+    monkeypatch.setenv('INDEXNOW_KEY', 'dryRunKeyABCDEF12')
+    sent = []
+
+    def _no_send(payload, **kw):
+        sent.append(payload)
+        return 200, 'ok'
+
+    monkeypatch.setattr(indexnow_submit, 'submit_payload', _no_send)
+    rc = indexnow_submit.main([
+        '--dry-run',
+        '--sitemap', 'https://podskrift.com/sitemap.xml',
+    ])
+    assert rc == 0
+    assert sent == [], 'dry-run must not POST'
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        'host': 'podskrift.com',
+        'key': 'dryRunKeyABCDEF12',
+        'keyLocation': 'https://podskrift.com/dryRunKeyABCDEF12.txt',
+        'urlList': [
+            'https://podskrift.com/',
+            'https://podskrift.com/spotify-podcast-transcript',
+        ],
+    }
+
+
 def test_ai_landing_page_renders_and_has_faq_json_ld(trial_on):
     """ /ai is the public MCP discovery page — calm copy, one primary CTA."""
     import json as _json
