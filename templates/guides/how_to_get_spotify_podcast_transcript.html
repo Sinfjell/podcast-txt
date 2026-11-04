@@ -105,6 +105,17 @@
       <li>
         <strong>Spotify exclusives / subscriber-only</strong> —
         No public feed means no audio Podskrift can fetch. Those episodes cannot be transcribed here.
+        See <a href="{{ url_for('landing_spotify_no_rss') }}">Spotify episode without RSS</a>.
+      </li>
+      <li>
+        <strong>Spotify shows no Read Along</strong> —
+        When the app has no transcript but a public feed exists,
+        <a href="{{ url_for('landing_spotify_no_transcript') }}">Spotify transcript not available</a>.
+      </li>
+      <li>
+        <strong>Video podcasts</strong> —
+        Only via a public audio feed — not by pasting a YouTube or Spotify video URL.
+        See <a href="{{ url_for('landing_video_podcast') }}">video podcast transcript</a>.
       </li>
     </ul>
   </section>
@@ -125,6 +136,9 @@
     <h2 id="spotify-guide-related">Related</h2>
     <ul class="ds-guide__list">
       <li><a href="{{ url_for('landing_spotify') }}">Spotify podcast transcript</a></li>
+      <li><a href="{{ url_for('landing_spotify_no_transcript') }}">Spotify transcript not available</a></li>
+      <li><a href="{{ url_for('landing_spotify_no_rss') }}">Spotify episode without RSS</a></li>
+      <li><a href="{{ url_for('landing_video_podcast') }}">Video podcast transcript</a></li>
       <li><a href="{{ url_for('guides_index') }}">All guides</a></li>
       <li><a href="{{ url_for('ai_landing') }}">Use transcripts in ChatGPT and Claude</a></li>
       <li><a href="{{ url_for('help_page') }}">Help</a></li>

@@ -17,6 +17,9 @@ Keep stem + suffix ≤ 60 characters.
 PAGES = (
     ('landing_generator', '/podcast-transcript-generator'),
     ('landing_spotify', '/spotify-podcast-transcript'),
+    ('landing_spotify_no_rss', '/spotify-episode-without-rss'),
+    ('landing_spotify_no_transcript', '/spotify-transcript-not-available'),
+    ('landing_video_podcast', '/video-podcast-transcript'),
     ('landing_apple', '/apple-podcast-transcript'),
     ('landing_podcast_to_text', '/podcast-to-text'),
     ('landing_rss', '/rss-to-text'),
@@ -35,6 +38,9 @@ PAGES = (
 FOOTER = (
     'landing_generator',
     'landing_spotify',
+    'landing_spotify_no_rss',
+    'landing_spotify_no_transcript',
+    'landing_video_podcast',
     'landing_apple',
     'landing_podcast_to_text',
     'landing_rss',
@@ -69,6 +75,9 @@ _SUMMARY_GATED = frozenset({'landing_summarize'})
 SHORT_LABELS = {
     'landing_generator': 'Podcast transcript generator',
     'landing_spotify': 'Transcribe a Spotify podcast',
+    'landing_spotify_no_rss': 'Spotify episode without RSS',
+    'landing_spotify_no_transcript': 'Spotify transcript not available',
+    'landing_video_podcast': 'Video podcast transcript',
     'landing_apple': 'Transcribe from Apple Podcasts',
     'landing_podcast_to_text': 'Podcast to text',
     'landing_rss': 'RSS feed to text',
@@ -95,18 +104,22 @@ LANG_LABELS_EN = {
 
 #: Last copy review of /spotify-podcast-transcript (ISO date, Europe/Oslo).
 SPOTIFY_PAGE_UPDATED = '2026-11-04'
+#: Shared dateModified for the Nov 2026 intent landings (Europe/Oslo).
+INTENT_PAGES_UPDATED = '2026-11-04'
 
 #: Endpoints that publish an explicit ``dateModified`` / ``page.updated``.
 #: Used by the sitemap ``<lastmod>`` without building the full page copy.
 DECLARED_UPDATED = {
     'landing_spotify': SPOTIFY_PAGE_UPDATED,
+    'landing_spotify_no_rss': INTENT_PAGES_UPDATED,
+    'landing_spotify_no_transcript': INTENT_PAGES_UPDATED,
+    'landing_video_podcast': INTENT_PAGES_UPDATED,
 }
 
 
 def declared_updated(endpoint):
     """ISO date this landing already declares as modified, or None."""
     return DECLARED_UPDATED.get(endpoint)
-
 
 TITLE_SUFFIX = ' — Podskrift'
 TITLE_MAX = 60
@@ -155,9 +168,10 @@ def hreflang_alternates(endpoint):
 def related_links(endpoint):
     """Other landings first; native pages prefer Spotify/Apple/English siblings."""
     core = [
-        'landing_generator', 'landing_spotify', 'landing_apple',
-        'landing_podcast_to_text', 'landing_rss', 'landing_free',
-        'landing_youtube_vs', 'landing_whole_podcast',
+        'landing_generator', 'landing_spotify', 'landing_spotify_no_rss',
+        'landing_spotify_no_transcript', 'landing_video_podcast',
+        'landing_apple', 'landing_podcast_to_text', 'landing_rss',
+        'landing_free', 'landing_youtube_vs', 'landing_whole_podcast',
     ]
     native = ('landing_no', 'landing_es', 'landing_de', 'landing_pt', 'landing_fr')
     if endpoint == 'landing_summarize':
@@ -166,6 +180,28 @@ def related_links(endpoint):
     elif endpoint == 'landing_whole_podcast':
         # Brief: RSS, podcast-to-text, Spotify (/ai is always appended by the template).
         out = ['landing_rss', 'landing_podcast_to_text', 'landing_spotify']
+    elif endpoint == 'landing_spotify':
+        out = ['landing_spotify_no_rss', 'landing_spotify_no_transcript',
+               'landing_video_podcast', 'landing_apple', 'landing_rss',
+               'landing_generator', 'landing_podcast_to_text', 'landing_free',
+               'landing_youtube_vs', 'landing_whole_podcast'] + list(native)
+    elif endpoint == 'landing_spotify_no_rss':
+        out = ['landing_spotify', 'landing_rss', 'landing_apple',
+               'landing_spotify_no_transcript', 'landing_video_podcast',
+               'landing_generator', 'landing_free', 'landing_youtube_vs']
+    elif endpoint == 'landing_spotify_no_transcript':
+        out = ['landing_spotify', 'landing_spotify_no_rss', 'landing_apple',
+               'landing_generator', 'landing_free', 'landing_video_podcast',
+               'landing_youtube_vs']
+    elif endpoint == 'landing_video_podcast':
+        out = ['landing_youtube_vs', 'landing_spotify', 'landing_spotify_no_rss',
+               'landing_rss', 'landing_apple', 'landing_generator',
+               'landing_podcast_to_text', 'landing_free']
+    elif endpoint == 'landing_youtube_vs':
+        out = ['landing_video_podcast', 'landing_spotify', 'landing_spotify_no_rss',
+               'landing_rss', 'landing_apple', 'landing_generator',
+               'landing_podcast_to_text', 'landing_free',
+               'landing_whole_podcast'] + list(native)
     elif endpoint == 'landing_no':
         out = ['landing_podcast_to_text', 'landing_spotify', 'landing_apple',
                'landing_rss', 'landing_free', 'landing_generator',
@@ -190,6 +226,9 @@ RELATED_LABELS = {
     'nb': {
         'landing_podcast_to_text': 'Podcast til tekst (engelsk)',
         'landing_spotify': 'Transkriber en Spotify-podcast (engelsk)',
+        'landing_spotify_no_rss': 'Spotify-episode uten RSS (engelsk)',
+        'landing_spotify_no_transcript': 'Spotify-transkript mangler (engelsk)',
+        'landing_video_podcast': 'Video-podcast til tekst (engelsk)',
         'landing_apple': 'Transkriber fra Apple Podcasts (engelsk)',
         'landing_rss': 'RSS-feed til tekst (engelsk)',
         'landing_free': 'Transkriber en podcast gratis (engelsk)',
@@ -198,6 +237,9 @@ RELATED_LABELS = {
     },
     'es': {
         'landing_spotify': 'Transcribir un podcast de Spotify (en inglés)',
+        'landing_spotify_no_rss': 'Episodio de Spotify sin RSS (en inglés)',
+        'landing_spotify_no_transcript': 'Transcripción de Spotify no disponible (en inglés)',
+        'landing_video_podcast': 'Transcribir un podcast en vídeo (en inglés)',
         'landing_apple': 'Transcribir desde Apple Podcasts (en inglés)',
         'landing_podcast_to_text': 'De podcast a texto (en inglés)',
         'landing_rss': 'De feed RSS a texto (en inglés)',
@@ -205,6 +247,9 @@ RELATED_LABELS = {
     },
     'de': {
         'landing_spotify': 'Spotify-Podcast transkribieren (Englisch)',
+        'landing_spotify_no_rss': 'Spotify-Folge ohne RSS (Englisch)',
+        'landing_spotify_no_transcript': 'Spotify-Transkript nicht verfügbar (Englisch)',
+        'landing_video_podcast': 'Video-Podcast transkribieren (Englisch)',
         'landing_apple': 'Aus Apple Podcasts transkribieren (Englisch)',
         'landing_podcast_to_text': 'Podcast zu Text (Englisch)',
         'landing_rss': 'RSS-Feed zu Text (Englisch)',
@@ -212,6 +257,9 @@ RELATED_LABELS = {
     },
     'pt': {
         'landing_spotify': 'Transcrever um podcast do Spotify (em inglês)',
+        'landing_spotify_no_rss': 'Episódio do Spotify sem RSS (em inglês)',
+        'landing_spotify_no_transcript': 'Transcrição do Spotify indisponível (em inglês)',
+        'landing_video_podcast': 'Transcrever podcast em vídeo (em inglês)',
         'landing_apple': 'Transcrever do Apple Podcasts (em inglês)',
         'landing_podcast_to_text': 'Podcast para texto (em inglês)',
         'landing_rss': 'Feed RSS para texto (em inglês)',
@@ -219,6 +267,9 @@ RELATED_LABELS = {
     },
     'fr': {
         'landing_spotify': 'Transcrire un podcast Spotify (en anglais)',
+        'landing_spotify_no_rss': 'Épisode Spotify sans flux RSS (en anglais)',
+        'landing_spotify_no_transcript': 'Transcription Spotify indisponible (en anglais)',
+        'landing_video_podcast': 'Transcrire un podcast vidéo (en anglais)',
         'landing_apple': 'Transcrire depuis Apple Podcasts (en anglais)',
         'landing_podcast_to_text': 'Podcast en texte (en anglais)',
         'landing_rss': 'Flux RSS en texte (en anglais)',
@@ -731,6 +782,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
                 ('guide_spotify_transcript',
                  'Guide: how to get a Spotify podcast transcript'),
             ],
+            # related_links() already prioritises the Nov 2026 intent landings.
             faq=[
                 ('Does every Spotify podcast work?',
                  'Most do: almost every show on Spotify also publishes a public RSS feed, '
@@ -754,6 +806,225 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
                  'We do not list a fixed free-minute count here because the grant can vary.'),
                 cost_faq,
             ] + common_rest,
+        )
+
+    if endpoint == 'landing_spotify_no_rss':
+        # Honest about resolve_spotify_url: Spotify links only work when the
+        # show can be matched to a public iTunes/RSS feed. True exclusives,
+        # paid episodes and video-only shows with no feed cannot be transcribed.
+        free_bit = _free_bit(trial, free_trial, 'en')
+        return dict(
+            lang='en',
+            title='Spotify Episode Without an RSS Feed',
+            meta=('How to transcribe a Spotify episode when the show has no '
+                  'public RSS feed — what Podskrift can and cannot do. '
+                  f'{free_bit.capitalize()}.'),
+            h1='Transcribe a Spotify episode that has no public RSS',
+            lede=('Straight answer: Podskrift can only transcribe a Spotify '
+                  'episode when the same show also publishes a public RSS feed '
+                  '(most do). True Spotify exclusives, Originals without a '
+                  'public feed, subscriber-only episodes, and video-only shows '
+                  'with no audio feed cannot be transcribed — there is no audio '
+                  'URL Podskrift is allowed to fetch.'),
+            placeholder='https://open.spotify.com/episode/…',
+            input_label='Spotify episode or show link',
+            button=start,
+            updated=INTENT_PAGES_UPDATED,
+            will_work=('Works only when a public podcast feed exists for the '
+                       'show. Spotify-only exclusives and paid episodes don’t.'),
+            cta_note=('Paste the Spotify link first. If no public feed matches, '
+                      'you’ll see that before anything is charged.'),
+            steps=[
+                ('Paste the Spotify link',
+                 'An open.spotify.com episode or show link. Podskrift looks up '
+                 'the show name in the public podcast directory and tries to '
+                 'match the episode in that feed.'),
+                ('If a public feed is found',
+                 'You see the episode (or the show’s episode list). Pick it and '
+                 'start the transcript as usual.'),
+                ('If nothing matches',
+                 'Search the show name here, or check Apple Podcasts / the '
+                 'host’s site for an RSS URL. If the show truly has no public '
+                 'feed, Podskrift cannot transcribe it — there is no workaround '
+                 'that downloads Spotify’s private audio.'),
+            ],
+            troubleshoot_title='What works and what doesn’t',
+            troubleshoot_head=('Situation', 'Why', 'What to do'),
+            troubleshoot=[
+                ('Show also on Apple Podcasts or has its own RSS',
+                 'A public feed exists; Spotify is just how you found the episode.',
+                 'Paste the Spotify link, or the Apple / RSS link — both work.'),
+                ('Looks Spotify-only but a feed still exists',
+                 'Some shows stay off the big apps yet publish RSS for directories.',
+                 'Search the show name here, or paste the feed URL from the host.'),
+                ('True Spotify exclusive / Original, no public feed',
+                 'There is no public audio URL. Podskrift never scrapes Spotify’s CDN.',
+                 'Cannot be transcribed. No workaround.'),
+                ('Subscriber-only / paid Spotify episode',
+                 'The audio sits behind a Spotify subscription, not in the public feed.',
+                 'Not possible. Free episodes of the same show often still work.'),
+                ('Spotify video show with no audio feed',
+                 'Video-only Spotify shows usually have no public podcast RSS.',
+                 'Only works if the same episode is also published as audio elsewhere.'),
+            ],
+            faq=[
+                ('Can Podskrift transcribe Spotify-exclusive podcasts?',
+                 'No. It needs a public RSS feed (or the same episode via Apple '
+                 'Podcasts / a direct audio URL). Exclusives without a public '
+                 'feed have no audio Podskrift can fetch.'),
+                ('How does Podskrift use a Spotify link at all?',
+                 'It reads the public show/episode metadata, finds a matching '
+                 'show in the public podcast directory, then pulls the episode '
+                 'audio from that show’s RSS feed — not from Spotify’s private '
+                 'stream.'),
+                ('I pasted a Spotify link and got “no public RSS feed” — now what?',
+                 'Try searching the show name, check Apple Podcasts, or paste an '
+                 'RSS URL from the host. If none of those find the show, it is a '
+                 'true exclusive and cannot be transcribed here.'),
+                ('Can I upload the audio I downloaded from Spotify?',
+                 'No file upload. If you have a direct public audio URL (hosted '
+                 'somewhere you control), paste that URL. Ripping Spotify’s '
+                 'stream is not supported and is against Spotify’s terms.'),
+                ('Is this the same as Spotify’s built-in transcript?',
+                 'No. Podskrift makes its own transcript from public-feed audio. '
+                 'If Spotify’s in-app transcript is missing, see the “Spotify '
+                 'transcript not available” page — that still requires a public '
+                 'feed.'),
+            ] + common,
+        )
+
+    if endpoint == 'landing_spotify_no_transcript':
+        free_bit = _free_bit(trial, free_trial, 'en')
+        return dict(
+            lang='en',
+            title='Spotify Transcript Not Available',
+            meta=('When Spotify has no transcript for an episode: why it '
+                  'happens, what you can do, and how to get a downloadable '
+                  f'.txt and .srt. {free_bit.capitalize()}.'),
+            h1='Spotify transcript not available — get your own',
+            lede=('If Spotify’s built-in transcript is missing or greyed out, '
+                  'Podskrift can still make one — but only when the episode also '
+                  'exists in a public podcast RSS feed. Paste the Spotify link; '
+                  'you get plain text and .srt you can copy and download. Spotify '
+                  'does not let you export the transcript it shows in the app.'),
+            placeholder='https://open.spotify.com/episode/…',
+            input_label='Spotify episode or show link',
+            button=start,
+            updated=INTENT_PAGES_UPDATED,
+            will_work=('Works when the show has a public RSS feed — most do. '
+                       'Exclusives, paid episodes and video-only shows without a '
+                       'feed don’t.'),
+            cta_note=('You see the episode and its price before you pay anything. '
+                      'You create a free account after you pick the episode.'),
+            steps=[
+                ('Copy the Spotify episode link',
+                 'In Spotify: open the episode → Share → Copy link '
+                 '(open.spotify.com/episode/…).'),
+                ('Paste it here',
+                 'Podskrift matches the episode in the show’s public RSS feed '
+                 'and lists it. If no feed exists, it tells you up front.'),
+                ('Download .txt or .srt',
+                 'Transcription usually takes a few minutes. Unlike Spotify’s '
+                 'in-app view, you can copy, search and keep the files.'),
+            ],
+            faq=[
+                ('Why does Spotify say transcript not available?',
+                 'Spotify only generates in-app transcripts for some shows and '
+                 'languages, and it can lag behind new episodes. That is a Spotify '
+                 'product limit — it does not mean the audio cannot be transcribed '
+                 'elsewhere.'),
+                ('Can I export Spotify’s own transcript?',
+                 'No. Spotify does not offer a .txt or .srt download. Paste the '
+                 'episode link here to get your own copy from the public feed.'),
+                ('Is Podskrift’s transcript the same as Spotify’s?',
+                 'No. Podskrift runs its own speech recognition on the public-feed '
+                 'audio. Wording can differ; you get timestamps and downloadable '
+                 'files either way.'),
+                ('Does every Spotify episode work?',
+                 'Most do, when the show also publishes a public RSS feed. '
+                 'Spotify exclusives, subscriber-only episodes and video-only '
+                 'shows without a feed cannot be transcribed.'),
+                ('What if the show has no public RSS?',
+                 'Podskrift cannot fetch Spotify’s private audio. Search the show '
+                 'name or check Apple Podcasts; if nothing turns up, see the '
+                 '“Spotify episode without RSS” page — there is no workaround for '
+                 'true exclusives.'),
+            ] + common,
+            also_related=[
+                ('guide_spotify_transcript',
+                 'Guide: how to get a Spotify podcast transcript'),
+            ],
+        )
+
+    if endpoint == 'landing_video_podcast':
+        free_bit = _free_bit(trial, free_trial, 'en')
+        return dict(
+            lang='en',
+            title='Transcribe a Video Podcast to Text',
+            meta=('How to get a transcript of a video podcast. Works when the '
+                  'episode is also in a public audio RSS feed — not for raw '
+                  f'YouTube URLs. {free_bit.capitalize()}.'),
+            h1='Transcribe a video podcast (when audio is public)',
+            lede=('Podskrift transcribes podcast audio from a public feed — not '
+                  'YouTube videos and not Spotify’s private video stream. If your '
+                  'video podcast is also published as a normal podcast (Apple '
+                  'Podcasts, Spotify with a public RSS feed, or a direct audio '
+                  'URL), paste that podcast link and get .txt and .srt.'),
+            placeholder='Paste a Spotify, Apple or RSS podcast link',
+            input_label='Podcast or episode link (not a YouTube URL)',
+            button=start,
+            updated=INTENT_PAGES_UPDATED,
+            will_work=('Works for video podcasts that also ship a public audio '
+                       'feed. YouTube URLs and Spotify video-only shows without '
+                       'RSS don’t.'),
+            steps=[
+                ('Prefer the podcast link, not the video link',
+                 'Find the same episode on Apple Podcasts, Spotify (with a public '
+                 'feed), or the show’s RSS — not youtube.com or youtu.be.'),
+                ('Paste and pick the episode',
+                 'Podskrift fetches the public-feed audio. You see the title and '
+                 'length before anything is charged.'),
+                ('Get downloadable text',
+                 'Read in the browser, or download .txt and timestamped .srt for '
+                 'captions or notes.'),
+            ],
+            troubleshoot_title='Video podcast sources',
+            troubleshoot_head=('Source', 'Supported?', 'What to do'),
+            troubleshoot=[
+                ('Video podcast also on Apple / RSS / Spotify with a public feed',
+                 'Yes — Podskrift uses the public audio enclosure.',
+                 'Paste that podcast or feed link.'),
+                ('YouTube-only video (youtube.com / youtu.be)',
+                 'No. Podskrift does not accept YouTube URLs or download YouTube audio.',
+                 'Use YouTube’s captions, or publish/find the episode as a podcast.'),
+                ('Spotify video show with no public RSS',
+                 'No. There is no public audio URL to fetch.',
+                 'Only works if the same episode appears as audio elsewhere.'),
+                ('Direct .mp3 / .m4a / .mp4 audio URL you host',
+                 'Often yes, when the URL is publicly fetchable.',
+                 'Paste the direct URL. Very large video files that cannot be '
+                 'streamed may be refused.'),
+            ],
+            faq=[
+                ('Can Podskrift transcribe a YouTube video?',
+                 'No. It does not accept YouTube URLs. For YouTube-only content, '
+                 'use YouTube’s own captions. If the same episode is also a '
+                 'podcast, paste the podcast link instead.'),
+                ('What about Spotify video podcasts?',
+                 'Only when the show also has a public RSS (or Apple) audio feed. '
+                 'Spotify video-only shows without a public feed cannot be '
+                 'transcribed — Podskrift never pulls Spotify’s private video.'),
+                ('Can I paste an .mp4 link?',
+                 'If it is a direct, publicly fetchable media URL, try it. Huge '
+                 'video files that need a full download before any audio can be '
+                 'read may be refused; an audio-only feed is more reliable.'),
+                ('Is this a YouTube caption or downloader tool?',
+                 'No. It is a podcast transcription tool. See “YouTube vs podcast '
+                 'transcript” for when YouTube captions are enough.'),
+                ('Do I get speaker labels?',
+                 'Not yet. You get one continuous transcript with timestamps, not '
+                 'named speakers.'),
+            ] + common,
         )
 
     if endpoint == 'landing_apple':

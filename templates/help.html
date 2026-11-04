@@ -22,12 +22,15 @@
       {{ link_button("Transcribe from Apple Podcasts", href=url_for('landing_apple')) }}
       {{ link_button("Transcribe a Spotify podcast", href=url_for('landing_spotify')) }}
       {{ link_button("How to get a Spotify podcast transcript", href=url_for('guide_spotify_transcript')) }}
+      {{ link_button("Spotify transcript not available", href=url_for('landing_spotify_no_transcript')) }}
     {% endcall %}
 
     {% call section(title="Can't find a podcast?", variant="bordered") %}
-      <p class="ds-guide__muted">How to find the RSS feed for shows outside the search, and what to do with Spotify-only shows.</p>
+      <p class="ds-guide__muted">How to find the RSS feed for shows outside the search, and what to do with Spotify-only or video shows.</p>
       {{ link_button("Finding RSS feeds", href=url_for('rss_help')) }}
       {{ link_button("RSS feed to text", href=url_for('landing_rss')) }}
+      {{ link_button("Spotify episode without RSS", href=url_for('landing_spotify_no_rss')) }}
+      {{ link_button("Video podcast transcript", href=url_for('landing_video_podcast')) }}
       {{ link_button("YouTube vs podcast transcript", href=url_for('landing_youtube_vs')) }}
     {% endcall %}
 

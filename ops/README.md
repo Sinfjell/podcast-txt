@@ -13,6 +13,20 @@ python3 ops/seed-show-pages.py
 Fetches top podcasts for us/gb/de/nl/no/es/br/it, looks up RSS via iTunes
 Lookup, writes ~150 shows. Live pages never call Apple at request time.
 
+## IndexNow (Bing / ChatGPT search)
+
+Set `INDEXNOW_KEY` in the production environment (same value as the key file
+body). The app serves it at `https://podskrift.com/<key>.txt`. Then notify
+engines of the sitemap URL list:
+
+```bash
+INDEXNOW_KEY=… .venv/bin/python ops/indexnow_submit.py --dry-run
+INDEXNOW_KEY=… .venv/bin/python ops/indexnow_submit.py
+```
+
+`--dry-run` prints the JSON payload without POSTing. Against a local app:
+`--sitemap http://127.0.0.1:5002/sitemap.xml`.
+
 ## Production deploy (GitHub Actions)
 
 On every push to `main` (merge or direct), [.github/workflows/deploy.yml](../.github/workflows/deploy.yml)

@@ -207,6 +207,11 @@ The app includes a comprehensive help guide for finding RSS feeds from:
 - `MCP_OAUTH_ENABLED` — OAuth 2.1 authorization server for ChatGPT / Claude.ai
   connectors (default off). Keeps `psk_…` auth; adds consent, DCR, and tokens
   audience-bound to `/mcp`.
+- `INDEXNOW_KEY` — optional IndexNow ownership key (8–128 chars, `A–Z` / `a–z` /
+  `0–9` / `-`). When set, the app serves it at `https://podskrift.com/<key>.txt`
+  so Bing / ChatGPT search / other IndexNow engines can verify the host. Unset
+  means that route 404s; nothing is generated at runtime. Submit the sitemap
+  with `ops/indexnow_submit.py` (supports `--dry-run`).
 
 ### Free trial
 
@@ -294,6 +299,9 @@ OpenAI account as well — that one still holds if this code has a bug.
 ### Discoverability
 
 `/robots.txt`, `/llms.txt` and `/sitemap.xml` are generated, not static files.
+Every sitemap `<url>` includes a stable W3C `<lastmod>` (page-declared
+`dateModified`, else content-file git date at deploy, else a group fallback —
+never the current request time).
 The trial length advertised to new signups and the hourly rate in them come
 from `NEW_USER_TRIAL_MINUTES` and the Whisper price constant, and the copy
 switches off with `trial_available()` — so the site never advertises a grant

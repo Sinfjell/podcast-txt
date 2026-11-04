@@ -82,6 +82,9 @@ before merging, regardless of how many files the diff has.
 - OpenAI's 401 body echoes the submitted key. Never surface a raw OpenAI error
   to the user or the logs — `describe_openai_error()` exists for this. A user
   once pasted their password into the key field and it landed in the database.
+- `INDEXNOW_KEY` (optional) — IndexNow ownership key served at `/<key>.txt`.
+  Unset → 404; never invent a key at runtime. Submit URLs with
+  `ops/indexnow_submit.py`. Full env list: [README.md](README.md#configuration).
 
 ## Build in public
 
