@@ -32,6 +32,8 @@ PAGES = (
     ('landing_de', '/de/podcast-transkribieren'),
     ('landing_pt', '/pt/transcrever-podcast'),
     ('landing_fr', '/fr/transcrire-podcast'),
+    ('landing_nl', '/nl/podcast-naar-tekst'),
+    ('landing_it', '/it/trascrivere-podcast'),
 )
 
 #: Compact footer column.
@@ -53,6 +55,8 @@ FOOTER = (
     'landing_de',
     'landing_pt',
     'landing_fr',
+    'landing_nl',
+    'landing_it',
 )
 
 #: Reciprocal hreflang group for the podcast-to-text family (x-default = en).
@@ -63,6 +67,8 @@ HREFLANG_GROUP = {
     'de': 'landing_de',
     'pt': 'landing_pt',
     'fr': 'landing_fr',
+    'nl': 'landing_nl',
+    'it': 'landing_it',
 }
 #: Kept for callers/tests that still look up the old Norwegian↔English pair.
 HREFLANG_PAIRS = {
@@ -90,6 +96,8 @@ SHORT_LABELS = {
     'landing_de': 'Podcast transkribieren (Deutsch)',
     'landing_pt': 'Transcrever podcast (português)',
     'landing_fr': 'Transcrire un podcast (français)',
+    'landing_nl': 'Podcast naar tekst (Nederlands)',
+    'landing_it': 'Trascrivere un podcast (italiano)',
 }
 
 #: English labels for non-English landings in llms.txt / llms-full.txt.
@@ -100,6 +108,8 @@ LANG_LABELS_EN = {
     'de': 'German',
     'pt': 'Portuguese',
     'fr': 'French',
+    'nl': 'Dutch',
+    'it': 'Italian',
 }
 
 #: Last copy review of /spotify-podcast-transcript (ISO date, Europe/Oslo).
@@ -173,7 +183,8 @@ def related_links(endpoint):
         'landing_apple', 'landing_podcast_to_text', 'landing_rss',
         'landing_free', 'landing_youtube_vs', 'landing_whole_podcast',
     ]
-    native = ('landing_no', 'landing_es', 'landing_de', 'landing_pt', 'landing_fr')
+    native = ('landing_no', 'landing_es', 'landing_de', 'landing_pt', 'landing_fr',
+              'landing_nl', 'landing_it')
     if endpoint == 'landing_summarize':
         out = ['landing_spotify', 'landing_podcast_to_text', 'landing_generator',
                'landing_free', 'landing_apple']
@@ -206,7 +217,8 @@ def related_links(endpoint):
         out = ['landing_podcast_to_text', 'landing_spotify', 'landing_apple',
                'landing_rss', 'landing_free', 'landing_generator',
                'landing_youtube_vs']
-    elif endpoint in ('landing_es', 'landing_de', 'landing_pt', 'landing_fr'):
+    elif endpoint in ('landing_es', 'landing_de', 'landing_pt', 'landing_fr',
+                      'landing_nl', 'landing_it'):
         out = ['landing_spotify', 'landing_apple', 'landing_podcast_to_text',
                'landing_rss', 'landing_free']
     else:
@@ -275,6 +287,26 @@ RELATED_LABELS = {
         'landing_rss': 'Flux RSS en texte (en anglais)',
         'landing_free': 'Transcrire un podcast gratuitement (en anglais)',
     },
+    'nl': {
+        'landing_spotify': 'Spotify-podcast transcriberen (Engels)',
+        'landing_spotify_no_rss': 'Spotify-aflevering zonder RSS (Engels)',
+        'landing_spotify_no_transcript': 'Spotify-transcript niet beschikbaar (Engels)',
+        'landing_video_podcast': 'Videopodcast transcriberen (Engels)',
+        'landing_apple': 'Transcriberen vanaf Apple Podcasts (Engels)',
+        'landing_podcast_to_text': 'Podcast naar tekst (Engels)',
+        'landing_rss': 'RSS-feed naar tekst (Engels)',
+        'landing_free': 'Podcast gratis transcriberen (Engels)',
+    },
+    'it': {
+        'landing_spotify': 'Trascrivere un podcast Spotify (in inglese)',
+        'landing_spotify_no_rss': 'Episodio Spotify senza RSS (in inglese)',
+        'landing_spotify_no_transcript': 'Trascrizione Spotify non disponibile (in inglese)',
+        'landing_video_podcast': 'Trascrivere un podcast video (in inglese)',
+        'landing_apple': 'Trascrivere da Apple Podcasts (in inglese)',
+        'landing_podcast_to_text': 'Podcast in testo (in inglese)',
+        'landing_rss': 'Feed RSS in testo (in inglese)',
+        'landing_free': 'Trascrivere un podcast gratis (in inglese)',
+    },
 }
 RELATED_LABELS['no'] = RELATED_LABELS['nb']
 
@@ -332,6 +364,26 @@ CHROME = {
                contact='Contact', feedback='Avis / idées',
                privacy='Confidentialité', terms='Conditions', cookies='Paramètres des cookies',
                footer_label='Pied de page'),
+    'nl': dict(pricing='Prijzen', help='Help', login='Inloggen', start_free='Gratis starten',
+               menu='Menu', new_transcript='Nieuwe transcriptie', history='Geschiedenis',
+               settings='Instellingen', logout='Uitloggen', buy='Minuten kopen',
+               tagline='Podcasttranscripties die u kunt lezen, doorzoeken en gebruiken met AI.',
+               product='Product', transcribe='Transcriberen', support='Ondersteuning', legal='Juridisch',
+               podcasts='Podcasts', ai='Gebruiken in ChatGPT en Claude',
+               ai_guide='Gids: AI-transcripties', whats_new='Nieuw',
+               contact='Contact', feedback='Feedback / ideeën',
+               privacy='Privacy', terms='Voorwaarden', cookies='Cookie-instellingen',
+               footer_label='Voettekst'),
+    'it': dict(pricing='Prezzi', help='Aiuto', login='Accedi', start_free='Inizia gratis',
+               menu='Menu', new_transcript='Nuova trascrizione', history='Cronologia',
+               settings='Impostazioni', logout='Esci', buy='Acquista minuti',
+               tagline='Trascrizioni di podcast da leggere, cercare e usare con l’IA.',
+               product='Prodotto', transcribe='Trascrivere', support='Assistenza', legal='Note legali',
+               podcasts='Podcast', ai='Usare in ChatGPT e Claude',
+               ai_guide='Guida alle trascrizioni IA', whats_new='Novità',
+               contact='Contatti', feedback='Feedback / idee',
+               privacy='Privacy', terms='Termini', cookies='Impostazioni cookie',
+               footer_label='Piè di pagina'),
 }
 CHROME['no'] = CHROME['nb']
 
@@ -343,12 +395,14 @@ LANGUAGE_ROOT_REDIRECTS = {
     'de': 'landing_de',
     'es': 'landing_es',
     'pt': 'landing_pt',
+    'nl': 'landing_nl',
+    'it': 'landing_it',
 }
 
 
 #: Languages that write a decimal comma and put the currency sign after the
 #: amount ("1,50 $"). Portuguese (Brazil) writes "US$ 1,50".
-_COMMA_DECIMAL_LANGS = ('no', 'nb', 'fr', 'de', 'es', 'pt')
+_COMMA_DECIMAL_LANGS = ('no', 'nb', 'fr', 'de', 'es', 'pt', 'nl', 'it')
 
 
 def _amount(value, lang='en'):
@@ -370,11 +424,11 @@ def _usd(cents, lang='en'):
 
 
 def _fmt_minutes(n, lang='en'):
-    """1,200 (en) / 1 200 (nb, fr) / 1.200 (es, de, pt) for thousands."""
+    """1,200 (en) / 1 200 (nb, fr) / 1.200 (es, de, pt, nl, it) for thousands."""
     if n >= 1000:
         if lang in ('no', 'nb', 'fr'):
             sep = ' '
-        elif lang in ('es', 'de', 'pt'):
+        elif lang in ('es', 'de', 'pt', 'nl', 'it'):
             sep = '.'
         else:
             sep = ','
@@ -405,6 +459,14 @@ def pack_phrase(pack, lang='en'):
             return (f'à partir de {lo} pour 60 minutes, moins cher à la minute plus vous '
                     f'achetez ({top_min} min pour {top}), ou seulement les minutes dont '
                     f'un épisode a besoin')
+        if lang == 'nl':
+            return (f'vanaf {lo} voor 60 minuten, goedkoper per minuut naarmate u meer koopt '
+                    f'({top_min} min voor {top}), of alleen de minuten die één aflevering '
+                    f'nodig heeft')
+        if lang == 'it':
+            return (f'a partire da {lo} per 60 minuti, più conveniente al minuto quanto più '
+                    f'ne acquista ({top_min} min per {top}), oppure solo i minuti di cui '
+                    f'un episodio ha bisogno')
         return (f'from {lo} for 60 minutes, cheaper per minute the more you buy '
                 f'({top_min} min for {top}), or just the minutes one episode needs')
     if lang in ('no', 'nb'):
@@ -417,6 +479,10 @@ def pack_phrase(pack, lang='en'):
         return f'{_amount(pack["price"], lang)} dólares por {pack["minutes"]} minutos'
     if lang == 'fr':
         return f'{_amount(pack["price"], "fr")} dollars pour {pack["minutes"]} minutes'
+    if lang == 'nl':
+        return f'{_amount(pack["price"], "nl")} dollar voor {pack["minutes"]} minuten'
+    if lang == 'it':
+        return f'{_amount(pack["price"], "it")} dollari per {pack["minutes"]} minuti'
     return f'${pack["price"]:g} for {pack["minutes"]} minutes'
 
 
@@ -433,6 +499,11 @@ def _start_button(trial, lang='en', free_trial=False):
     if lang == 'fr':
         return ('Commencer la transcription gratuite' if offer
                 else 'Commencer la transcription')
+    if lang == 'nl':
+        return 'Start gratis transcriptie' if offer else 'Start transcriptie'
+    if lang == 'it':
+        return ('Inizia la trascrizione gratuita' if offer
+                else 'Inizia la trascrizione')
     return 'Start free transcript' if offer else 'Start transcript'
 
 
@@ -446,6 +517,8 @@ def _free_bit(trial, free_trial, lang='en'):
             'de': f'{trial} Minuten gratis',
             'pt': f'{trial} minutos grátis',
             'fr': f'{trial} minutes gratuites',
+            'nl': f'{trial} gratis minuten',
+            'it': f'{trial} minuti gratis',
         }.get(lang, f'{trial} minutes free')
     if free_trial or trial:
         return {
@@ -455,6 +528,8 @@ def _free_bit(trial, free_trial, lang='en'):
             'de': 'kostenlos starten',
             'pt': 'grátis para começar',
             'fr': 'gratuit pour commencer',
+            'nl': 'gratis om te starten',
+            'it': 'gratis per iniziare',
         }.get(lang, 'free to start')
     return {
         'en': 'a free account',
@@ -463,6 +538,8 @@ def _free_bit(trial, free_trial, lang='en'):
         'de': 'Kostenloses Konto',
         'pt': 'conta gratuita',
         'fr': 'compte gratuit',
+        'nl': 'gratis account',
+        'it': 'account gratuito',
     }.get(lang, 'a free account')
 
 
@@ -577,6 +654,34 @@ def _price_fr(trial, pack, free_trial=False):
                      f'{pack_phrase(pack, "fr")}. Sans abonnement.')
     parts.append('Vous pouvez aussi ajouter votre propre clé API OpenAI et payer '
                  'OpenAI directement ; c’est facultatif.')
+    return ' '.join(parts)
+
+
+def _price_nl(trial, pack, free_trial=False):
+    parts = []
+    if isinstance(trial, int) and trial > 0:
+        parts.append(f'Nieuwe accounts krijgen {trial} gratis minuten, zonder kaart.')
+    elif free_trial:
+        parts.append('Start gratis, zonder kaart.')
+    if pack:
+        parts.append(f'Daarna koopt u minuten in één keer: '
+                     f'{pack_phrase(pack, "nl")}. Zonder abonnement.')
+    parts.append('U kunt ook uw eigen OpenAI API-sleutel toevoegen en OpenAI '
+                 'direct betalen; dat is optioneel.')
+    return ' '.join(parts)
+
+
+def _price_it(trial, pack, free_trial=False):
+    parts = []
+    if isinstance(trial, int) and trial > 0:
+        parts.append(f'I nuovi account ricevono {trial} minuti gratis, senza carta.')
+    elif free_trial:
+        parts.append('Inizi gratis, senza carta.')
+    if pack:
+        parts.append(f'Poi acquista i minuti con un pagamento unico: '
+                     f'{pack_phrase(pack, "it")}. Senza abbonamento.')
+    parts.append('Può anche aggiungere la propria chiave API OpenAI e pagare '
+                 'OpenAI direttamente; è facoltativo.')
     return ' '.join(parts)
 
 
@@ -1585,6 +1690,107 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
             ],
             faq=faq,
         )
+
+    if endpoint == 'landing_nl':
+        # Native Dutch (polite u-form), Spotify-first; hreflang "nl".
+        free_nl = _free_bit(trial, free_trial, 'nl')
+        faq = [
+            ('Wat kost het?', _price_nl(trial, pack, free_trial=free_trial)),
+            ('Moet u «Nederlands» kiezen in plaats van automatische detectie?',
+             'Ja, bij voorkeur. Automatische detectie werkt vaak, maar «Nederlands» '
+             'kiezen geeft meestal een beter resultaat — vooral bij kort audio, een '
+             'sterk accent of een mix van talen.'),
+            ('Werkt dit met alle Spotify-podcasts?',
+             'Met de meeste wel: bijna elke show heeft ook een openbare RSS-feed, en '
+             'daarvandaan komt de audio. Exclusieve Spotify-podcasts en afleveringen '
+             'alleen voor abonnees hebben geen openbare feed, dus die kunnen we niet '
+             'transcriberen.'),
+            ('Moet ik een audiobestand uploaden?',
+             'Nee. Plak de Spotify- of Apple Podcasts-link, of de URL van een '
+             'RSS-feed, en Podskrift downloadt de audio uit de openbare feed van '
+             'de podcast.'),
+            ('Wat krijg ik?',
+             'De volledige transcriptie als tekst (.txt) en als ondertitels met '
+             'tijdstempels (.srt). U kunt die plakken in ChatGPT of Claude. '
+             'Transcripties blijven privé op uw account, tenzij u een deellink '
+             'aanmaakt.'),
+            ('Heb ik een API-sleutel of abonnement nodig?',
+             'Nee. Geen OpenAI-sleutel verplicht, en geen abonnement — minuten '
+             'koopt u eenmalig.'),
+        ]
+        return dict(
+            lang='nl',
+            title='Podcast naar tekst vanaf een link',
+            meta=('Zet een podcast om naar tekst zonder audio te uploaden. Plak de '
+                  'Spotify- of Apple Podcasts-link en download .txt en .srt. '
+                  f'{free_nl.capitalize()}.'),
+            h1='Podcast naar tekst vanaf een link',
+            lede=('Plak de Spotify- of Apple Podcasts-link. Podskrift vindt de '
+                  'aflevering in de openbare feed van de podcast en zet de audio om '
+                  'in tekst die u kunt kopiëren en downloaden.'),
+            placeholder='Plak de Spotify- of Apple Podcasts-link',
+            input_label='Spotify-, Apple Podcasts- of RSS-link',
+            button=_start_button(trial, 'nl', free_trial=free_trial),
+            steps=[
+                ('Kopieer de link',
+                 'In Spotify of Apple Podcasts: Delen, daarna Link kopiëren.'),
+                ('Plak hem hier',
+                 'Kies de aflevering en selecteer bij voorkeur «Nederlands» als taal.'),
+                ('Lees of download',
+                 'Lees in de browser of download .txt en .srt.'),
+            ],
+            faq=faq,
+        )
+
+    if endpoint == 'landing_it':
+        # Native Italian (lei-form), Spotify-first; hreflang "it".
+        free_it = _free_bit(trial, free_trial, 'it')
+        faq = [
+            ('Quanto costa?', _price_it(trial, pack, free_trial=free_trial)),
+            ('Conviene scegliere «Italiano» invece del rilevamento automatico?',
+             'Sì, di preferenza. Il rilevamento automatico spesso funziona, ma '
+             'scegliere «Italiano» di solito dà un risultato migliore — soprattutto '
+             'con audio breve, un accento marcato o un mix di lingue.'),
+            ('Funziona con tutti i podcast di Spotify?',
+             'Con la maggior parte sì: quasi tutti pubblicano anche un feed RSS '
+             'pubblico, ed è da lì che arriva l’audio. Le esclusive Spotify e gli '
+             'episodi riservati agli abbonati non hanno un feed pubblico, quindi '
+             'non si possono trascrivere.'),
+            ('Devo caricare un file audio?',
+             'No. Incolla il link di Spotify o Apple Podcasts, oppure l’URL di un '
+             'feed RSS, e Podskrift scarica l’audio dal feed pubblico del podcast.'),
+            ('Cosa ricevo?',
+             'La trascrizione completa in testo (.txt) e come sottotitoli con '
+             'timestamp (.srt). Può incollarla in ChatGPT o Claude. Le trascrizioni '
+             'restano private sul suo account, a meno che non crei un link di '
+             'condivisione.'),
+            ('Serve una chiave API o un abbonamento?',
+             'No. Nessuna chiave OpenAI obbligatoria e nessun abbonamento: i minuti '
+             'si acquistano una sola volta.'),
+        ]
+        return dict(
+            lang='it',
+            title='Trascrivere un podcast in testo dal link',
+            meta=('Trasforma un podcast in testo senza caricare audio. Incolla il '
+                  'link di Spotify o Apple Podcasts e scarica .txt e .srt. '
+                  f'{free_it.capitalize()}.'),
+            h1='Trascrivere un podcast in testo da un link',
+            lede=('Incolla il link di Spotify o Apple Podcasts. Podskrift trova '
+                  'l’episodio nel feed pubblico del podcast e trasforma l’audio in '
+                  'testo che può copiare e scaricare.'),
+            placeholder='Incolla il link di Spotify o Apple Podcasts',
+            input_label='Link di Spotify, Apple Podcasts o RSS',
+            button=_start_button(trial, 'it', free_trial=free_trial),
+            steps=[
+                ('Copia il link',
+                 'In Spotify o Apple Podcasts: Condividi, poi Copia link.'),
+                ('Incollalo qui',
+                 'Scegli l’episodio e, se puoi, seleziona «Italiano» come lingua.'),
+                ('Leggi o scarica',
+                 'Leggi nel browser oppure scarica .txt e .srt.'),
+            ],
+            faq=faq,
+        )
     raise KeyError(endpoint)
 
 
@@ -1619,6 +1825,18 @@ UI = {
                rss_help='Comment trouver un flux RSS',
                pricing='Tarifs', shows='Podcasts populaires',
                note='Vous pouvez aussi chercher par le nom du podcast.', example='Ce que vous obtenez'),
+    'nl': dict(how='Hoe het werkt', faq='Veelgestelde vragen',
+               related='Meer manieren om te transcriberen',
+               ai='Gebruiken in ChatGPT en Claude', guides='Installatiegidsen',
+               rss_help='Zo vindt u een RSS-feed',
+               pricing='Prijzen', shows='Populaire podcasts',
+               note='U kunt ook zoeken op de naam van de podcast.', example='Dit krijgt u'),
+    'it': dict(how='Come funziona', faq='Domande frequenti',
+               related='Altri modi per trascrivere',
+               ai='Usare in ChatGPT e Claude', guides='Guide di configurazione',
+               rss_help='Come trovare un feed RSS',
+               pricing='Prezzi', shows='Podcast popolari',
+               note='Può anche cercare per nome del podcast.', example='Cosa ottiene'),
     'no': None,
 }
 UI['no'] = UI['nb']
