@@ -13098,6 +13098,8 @@ def _landing_price_line(ui_lang, trial, pack):
         'de': 'Kostenlos starten, ohne Karte.',
         'pt': 'Experimente grátis, sem cartão.',
         'fr': 'Essayez gratuitement, sans carte.',
+        'nl': 'Probeer gratis, zonder kaart.',
+        'it': 'Provi gratis, senza carta.',
         'en': 'Try it free, no card needed.',
     }
     if ui_lang in ('no', 'nb'):
@@ -13125,6 +13127,16 @@ def _landing_price_line(ui_lang, trial, pack):
             [neutral['fr']] if free_trial_offered() else [])
         if pack:
             bits.append('Ensuite ' + landing_pages_mod.pack_phrase(pack, 'fr') + '.')
+    elif ui_lang == 'nl':
+        bits = [f'{trial} gratis minuten.'] if trial else (
+            [neutral['nl']] if free_trial_offered() else [])
+        if pack:
+            bits.append('Daarna ' + landing_pages_mod.pack_phrase(pack, 'nl') + '.')
+    elif ui_lang == 'it':
+        bits = [f'{trial} minuti gratis.'] if trial else (
+            [neutral['it']] if free_trial_offered() else [])
+        if pack:
+            bits.append('Poi ' + landing_pages_mod.pack_phrase(pack, 'it') + '.')
     else:
         bits = [f'{trial} minutes free.'] if trial else (
             [neutral['en']] if free_trial_offered() else [])
@@ -13182,6 +13194,22 @@ _LANDING_ACCOUNT_COPY = {
                     'voir l’épisode et son prix exact avant de payer. Paiement '
                     'unique, les minutes n’expirent pas.'),
         'paid': 'Vous avez {n} minutes payantes.',
+    },
+    'nl': {
+        'start': 'Start transcriptie',
+        'see_price': 'Bekijk prijs van de aflevering',
+        'used_up': ('Uw gratis minuten zijn op. Plak een link om de aflevering '
+                    'en de exacte prijs te zien vóór u betaalt. Eenmalige '
+                    'aankoop, minuten verlopen nooit.'),
+        'paid': 'U heeft {n} betaalde minuten.',
+    },
+    'it': {
+        'start': 'Inizia la trascrizione',
+        'see_price': 'Vedi il prezzo dell’episodio',
+        'used_up': ('I suoi minuti gratis sono esauriti. Incolli un link per '
+                    'vedere l’episodio e il prezzo esatto prima di pagare. '
+                    'Pagamento unico, i minuti non scadono.'),
+        'paid': 'Ha {n} minuti a pagamento.',
     },
 }
 _LANDING_ACCOUNT_COPY['no'] = _LANDING_ACCOUNT_COPY['nb']
