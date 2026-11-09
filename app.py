@@ -415,17 +415,36 @@ def trial_estimate_seconds(duration_min):
     return max(60, int((duration_min or 0) * 60) or TRIAL_UNKNOWN_ESTIMATE_SECONDS)
 
 
-def encode_partial_task_meta(partial_seconds, episode_seconds):
-    """Serialize partial-preview metadata for the partial_meta column."""
+def encode_partial_task_meta(partial_seconds, episode_seconds,
+                             measured_seconds=None):
+    """Serialize partial-preview metadata for the partial_meta column.
+
+    ``episode_seconds`` is the display length (max of measured and feed).
+    ``measured_seconds`` is the ffprobe length of the full download before
+    the preview trim — kept separately so post-purchase remainder jobs can
+    observe ad-insertion drift vs a later full download.
+    """
     import json as _json
-    return _json.dumps({
+    data = {
         'partial_seconds': int(partial_seconds),
         'episode_seconds': int(max(partial_seconds, episode_seconds)),
-    }, separators=(',', ':'))
+    }
+    if measured_seconds is not None:
+        try:
+            measured_i = int(max(0, float(measured_seconds)))
+        except (TypeError, ValueError):
+            measured_i = None
+        if measured_i is not None and measured_i > 0:
+            data['measured_seconds'] = measured_i
+    return _json.dumps(data, separators=(',', ':'))
 
 
 def task_partial_meta(task):
-    """Return {partial_seconds, episode_seconds} for a partial preview, or None."""
+    """Return partial-preview dict, or None.
+
+    Keys: ``partial_seconds``, ``episode_seconds``, and optional
+    ``measured_seconds`` (probe of the full file before the preview trim).
+    """
     import json as _json
     if task is None:
         return None
@@ -440,19 +459,161 @@ def task_partial_meta(task):
         return None
     if partial_seconds <= 0 or episode_seconds <= 0:
         return None
-    return {
+    out = {
         'partial_seconds': partial_seconds,
         'episode_seconds': max(partial_seconds, episode_seconds),
     }
+    raw_measured = data.get('measured_seconds')
+    if raw_measured is not None:
+        try:
+            measured = int(raw_measured)
+        except (TypeError, ValueError):
+            measured = None
+        if measured is not None and measured > 0:
+            out['measured_seconds'] = measured
+    return out
 
 
 def task_is_partial(task):
     return task_partial_meta(task) is not None
 
 
-def set_task_partial_meta(task, partial_seconds, episode_seconds):
+def set_task_partial_meta(task, partial_seconds, episode_seconds,
+                          measured_seconds=None):
     """Write partial-preview metadata onto `task` (caller commits)."""
-    task.partial_meta = encode_partial_task_meta(partial_seconds, episode_seconds)
+    # Preserve an earlier measured_seconds when a later write omits it.
+    if measured_seconds is None:
+        prev = task_partial_meta(task)
+        if prev and prev.get('measured_seconds'):
+            measured_seconds = prev['measured_seconds']
+    task.partial_meta = encode_partial_task_meta(
+        partial_seconds, episode_seconds, measured_seconds=measured_seconds)
+
+
+def encode_continuation_meta(preview_task_id, audio_start_seconds,
+                             stt_provider=None, language=None):
+    """Serialize post-purchase remainder-job metadata."""
+    import json as _json
+    data = {
+        'preview_task_id': str(preview_task_id),
+        'audio_start_seconds': int(audio_start_seconds),
+    }
+    if stt_provider:
+        data['stt_provider'] = str(stt_provider)
+    if language:
+        data['language'] = str(language)
+    return _json.dumps(data, separators=(',', ':'))
+
+
+def task_continuation_meta(task):
+    """Return continuation dict for a remainder job, or None."""
+    import json as _json
+    if task is None:
+        return None
+    raw = getattr(task, 'continuation_meta', None) or ''
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        data = _json.loads(raw)
+        preview_task_id = str(data['preview_task_id'])
+        audio_start_seconds = int(data['audio_start_seconds'])
+    except (TypeError, ValueError, KeyError, _json.JSONDecodeError):
+        return None
+    if not preview_task_id or audio_start_seconds <= 0:
+        return None
+    out = {
+        'preview_task_id': preview_task_id,
+        'audio_start_seconds': audio_start_seconds,
+    }
+    provider = data.get('stt_provider')
+    if isinstance(provider, str) and provider.strip():
+        out['stt_provider'] = provider.strip()
+    lang = data.get('language')
+    if isinstance(lang, str) and lang.strip():
+        out['language'] = lang.strip()
+    return out
+
+
+def find_reusable_partial_preview(user_id, source_audio_url):
+    """Newest completed partial for this user+audio with a usable transcript.
+
+    Used so a post-purchase autostart (or web re-run) can transcribe only the
+    remainder and stitch. Returns None when missing or unusable — callers fall
+    back to a full-episode job.
+    """
+    if not user_id or not source_audio_url:
+        return None
+    q = (TranscriptionTask.query
+         .filter(TranscriptionTask.user_id == user_id,
+                 TranscriptionTask.source_audio_url == source_audio_url,
+                 TranscriptionTask.status == 'completed')
+         .order_by(TranscriptionTask.started_at.desc()))
+    for task in q.limit(20):
+        meta = task_partial_meta(task)
+        if meta is None:
+            continue
+        if not (task.transcript_text or '').strip():
+            continue
+        if meta['partial_seconds'] <= 0:
+            continue
+        if meta['episode_seconds'] <= meta['partial_seconds']:
+            continue
+        return task
+    return None
+
+
+def stitch_preview_and_remainder(preview_text, preview_segments,
+                                 remainder_text, remainder_segments,
+                                 offset_seconds):
+    """Merge a partial preview with a remainder transcript.
+
+    Remainder segment times are shifted by ``offset_seconds`` (the preview
+    length). Text is joined with a single space at the seam — the same join
+    used between Whisper chunks. Returns ``(text, segments)``.
+    """
+    offset = float(offset_seconds or 0)
+    segs = []
+    for seg in (preview_segments or []):
+        try:
+            segs.append({
+                'start': float(seg.get('start', 0) or 0),
+                'end': float(seg.get('end', 0) or 0),
+                'text': seg.get('text', '') or '',
+            })
+        except (TypeError, ValueError, AttributeError):
+            continue
+    if not segs and (preview_text or '').strip() and offset > 0:
+        # Preview had text but no timestamps — one synthetic span so SRT/share
+        # still cover the first portion of the finished episode.
+        segs.append({
+            'start': 0.0,
+            'end': offset,
+            'text': (preview_text or '').strip(),
+        })
+    for seg in (remainder_segments or []):
+        try:
+            segs.append({
+                'start': float(seg.get('start', 0) or 0) + offset,
+                'end': float(seg.get('end', 0) or 0) + offset,
+                'text': seg.get('text', '') or '',
+            })
+        except (TypeError, ValueError, AttributeError):
+            continue
+    left = (preview_text or '').rstrip()
+    right = (remainder_text or '').lstrip()
+    if left and right:
+        text = f'{left} {right}'
+    else:
+        text = left or right
+    return text, segs
+
+
+_CONTINUATION_PINNABLE_PROVIDERS = frozenset({
+    stt_mod.PROVIDER_OPENAI,
+    stt_mod.PROVIDER_TOGETHER,
+    stt_mod.PROVIDER_SCRIBE,
+    stt_mod.PROVIDER_SONIOX,
+})
 
 
 def partial_minutes_pair(meta):
@@ -2005,6 +2166,11 @@ def trial_reconcile_task(task_id, actual_seconds):
     partial-preview jobs (and trial-only unknown-duration overruns), which
     return ``'trim'`` so the caller shortens the file to the reservation.
 
+    Continuation (post-purchase remainder) jobs never return ``'trim'``: writing
+    partial_meta relative to the remainder would poison a later reuse with the
+    wrong offset. They raise TrialExhausted so the remainder reservation is
+    refunded instead.
+
     Charge order: free trial first, then paid. Episodes over the free
     per-episode cap must be covered by paid minutes (or BYOK) — they do not
     burn free trial, and paid is not subject to the free-trial daily budget.
@@ -2026,12 +2192,23 @@ def trial_reconcile_task(task_id, actual_seconds):
     over_free_cap = bool(
         TRIAL_MAX_EPISODE_SECONDS and actual > TRIAL_MAX_EPISODE_SECONDS)
     is_partial = task_is_partial(task)
+    is_continuation = task_continuation_meta(task) is not None
 
     if over_free_cap and paid_reserved <= 0 and trial_reserved > 0:
         # Partial previews intentionally reserve only N minutes of a longer
         # episode — do not try to switch the whole thing onto paid credits.
         if is_partial:
             return 'trim'
+        if is_continuation:
+            estimate_min = actual // 60
+            cost = openai_whisper_cost_usd(estimate_min)
+            raise TrialExhausted(
+                f'This episode is {estimate_min} minutes — longer than the '
+                f'minutes reserved for the remaining audio. '
+                f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
+                f'or add your own OpenAI API key (about ${cost} at OpenAI\'s rate).',
+                scope='episode_length',
+            )
         # Started as a free-trial job; real audio exceeds the free per-episode
         # cap. Paid credits can still save it if they cover the full length.
         #
@@ -2069,6 +2246,17 @@ def trial_reconcile_task(task_id, actual_seconds):
             return None
         # No paid cover: trim to the reservation (unknown / under-claimed
         # duration) rather than failing after the download already happened.
+        # Continuation remainder jobs must not become nested partials.
+        if is_continuation:
+            estimate_min = actual // 60
+            cost = openai_whisper_cost_usd(estimate_min)
+            raise TrialExhausted(
+                f'This episode is {estimate_min} minutes — longer than the '
+                f'minutes reserved for the remaining audio. '
+                f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
+                f'or add your own OpenAI API key (about ${cost} at OpenAI\'s rate).',
+                scope='episode_length',
+            )
         set_task_partial_meta(task, total_reserved, actual)
         db.session.commit()
         return 'trim'
@@ -2079,6 +2267,24 @@ def trial_reconcile_task(task_id, actual_seconds):
         split = platform_reserve(
             user_id, extra, paid_only=over_free_cap, budget_day=budget_day)
         if split is None:
+            # Continuation: never write partial_meta against the remainder
+            # (wrong offset for a later stitch; would double-bill on reuse).
+            if is_continuation:
+                owner = db.session.get(User, user_id)
+                estimate_min = actual // 60
+                _, _, remaining = trial_status(owner) if owner else (0, 0, 0)
+                cost = openai_whisper_cost_usd(estimate_min)
+                buy_bit = (
+                    f'{CREDIT_PACK_LABEL}, or '
+                    if stripe_checkout_enabled() else ''
+                )
+                raise TrialExhausted(
+                    f'The remaining audio is about {estimate_min} minutes — longer '
+                    f'than the {remaining // 60} minutes you have left. '
+                    f'{buy_bit}add your own OpenAI API key (about ${cost} for '
+                    f'this one, billed by OpenAI).',
+                    scope=trial_refusal_scope(owner, extra) if owner else 'user',
+                )
             # Partial job, or trial-only unknown-duration overrun: keep the
             # reservation and let the worker trim audio to it.
             if is_partial or (paid_reserved <= 0 and trial_reserved > 0
@@ -3279,15 +3485,24 @@ def _ffmpeg_error(message, stderr=b'', *, returncode=None):
     return RuntimeError(message)
 
 
-def trim_audio_file(audio_file, max_seconds):
-    """Rewrite `audio_file` to the first `max_seconds` of audio via ffmpeg.
+def trim_audio_file(audio_file, max_seconds=None, *, start_seconds=0):
+    """Rewrite `audio_file` to a time window via ffmpeg.
 
-    Used for partial trial previews (and unknown-duration overruns) so Whisper
-    never sees more audio than we reserved. Prefers stream-copy; falls back to
-    a light re-encode when the container rejects copy. The later
-    prepare_audio_for_whisper() pass still re-encodes for Whisper either way.
+    - ``start_seconds=0``, ``max_seconds=N``: first N seconds (partial previews
+      and unknown-duration overruns) so Whisper never sees more than reserved.
+    - ``start_seconds=S``, ``max_seconds=None``: from S to end (post-purchase
+      remainder after a reusable partial preview).
+    - ``start_seconds=S``, ``max_seconds=N``: the window [S, S+N).
+
+    Prefers stream-copy; falls back to a light re-encode when the container
+    rejects copy. The later prepare_audio_for_whisper() pass still re-encodes
+    for Whisper either way.
     """
-    max_seconds = max(1, int(math.ceil(float(max_seconds))))
+    start_seconds = max(0.0, float(start_seconds or 0))
+    if max_seconds is not None:
+        max_seconds = max(1, int(math.ceil(float(max_seconds))))
+    if start_seconds <= 0 and max_seconds is None:
+        return audio_file
     if shutil.which('ffmpeg') is None:
         raise _ffmpeg_error(
             'Audio processing is unavailable on the server right now. '
@@ -3312,24 +3527,32 @@ def trim_audio_file(audio_file, max_seconds):
             raise _ffmpeg_error(
                 'This episode took too long to process. Please try a shorter one.')
 
-    copy = _run([
-        'nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y',
-        '-i', audio_file, '-map_metadata', '-1', '-t', str(max_seconds),
-        '-c', 'copy', '-vn', tmp_path,
-    ])
+    def _base_cmd(*, copy):
+        # -ss before -i: fast seek (seam skew of ~1s is fine for transcripts).
+        cmd = ['nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y']
+        if start_seconds > 0:
+            cmd += ['-ss', f'{start_seconds:.2f}']
+        cmd += ['-i', audio_file, '-map_metadata', '-1']
+        if max_seconds is not None:
+            cmd += ['-t', str(max_seconds)]
+        if copy:
+            cmd += ['-c', 'copy', '-vn', tmp_path]
+        else:
+            cmd += [
+                '-vn', '-ac', '1', '-ar', str(WHISPER_SAMPLE_RATE),
+                '-b:a', f'{WHISPER_AUDIO_BITRATE_KBPS}k', '-threads', '1',
+                tmp_path,
+            ]
+        return cmd
+
+    copy = _run(_base_cmd(copy=True))
     if copy.returncode != 0 or not os.path.exists(tmp_path) or os.path.getsize(tmp_path) < MIN_PART_BYTES:
         if os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
             except OSError:
                 pass
-        encoded = _run([
-            'nice', '-n', '10', 'ffmpeg', '-v', 'error', '-y',
-            '-i', audio_file, '-map_metadata', '-1', '-t', str(max_seconds),
-            '-vn', '-ac', '1', '-ar', str(WHISPER_SAMPLE_RATE),
-            '-b:a', f'{WHISPER_AUDIO_BITRATE_KBPS}k', '-threads', '1',
-            tmp_path,
-        ])
+        encoded = _run(_base_cmd(copy=False))
         if encoded.returncode != 0 or not os.path.exists(tmp_path):
             if os.path.exists(tmp_path):
                 try:
@@ -3505,20 +3728,93 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None,
 
     task_row = db.session.get(TranscriptionTask, task_id)
     partial_info = task_partial_meta(task_row) if task_row else None
+    cont_info = task_continuation_meta(task_row) if task_row else None
     reserved_seconds = 0
     if task_row is not None:
         reserved_seconds = (
             int(task_row.trial_seconds_charged or 0)
             + int(task_row.paid_seconds_charged or 0)
         )
+    continuation_offset = 0.0
+    continuation_length_delta_s = None
+    # Measured length of the remainder file after start-trim (for display /
+    # stt_audio_seconds). Distinct from full_episode_seconds.
+    remainder_measured = None
+    # Snapshot preview text/segments up front so a mid-job delete cannot turn
+    # a remainder-only result into a silently truncated "full" transcript.
+    stashed_preview_text = ''
+    stashed_preview_segments = []
+    if cont_info and not partial_info:
+        # Reuse the preview: drop audio before partial_seconds, bill only the
+        # remainder. Stitch happens after chunks land (see below).
+        # Resume re-enters here with continuation_meta still set — re-apply the
+        # start-trim every time (part files are not kept across process death).
+        continuation_offset = float(cont_info['audio_start_seconds'])
+        preview_row = db.session.get(
+            TranscriptionTask, cont_info['preview_task_id'])
+        if preview_row is None or not (preview_row.transcript_text or '').strip():
+            # Fail before STT so the remainder reservation refunds in full.
+            raise RuntimeError(
+                'Could not finish this episode: the free preview transcript '
+                'is no longer available. Please try again from History.')
+        stashed_preview_text = preview_row.transcript_text or ''
+        if preview_row.segments_json:
+            try:
+                loaded = json.loads(preview_row.segments_json)
+                if isinstance(loaded, list):
+                    stashed_preview_segments = loaded
+            except (TypeError, ValueError, json.JSONDecodeError):
+                stashed_preview_segments = []
+        preview_meta = task_partial_meta(preview_row)
+        preview_measured = (
+            (preview_meta or {}).get('measured_seconds')
+            if preview_meta else None)
+        if preview_measured and full_episode_seconds is not None:
+            continuation_length_delta_s = (
+                float(full_episode_seconds) - float(preview_measured))
+            app.logger.info(
+                'continuation length delta task=%s preview_measured=%.1f '
+                'full_measured=%.1f delta_s=%.1f',
+                task_id, float(preview_measured), float(full_episode_seconds),
+                continuation_length_delta_s)
+        if (billable_duration is not None
+                and billable_duration > continuation_offset + 1):
+            trim_audio_file(audio_file, start_seconds=continuation_offset)
+            measured_duration = probe_audio_duration(audio_file)
+            remainder_measured = measured_duration
+            if measured_duration is not None:
+                billable_duration = measured_duration
+            elif reserved_seconds > 0:
+                # Probe failed after trim: never fall back to the pre-trim
+                # full-file length (that would look like the whole episode).
+                billable_duration = float(reserved_seconds)
+            else:
+                billable_duration = max(
+                    0.0, float(full_episode_seconds or 0) - continuation_offset)
+        else:
+            # Source shorter than the preview claimed, or unusable — abandon
+            # continuation and transcribe whatever we have as a normal job.
+            app.logger.warning(
+                'continuation abandoned for %s: audio %.1fs vs start %.1fs',
+                task_id, billable_duration or 0, continuation_offset)
+            continuation_offset = 0.0
+            cont_info = None
+            continuation_length_delta_s = None
+            stashed_preview_text = ''
+            stashed_preview_segments = []
+            if task_row is not None:
+                task_row.continuation_meta = None
+                db.session.commit()
 
     # Partial preview: never send more audio than we reserved. Trim before
     # reconcile so billing matches the file Whisper will see.
     if partial_info and reserved_seconds > 0 and billable_duration > reserved_seconds:
         # Remember the real length for the result-page "first N of M" copy.
+        # measured_seconds = probe of the full download (before this trim).
         set_task_partial_meta(
             task_row, reserved_seconds,
-            max(full_episode_seconds, partial_info['episode_seconds']))
+            max(full_episode_seconds, partial_info['episode_seconds']),
+            measured_seconds=full_episode_seconds)
         db.session.commit()
         trim_audio_file(audio_file, reserved_seconds)
         measured_duration = probe_audio_duration(audio_file)
@@ -3604,9 +3900,16 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None,
         # For the ETA, a measurement of the whole file beats everything. The
         # feed's claim is only better than the size-based fallback, so it wins
         # only when ffprobe could not read the file at all.
+        # Continuation remainder: never use the pre-trim feed/full duration —
+        # progress and chunk offsets must track the remainder file only.
         task = db.session.get(TranscriptionTask, task_id)
         feed_duration = task.audio_duration if task and task.audio_duration else None
-        audio_duration = measured_duration or feed_duration or billable_duration
+        if cont_info and continuation_offset > 0:
+            audio_duration = (
+                remainder_measured if remainder_measured is not None
+                else billable_duration)
+        else:
+            audio_duration = measured_duration or feed_duration or billable_duration
 
         # _update_task refuses to move a task out of 'error', so a False here
         # means the sweeper failed this task while we were splitting -- and
@@ -3648,23 +3951,61 @@ def transcribe_audio(audio_file, task_id, openai_client, language=None,
 
     elapsed = time.time() - upload_start
 
-    _update_task(
-        task_id,
+    # Seconds actually sent to STT (admin aggregates). User-facing duration
+    # for a continuation job is preview + remainder (full episode).
+    stt_seconds = float(audio_duration or billable_duration or 0)
+    display_duration = stt_seconds
+
+    # Stitch reusable partial preview + remainder into one full transcript.
+    if cont_info and continuation_offset > 0:
+        if not (stashed_preview_text or '').strip():
+            # Should have been caught before STT; never complete truncated.
+            raise RuntimeError(
+                'Could not finish this episode: the free preview transcript '
+                'is no longer available. Please try again from History.')
+        full_text, all_segments = stitch_preview_and_remainder(
+            stashed_preview_text, stashed_preview_segments,
+            full_text, all_segments, continuation_offset)
+        rem_len = (
+            float(remainder_measured) if remainder_measured is not None
+            else float(billable_duration or audio_duration or 0))
+        display_duration = continuation_offset + rem_len
+
+    complete_kwargs = dict(
         status='completed',
         phase='completed',
         progress=100,
         transcript_text=full_text,
         segments_json=json.dumps(all_segments) if all_segments else None,
-        audio_duration=audio_duration,
+        audio_duration=display_duration,
         transcription_time=elapsed,
         stt_provider=stt_job.provider_label(),
         stt_cost_usd=round(stt_job.cost_usd, 5),
+        stt_audio_seconds=stt_seconds,
         completed_at=datetime.now(timezone.utc),
+        continuation_meta=None,
     )
+    _update_task(task_id, **complete_kwargs)
+    if continuation_length_delta_s is not None:
+        try:
+            finished = db.session.get(TranscriptionTask, task_id)
+            uid = finished.user_id if finished is not None else None
+            product_analytics.capture(
+                'continuation_length_delta', uid,
+                {
+                    'task_id': task_id,
+                    'continuation_length_delta_s': round(
+                        continuation_length_delta_s, 2),
+                    'preview_task_id': (cont_info or {}).get('preview_task_id'),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            app.logger.exception(
+                'continuation_length_delta analytics failed for %s', task_id)
     _emit_stt_job_summary(
         stt_job,
         language=language,
-        audio_duration=audio_duration,
+        audio_duration=stt_seconds,
         key_source=key_source,
     )
 
@@ -3873,6 +4214,12 @@ def _stt_job_for_task(task_id, key_source, language, *, openai_model=None,
     trial_s = int(task.trial_seconds_charged or 0) if task is not None else 0
     paid_s = int(task.paid_seconds_charged or 0) if task is not None else 0
     user_id = task.user_id if task is not None else None
+    cont = task_continuation_meta(task) if task is not None else None
+    # Prefer the language pinned on the preview (stored in continuation_meta)
+    # when the remainder job did not carry one — keeps the seam consistent
+    # without bypassing STT_PROVIDER / funding / Soniox gates.
+    if not language and cont and cont.get('language'):
+        language = normalize_language_code(cont.get('language')) or language
     provider, reason = stt_mod.route_job(
         key_source, language, trial_s, paid_s, audio_seconds=audio_seconds)
     client = build_together_client() if provider == stt_mod.PROVIDER_TOGETHER else None
@@ -3882,6 +4229,13 @@ def _stt_job_for_task(task_id, key_source, language, *, openai_model=None,
         provider, reason = stt_mod.PROVIDER_OPENAI, 'no_scribe_key'
     if provider == stt_mod.PROVIDER_SONIOX and not stt_mod.soniox_api_key():
         provider, reason = stt_mod.PROVIDER_OPENAI, 'no_soniox_key'
+    # Only annotate continuation_pin when routing already chose the preview's
+    # provider — never force Together/Scribe/Soniox past a kill switch.
+    pinned = (cont or {}).get('stt_provider')
+    if (pinned in _CONTINUATION_PINNABLE_PROVIDERS
+            and pinned == provider
+            and key_source == 'trial'):
+        reason = 'continuation_pin'
     model = stt_mod.normalize_transcription_model(openai_model)
     # Soniox keeps the standard Whisper-sized parts (SEGMENT_SECONDS): a single
     # whole-file part would exceed WHISPER_MAX_UPLOAD_BYTES past ~70 min at
@@ -9501,15 +9855,56 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
         trial_charge = None
         paid_charge = None
         partial_job = False
+        continuation_blob = None
         if key_source == 'trial':
             # Floored at a minute: a zero reservation would quietly make the
             # task look unmetered (NULL/0 charges).
             estimate = trial_estimate_seconds(meta.get('duration_min'))
             estimate_min = estimate // 60
-            over_free_cap = bool(
-                TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS)
             before_trial, before_paid = _platform_remaining_seconds(user_id)
             paid_bal = before_paid
+            # Post-purchase (or paid) re-run of an episode the user already has
+            # a completed partial for: reserve only the remainder and stitch.
+            # Only when the remainder itself is coverable — otherwise keep the
+            # full-episode estimate (today's refuse / new-partial behaviour).
+            # Web only — same gate as the duplicate guard.
+            if source == 'web':
+                preview = find_reusable_partial_preview(user_id, audio_url)
+                if preview is not None:
+                    pmeta = task_partial_meta(preview)
+                    start_s = int(pmeta['partial_seconds'])
+                    full_s = max(int(estimate), int(pmeta['episode_seconds']))
+                    rem_s = full_s - start_s
+                    rem_estimate = max(60, rem_s) if rem_s >= 60 else 0
+                    if rem_estimate > 0:
+                        rem_over_cap = bool(
+                            TRIAL_MAX_EPISODE_SECONDS
+                            and rem_estimate > TRIAL_MAX_EPISODE_SECONDS)
+                        rem_coverable = (
+                            (paid_bal >= rem_estimate) if rem_over_cap
+                            else (before_trial + paid_bal) >= rem_estimate
+                        )
+                        if rem_coverable:
+                            if not language and preview.language:
+                                language = (
+                                    normalize_language_code(preview.language)
+                                    or '')
+                                ph_props['language'] = language or None
+                            estimate = rem_estimate
+                            estimate_min = estimate // 60
+                            pin_provider = preview.stt_provider or None
+                            if pin_provider == 'mixed':
+                                pin_provider = None
+                            continuation_blob = encode_continuation_meta(
+                                preview.id, start_s,
+                                stt_provider=pin_provider,
+                                language=language or None)
+                            ph_props['continuation'] = True
+                            ph_props['continuation_preview_seconds'] = start_s
+                            ph_props['continuation_remainder_seconds'] = (
+                                estimate)
+            over_free_cap = bool(
+                TRIAL_MAX_EPISODE_SECONDS and estimate > TRIAL_MAX_EPISODE_SECONDS)
             can_cover_full = (
                 (paid_bal >= estimate) if over_free_cap
                 else (before_trial + paid_bal) >= estimate
@@ -9659,6 +10054,9 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
                 partial_meta=(
                     encode_partial_task_meta(trial_charge, estimate)
                     if partial_job and trial_charge else None
+                ),
+                continuation_meta=(
+                    continuation_blob if not partial_job else None
                 ),
                 source=source,
                 source_client=client_label if source == 'mcp' else None,
