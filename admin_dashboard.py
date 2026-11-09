@@ -355,8 +355,11 @@ def collect_kpis(db, trial_global_seconds, trial_daily_seconds=None):
            AND COALESCE(completed_at, started_at) >= :since
     """), {'since': d7}).scalar() or 0
 
+    # Prefer stt_audio_seconds (billed STT length) so a continuation job whose
+    # audio_duration is the full stitched episode does not double-count the
+    # preview minutes already counted on the partial task.
     minutes_7d = db.session.execute(text("""
-        SELECT COALESCE(SUM(audio_duration), 0) / 60.0
+        SELECT COALESCE(SUM(COALESCE(stt_audio_seconds, audio_duration)), 0) / 60.0
           FROM transcription_tasks
          WHERE status = 'completed'
            AND COALESCE(completed_at, started_at) >= :since
@@ -414,7 +417,7 @@ def collect_chart_data(db, days=90):
     ]
     completed_rows = list(db.session.execute(text("""
         SELECT COALESCE(completed_at, started_at), user_id,
-               COALESCE(audio_duration, 0)
+               COALESCE(stt_audio_seconds, audio_duration, 0)
           FROM transcription_tasks
          WHERE status = 'completed'
            AND COALESCE(completed_at, started_at) >= :since
