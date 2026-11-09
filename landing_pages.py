@@ -26,6 +26,8 @@ PAGES = (
     ('landing_free', '/transcribe-podcast-free'),
     ('landing_youtube_vs', '/youtube-vs-podcast-transcript'),
     ('landing_summarize', '/summarize-podcast-episode'),
+    ('landing_de_summarize', '/de/podcast-zusammenfassen'),
+    ('landing_es_summarize', '/es/resumir-podcast'),
     ('landing_whole_podcast', '/transcribe-whole-podcast'),
     ('landing_no', '/no/podcast-til-tekst'),
     ('landing_es', '/es/transcribir-podcast'),
@@ -49,6 +51,8 @@ FOOTER = (
     'landing_free',
     'landing_youtube_vs',
     'landing_summarize',
+    'landing_de_summarize',
+    'landing_es_summarize',
     'landing_whole_podcast',
     'landing_no',
     'landing_es',
@@ -70,13 +74,25 @@ HREFLANG_GROUP = {
     'nl': 'landing_nl',
     'it': 'landing_it',
 }
+#: Reciprocal hreflang group for the summarize-episode family (x-default = en).
+HREFLANG_SUMMARIZE_GROUP = {
+    'en': 'landing_summarize',
+    'de': 'landing_de_summarize',
+    'es': 'landing_es_summarize',
+}
+#: All reciprocal hreflang groups (podcast-to-text, summarize, …).
+HREFLANG_GROUPS = (HREFLANG_GROUP, HREFLANG_SUMMARIZE_GROUP)
 #: Kept for callers/tests that still look up the old Norwegian↔English pair.
 HREFLANG_PAIRS = {
     'landing_no': 'landing_podcast_to_text',
 }
 
 #: Endpoints that 404 / stay out of sitemap·footer·llms when their flag is off.
-_SUMMARY_GATED = frozenset({'landing_summarize'})
+_SUMMARY_GATED = frozenset({
+    'landing_summarize',
+    'landing_de_summarize',
+    'landing_es_summarize',
+})
 
 SHORT_LABELS = {
     'landing_generator': 'Podcast transcript generator',
@@ -90,6 +106,8 @@ SHORT_LABELS = {
     'landing_free': 'Transcribe a podcast free',
     'landing_youtube_vs': 'YouTube vs podcast transcript',
     'landing_summarize': 'Summarize a podcast episode',
+    'landing_de_summarize': 'Podcast zusammenfassen (Deutsch)',
+    'landing_es_summarize': 'Resumir un podcast (español)',
     'landing_whole_podcast': 'Transcribe a whole podcast',
     'landing_no': 'Podcast til tekst (norsk)',
     'landing_es': 'Transcribir podcast (español)',
@@ -135,7 +153,11 @@ TITLE_SUFFIX = ' — Podskrift'
 TITLE_MAX = 60
 META_MAX = 160
 
-_ENDPOINT_LANG = {ep: lang for lang, ep in HREFLANG_GROUP.items()}
+_ENDPOINT_LANG = {
+    ep: lang
+    for group in HREFLANG_GROUPS
+    for lang, ep in group.items()
+}
 
 
 def lang_of(endpoint):
@@ -167,12 +189,22 @@ def public_footer():
 
 
 def hreflang_alternates(endpoint):
-    """[(hreflang, endpoint)] for *endpoint*; full reciprocal set for the group."""
-    if endpoint not in HREFLANG_GROUP.values():
-        return []
-    out = [(lang, ep) for lang, ep in HREFLANG_GROUP.items()]
-    out.append(('x-default', HREFLANG_GROUP['en']))
-    return out
+    """[(hreflang, endpoint)] for *endpoint*; full reciprocal set for its group.
+
+    Gated group members (SUMMARY_ENABLED off) are omitted. Ungrouped endpoints
+    return an empty list.
+    """
+    for group in HREFLANG_GROUPS:
+        if endpoint not in group.values():
+            continue
+        if not page_is_public(endpoint):
+            return []
+        out = [(lang, ep) for lang, ep in group.items() if page_is_public(ep)]
+        x_default = group['en']
+        if page_is_public(x_default):
+            out.append(('x-default', x_default))
+        return out
+    return []
 
 
 def related_links(endpoint):
@@ -188,6 +220,14 @@ def related_links(endpoint):
     if endpoint == 'landing_summarize':
         out = ['landing_spotify', 'landing_podcast_to_text', 'landing_generator',
                'landing_free', 'landing_apple']
+    elif endpoint == 'landing_de_summarize':
+        out = ['landing_de', 'landing_summarize', 'landing_spotify',
+               'landing_podcast_to_text', 'landing_generator', 'landing_free',
+               'landing_apple']
+    elif endpoint == 'landing_es_summarize':
+        out = ['landing_es', 'landing_summarize', 'landing_spotify',
+               'landing_podcast_to_text', 'landing_generator', 'landing_free',
+               'landing_apple']
     elif endpoint == 'landing_whole_podcast':
         # Brief: RSS, podcast-to-text, Spotify (/ai is always appended by the template).
         out = ['landing_rss', 'landing_podcast_to_text', 'landing_spotify']
@@ -256,6 +296,8 @@ RELATED_LABELS = {
         'landing_podcast_to_text': 'De podcast a texto (en inglés)',
         'landing_rss': 'De feed RSS a texto (en inglés)',
         'landing_free': 'Transcribir un podcast gratis (en inglés)',
+        'landing_summarize': 'Resumir un episodio de podcast (en inglés)',
+        'landing_generator': 'Generador de transcripciones de podcast (en inglés)',
     },
     'de': {
         'landing_spotify': 'Spotify-Podcast transkribieren (Englisch)',
@@ -266,6 +308,8 @@ RELATED_LABELS = {
         'landing_podcast_to_text': 'Podcast zu Text (Englisch)',
         'landing_rss': 'RSS-Feed zu Text (Englisch)',
         'landing_free': 'Podcast kostenlos transkribieren (Englisch)',
+        'landing_summarize': 'Podcast-Folge zusammenfassen (Englisch)',
+        'landing_generator': 'Generator für Podcast-Transkripte (Englisch)',
     },
     'pt': {
         'landing_spotify': 'Transcrever um podcast do Spotify (em inglês)',
@@ -1520,6 +1564,154 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
                 ('Do I need an OpenAI API key?',
                  'No. An API key is optional; you can use the free minutes or buy minutes '
                  'instead.'),
+            ],
+        )
+
+    if endpoint == 'landing_de_summarize':
+        # Native German (du-form, matching /de/podcast-transkribieren). Same
+        # facts as landing_summarize; SUMMARY_ENABLED gated.
+        free_de = _free_bit(trial, free_trial, 'de')
+        return dict(
+            lang='de',
+            title='Podcast-Folge zusammenfassen per Link',
+            meta=('Spotify- oder Apple-Link einfügen. KI-Zusammenfassung '
+                  '(TL;DR, Kernpunkte, Zitate) über dem vollständigen Transkript. '
+                  f'{free_de}.'),
+            h1='Podcast-Folge per Link zusammenfassen',
+            lede=('ChatGPT kann keine Spotify-Folge anhören. Füge den Folgenlink hier '
+                  'ein: Podskrift macht aus dem Audio ein Transkript und zeigt darüber '
+                  'eine KI-Zusammenfassung — TL;DR, Kernpunkte und ein paar kurze Zitate '
+                  '— damit du jeden Punkt prüfen kannst.'),
+            placeholder='Spotify-, Apple-Podcasts- oder RSS-Folgenlink einfügen',
+            input_label='Podcast- oder Folgenlink',
+            button='Folge zusammenfassen',
+            will_work=('Funktioniert, wenn die Show einen öffentlichen RSS-Feed hat — '
+                       'die meisten haben einen. Spotify-Exklusives, Folgen nur für '
+                       'Abonnenten und rein videobasierte Shows nicht. Kein YouTube-Tool.'),
+            also_related=[
+                ('guide_chatgpt', 'ChatGPT-Einrichtungsleitfaden'),
+            ],
+            steps=[
+                ('Folgenlink einfügen',
+                 'Ein Spotify-, Apple-Podcasts- oder RSS-Folgenlink. Suche nach dem '
+                 'Shownamen funktioniert auch.'),
+                ('Transkript erhalten',
+                 'Podskrift holt das Audio aus dem öffentlichen Feed und transkribiert '
+                 'es. Nur das Transkript verbraucht Minuten — die Zusammenfassung nicht.'),
+                ('Zusammenfassung und Volltext lesen',
+                 'Wenn das Transkript fertig ist, erscheint darüber eine KI-Zusammenfassung: '
+                 'TL;DR, Kernpunkte und bis zu ein paar kurze Zitate. Kopieren oder als '
+                 '.txt / .srt herunterladen.'),
+            ],
+            faq=[
+                ('Was kostet es?', _price_de(trial, pack, free_trial=free_trial)),
+                ('Funktioniert das mit jeder Show?',
+                 'Mit den meisten ja, wenn die Show auch einen öffentlichen RSS-Feed hat. '
+                 'Spotify-Exklusives, Folgen nur für Abonnenten und rein videobasierte Shows '
+                 'haben keinen öffentlichen Feed und lassen sich daher weder transkribieren '
+                 'noch zusammenfassen. YouTube-URLs werden nicht unterstützt.'),
+                ('Was steckt in der Zusammenfassung?',
+                 'Ein kurzes TL;DR, eine Liste mit Kernpunkten und bis zu ein paar kurze '
+                 'Zitate wörtlich aus dem Transkript. Die Zusammenfassung steht in derselben '
+                 'Sprache wie das Transkript — wähle also „Deutsch“ für deutsche Folgen. '
+                 'Du bekommst außerdem das vollständige Transkript, um jeden Punkt und jedes '
+                 'Zitat zu prüfen.'),
+                ('Verbraucht die Zusammenfassung extra Minuten?',
+                 'Nein. Nur die Transkription verbraucht Gratis- oder bezahlte Minuten. Die '
+                 'Zusammenfassung kommt mit dem Transkript ohne Aufpreis.'),
+                ('Was, wenn ich nur eine kostenlose Vorschau einer langen Folge bekomme?',
+                 'Die Zusammenfassung deckt nur den transkribierten Teil ab. Ein „Preview“-Badge '
+                 'kennzeichnet, dass die Zusammenfassung unvollständig ist.'),
+                ('Kann ich eine andere Art von Zusammenfassung bekommen?',
+                 'Kopiere das Transkript in ChatGPT oder Claude für Kapitelnotizen, '
+                 'Lernnotizen oder einen Tweet-Thread, oder verbinde Podskrift als Connector, '
+                 'damit sie Transkripte für dich holen. Siehe die KI- und ChatGPT-Links unten.'),
+                ('Ist das dieselbe Zusammenfassung wie bei Spotify oder ChatGPT?',
+                 'Nein. ChatGPT kann das Audio der Folge nicht anhören, und Spotifys eigene '
+                 'Transkripte bleiben in der Spotify-App. Podskrift transkribiert das Audio '
+                 'aus dem öffentlichen Feed selbst und fasst dieses Transkript dann zusammen.'),
+                ('Gibt es Sprecherkennzeichnung?',
+                 'Noch nicht. Du bekommst ein durchgehendes Transkript mit Zeitstempeln, '
+                 'keine benannten Sprecher.'),
+                ('Brauche ich einen OpenAI-API-Schlüssel?',
+                 'Nein. Ein API-Schlüssel ist optional; du kannst die Gratisminuten nutzen '
+                 'oder Minuten kaufen.'),
+            ],
+        )
+
+    if endpoint == 'landing_es_summarize':
+        # Neutral Spanish (tú-form, matching /es/transcribir-podcast). Same
+        # facts as landing_summarize; SUMMARY_ENABLED gated.
+        free_es = _free_bit(trial, free_trial, 'es')
+        return dict(
+            lang='es',
+            title='Resumir un episodio de podcast por enlace',
+            meta=('Pega un enlace de Spotify o Apple. Resumen con IA '
+                  '(TL;DR, puntos clave, citas) sobre la transcripción completa. '
+                  f'{free_es.capitalize()}.'),
+            h1='Resumir un episodio de podcast desde un enlace',
+            lede=('ChatGPT no puede escuchar un episodio de Spotify. Pega el enlace '
+                  'aquí: Podskrift convierte el audio en una transcripción y muestra '
+                  'encima un resumen con IA — TL;DR, puntos clave y unas cuantas citas '
+                  'cortas — para que puedas comprobar cada punto.'),
+            placeholder='Pega un enlace de episodio de Spotify, Apple o RSS',
+            input_label='Enlace del podcast o del episodio',
+            button='Resumir este episodio',
+            will_work=('Funciona cuando el programa tiene un feed RSS público — la '
+                       'mayoría lo tiene. Los exclusivos de Spotify, los episodios solo '
+                       'para suscriptores y los que son solo vídeo, no. No es una '
+                       'herramienta de YouTube.'),
+            also_related=[
+                ('guide_chatgpt', 'Guía de configuración de ChatGPT'),
+            ],
+            steps=[
+                ('Pega el enlace del episodio',
+                 'Un enlace de episodio de Spotify, Apple Podcasts o RSS. Buscar por '
+                 'nombre del programa también funciona.'),
+                ('Obtén la transcripción',
+                 'Podskrift descarga el audio del feed público y lo transcribe. Solo la '
+                 'transcripción usa tus minutos; el resumen, no.'),
+                ('Lee el resumen y el texto completo',
+                 'Cuando la transcripción está lista, aparece encima un resumen con IA: '
+                 'TL;DR, puntos clave y hasta unas cuantas citas cortas. Copia o descarga '
+                 '.txt / .srt.'),
+            ],
+            faq=[
+                ('¿Cuánto cuesta?', _price_es(trial, pack, free_trial=free_trial)),
+                ('¿Funciona con todos los programas?',
+                 'Con la mayoría sí, cuando el programa también tiene un feed RSS '
+                 'público. Los exclusivos de Spotify, los episodios solo para '
+                 'suscriptores y los que son solo vídeo no tienen feed público, así que '
+                 'no se pueden transcribir ni resumir. Las URL de YouTube no están '
+                 'soportadas.'),
+                ('¿Qué incluye el resumen?',
+                 'Un TL;DR breve, una lista de puntos clave y hasta unas cuantas citas '
+                 'cortas tomadas literalmente de la transcripción. El resumen se escribe '
+                 'en el mismo idioma que la transcripción: elige «Español» para '
+                 'episodios en español. También recibes la transcripción completa para '
+                 'comprobar cada punto y cada cita.'),
+                ('¿El resumen consume minutos extra?',
+                 'No. Solo la transcripción usa minutos de prueba o de pago. El resumen '
+                 'viene con la transcripción sin coste adicional.'),
+                ('¿Y si solo obtengo una vista previa gratuita de un episodio largo?',
+                 'El resumen cubre solo la parte que se transcribió. Una insignia '
+                 '«Preview» indica que el resumen es parcial.'),
+                ('¿Puedo obtener otro tipo de resumen?',
+                 'Copia la transcripción en ChatGPT o Claude para notas por capítulos, '
+                 'apuntes de estudio o un hilo, o conecta Podskrift como conector para '
+                 'que ellos obtengan las transcripciones. Mira los enlaces de IA y '
+                 'ChatGPT más abajo.'),
+                ('¿Es lo mismo que el resumen de Spotify o de ChatGPT?',
+                 'No. ChatGPT no puede escuchar el audio del episodio, y las '
+                 'transcripciones propias de Spotify se quedan dentro de la app. '
+                 'Podskrift transcribe el audio del feed público y luego resume esa '
+                 'transcripción.'),
+                ('¿Hay etiquetas de hablantes?',
+                 'Todavía no. Obtienes una transcripción continua con marcas de tiempo, '
+                 'sin hablantes con nombre.'),
+                ('¿Necesito una clave de API de OpenAI?',
+                 'No. Una clave de API es opcional; puedes usar los minutos gratis o '
+                 'comprar minutos.'),
             ],
         )
 

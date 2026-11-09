@@ -22889,10 +22889,16 @@ def test_summarize_landing_gated_when_summary_disabled(monkeypatch):
     import landing_pages as lp
     assert not lp.summary_landing_active()
     client = A.app.test_client()
-    assert client.get('/summarize-podcast-episode').status_code == 404
-    assert '/summarize-podcast-episode' not in client.get('/sitemap.xml').data.decode()
-    assert 'href="/summarize-podcast-episode"' not in client.get('/').data.decode()
-    assert '/summarize-podcast-episode' not in client.get('/llms.txt').data.decode()
+    for path in ('/summarize-podcast-episode',
+                 '/de/podcast-zusammenfassen',
+                 '/es/resumir-podcast'):
+        assert client.get(path).status_code == 404
+        assert path not in client.get('/sitemap.xml').data.decode()
+        assert f'href="{path}"' not in client.get('/').data.decode()
+        assert path not in client.get('/llms.txt').data.decode()
+    assert lp.hreflang_alternates('landing_summarize') == []
+    assert lp.hreflang_alternates('landing_de_summarize') == []
+    assert lp.hreflang_alternates('landing_es_summarize') == []
 
 
 def test_summarize_landing_honesty_when_summary_enabled(trial_on, monkeypatch):
@@ -22940,6 +22946,132 @@ def test_summarize_landing_honesty_when_summary_enabled(trial_on, monkeypatch):
     meta = _re.search(r'<meta name="description" content="([^"]*)"', html).group(1)
     assert len(title) <= lp.TITLE_MAX and len(meta) <= lp.META_MAX
     assert title.count('Podskrift') <= 1
+
+
+def test_de_es_summarize_landings_lang_hreflang_and_gating(trial_on, monkeypatch):
+    """DE/ES summarize pages: native lang, summarize hreflang group, discovery."""
+    import landing_pages as lp
+    import pathlib
+    import xml.etree.ElementTree as ET
+    monkeypatch.setenv('SUMMARY_ENABLED', '1')
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    assert lp.HREFLANG_SUMMARIZE_GROUP == {
+        'en': 'landing_summarize',
+        'de': 'landing_de_summarize',
+        'es': 'landing_es_summarize',
+    }
+    assert lp.HREFLANG_GROUPS == (lp.HREFLANG_GROUP, lp.HREFLANG_SUMMARIZE_GROUP)
+    assert lp.lang_of('landing_de_summarize') == 'de'
+    assert lp.lang_of('landing_es_summarize') == 'es'
+    # Podcast-to-text group unchanged.
+    assert lp.HREFLANG_GROUP['en'] == 'landing_podcast_to_text'
+    assert 'landing_summarize' not in lp.HREFLANG_GROUP.values()
+
+    client = A.app.test_client()
+    paths = {
+        'en': '/summarize-podcast-episode',
+        'de': '/de/podcast-zusammenfassen',
+        'es': '/es/resumir-podcast',
+    }
+    import re as _re
+    for lang, path in paths.items():
+        html = client.get(path).data.decode()
+        assert f'<html lang="{lang}">' in html
+        for other_lang, other_path in paths.items():
+            assert f'hreflang="{other_lang}"' in html
+            assert other_path in html
+        assert 'hreflang="x-default"' in html
+        assert paths['en'] in html
+        alts = _re.findall(
+            r'<link rel="alternate" hreflang="([^"]+)" href="([^"]+)">', html)
+        alt_langs = {hl for hl, _ in alts}
+        assert alt_langs == {'en', 'de', 'es', 'x-default'}
+        assert all('/podcast-to-text' not in href for _, href in alts)
+
+    # Reciprocity: podcast-to-text group still does not include summarize pages.
+    p2t = client.get('/podcast-to-text').data.decode()
+    assert 'hreflang="nb"' in p2t and '/no/podcast-til-tekst' in p2t
+    p2t_alts = _re.findall(
+        r'<link rel="alternate" hreflang="([^"]+)" href="([^"]+)">', p2t)
+    assert all('/summarize' not in href and 'zusammenfassen' not in href
+               and 'resumir-podcast' not in href for _, href in p2t_alts)
+
+    de = client.get('/de/podcast-zusammenfassen').data.decode()
+    assert 'Folge zusammenfassen' in de
+    assert '„Deutsch“' in de
+    assert 'Preview' in de
+    assert 'href="/de/podcast-transkribieren"' in de
+    assert 'href="/summarize-podcast-episode"' in de
+    es = client.get('/es/resumir-podcast').data.decode()
+    assert 'Resumir este episodio' in es
+    assert '«Español»' in es
+    assert 'Preview' in es
+    assert 'href="/es/transcribir-podcast"' in es
+    assert 'href="/summarize-podcast-episode"' in es
+
+    locs = [el.text for el in ET.fromstring(client.get('/sitemap.xml').data).iter(
+        '{http://www.sitemaps.org/schemas/sitemap/0.9}loc')]
+    home = client.get('/').data.decode()
+    llms = client.get('/llms.txt').data.decode()
+    for path in paths.values():
+        assert any(loc.endswith(path) for loc in locs)
+        assert f'href="{path}"' in home
+        assert path in llms
+    assert '(German)' in llms and '/de/podcast-zusammenfassen' in llms
+    assert '(Spanish)' in llms and '/es/resumir-podcast' in llms
+
+    changelog = pathlib.Path('changelog.json').read_text()
+    assert 'podcast-zusammenfassen' not in changelog
+    assert 'resumir-podcast' not in changelog
+    assert 'landing_de_summarize' not in changelog
+    assert 'landing_es_summarize' not in changelog
+
+
+def test_de_es_summarize_price_phrases_use_live_helpers(trial_on, monkeypatch):
+    """Break pack_phrase for de/es → summarize pages lose the live phrase."""
+    import landing_pages as lp
+    monkeypatch.setenv('SUMMARY_ENABLED', '1')
+    monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
+    monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', True)
+    pack = A._landing_pack()
+    live_de = lp.pack_phrase(pack, 'de')
+    live_es = lp.pack_phrase(pack, 'es')
+    de_html = A.app.test_client().get('/de/podcast-zusammenfassen').data.decode()
+    es_html = A.app.test_client().get('/es/resumir-podcast').data.decode()
+    assert live_de in de_html
+    assert live_es in es_html
+    real = lp.pack_phrase
+
+    def _mutated(pack, lang='en'):
+        if lang == 'de':
+            return 'PREIS-MUTATION-SENTINEL'
+        if lang == 'es':
+            return 'PRECIO-MUTACION-SENTINELA'
+        return real(pack, lang)
+
+    monkeypatch.setattr(lp, 'pack_phrase', _mutated)
+    assert 'PREIS-MUTATION-SENTINEL' in A.app.test_client().get(
+        '/de/podcast-zusammenfassen').data.decode()
+    assert live_de not in A.app.test_client().get(
+        '/de/podcast-zusammenfassen').data.decode()
+    assert 'PRECIO-MUTACION-SENTINELA' in A.app.test_client().get(
+        '/es/resumir-podcast').data.decode()
+    assert live_es not in A.app.test_client().get(
+        '/es/resumir-podcast').data.decode()
+
+
+def test_universiteit_van_vlaanderen_show_page_in_catalog_and_sitemap(trial_on):
+    """Curated show from iTunes lookup renders and is listed in sitemap."""
+    import xml.etree.ElementTree as ET
+    slug = 'de-universiteit-van-vlaanderen-podcast'
+    client = A.app.test_client()
+    resp = client.get(f'/podcasts/{slug}')
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert 'Universiteit van Vlaanderen' in html
+    locs = [el.text for el in ET.fromstring(client.get('/sitemap.xml').data).iter(
+        '{http://www.sitemaps.org/schemas/sitemap/0.9}loc')]
+    assert any(loc.endswith(f'/podcasts/{slug}') for loc in locs)
 
 
 def test_spotify_landing_will_work_line_and_cta_note(trial_on):
