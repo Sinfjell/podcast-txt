@@ -1661,6 +1661,17 @@
       "language": "us",
       "description": "The World War II podcast with comedian Al Murray and historian James Holland. We Have Ways of Making You Talk dives deep into WWII history, exploring key battles, forgotten front lines, and incredible untold stories. Whether you're fascinated by the Battle of Britain, the D-Day landings, or the Eastern Front, this show offers a rich, detailed look at the war that shaped the modern world. Al and James bring a unique blend of expert knowledge and humour, discussing everythin…",
       "source": "apple_top"
+    },
+    {
+      "slug": "de-universiteit-van-vlaanderen-podcast",
+      "name": "De Universiteit van Vlaanderen Podcast",
+      "author": "Universiteit van Vlaanderen",
+      "itunes_id": "1393961197",
+      "feed_url": "https://anchor.fm/s/d399ffec/podcast/rss",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts112/v4/18/23/46/182346b1-4eb0-3486-959c-395003965ec8/mza_18355785697841633107.jpeg/600x600bb.jpg",
+      "language": "nl",
+      "description": "Waarom val ik niet af terwijl ik 3x per week sport? Waarom maak ik zoveel ruzie op vakantie? Waarom dragen oude mensen ook in de zomer lange mouwen? Wat is kunst? Hoe weten we dat de big bang echt gebeurd is? De meest begeesterende wetenschappers van de vijf Vlaamse universiteiten geven een antwoord op al deze vragen en nog veel.",
+      "source": "manual"
     }
   ]
 }
