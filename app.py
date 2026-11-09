@@ -828,6 +828,28 @@ def normalize_language_code(value):
     return LANGUAGE_NAME_TO_CODE.get(lowered, '')
 
 
+def detection_language_code(value):
+    """ISO code from STT auto-detect, including languages outside the picker.
+
+    ``normalize_language_code`` drops unknowns so junk never reaches the
+    picker/Whisper path. Together may still return a real ISO-639-1 code
+    (e.g. ``is``, ``eu``) that is not in ``SUPPORTED_LANGUAGES``; routing,
+    pinning, and ``task.language`` must keep that code so ``after_detect_route``
+    can see Soniox-capable langs and accounting is not left NULL.
+    """
+    code = normalize_language_code(value)
+    if code:
+        return code
+    if not value:
+        return ''
+    raw = str(value).strip().casefold().replace('_', '-')
+    if '-' in raw:
+        raw = raw.split('-', 1)[0]
+    if len(raw) == 2 and raw.isalpha():
+        return raw
+    return ''
+
+
 def display_language(value):
     """Human label for a stored language: codes → English name; names stay as-is."""
     if not value:
@@ -4797,11 +4819,15 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
         return result
 
     if not language:
-        detected = normalize_language_code(result.language)
+        # Keep a raw ISO-639-1 code even when it is outside the picker list
+        # (e.g. is/eu). normalize_language_code would wipe those to '' and
+        # after_detect_route would always pick whisper-1 (missing Soniox).
+        detected = detection_language_code(result.language)
         if not stt_mod.language_allowed(detected):
             # Outside Together rollout (or implausible detection). Prefer
             # Soniox when the detected code is on STT_SONIOX_LANGUAGES;
-            # otherwise whisper-1 for this chunk and the rest of the job.
+            # otherwise whisper-1 for the rest of the job. Keep Together's
+            # part-1 text either way — re-billing chunk 1 is wasteful.
             next_provider, next_reason = stt_mod.after_detect_route(
                 detected, audio_seconds=job.audio_seconds)
             if next_provider == stt_mod.PROVIDER_SONIOX:
@@ -4815,34 +4841,26 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
                     detected, task_id)
                 job.provider = stt_mod.PROVIDER_SONIOX
                 job.reason = next_reason
-                job.pinned_language = detected
-                language = detected
+                if detected:
+                    job.pinned_language = detected
+                    language = detected
                 # Fall through to Together quality guards on this part, then
                 # return; later chunks hit the Soniox branch above.
             else:
                 job.events['fallback_language'] += 1
                 app.logger.info(
                     'stt language %r not on Together; whisper-1 for the '
-                    'rest of task %s', detected, task_id)
+                    'rest of task %s (keeping Together part 1)',
+                    detected, task_id)
                 job.provider = stt_mod.PROVIDER_OPENAI
                 job.reason = next_reason
                 job.openai_model = stt_mod.OPENAI_MODEL
                 job.fallback_language = detected or None
-                together_first = result
-                result = openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
-                # Together already transcribed this chunk (paid): compare for free.
-                if detected and detected in stt_mod.together_shadow_languages():
-                    job.events['together_shadow_first'] += 1
-                    _log_together_shadow(job, _together_shadow_props(
-                        getattr(result, 'text', '') or '', together_first,
-                        task_id=job.task_id, language=detected,
-                        chunk_seconds=chunk_seconds,
-                        source='first_chunk_autodetect'))
-                _maybe_scribe_shadow(
-                    job, chunk_file, language,
-                    getattr(result, 'text', '') or '',
-                    chunk_seconds, served_provider=stt_mod.PROVIDER_OPENAI)
-                return result
+                if detected:
+                    job.pinned_language = detected
+                    language = detected
+                # Fall through to Together quality guards; do not openai_call
+                # the same chunk again (Soniox after-detect path mirrors this).
         else:
             job.pinned_language = detected
             language = detected
@@ -5156,8 +5174,14 @@ def _transcribe_chunks(audio_chunks, remaining, task_id, openai_client, language
         # gpt-transcribe: never store its language label (Norwegian→Danish).
         detected = None if use_gpt else getattr(chunk_transcript, 'language', None)
         # Store ISO codes only. Whisper returns names like 'english'; the
-        # picker sends 'en'. normalize_language_code maps both; unknown → auto.
-        stored_lang = normalize_language_code(language or detected) or None
+        # picker sends 'en'. normalize_language_code maps both; a pin from
+        # Together auto-detect may be a valid ISO code outside the picker
+        # (is/eu) — keep that via detection_language_code.
+        stored_lang = (
+            normalize_language_code(language or detected)
+            or detection_language_code(language or detected)
+            or None
+        )
         provisional = ' '.join(
             p['text'] for p in part_results if p['text']).strip()
         # Publish the text we have so far so the page can show it streaming in
