@@ -26,14 +26,22 @@ def test_fix_tracked_perms_sh_syntax():
 def test_fix_tracked_perms_sh_uses_git_ls_files_not_recursive_chown():
     text = SCRIPT.read_text(encoding='utf-8')
     assert 'git ls-files -z' in text
-    assert 'chown' in text
+    assert 'chown -h' in text
     assert 'chmod 644' in text
-    assert 'chmod 755' in text
-    # Must never recurse: that would loosen podcast.db / backups / .env.
+    assert '100755' in text  # mode from git index, not filesystem -x
+    # Must never recurse or chmod directories (data/ stays 750 + ACL).
     assert not any(
         line.lstrip().startswith(('chown -R', 'chmod -R'))
         for line in text.splitlines()
         if not line.lstrip().startswith('#')
+    )
+    # Dir loop must chown only — no chmod of parent paths (comments may say so).
+    assert 'Parent dirs of tracked files' in text
+    dir_section = text.split('Parent dirs of tracked files', 1)[-1]
+    assert 'chown -h' in dir_section
+    assert not any(
+        line.lstrip().startswith('chmod')
+        for line in dir_section.splitlines()
     )
 
 
@@ -48,7 +56,7 @@ def test_deploy_yml_runs_fix_tracked_perms_and_show_pages_checks():
 
 
 def test_fix_tracked_perms_touches_tracked_only(tmp_path: Path):
-    """In a throwaway checkout: tracked files become 644/755; untracked stay put."""
+    """Tracked files become 644/755 from git mode; dirs/untracked stay put."""
     repo = tmp_path / 'app'
     repo.mkdir()
     subprocess.run(['git', 'init'], cwd=repo, check=True, capture_output=True)
@@ -63,6 +71,7 @@ def test_fix_tracked_perms_touches_tracked_only(tmp_path: Path):
 
     data = repo / 'data'
     data.mkdir()
+    data.chmod(0o750)
     tracked = data / 'show_pages.json'
     tracked.write_text('{"shows":[]}', encoding='utf-8')
     script_file = repo / 'run.sh'
@@ -76,18 +85,29 @@ def test_fix_tracked_perms_touches_tracked_only(tmp_path: Path):
     untracked_env.write_text('SECRET=1\n', encoding='utf-8')
     untracked_env.chmod(0o600)
 
-    subprocess.run(['git', 'add', 'data/show_pages.json', 'run.sh'], cwd=repo, check=True)
+    # Symlink target must not be chmod'd if we ever listed a symlink (skip path).
+    link_target = repo / 'link-target.txt'
+    link_target.write_text('target\n', encoding='utf-8')
+    link_target.chmod(0o600)
+    tracked_link = repo / 'tracked-link.txt'
+    tracked_link.symlink_to('link-target.txt')
+
+    subprocess.run(
+        ['git', 'add', 'data/show_pages.json', 'run.sh', 'tracked-link.txt'],
+        cwd=repo, check=True,
+    )
     subprocess.run(['git', 'commit', '-m', 'init'], cwd=repo, check=True, capture_output=True)
 
-    # Simulate a root pull: tracked files become owner-only and not group/world readable.
+    # Simulate a root pull: tracked regular file is 640; strip +x from run.sh
+    # so only the git index (100755) should restore 755.
     tracked.chmod(0o640)
-    # Copy the real script into the fake repo so we run it from cwd like prod.
+    script_file.chmod(0o644)
+
     dest_script = repo / 'ops' / 'fix-tracked-perms.sh'
     dest_script.parent.mkdir()
     dest_script.write_text(SCRIPT.read_text(encoding='utf-8'), encoding='utf-8')
     dest_script.chmod(0o755)
 
-    # Numeric uid:gid so chown works without podskrift/psaserv names in CI.
     env = {
         **os.environ,
         'APP_USER': str(os.getuid()),
@@ -108,10 +128,14 @@ def test_fix_tracked_perms_touches_tracked_only(tmp_path: Path):
     db_mode = stat.S_IMODE(untracked_db.stat().st_mode)
     env_mode = stat.S_IMODE(untracked_env.stat().st_mode)
     data_mode = stat.S_IMODE(data.stat().st_mode)
+    target_mode = stat.S_IMODE(link_target.stat().st_mode)
 
     assert tracked_mode == 0o644
-    assert script_mode == 0o755
-    assert data_mode == 0o755
+    assert script_mode == 0o755  # from git 100755, not filesystem -x
+    # data/ keeps 750 — script must not chmod parent dirs.
+    assert data_mode == 0o750
     # Untracked runtime secrets must keep their tight modes.
     assert db_mode == 0o600
     assert env_mode == 0o600
+    # Symlink chmod must not follow and loosen the target.
+    assert target_mode == 0o600

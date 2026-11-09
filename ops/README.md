@@ -38,11 +38,11 @@ SSHs into the Hetzner/Plesk host and runs:
    queued/running transcriptions, or until **20 minutes** elapse (then
    proceeds anyway so the Actions job stays inside its 30-minute timeout)
 3. **Tracked-file permissions** — `ops/fix-tracked-perms.sh` runs
-   `git ls-files` → `chown podskrift:psaserv` and `chmod 644`/`755` on
-   tracked paths (and parent dir inodes only). A root-owned `git pull`
-   otherwise leaves new files `root:root` mode 640, which the app user
-   cannot read (`data/show_pages.json` → empty `/podcasts/*`). Untracked
-   runtime data (SQLite DB, backups, `.env`) is not touched.
+   `git ls-files` → `chown -h podskrift:psaserv` and `chmod 644` (or
+   `755` when the git index marks the file executable) on tracked files
+   only. Parent directories are `chown -h`'d but **not** chmod'd, so `data/`
+   and the app dir keep mode 750 + ACLs. Symlinks are never chmod'd.
+   Untracked runtime data (SQLite DB, backups, `.env`) is not touched.
 4. `systemctl restart podskrift`, asserts `/health` stays 200, that
    `podskrift` can read `data/show_pages.json`, and that `/podcasts`
    lists curated shows (known slug `the-daily` returns 200)
