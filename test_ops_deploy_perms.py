@@ -47,12 +47,16 @@ def test_fix_tracked_perms_sh_uses_git_ls_files_not_recursive_chown():
 
 def test_deploy_yml_runs_fix_tracked_perms_and_show_pages_checks():
     text = DEPLOY_YML.read_text(encoding='utf-8')
-    assert 'ops/fix-tracked-perms.sh' in text
+    assert 'APP=/var/www/vhosts/podskrift.nettsmed.dev/app' in text
+    assert 'git show HEAD:ops/fix-tracked-perms.sh' in text
+    assert 'PERM_SCRIPT="$APP/ops/fix-tracked-perms.sh"' in text
+    assert 'inline git ls-files fallback' in text
     assert 'APP_USER=podskrift' in text
     assert 'APP_GROUP=psaserv' in text
-    assert 'sudo -u podskrift test -r data/show_pages.json' in text
+    assert 'sudo -u podskrift test -r "$APP/data/show_pages.json"' in text
     assert 'http://127.0.0.1:5002/podcasts' in text
     assert '/podcasts/the-daily' in text
+    assert 'bash ops/fix-tracked-perms.sh' not in text
 
 
 def test_fix_tracked_perms_touches_tracked_only(tmp_path: Path):
