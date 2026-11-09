@@ -15557,7 +15557,10 @@ def test_partial_preview_respects_daily_budget(monkeypatch, trial_on):
 
 
 def test_completed_partial_allows_full_rerun_after_purchase(monkeypatch, trial_on):
-    """Duplicate guard must not block upgrading a completed partial to full."""
+    """Duplicate guard must not block upgrading a completed partial to full.
+
+    After purchase the upgrade reserves only the remainder (not a full re-run).
+    """
     import threading as _t
     from models import db, TranscriptionTask
 
@@ -15579,6 +15582,8 @@ def test_completed_partial_allows_full_rerun_after_purchase(monkeypatch, trial_o
         task.status = 'completed'
         task.phase = 'completed'
         task.transcript_text = 'preview'
+        task.language = 'en'
+        task.stt_provider = 'whisper-1'
         task.trial_settled = True
         db.session.commit()
         assert A.task_is_partial(task)
@@ -15596,9 +15601,236 @@ def test_completed_partial_allows_full_rerun_after_purchase(monkeypatch, trial_o
     with A.app.app_context():
         full = db.session.get(TranscriptionTask, body['task_id'])
         assert not A.task_is_partial(full)
-        # Trial already spent on the preview; full run uses paid.
+        cont = A.task_continuation_meta(full)
+        assert cont is not None
+        assert cont['preview_task_id'] == partial_id
+        assert cont['audio_start_seconds'] == 60 * 60
+        # Trial already spent on the preview; remainder only from paid.
         assert (full.trial_seconds_charged or 0) == 0
+        assert full.paid_seconds_charged == 30 * 60
+        # Paid balance kept the unused preview-portion minutes.
+        assert _paid(uid) == 60 * 60
+
+
+def test_stitch_preview_and_remainder_offsets_segments():
+    """Remainder timestamps shift by partial_seconds; text joins at one seam."""
+    preview_segs = [
+        {'start': 0.0, 'end': 2.5, 'text': 'Hello'},
+        {'start': 2.5, 'end': 5.0, 'text': ' world'},
+    ]
+    rem_segs = [
+        {'start': 0.0, 'end': 1.5, 'text': ' and'},
+        {'start': 1.5, 'end': 3.0, 'text': ' more'},
+    ]
+    text, segs = A.stitch_preview_and_remainder(
+        'Hello world', preview_segs, 'and more', rem_segs, 3600)
+    assert text == 'Hello world and more'
+    assert segs[0]['start'] == 0.0 and segs[0]['end'] == 2.5
+    assert segs[1]['end'] == 5.0
+    assert segs[2]['start'] == 3600.0
+    assert segs[2]['end'] == 3601.5
+    assert segs[3]['start'] == 3601.5
+    assert segs[3]['end'] == 3603.0
+    # No duplicate or missing seam token.
+    assert 'world and' in text
+    assert 'world  and' not in text
+
+
+def test_stitch_synthesizes_preview_segment_when_timestamps_missing():
+    text, segs = A.stitch_preview_and_remainder(
+        'Only text', [], 'tail', [{'start': 0, 'end': 2, 'text': 'tail'}], 600)
+    assert text == 'Only text tail'
+    assert segs[0] == {'start': 0.0, 'end': 600.0, 'text': 'Only text'}
+    assert segs[1]['start'] == 600.0
+
+
+def test_continuation_reserves_only_remainder_and_trims_start(
+        monkeypatch, trial_on, tmp_path):
+    """Usable preview → start-trim + remainder reservation + stitched result."""
+    import shutil
+    import subprocess
+    import types
+    from models import db, TranscriptionTask
+
+    uid = _make_user('cont-trim@test.com', limit=0, used=0)
+    _set_paid(uid, 90 * 60)
+    audio = tmp_path / 'ep.mp3'
+    subprocess.run(
+        ['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=f=440:d=3',
+         '-ac', '1', str(audio)],
+        check=True, capture_output=True)
+
+    with A.app.app_context():
+        preview = TranscriptionTask(
+            id='cont-preview-1',
+            user_id=uid,
+            episode_title='Long',
+            status='completed',
+            phase='completed',
+            transcript_text='PREVIEW BODY',
+            segments_json=json.dumps([
+                {'start': 0, 'end': 10, 'text': 'PREVIEW BODY'},
+            ]),
+            source_audio_url='https://example.com/cont-trim.mp3',
+            language='en',
+            stt_provider='whisper-1',
+            trial_seconds_charged=60 * 60,
+            trial_settled=True,
+            partial_meta=A.encode_partial_task_meta(60 * 60, 90 * 60),
+        )
+        db.session.add(preview)
+        db.session.commit()
+
+    trims = []
+    probes = {'n': 0}
+
+    def fake_trim(path, max_seconds=None, *, start_seconds=0):
+        trims.append({'max': max_seconds, 'start': start_seconds})
+        return path
+
+    def fake_probe(path):
+        # First probe is the full download; after start-trim, the remainder.
+        probes['n'] += 1
+        return 90 * 60.0 if probes['n'] == 1 else 30 * 60.0
+
+    def fake_download(url, path, task_id):
+        shutil.copy(str(audio), path)
+
+    reserves = []
+    real_reserve = A.platform_reserve
+
+    def tracking_reserve(user_id, seconds, **kw):
+        reserves.append(int(seconds))
+        return real_reserve(user_id, seconds, **kw)
+
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
+    monkeypatch.setattr(A, 'probe_audio_duration', fake_probe)
+    monkeypatch.setattr(A, 'trim_audio_file', fake_trim)
+    monkeypatch.setattr(A, 'platform_reserve', tracking_reserve)
+    monkeypatch.setattr(A, 'prepare_audio_for_whisper',
+                        lambda f, **kw: [str(audio)])
+    monkeypatch.setattr(
+        A, '_transcribe_chunks',
+        lambda *a, **kw: (
+            'REMAINDER BODY',
+            [{'start': 0.0, 'end': 5.0, 'text': 'REMAINDER BODY'}],
+        ))
+    monkeypatch.setattr(A, 'download_audio', fake_download)
+    monkeypatch.setattr(
+        A.threading, 'Thread',
+        lambda target=None, **kw: types.SimpleNamespace(
+            daemon=True, start=lambda: target and target()))
+    monkeypatch.setattr(A, 'free_disk_bytes', lambda *a, **kw: 10 ** 12)
+
+    with A.app.app_context():
+        user = db.session.get(A.User, uid)
+        payload, status = A.enqueue_transcription(
+            user,
+            {'title': 'Long', 'audio_url': 'https://example.com/cont-trim.mp3',
+             'duration_min': 90},
+            language='en', source='web')
+    assert status == 200, payload
+    assert trims and trims[0]['start'] == 60 * 60 and trims[0]['max'] is None
+    # Enqueue must reserve the remainder only (not the full 90, even if
+    # reconcile would later shrink a full reservation to match the trim).
+    assert reserves == [30 * 60]
+    # Only the 30 remaining minutes reserved from paid.
+    assert _paid(uid) == 60 * 60
+
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, payload['task_id'])
+        assert task.status == 'completed', task.error_message
+        assert not A.task_is_partial(task)
+        assert A.task_continuation_meta(task) is None  # cleared on complete
+        assert task.transcript_text == 'PREVIEW BODY REMAINDER BODY'
+        segs = json.loads(task.segments_json)
+        assert segs[0]['text'] == 'PREVIEW BODY'
+        assert segs[1]['start'] == 3600.0
+        assert segs[1]['text'] == 'REMAINDER BODY'
+        assert task.paid_seconds_charged == 30 * 60
+        # Display duration is preview + remainder.
+        assert abs(task.audio_duration - 90 * 60) < 1.0
+
+
+def test_continuation_falls_back_to_full_when_preview_unusable(
+        monkeypatch, trial_on):
+    """Empty preview transcript → full-episode reservation (no continuation)."""
+    import threading as _t
+    from models import db, TranscriptionTask
+
+    monkeypatch.setattr(A, 'MAX_CONCURRENT_TRANSCRIPTIONS', 2)
+    monkeypatch.setattr(A, '_transcription_slots', _t.BoundedSemaphore(2))
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
+
+    uid = _make_user('cont-fallback@test.com', limit=0, used=0)
+    audio = 'https://example.com/cont-fallback.mp3'
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='bad-preview-1',
+            user_id=uid,
+            episode_title='Broken',
+            status='completed',
+            phase='completed',
+            transcript_text='',  # unusable
+            source_audio_url=audio,
+            trial_seconds_charged=60 * 60,
+            trial_settled=True,
+            partial_meta=A.encode_partial_task_meta(60 * 60, 90 * 60),
+        ))
+        db.session.commit()
+
+    _set_paid(uid, 90 * 60)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': audio,
+        'episode_title': 'Full',
+        'duration_min': '90',
+    })
+    assert resp.status_code == 200, resp.get_json()
+    with A.app.app_context():
+        full = db.session.get(TranscriptionTask, resp.get_json()['task_id'])
+        assert A.task_continuation_meta(full) is None
+        assert not A.task_is_partial(full)
         assert full.paid_seconds_charged == 90 * 60
+
+
+def test_non_preview_purchase_enqueue_unchanged(monkeypatch, trial_on):
+    """No completed partial → still reserves the full episode from paid."""
+    import threading as _t
+    from models import db, TranscriptionTask
+
+    monkeypatch.setattr(A, 'MAX_CONCURRENT_TRANSCRIPTIONS', 2)
+    monkeypatch.setattr(A, '_transcription_slots', _t.BoundedSemaphore(2))
+    monkeypatch.setattr(A, 'TRIAL_MAX_EPISODE_SECONDS', 180 * 60)
+
+    uid = _make_user('no-preview-buy@test.com', limit=0, used=0)
+    _set_paid(uid, 45 * 60)
+    resp = _post_start(monkeypatch, uid, {
+        'audio_url': 'https://example.com/fresh-ep.mp3',
+        'episode_title': 'Fresh',
+        'duration_min': '45',
+    })
+    assert resp.status_code == 200, resp.get_json()
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, resp.get_json()['task_id'])
+        assert A.task_continuation_meta(task) is None
+        assert not A.task_is_partial(task)
+        assert task.paid_seconds_charged == 45 * 60
+        assert _paid(uid) == 0
+
+
+def test_trim_audio_file_start_offset_keeps_tail(tmp_path):
+    """ffmpeg -ss drops the head; duration ≈ original − start."""
+    import subprocess
+    src = tmp_path / 'full.mp3'
+    subprocess.run(
+        ['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=f=440:d=8',
+         '-ac', '1', str(src)],
+        check=True, capture_output=True)
+    path = str(src)
+    A.trim_audio_file(path, start_seconds=5)
+    dur = A.probe_audio_duration(path)
+    assert dur is not None
+    assert 2.5 < dur < 3.5
 
 
 def test_partial_download_and_status_include_preview_note(monkeypatch, trial_on):
