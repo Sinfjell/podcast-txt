@@ -8314,20 +8314,28 @@ def test_deploy_yml_fixes_tracked_perms_and_checks_show_pages():
 
     After aaa3661, root:root mode 640 on that file emptied /podcasts/* until
     ownership was fixed. Deploy must chown tracked files and fail if the app
-    user still cannot read the curated show list.
+    user still cannot read the curated show list. Prefer git-show|bash -s
+    (run 42589080986: relative bash ops/… exited 127 right after pull).
     """
     from pathlib import Path
 
     root = Path(__file__).resolve().parent
     deploy = (root / '.github' / 'workflows' / 'deploy.yml').read_text()
     script = (root / 'ops' / 'fix-tracked-perms.sh').read_text()
-    assert 'ops/fix-tracked-perms.sh' in deploy
+    assert 'APP=/var/www/vhosts/podskrift.nettsmed.dev/app' in deploy
+    assert 'git show HEAD:ops/fix-tracked-perms.sh' in deploy
+    assert 'bash -s' in deploy
+    assert 'PERM_SCRIPT="$APP/ops/fix-tracked-perms.sh"' in deploy
+    assert 'inline git ls-files fallback' in deploy
     assert 'APP_USER=podskrift' in deploy
     assert 'APP_GROUP=psaserv' in deploy
-    assert 'sudo -u podskrift test -r data/show_pages.json' in deploy
+    assert 'sudo -u podskrift test -r "$APP/data/show_pages.json"' in deploy
     assert 'http://127.0.0.1:5002/podcasts' in deploy
     assert '/podcasts/the-daily' in deploy
+    # Must not rely only on a relative worktree path (the 127 failure mode).
+    assert 'bash ops/fix-tracked-perms.sh' not in deploy
     assert 'git ls-files -z' in script
+    assert 'chown -h' in script
     assert not any(
         line.lstrip().startswith(('chown -R', 'chmod -R'))
         for line in script.splitlines()

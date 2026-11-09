@@ -126,69 +126,107 @@ jobs:
               -o BatchMode=yes \
               -o StrictHostKeyChecking=yes \
               "${PODSKRIFT_SSH_USER}@${PODSKRIFT_SSH_HOST}" \
-              'set -euo pipefail
-               cd /var/www/vhosts/podskrift.nettsmed.dev/app
-               git fetch origin
-               git checkout main
-               # Drain BEFORE pulling: the old process keeps serving during the
-               # wait (up to 20 min) and must not lazily load new templates or
-               # modules from a half-updated tree. Script comes from the new
-               # commit without touching the working tree. Anything still
-               # running after the wait is re-queued on boot resume.
-               git show origin/main:ops/drain-in-flight.sh \
-                 | PODSKRIFT_DRAIN_MAX_WAIT_SEC=1200 bash -s
-               git pull --ff-only origin main
-               # Tracked files only: git pull as root leaves new/changed files
-               # root:root (often mode 640). App user podskrift then cannot read
-               # them — e.g. data/show_pages.json → load_curated_shows()=[] →
-               # every /podcasts/* 404 (Nov 2026). Script chowns tracked files
-               # (+ parent dir inodes) and chmod's files 644/755 from the git
-               # index; never chmod dirs (data/ stays 750+ACL) or untracked
-               # DB/backups/.env; never follows symlinks.
-               APP_USER=podskrift APP_GROUP=psaserv bash ops/fix-tracked-perms.sh
-               # Install/upgrade runtime deps (e.g. PyJWT for ChatGPT OAuth).
-               .venv/bin/pip install -r requirements.txt
-               systemctl restart podskrift
-               # "active" only means systemd started gunicorn, not that the app
-               # answers (28.10: unreadable new files gave ~1 min downtime while
-               # this step stayed green). Require /health 200 on 60 consecutive
-               # checks (~1 min) within 4 min, else fail with the journal tail.
-               ok=0
-               deadline=$(( $(date +%s) + 240 ))
-               while [ "$ok" -lt 60 ]; do
-                 if curl -fs -m 5 -o /dev/null http://127.0.0.1:5002/health; then
-                   ok=$((ok + 1))
-                 else
-                   [ "$ok" -gt 0 ] && echo "health check failed after $ok OK checks; counting again"
-                   ok=0
-                 fi
-                 if [ "$(date +%s)" -ge "$deadline" ]; then
-                   echo "::error::podskrift /health did not return 200 for 60 consecutive checks within 240s"
-                   systemctl status podskrift --no-pager || true
-                   journalctl -u podskrift -n 80 --no-pager || true
-                   exit 1
-                 fi
-                 sleep 1
-               done
-               systemctl is-active --quiet podskrift
-               curl -fsS -m 5 -o /dev/null -w "prod /health %{http_code} (60 consecutive OK)\n" http://127.0.0.1:5002/health
-               # Curated show pages depend on a readable data/show_pages.json.
-               # /health stays green when that file is unreadable and the index
-               # is empty — fail the deploy explicitly in that case.
-               if ! sudo -u podskrift test -r data/show_pages.json; then
-                 echo "::error::podskrift cannot read data/show_pages.json"
-                 ls -la data/show_pages.json || true
-                 exit 1
-               fi
-               curl -fsS -m 10 -o /tmp/podskrift-podcasts-index.html \
-                 http://127.0.0.1:5002/podcasts \
-                 || { echo "::error::/podcasts did not return 200"; exit 1; }
-               if ! grep -q "/podcasts/the-daily" /tmp/podskrift-podcasts-index.html; then
-                 echo "::error::/podcasts index lists no curated shows"
-                 exit 1
-               fi
-               curl -fsS -m 15 -o /dev/null -w "prod /podcasts/the-daily %{http_code}\n" \
-                 http://127.0.0.1:5002/podcasts/the-daily
-               echo "podskrift is active"
-               echo "HEAD $(git rev-parse --short HEAD)"
-              '
+              bash -s <<'REMOTE'
+          set -euo pipefail
+          APP=/var/www/vhosts/podskrift.nettsmed.dev/app
+          cd "$APP"
+          git fetch origin
+          git checkout main
+          # Drain BEFORE pulling: the old process keeps serving during the
+          # wait (up to 20 min) and must not lazily load new templates or
+          # modules from a half-updated tree. Script comes from the new
+          # commit without touching the working tree. Anything still
+          # running after the wait is re-queued on boot resume.
+          git show origin/main:ops/drain-in-flight.sh \
+            | PODSKRIFT_DRAIN_MAX_WAIT_SEC=1200 bash -s
+          git pull --ff-only origin main
+          # Tracked files only: git pull as root leaves new/changed files
+          # root:root (often mode 640). App user podskrift then cannot read
+          # them — e.g. data/show_pages.json → empty /podcasts/* (Nov 2026).
+          # Run via git-show|bash -s (same as drain) so a briefly-missing
+          # worktree path cannot exit 127; absolute path next; inline last.
+          # Never chmod dirs (data/ stays 750+ACL); never follow symlinks.
+          APP_USER=podskrift
+          APP_GROUP=psaserv
+          PERM_SCRIPT="$APP/ops/fix-tracked-perms.sh"
+          if git cat-file -e HEAD:ops/fix-tracked-perms.sh 2>/dev/null; then
+            git show HEAD:ops/fix-tracked-perms.sh \
+              | APP_USER="$APP_USER" APP_GROUP="$APP_GROUP" bash -s
+          elif [ -f "$PERM_SCRIPT" ]; then
+            APP_USER="$APP_USER" APP_GROUP="$APP_GROUP" bash "$PERM_SCRIPT"
+          else
+            echo "fix-tracked-perms.sh missing; inline git ls-files fallback"
+            while IFS= read -r -d '' rec; do
+              mode=${rec%% *}
+              path=${rec#*$'\t'}
+              [ -n "$path" ] || continue
+              [ -e "$path" ] || [ -L "$path" ] || continue
+              chown -h "${APP_USER}:${APP_GROUP}" -- "$path"
+              if [ -L "$path" ]; then
+                continue
+              fi
+              if [ "$mode" = "100755" ]; then
+                chmod 755 -- "$path"
+              else
+                chmod 644 -- "$path"
+              fi
+            done < <(git ls-files -z --stage)
+            declare -A dirs=()
+            while IFS= read -r -d '' f; do
+              d=$(dirname -- "$f")
+              while [ "$d" != '.' ] && [ "$d" != '/' ]; do
+                dirs["$d"]=1
+                d=$(dirname -- "$d")
+              done
+            done < <(git ls-files -z)
+            for d in "${!dirs[@]}"; do
+              [ -e "$d" ] || [ -L "$d" ] || continue
+              chown -h "${APP_USER}:${APP_GROUP}" -- "$d"
+            done
+          fi
+          # Install/upgrade runtime deps (e.g. PyJWT for ChatGPT OAuth).
+          .venv/bin/pip install -r requirements.txt
+          systemctl restart podskrift
+          # "active" only means systemd started gunicorn, not that the app
+          # answers (28.10: unreadable new files gave ~1 min downtime while
+          # this step stayed green). Require /health 200 on 60 consecutive
+          # checks (~1 min) within 4 min, else fail with the journal tail.
+          ok=0
+          deadline=$(( $(date +%s) + 240 ))
+          while [ "$ok" -lt 60 ]; do
+            if curl -fs -m 5 -o /dev/null http://127.0.0.1:5002/health; then
+              ok=$((ok + 1))
+            else
+              [ "$ok" -gt 0 ] && echo "health check failed after $ok OK checks; counting again"
+              ok=0
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::podskrift /health did not return 200 for 60 consecutive checks within 240s"
+              systemctl status podskrift --no-pager || true
+              journalctl -u podskrift -n 80 --no-pager || true
+              exit 1
+            fi
+            sleep 1
+          done
+          systemctl is-active --quiet podskrift
+          curl -fsS -m 5 -o /dev/null -w "prod /health %{http_code} (60 consecutive OK)\n" http://127.0.0.1:5002/health
+          # Curated show pages depend on a readable data/show_pages.json.
+          # /health stays green when that file is unreadable and the index
+          # is empty — fail the deploy explicitly in that case.
+          if ! sudo -u podskrift test -r "$APP/data/show_pages.json"; then
+            echo "::error::podskrift cannot read data/show_pages.json"
+            ls -la "$APP/data/show_pages.json" || true
+            exit 1
+          fi
+          curl -fsS -m 10 -o /tmp/podskrift-podcasts-index.html \
+            http://127.0.0.1:5002/podcasts \
+            || { echo "::error::/podcasts did not return 200"; exit 1; }
+          if ! grep -q "/podcasts/the-daily" /tmp/podskrift-podcasts-index.html; then
+            echo "::error::/podcasts index lists no curated shows"
+            exit 1
+          fi
+          curl -fsS -m 15 -o /dev/null -w "prod /podcasts/the-daily %{http_code}\n" \
+            http://127.0.0.1:5002/podcasts/the-daily
+          echo "podskrift is active"
+          echo "HEAD $(git rev-parse --short HEAD)"
+          REMOTE
