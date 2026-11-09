@@ -8309,6 +8309,32 @@ def test_pyjwt_in_prod_requirements_and_rs256_roundtrip():
     assert claims['sub'] == 'https://chatgpt.com/oauth/client.json'
 
 
+def test_deploy_yml_fixes_tracked_perms_and_checks_show_pages():
+    """Root git pull must not leave data/show_pages.json unreadable by podskrift.
+
+    After aaa3661, root:root mode 640 on that file emptied /podcasts/* until
+    ownership was fixed. Deploy must chown tracked files and fail if the app
+    user still cannot read the curated show list.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent
+    deploy = (root / '.github' / 'workflows' / 'deploy.yml').read_text()
+    script = (root / 'ops' / 'fix-tracked-perms.sh').read_text()
+    assert 'ops/fix-tracked-perms.sh' in deploy
+    assert 'APP_USER=podskrift' in deploy
+    assert 'APP_GROUP=psaserv' in deploy
+    assert 'sudo -u podskrift test -r data/show_pages.json' in deploy
+    assert 'http://127.0.0.1:5002/podcasts' in deploy
+    assert '/podcasts/the-daily' in deploy
+    assert 'git ls-files -z' in script
+    assert not any(
+        line.lstrip().startswith(('chown -R', 'chmod -R'))
+        for line in script.splitlines()
+        if not line.lstrip().startswith('#')
+    )
+
+
 def _chatgpt_cimd_doc(*, cimd_url, redirect_uri, jwks_uri=None):
     """Shape of ChatGPT's real CIMD document (fetched 2026-03)."""
     return {

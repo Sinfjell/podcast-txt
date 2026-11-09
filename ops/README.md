@@ -37,7 +37,15 @@ SSHs into the Hetzner/Plesk host and runs:
    `http://127.0.0.1:5002/internal/in-flight` until there are no
    queued/running transcriptions, or until **20 minutes** elapse (then
    proceeds anyway so the Actions job stays inside its 30-minute timeout)
-3. `systemctl restart podskrift`, asserts the unit is active, prints HEAD
+3. **Tracked-file permissions** — `ops/fix-tracked-perms.sh` runs
+   `git ls-files` → `chown podskrift:psaserv` and `chmod 644`/`755` on
+   tracked paths (and parent dir inodes only). A root-owned `git pull`
+   otherwise leaves new files `root:root` mode 640, which the app user
+   cannot read (`data/show_pages.json` → empty `/podcasts/*`). Untracked
+   runtime data (SQLite DB, backups, `.env`) is not touched.
+4. `systemctl restart podskrift`, asserts `/health` stays 200, that
+   `podskrift` can read `data/show_pages.json`, and that `/podcasts`
+   lists curated shows (known slug `the-daily` returns 200)
 
 New jobs keep being accepted during the drain; anything still mid-flight when
 the process exits is **re-queued once on boot** (same task id and trial/paid
