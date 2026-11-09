@@ -194,7 +194,7 @@ jobs:
           ok=0
           deadline=$(( $(date +%s) + 240 ))
           while [ "$ok" -lt 60 ]; do
-            if curl -fs -m 5 -o /dev/null http://127.0.0.1:5002/health; then
+            if curl -fsS -m 5 -H "Host: podskrift.com" -o /dev/null http://127.0.0.1:5002/health; then
               ok=$((ok + 1))
             else
               [ "$ok" -gt 0 ] && echo "health check failed after $ok OK checks; counting again"
@@ -209,7 +209,7 @@ jobs:
             sleep 1
           done
           systemctl is-active --quiet podskrift
-          curl -fsS -m 5 -o /dev/null -w "prod /health %{http_code} (60 consecutive OK)\n" http://127.0.0.1:5002/health
+          curl -fsS -m 5 -H "Host: podskrift.com" -o /dev/null -w "prod /health %{http_code} (60 consecutive OK)\n" http://127.0.0.1:5002/health
           # Curated show pages depend on a readable data/show_pages.json.
           # /health stays green when that file is unreadable and the index
           # is empty — fail the deploy explicitly in that case.
@@ -218,14 +218,19 @@ jobs:
             ls -la "$APP/data/show_pages.json" || true
             exit 1
           fi
-          curl -fsS -m 10 -o /tmp/podskrift-podcasts-index.html \
+          # Host is required: without it Flask 301s to https://podskrift.com
+          # and curl -fsS saves redirect HTML (no curated show links).
+          # Do not use -L; that would follow the redirect off-box.
+          curl -fsS -m 10 -H "Host: podskrift.com" \
+            -o /tmp/podskrift-podcasts-index.html \
             http://127.0.0.1:5002/podcasts \
             || { echo "::error::/podcasts did not return 200"; exit 1; }
           if ! grep -q "/podcasts/the-daily" /tmp/podskrift-podcasts-index.html; then
             echo "::error::/podcasts index lists no curated shows"
             exit 1
           fi
-          curl -fsS -m 15 -o /dev/null -w "prod /podcasts/the-daily %{http_code}\n" \
+          curl -fsS -m 15 -H "Host: podskrift.com" -o /dev/null \
+            -w "prod /podcasts/the-daily %{http_code}\n" \
             http://127.0.0.1:5002/podcasts/the-daily
           echo "podskrift is active"
           echo "HEAD $(git rev-parse --short HEAD)"
