@@ -13949,6 +13949,22 @@ def test_normalize_language_code_maps_names_and_unknown_to_auto():
     assert A.normalize_language_code('not-a-language') == ''
     assert A.normalize_language_code('') == ''
     assert A.normalize_language_code(None) == ''
+    # Outside the picker: normalize still drops (picker/RSS path).
+    assert A.normalize_language_code('is') == ''
+    assert A.normalize_language_code('eu') == ''
+
+
+def test_detection_language_code_keeps_iso_outside_picker():
+    """Together auto-detect may return is/eu; routing must not see ''."""
+    assert A.detection_language_code('is') == 'is'
+    assert A.detection_language_code('EU') == 'eu'
+    assert A.detection_language_code('eu-ES') == 'eu'
+    assert A.detection_language_code('en') == 'en'
+    assert A.detection_language_code('english') == 'en'
+    assert A.detection_language_code('not-a-language') == ''
+    assert A.detection_language_code('') == ''
+    assert A.detection_language_code(None) == ''
+    assert A.detection_language_code('x') == ''  # not 2-letter
 
 
 def test_display_language_keeps_legacy_names_readable():
@@ -20248,18 +20264,24 @@ def test_stt_auto_language_pins_detected_language(tmp_path, together_on):
     assert job.pinned_language == 'no'
 
 
-def test_stt_wrong_or_unrolled_language_reruns_on_whisper1(tmp_path, together_on):
-    """Accented English came back as Swahili: re-run on whisper-1, job switches."""
-    tg = _ScriptedClient(_result('habari ' * 30, [_seg(0, 20, ' habari')], 'sw'))
+def test_stt_wrong_or_unrolled_language_keeps_part1_switches_rest(
+        tmp_path, together_on):
+    """Accented English came back as Swahili: keep Together part 1, rest whisper-1."""
+    tg_text = ' '.join(['habari'] * 40)
+    tg = _ScriptedClient(_result(tg_text, [_seg(0, 20, ' ' + tg_text)], 'sw'))
     oa = _ScriptedClient()
     job = _job(tg)
     r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), '', chunk_seconds=60)
-    assert r.text == 'whisper default' and len(oa.calls) == 1
+    assert r.text == tg_text and oa.calls == []  # part 1 not re-billed on whisper
     assert job.provider == STT.PROVIDER_OPENAI
-    assert job.provider_label() == 'mixed'      # paid Together once, then whisper-1
+    assert job.pinned_language == 'sw'
+    assert job.events['chunks_together'] == 1
+    assert job.events[f'chunks_{STT.PROVIDER_OPENAI}'] == 0
+    assert job.provider_label() == STT.PROVIDER_TOGETHER  # only Together so far
     # Later chunks go straight to whisper-1.
     A._transcribe_chunk_routed(job, oa, _chunk(tmp_path, 'd.mp3'), '', chunk_seconds=60)
-    assert len(tg.calls) == 1 and len(oa.calls) == 2
+    assert len(tg.calls) == 1 and len(oa.calls) == 1
+    assert job.provider_label() == 'mixed'
 
 
 # -- dropped windows and invented text -------------------------------------
@@ -20591,15 +20613,19 @@ def test_stt_cut_audio_window_produces_the_requested_slice(tmp_path):
     assert abs(A.probe_audio_duration(out) - 5.0) < 0.3
 
 
-def test_stt_detected_language_not_rolled_out_reruns_on_whisper1(tmp_path, together_on, monkeypatch):
-    """Stage 1 is English only: an auto-detected Norwegian episode goes to whisper-1."""
+def test_stt_detected_language_not_rolled_out_keeps_part1(
+        tmp_path, together_on, monkeypatch):
+    """Stage 1 is English only: auto-detected Norwegian keeps Together part 1."""
     monkeypatch.setenv('STT_TOGETHER_LANGUAGES', 'en')
     tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)], 'no'))
     oa = _ScriptedClient()
     job = _job(tg)
     r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), '', chunk_seconds=60)
-    assert r.text == 'whisper default' and len(oa.calls) == 1
-    assert job.provider == STT.PROVIDER_OPENAI and job.pinned_language is None
+    assert r.text == _GOOD and oa.calls == []
+    assert job.provider == STT.PROVIDER_OPENAI
+    assert job.pinned_language == 'no'
+    assert job.events['chunks_together'] == 1
+    assert job.events[f'chunks_{STT.PROVIDER_OPENAI}'] == 0
 
 
 def test_stt_invented_credit_line_is_dropped_when_clean_retry_is_empty(
@@ -20976,7 +21002,7 @@ def test_stt_scribe_shadow_off_at_zero(tmp_path, together_on, monkeypatch):
 @pytest.mark.parametrize('fallback_kind', ['error', 'language', 'gap'])
 def test_stt_together_fallback_still_scribe_shadows_at_100pct(
         tmp_path, together_on, monkeypatch, ph_events, fallback_kind):
-    """OpenAI fallback returns must still run Scribe shadow (non-English trial)."""
+    """Fallback / after-detect paths still run Scribe shadow (non-English trial)."""
     monkeypatch.setenv('ELEVENLABS_API_KEY', 'el-test-not-a-real-key')
     monkeypatch.setenv('SCRIBE_SHADOW_PCT', '100')
     monkeypatch.setenv('STT_TOGETHER_LANGUAGES', 'en,no')
@@ -20999,16 +21025,24 @@ def test_stt_together_fallback_still_scribe_shadows_at_100pct(
         tg = _ScriptedClient(_openai_exc(503), _openai_exc(503), _openai_exc(503))
         language = 'no'
         monkeypatch.setattr(A, '_repair_dropped_windows', lambda *a, **k: True)
+        expect_text, expect_oa, expect_served = (
+            'whisper default', 1, STT.PROVIDER_OPENAI)
     elif fallback_kind == 'language':
+        # After-detect keeps Together part 1; remaining parts go whisper-1.
+        # Part 1 is still Together-served, so shadow compares against Together.
         tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)], 'sw'))
         language = ''
         monkeypatch.setattr(A, '_repair_dropped_windows', lambda *a, **k: True)
+        expect_text, expect_oa, expect_served = (
+            _GOOD, 0, STT.PROVIDER_TOGETHER)
     else:
         tg = _ScriptedClient(_result(_GOOD, [_seg(0, 20, ' ' + _GOOD)], 'no'))
         language = 'no'
         monkeypatch.setattr(A, '_repair_dropped_windows', lambda *a, **k: False)
         # Full-chunk Together retry also fails → whisper-1 (still shadow).
         monkeypatch.setattr(A, '_together_full_chunk_retry', lambda *a, **k: None)
+        expect_text, expect_oa, expect_served = (
+            'whisper default', 1, STT.PROVIDER_OPENAI)
 
     oa = _ScriptedClient()
     job = _job(tg)
@@ -21017,12 +21051,12 @@ def test_stt_together_fallback_still_scribe_shadows_at_100pct(
                                    chunk_seconds=60)
     for t in threads:
         t.join(5)
-    assert r.text == 'whisper default'
-    assert len(oa.calls) == 1
+    assert r.text == expect_text
+    assert len(oa.calls) == expect_oa
     assert job.events['scribe_shadow'] == 1
     ev = [e for e in ph_events.events if e['event'] == 'stt_scribe_shadow_compared']
     assert len(ev) == 1
-    assert ev[0]['properties']['served_provider'] == STT.PROVIDER_OPENAI
+    assert ev[0]['properties']['served_provider'] == expect_served
 
 
 def test_stt_together_fallback_never_scribe_shadows_byok(
@@ -21438,15 +21472,75 @@ def test_stt_auto_detect_zh_goes_to_whisper1(tmp_path, soniox_on):
     job = _job(tg)
     r = A._transcribe_chunk_routed(
         job, oa, _chunk(tmp_path), '', chunk_seconds=60)
-    assert r.text == 'whisper default'
-    assert len(oa.calls) == 1
+    assert r.text == zh_text  # keep Together part 1
+    assert oa.calls == []
     assert job.provider == STT.PROVIDER_OPENAI
     assert job.reason == 'language_not_rolled_out'
-    assert job.provider_label() == 'mixed'
+    assert job.pinned_language == 'zh'
+    assert job.provider_label() == STT.PROVIDER_TOGETHER
     # Later chunks stay on whisper-1.
     A._transcribe_chunk_routed(
         job, oa, _chunk(tmp_path, 'z2.mp3'), '', chunk_seconds=60)
-    assert len(tg.calls) == 1 and len(oa.calls) == 2
+    assert len(tg.calls) == 1 and len(oa.calls) == 1
+    assert job.provider_label() == 'mixed'
+
+
+def test_stt_auto_detect_unknown_iso_pins_and_no_double_charge(
+        tmp_path, together_on, monkeypatch):
+    """is/eu are outside the picker: pin them, keep Together part 1, no whisper rebill."""
+    monkeypatch.setenv('STT_TOGETHER_LANGUAGES', 'en,no,da')
+    # Icelandic is not on Soniox → whisper for remaining parts once pinned.
+    is_text = ' '.join(['orð'] * 40)
+    tg = _ScriptedClient(_result(is_text, [_seg(0, 20, ' ' + is_text)], 'is'))
+    oa = _ScriptedClient()
+    job = _job(tg)
+    r = A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path), '', chunk_seconds=60)
+    assert r.text == is_text
+    assert oa.calls == []
+    assert job.pinned_language == 'is'
+    assert job.provider == STT.PROVIDER_OPENAI
+    assert job.reason == 'language_not_rolled_out'
+    assert job.events['chunks_together'] == 1
+    assert job.events[f'chunks_{STT.PROVIDER_OPENAI}'] == 0
+    assert abs(job.cost_usd - STT.cost_usd(STT.PROVIDER_TOGETHER, 60)) < 1e-9
+    # Later parts use whisper with the pin (not a second Together detect).
+    A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path, 'p2.mp3'), job.pinned_language,
+        chunk_seconds=60)
+    assert len(tg.calls) == 1 and len(oa.calls) == 1
+    assert oa.calls[0].get('language') == 'is'
+    assert job.provider_label() == 'mixed'
+
+
+def test_stt_auto_detect_eu_routes_to_soniox_when_listed(
+        tmp_path, soniox_on, monkeypatch):
+    """Basque stays off the default Soniox list; when listed, after-detect switches."""
+    monkeypatch.setenv('STT_SONIOX_LANGUAGES', 'de,nl,he,hu,fi,pl,eu')
+    eu_text = ' '.join(['hitza'] * 40)
+    tg = _ScriptedClient(_result(eu_text, [_seg(0, 20, ' ' + eu_text)], 'eu'))
+    oa = _ScriptedClient()
+    job = A.SttJob(
+        STT.PROVIDER_TOGETHER, 'rollout', together_client=tg,
+        audio_seconds=1800)
+    r1 = A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path), '', chunk_seconds=60)
+    assert r1.text == eu_text
+    assert oa.calls == []
+    assert job.provider == STT.PROVIDER_SONIOX
+    assert job.reason == 'soniox_after_detect'
+    assert job.pinned_language == 'eu'
+    assert job.events['fallback_language'] == 0
+    assert job.events['chunks_together'] == 1
+    assert STT.PROVIDER_SONIOX not in job.providers_used
+
+    _soniox_http_script(monkeypatch, transcript_text=eu_text)
+    r2 = A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path, 'p2.mp3'), 'eu', chunk_seconds=60)
+    assert oa.calls == []
+    assert STT.PROVIDER_SONIOX in job.providers_used
+    assert 'hitza' in r2.text or eu_text.split()[0] in r2.text
+    assert job.provider_label() == 'mixed'
 
 
 def test_stt_auto_detect_byok_unchanged(tmp_path, soniox_on):
@@ -23334,9 +23428,13 @@ def _capture_threads(monkeypatch):
     return threads
 
 
-def test_together_shadow_first_chunk_compare_is_free(
+def test_together_shadow_after_detect_keeps_part1_sets_fallback_language(
         tmp_path, together_on, monkeypatch, ph_events):
-    """Auto-detected non-English first chunk: Together's text vs whisper-1, no extra call."""
+    """After-detect whisper path keeps Together part 1; no paid re-transcribe.
+
+    First-chunk free compare against whisper-1 went away with that rebill.
+    ``fallback_language`` still lets later whisper chunks sample Together.
+    """
     monkeypatch.setenv('STT_TOGETHER_SHADOW_LANGUAGES', 'es,pt')
     monkeypatch.setenv('STT_TOGETHER_SHADOW_RATE', '0')
     monkeypatch.setattr(A, '_repair_dropped_windows', lambda *a, **k: True)
@@ -23345,16 +23443,13 @@ def test_together_shadow_first_chunk_compare_is_free(
     job = _job(tg)
     job.user_id = 5151
     r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), '', chunk_seconds=60)
-    assert r.text == 'hola que tal'                       # user gets whisper-1
-    assert len(tg.calls) == 1 and len(oa.calls) == 1      # no extra Together call
+    assert r.text == 'hola que tal amigo'                 # keep Together part 1
+    assert len(tg.calls) == 1 and oa.calls == []          # no whisper rebill
     assert job.fallback_language == 'es'
+    assert job.pinned_language == 'es'
+    assert job.provider == STT.PROVIDER_OPENAI
     ev = [e for e in ph_events.events if e['event'] == 'stt_together_shadow_compared']
-    assert len(ev) == 1
-    p = ev[0]['properties']
-    assert p['source'] == 'first_chunk_autodetect' and p['language'] == 'es'
-    assert p['together_words'] == 4 and p['whisper_words'] == 3
-    assert 0 < p['similarity'] <= 1
-    assert 'text' not in p and 'transcript' not in p
+    assert ev == []  # no free first-chunk compare without a whisper serve
 
 
 def test_together_shadow_samples_later_whisper_chunks_and_never_serves(
