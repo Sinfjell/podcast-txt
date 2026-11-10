@@ -174,6 +174,10 @@
     .result-offer-actions {
         display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
     }
+    .partial-copy-nudge {
+        flex: 1 0 100%; margin: 8px 0 0; line-height: 1.5; color: var(--muted);
+    }
+    .partial-copy-nudge .btn { margin-left: 8px; vertical-align: baseline; }
     /* Secondary BYOK under the purchase CTA — not a peer button. */
     .paywall-byok-alt {
         margin: 12px 0 0; font-size: 13px; line-height: 1.45; color: var(--muted);
@@ -231,6 +235,9 @@
             </span>
             <button type="button" class="btn btn-secondary hidden" id="shareBtn">Share</button>
         </div>
+        <!-- Inline nudge after Copy/Download on a partial preview (at most once) -->
+        <div id="partialCopyNudge" class="hidden text-sm partial-copy-nudge"
+             data-testid="partial-copy-nudge" hidden role="status"></div>
     </div>
     <div id="sharePanel" class="hidden share-panel" role="region" aria-label="Share transcript">
         <p class="text-sm text-muted" id="shareHint" style="margin: 0 0 8px;">
@@ -264,6 +271,14 @@
     </div>
     <div class="tx-body">
         <div class="transcript-pane ph-no-capture" id="transcriptPane"></div>
+        <!-- End-of-preview unlock: shown after the free text when still locked -->
+        <div id="partialEndUnlock" class="hidden card mb-2 result-offer-card"
+             data-testid="partial-end-unlock" hidden>
+            <div class="card-body">
+                <p class="result-offer-title" id="partialEndTitle"></p>
+                <div class="result-offer-actions" id="partialEndActions"></div>
+            </div>
+        </div>
     </div>
 </section>
 <style>
@@ -344,6 +359,10 @@
     var resultViewed = false;
     var resultOfferShown = false;
     var partialPreviewShown = false;
+    var partialEndShown = false;
+    var partialCopyNudgeShown = false;
+    var partialEndObserver = null;
+    var lastStatusData = null;
     var nextStepsLoaded = false;
     var taskHasRss = false;
     var RELATED_CLIENT_TIMEOUT_MS = 10000;
@@ -428,6 +447,245 @@
         c.classList.add('btn-secondary');
     }
 
+    function partialUnlockKind(d) {
+        if (d.full_transcript_url) return 'owned';
+        if (d.can_finish_full && d.finish && d.finish.audio_url) return 'finish';
+        if (d.buy_available && STRIPE_BUY) return 'buy';
+        return null;
+    }
+
+    function partialBuyExtra(d) {
+        // Same episode fields as the lifecycle email finish CTA so
+        // /billing/checkout stashes PENDING_TRANSCRIPTION and
+        // /billing/success auto-starts the full episode once paid.
+        var buyExtra = {};
+        if (d.episode_offer) {
+            buyExtra.minutes = d.episode_offer.minutes;
+            buyExtra.price_source = 'episode';
+            // The server re-prices from the task; nothing here sets
+            // the amount.
+            buyExtra.offer = 'remaining';
+            buyExtra.task_id = taskId;
+        }
+        var fin = d.finish || {};
+        if (fin.audio_url) {
+            buyExtra.audio_url = fin.audio_url;
+            if (fin.rss_url) buyExtra.rss_url = fin.rss_url;
+            if (fin.episode_title) buyExtra.episode_title = fin.episode_title;
+            if (fin.podcast_name) buyExtra.podcast_name = fin.podcast_name;
+            if (fin.artwork) buyExtra.artwork = fin.artwork;
+            if (fin.published) buyExtra.published = fin.published;
+            if (fin.duration_min) buyExtra.duration_min = fin.duration_min;
+            if (fin.language) buyExtra.language = fin.language;
+        }
+        return Object.keys(buyExtra).length ? buyExtra : null;
+    }
+
+    // Shared buy/finish click for top card, end unlock, and copy nudge.
+    function triggerPartialUnlock(d, placement) {
+        var card_t = d.card || {};
+        var kind = partialUnlockKind(d);
+        if (kind === 'finish') {
+            phCapture('finish_episode_clicked', {
+                task_id: taskId,
+                partial_minutes: d.partial_minutes,
+                episode_minutes: d.episode_minutes,
+                paid_remaining_min: d.paid_remaining_min,
+                placement: placement || 'top_card',
+            }, leaveSafeOpts());
+            finishFullEpisode(d.finish, d);
+            return;
+        }
+        if (kind !== 'buy') return;
+        phCapture('finish_episode_clicked', {
+            task_id: taskId,
+            partial_minutes: d.partial_minutes,
+            episode_minutes: d.episode_minutes,
+            action: 'buy',
+            offer_variant: d.episode_offer ? d.episode_offer.variant : null,
+            offered_amount_cents: d.episode_offer ? d.episode_offer.amount_cents : null,
+            ui_locale: card_t.locale || null,
+            placement: placement || 'top_card',
+        }, leaveSafeOpts());
+        if (typeof window.podskriftPaywallBuyClicked === 'function') {
+            window.podskriftPaywallBuyClicked('partial_preview', 'partial', {
+                placement: placement || 'top_card'
+            });
+        }
+        postBuyForm('partial_preview', window.location.pathname, partialBuyExtra(d));
+    }
+
+    function appendPartialByok(actions, card_t) {
+        var byokWrap = document.createElement('p');
+        byokWrap.className = 'paywall-byok-alt';
+        var keyLink = document.createElement('a');
+        keyLink.href = SETTINGS_OPENAI;
+        keyLink.textContent = card_t.byok_alt
+            || 'Have an OpenAI API key? Use it instead';
+        keyLink.setAttribute('data-paywall-byok', 'partial_preview');
+        byokWrap.appendChild(keyLink);
+        actions.parentNode.insertBefore(byokWrap, actions.nextSibling);
+    }
+
+    function makePartialUnlockButton(d, placement, testId) {
+        var card_t = d.card || {};
+        var kind = partialUnlockKind(d);
+        if (kind !== 'finish' && kind !== 'buy') return null;
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-sm btn-primary';
+        if (kind === 'finish') {
+            btn.textContent = card_t.button_finish || 'Transcribe the full episode';
+        } else {
+            btn.textContent = card_t.button_buy || d.unlock_label || d.buy_label || UNLOCK_LABEL;
+            if (testId) btn.setAttribute('data-testid', testId);
+        }
+        btn.addEventListener('click', function() {
+            triggerPartialUnlock(d, placement);
+        });
+        return btn;
+    }
+
+    function partialMinutesMissing(d) {
+        var previewMin = d.partial_minutes != null ? d.partial_minutes : null;
+        var episodeMin = d.episode_minutes != null ? d.episode_minutes : null;
+        if (previewMin == null || episodeMin == null) return null;
+        return Math.max(0, episodeMin - previewMin);
+    }
+
+    function firePartialPaywallShown(d, surface) {
+        var card_t = d.card || {};
+        var offer = d.episode_offer || null;
+        if (typeof window.podskriftPaywallShown !== 'function') return;
+        window.podskriftPaywallShown('partial_preview', 'partial', {
+            surface: surface,
+            task_id: taskId,
+            episode_minutes: d.episode_minutes != null ? d.episode_minutes : null,
+            preview_minutes: d.partial_minutes != null ? d.partial_minutes : null,
+            minutes_missing: partialMinutesMissing(d),
+            offered_price: offer ? offer.price : null,
+            offered_minutes: offer ? offer.minutes : null,
+            offered_amount_cents: offer ? offer.amount_cents : null,
+            offer_variant: offer ? offer.variant : null,
+            ui_locale: card_t.locale || null,
+            local_price: card_t.local_price || null,
+            trial_remaining_min: d.trial_remaining_min,
+            paid_remaining_min: d.paid_remaining_min
+        });
+    }
+
+    function hidePartialEndUnlock() {
+        var endCard = el('partialEndUnlock');
+        if (partialEndObserver) {
+            try { partialEndObserver.disconnect(); } catch (e) { /* ignore */ }
+            partialEndObserver = null;
+        }
+        if (endCard) {
+            show(endCard, false);
+            endCard.setAttribute('hidden', '');
+            var endActions = el('partialEndActions');
+            if (endActions) {
+                while (endActions.firstChild) endActions.removeChild(endActions.firstChild);
+                var next = endActions.nextSibling;
+                while (next && next.classList && next.classList.contains('paywall-byok-alt')) {
+                    var remove = next;
+                    next = next.nextSibling;
+                    remove.parentNode.removeChild(remove);
+                }
+            }
+        }
+    }
+
+    function renderPartialEndUnlock(d) {
+        var endCard = el('partialEndUnlock');
+        var endActions = el('partialEndActions');
+        var endTitle = el('partialEndTitle');
+        if (!endCard || !endActions || !endTitle) return;
+        hidePartialEndUnlock();
+        var kind = partialUnlockKind(d);
+        // Only when still locked and buy/finish is available — never when owned.
+        if (!(d.partial && !d.full_transcript_url
+                && (kind === 'buy' || kind === 'finish'))) {
+            return;
+        }
+        var card_t = d.card || {};
+        var missing = partialMinutesMissing(d);
+        endTitle.textContent = card_t.end_title || (
+            'Preview ends at ' + d.partial_minutes + ':00. '
+            + (missing != null ? missing : '')
+            + ' min of this episode are not transcribed yet.');
+        if (endCard.setAttribute && card_t.locale) {
+            endCard.setAttribute('lang', card_t.locale);
+        }
+        var btn = makePartialUnlockButton(d, 'inline_end', 'partial-end-buy');
+        if (!btn) return;
+        demoteCopyButton();
+        endActions.appendChild(btn);
+        appendPartialByok(endActions, card_t);
+        endCard.removeAttribute('hidden');
+        show(endCard, true);
+        if (!partialEndShown && typeof IntersectionObserver === 'function') {
+            partialEndObserver = new IntersectionObserver(function(entries) {
+                var hit = entries.some(function(e) { return e.isIntersecting; });
+                if (!hit || partialEndShown) return;
+                partialEndShown = true;
+                firePartialPaywallShown(d, 'partial_inline_end');
+                if (partialEndObserver) {
+                    try { partialEndObserver.disconnect(); } catch (e2) { /* ignore */ }
+                    partialEndObserver = null;
+                }
+            }, { threshold: 0.25 });
+            partialEndObserver.observe(endCard);
+        } else if (!partialEndShown && typeof IntersectionObserver !== 'function') {
+            // No IO: fire once when rendered so analytics still has a signal.
+            partialEndShown = true;
+            firePartialPaywallShown(d, 'partial_inline_end');
+        }
+    }
+
+    function showPartialCopyNudge(d, action) {
+        if (partialCopyNudgeShown) return;
+        if (!d || !d.partial || d.full_transcript_url) return;
+        var kind = partialUnlockKind(d);
+        if (kind !== 'buy' && kind !== 'finish') return;
+        var nudge = el('partialCopyNudge');
+        if (!nudge) return;
+        var card_t = d.card || {};
+        var missing = partialMinutesMissing(d);
+        var price = (d.episode_offer && d.episode_offer.price) || '';
+        var isDownload = action === 'download';
+        // Prefer server copy: end_note (Copied) / end_note_downloaded; offer
+        // line matches button_buy (remaining vs full-episode).
+        var text = isDownload
+            ? (card_t.end_note_downloaded || '')
+            : (card_t.end_note || '');
+        if (!text) {
+            var verb = isDownload ? 'Downloaded' : 'Copied';
+            var offerLine = card_t.button_buy
+                || (kind === 'finish'
+                    ? (card_t.button_finish || 'Transcribe the full episode')
+                    : ('Get the remaining '
+                        + (missing != null ? missing : '') + ' min'
+                        + (price ? (' for ' + price) : '')));
+            text = verb + ' the free preview (' + d.partial_minutes + ' of '
+                + d.episode_minutes + ' min). ' + offerLine;
+        }
+        while (nudge.firstChild) nudge.removeChild(nudge.firstChild);
+        var span = document.createElement('span');
+        span.textContent = text + ' ';
+        nudge.appendChild(span);
+        var btn = makePartialUnlockButton(d, 'copy_nudge', 'partial-copy-nudge-buy');
+        if (btn) {
+            btn.className = 'btn btn-sm btn-primary';
+            nudge.appendChild(btn);
+        }
+        if (card_t.locale) nudge.setAttribute('lang', card_t.locale);
+        nudge.removeAttribute('hidden');
+        show(nudge, true);
+        partialCopyNudgeShown = true;
+        firePartialPaywallShown(d, 'partial_copy_nudge');
+    }
+
     function renderPartialPreview(d) {
         var card = el('partialPreviewCard');
         var actions = el('partialPreviewActions');
@@ -457,6 +715,10 @@
             show(localLine, showLocal);
         }
         while (actions.firstChild) actions.removeChild(actions.firstChild);
+        var staleByok = actions.parentNode.querySelectorAll('.paywall-byok-alt');
+        for (var i = 0; i < staleByok.length; i++) {
+            staleByok[i].parentNode.removeChild(staleByok[i]);
+        }
         show(el('resultOfferCard'), false);
 
         if (d.full_transcript_url) {
@@ -468,106 +730,22 @@
             fullLink.className = 'btn btn-sm btn-primary';
             fullLink.textContent = 'Open the full transcript';
             actions.appendChild(fullLink);
-        } else if (d.can_finish_full && d.finish && d.finish.audio_url) {
-            var finishBtn = document.createElement('button');
-            finishBtn.type = 'button';
-            finishBtn.className = 'btn btn-sm btn-primary';
-            demoteCopyButton();
-            finishBtn.textContent = card_t.button_finish || 'Transcribe the full episode';
-            finishBtn.addEventListener('click', function() {
-                phCapture('finish_episode_clicked', {
-                    task_id: taskId,
-                    partial_minutes: d.partial_minutes,
-                    episode_minutes: d.episode_minutes,
-                    paid_remaining_min: d.paid_remaining_min,
-                }, leaveSafeOpts());
-                finishFullEpisode(d.finish, d);
-            });
-            actions.appendChild(finishBtn);
-        } else if (d.buy_available && STRIPE_BUY) {
-            var buyBtn = document.createElement('button');
-            buyBtn.type = 'button';
-            buyBtn.className = 'btn btn-sm btn-primary';
-            demoteCopyButton();
-            buyBtn.textContent = card_t.button_buy || d.unlock_label || d.buy_label || UNLOCK_LABEL;
-            buyBtn.setAttribute('data-testid', 'partial-buy');
-            buyBtn.addEventListener('click', function() {
-                phCapture('finish_episode_clicked', {
-                    task_id: taskId,
-                    partial_minutes: d.partial_minutes,
-                    episode_minutes: d.episode_minutes,
-                    action: 'buy',
-                    offer_variant: d.episode_offer ? d.episode_offer.variant : null,
-                    offered_amount_cents: d.episode_offer ? d.episode_offer.amount_cents : null,
-                    ui_locale: card_t.locale || null,
-                }, leaveSafeOpts());
-                if (typeof window.podskriftPaywallBuyClicked === 'function') {
-                    window.podskriftPaywallBuyClicked('partial_preview', 'partial');
-                }
-                // Same episode fields as the lifecycle email finish CTA so
-                // /billing/checkout stashes PENDING_TRANSCRIPTION and
-                // /billing/success auto-starts the full episode once paid.
-                var buyExtra = {};
-                if (d.episode_offer) {
-                    buyExtra.minutes = d.episode_offer.minutes;
-                    buyExtra.price_source = 'episode';
-                    // The server re-prices from the task; nothing here sets
-                    // the amount.
-                    buyExtra.offer = 'remaining';
-                    buyExtra.task_id = taskId;
-                }
-                var fin = d.finish || {};
-                if (fin.audio_url) {
-                    buyExtra.audio_url = fin.audio_url;
-                    if (fin.rss_url) buyExtra.rss_url = fin.rss_url;
-                    if (fin.episode_title) buyExtra.episode_title = fin.episode_title;
-                    if (fin.podcast_name) buyExtra.podcast_name = fin.podcast_name;
-                    if (fin.artwork) buyExtra.artwork = fin.artwork;
-                    if (fin.published) buyExtra.published = fin.published;
-                    if (fin.duration_min) buyExtra.duration_min = fin.duration_min;
-                    if (fin.language) buyExtra.language = fin.language;
-                }
-                postBuyForm('partial_preview', window.location.pathname,
-                    Object.keys(buyExtra).length ? buyExtra : null);
-            });
-            actions.appendChild(buyBtn);
+            hidePartialEndUnlock();
+        } else {
+            var unlockBtn = makePartialUnlockButton(d, 'top_card', 'partial-buy');
+            if (unlockBtn) {
+                demoteCopyButton();
+                actions.appendChild(unlockBtn);
+            }
+            renderPartialEndUnlock(d);
         }
-
         // BYOK is a quiet secondary line under the purchase CTA — not a peer button.
-        var byokWrap = document.createElement('p');
-        byokWrap.className = 'paywall-byok-alt';
-        var keyLink = document.createElement('a');
-        keyLink.href = SETTINGS_OPENAI;
-        keyLink.textContent = card_t.byok_alt
-            || 'Have an OpenAI API key? Use it instead';
-        keyLink.setAttribute('data-paywall-byok', 'partial_preview');
-        byokWrap.appendChild(keyLink);
-        actions.parentNode.insertBefore(byokWrap, actions.nextSibling);
+        appendPartialByok(actions, card_t);
+
         show(card, true);
         if (!partialPreviewShown) {
             partialPreviewShown = true;
-            var offer = d.episode_offer || null;
-            var previewMin = d.partial_minutes != null ? d.partial_minutes : null;
-            var episodeMin = d.episode_minutes != null ? d.episode_minutes : null;
-            var missing = (previewMin != null && episodeMin != null)
-                ? Math.max(0, episodeMin - previewMin) : null;
-            if (typeof window.podskriftPaywallShown === 'function') {
-                window.podskriftPaywallShown('partial_preview', 'partial', {
-                    surface: 'partial_preview',
-                    task_id: taskId,
-                    episode_minutes: episodeMin,
-                    preview_minutes: previewMin,
-                    minutes_missing: missing,
-                    offered_price: offer ? offer.price : null,
-                    offered_minutes: offer ? offer.minutes : null,
-                    offered_amount_cents: offer ? offer.amount_cents : null,
-                    offer_variant: offer ? offer.variant : null,
-                    ui_locale: card_t.locale || null,
-                    local_price: card_t.local_price || null,
-                    trial_remaining_min: d.trial_remaining_min,
-                    paid_remaining_min: d.paid_remaining_min
-                });
-            }
+            firePartialPaywallShown(d, 'partial_preview');
         }
     }
 
@@ -951,12 +1129,19 @@
                     show(balLine, false);
                 }
             }
+            lastStatusData = d;
             if (d.partial) {
                 el('completionTitle').textContent = 'Free preview ready';
                 renderPartialPreview(d);
             } else {
                 el('completionTitle').textContent = 'Transcription complete';
                 show(el('partialPreviewCard'), false);
+                hidePartialEndUnlock();
+                var nudgeOff = el('partialCopyNudge');
+                if (nudgeOff) {
+                    show(nudgeOff, false);
+                    nudgeOff.setAttribute('hidden', '');
+                }
                 renderResultOffer(d);
             }
             renderSummary(d);
@@ -1083,6 +1268,7 @@
             setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
             phCapture('transcript_copied', { task_id: taskId });
             showCopyNextSteps();
+            showPartialCopyNudge(lastStatusData, 'copy');
         });
     };
 
@@ -1199,12 +1385,15 @@
             txt.dataset.phWired = '1';
             txt.addEventListener('click', function() {
                 phCapture('transcript_downloaded', { task_id: taskId, format: 'txt' });
+                // Never block the download — nudge is informational only.
+                showPartialCopyNudge(lastStatusData, 'download');
             });
         }
         if (srt && !srt.dataset.phWired) {
             srt.dataset.phWired = '1';
             srt.addEventListener('click', function() {
                 phCapture('transcript_downloaded', { task_id: taskId, format: 'srt' });
+                showPartialCopyNudge(lastStatusData, 'download');
             });
         }
     }

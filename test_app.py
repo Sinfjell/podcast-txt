@@ -16373,7 +16373,7 @@ def test_partial_preview_card_js_fires_paywall_shown_and_stashes_episode():
     tx = (pathlib.Path(A.__file__).parent / 'templates' / 'transcription.html'
           ).read_text()
     assert "podskriftPaywallShown('partial_preview', 'partial'" in tx
-    assert "surface: 'partial_preview'" in tx
+    assert "surface: 'partial_preview'" in tx or "surface: surface" in tx
     assert 'preview_minutes:' in tx
     assert 'minutes_missing:' in tx
     assert 'offered_price:' in tx
@@ -16382,10 +16382,35 @@ def test_partial_preview_card_js_fires_paywall_shown_and_stashes_episode():
     assert 'buyExtra.audio_url = fin.audio_url' in tx
     assert 'buyExtra.duration_min = fin.duration_min' in tx
     assert "postBuyForm('partial_preview'" in tx
+    assert 'triggerPartialUnlock' in tx
+    assert "placement: 'top_card'" in tx or "placement: placement" in tx
+    assert "partial_inline_end" in tx
+    assert "partial_copy_nudge" in tx
+    assert 'data-testid="partial-end-unlock"' in tx
+    assert 'data-testid="partial-copy-nudge"' in tx
+    assert 'IntersectionObserver' in tx
     base = (pathlib.Path(A.__file__).parent / 'templates' / 'base.html').read_text()
     assert "'surface'" in base
     assert "'preview_minutes'" in base
     assert "'offered_price'" in base
+
+
+def test_transcription_template_has_hidden_partial_end_and_nudge_containers():
+    """End unlock + copy nudge mount points exist and start hidden."""
+    import pathlib
+    import re
+    tx = (pathlib.Path(A.__file__).parent / 'templates' / 'transcription.html'
+          ).read_text()
+    end = re.search(
+        r'<div[^>]*id="partialEndUnlock"[^>]*>', tx, re.S)
+    nudge = re.search(
+        r'<div[^>]*id="partialCopyNudge"[^>]*>', tx, re.S)
+    assert end, 'missing partial-end-unlock container'
+    assert nudge, 'missing partial-copy-nudge container'
+    assert 'data-testid="partial-end-unlock"' in end.group(0)
+    assert 'data-testid="partial-copy-nudge"' in nudge.group(0)
+    assert 'hidden' in end.group(0) and 'class="hidden' in end.group(0)
+    assert 'hidden' in nudge.group(0) and 'class="hidden' in nudge.group(0)
 
 
 def test_partial_preview_checkout_stashes_episode_and_autostarts_once(
@@ -23913,15 +23938,54 @@ def test_status_card_shows_remaining_price_localized(remaining_on):
     assert en['episode_offer']['variant'] == 'remaining_v1'
     assert en['card']['button_buy'] == 'Get the remaining 57 min for $1.49'
     assert en['card']['local_price_line'] == ''        # en-US: no local guess
+    assert en['card']['end_title'] == (
+        'Preview ends at 60:00. 57 min of this episode are not transcribed yet.')
+    assert en['card']['end_note'] == (
+        'Copied the free preview (60 of 117 min). '
+        'Get the remaining 57 min for $1.49')
+    assert en['card']['end_note_downloaded'] == (
+        'Downloaded the free preview (60 of 117 min). '
+        'Get the remaining 57 min for $1.49')
+    # Nudge offer line matches the top button for the same offer.
+    assert en['card']['end_note'].endswith(en['card']['button_buy'])
     es = client.get('/status/rem-status-1', headers={
         'Accept-Language': 'es-ES,es;q=0.9'}).get_json()
     assert es['card']['locale'] == 'es'
     assert es['card']['button_buy'] == 'Obtén los 57 min restantes por 1,49\u00a0$'
     assert es['card']['local_price'] == '1,33\u00a0€'
     assert 'Stripe' in es['card']['local_price_line']
+    assert 'end_title' in es['card'] and es['card']['end_title']
+    assert 'end_note' in es['card'] and es['card']['end_note']
+    assert es['card']['end_note_downloaded']
+    assert es['card']['end_note'].endswith(es['card']['button_buy'])
     de = client.get('/status/rem-status-1', headers={
         'Accept-Language': 'de'}).get_json()
     assert de['card']['button_buy'].startswith('Restliche 57 Min.')
+
+
+def test_status_end_title_note_only_on_partial(remaining_on):
+    """end_title/end_note ride on the partial card; full tasks have no card."""
+    from models import db, TranscriptionTask
+    uid = _make_user('rem-endcard@test.com', limit=3600, used=3600)
+    _set_paid(uid, 0)
+    _partial_task(uid, 'rem-endcard-partial')
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='rem-endcard-full', user_id=uid, episode_title='Full Ep',
+            podcast_name='Show', status='completed', phase='completed',
+            transcript_text='full body',
+            source_audio_url='https://cdn.example.com/full.mp3',
+            language='en', trial_seconds_charged=600,
+        ))
+        db.session.commit()
+    client = _login(uid)
+    partial = client.get('/status/rem-endcard-partial').get_json()
+    assert partial.get('partial') is True
+    assert partial['card']['end_title']
+    assert partial['card']['end_note']
+    full = client.get('/status/rem-endcard-full').get_json()
+    assert not full.get('partial')
+    assert 'card' not in full
 
 
 def test_remaining_checkout_charges_what_the_card_shows(remaining_on, ph_events):
@@ -24352,3 +24416,35 @@ def test_public_copy_does_not_claim_a_specific_stt_vendor(trial_on):
                       'runs OpenAI Whisper', 'our OpenAI key', 'uses OpenAI Whisper',
                       'start Whisper', 'Whisper API'):
             assert claim not in body, f'{path} still says {claim!r}'
+
+
+def test_paywall_shown_dedupes_per_surface_so_partial_extra_surfaces_fire():
+    """Top card fires first with location partial_preview; the end block and
+    copy nudge reuse that location, so dedupe must include surface or they
+    are silently dropped. offer_shown stays once per location."""
+    import pathlib
+    base = (pathlib.Path(A.__file__).parent / 'templates' / 'base.html').read_text()
+    assert "var key = String(location) + '|' + (p.surface || '');" in base
+    assert 'if (firstForLocation) {' in base
+    assert "if (cta.placement) formBuy.placement = cta.placement;" in base
+    tx = (pathlib.Path(A.__file__).parent / 'templates' / 'transcription.html'
+          ).read_text()
+    assert "podskriftPaywallBuyClicked('partial_preview', 'partial', {" in tx
+    assert "showPartialCopyNudge(lastStatusData, 'copy')" in tx
+    assert "showPartialCopyNudge(lastStatusData, 'download')" in tx
+
+
+def test_partial_card_nudge_matches_full_episode_button():
+    """Full-episode offer: nudge second sentence is button_buy, not remaining."""
+    card = P.partial_card(
+        'en', partial_minutes=60, episode_minutes=117,
+        offer={'amount_cents': 238, 'minutes': 120},
+        buy_available=True)
+    assert card['button_buy'] == 'Transcribe this episode (117 min) for $2.38'
+    assert card['end_note'] == (
+        'Copied the free preview (60 of 117 min). '
+        'Transcribe this episode (117 min) for $2.38')
+    assert card['end_note_downloaded'] == (
+        'Downloaded the free preview (60 of 117 min). '
+        'Transcribe this episode (117 min) for $2.38')
+    assert 'remaining' not in card['end_note'].lower()
