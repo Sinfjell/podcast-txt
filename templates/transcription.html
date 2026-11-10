@@ -508,7 +508,9 @@
             placement: placement || 'top_card',
         }, leaveSafeOpts());
         if (typeof window.podskriftPaywallBuyClicked === 'function') {
-            window.podskriftPaywallBuyClicked('partial_preview', 'partial');
+            window.podskriftPaywallBuyClicked('partial_preview', 'partial', {
+                placement: placement || 'top_card'
+            });
         }
         postBuyForm('partial_preview', window.location.pathname, partialBuyExtra(d));
     }

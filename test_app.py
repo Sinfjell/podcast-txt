@@ -24408,3 +24408,17 @@ def test_public_copy_does_not_claim_a_specific_stt_vendor(trial_on):
                       'runs OpenAI Whisper', 'our OpenAI key', 'uses OpenAI Whisper',
                       'start Whisper', 'Whisper API'):
             assert claim not in body, f'{path} still says {claim!r}'
+
+
+def test_paywall_shown_dedupes_per_surface_so_partial_extra_surfaces_fire():
+    """Top card fires first with location partial_preview; the end block and
+    copy nudge reuse that location, so dedupe must include surface or they
+    are silently dropped. offer_shown stays once per location."""
+    import pathlib
+    base = (pathlib.Path(A.__file__).parent / 'templates' / 'base.html').read_text()
+    assert "var key = String(location) + '|' + (p.surface || '');" in base
+    assert 'if (firstForLocation) {' in base
+    assert "if (cta.placement) formBuy.placement = cta.placement;" in base
+    tx = (pathlib.Path(A.__file__).parent / 'templates' / 'transcription.html'
+          ).read_text()
+    assert "podskriftPaywallBuyClicked('partial_preview', 'partial', {" in tx

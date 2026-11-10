@@ -1662,10 +1662,15 @@
         window.podskriftPaywallShown = function (location, reason, props) {
             try {
                 if (!window.posthog || !location) return;
-                var key = String(location);
+                var p = props || {};
+                // Dedupe per location + surface so extra surfaces of the same
+                // paywall (e.g. partial_inline_end, partial_copy_nudge) still
+                // record; offer_shown stays once per location (old baseline).
+                var key = String(location) + '|' + (p.surface || '');
                 if (_paywallSeen.has(key)) return;
                 _paywallSeen.add(key);
-                var p = props || {};
+                var firstForLocation = !_paywallSeen.has(String(location));
+                _paywallSeen.add(String(location));
                 var payload = {
                     location: location,
                     reason: reason || '',
@@ -1683,7 +1688,9 @@
                 });
                 if (TRIAL_VARIANT) payload.trial_variant = TRIAL_VARIANT;
                 posthog.capture('paywall_shown', payload);
-                posthog.capture('offer_shown', Object.assign({variant: 'buy_or_key'}, payload));
+                if (firstForLocation) {
+                    posthog.capture('offer_shown', Object.assign({variant: 'buy_or_key'}, payload));
+                }
             } catch (e) { /* ignore */ }
         };
 
@@ -1691,11 +1698,12 @@
         // The paywall_buy_clicked event itself fires exactly once, on the
         // checkout form submit below, so every buy entry point (paywall,
         // buy modal, slider, episode button) is counted the same way.
-        window.podskriftPaywallBuyClicked = function (location, reason) {
+        window.podskriftPaywallBuyClicked = function (location, reason, props) {
             try {
                 window.__podskriftPaywallCta = {
                     location: location || '',
-                    reason: reason || ''
+                    reason: reason || '',
+                    placement: (props && props.placement) || ''
                 };
             } catch (e) { /* ignore */ }
         };
@@ -1815,6 +1823,7 @@
                     price_source: psEl ? psEl.value : '',
                     pricing_version: PRICING_VERSION
                 };
+                if (cta.placement) formBuy.placement = cta.placement;
                 if (TRIAL_VARIANT) formBuy.trial_variant = TRIAL_VARIANT;
                 posthog.capture('paywall_buy_clicked', formBuy, opts);
                 window.__podskriftPaywallCta = null;
