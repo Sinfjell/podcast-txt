@@ -29,6 +29,10 @@ CARD_COPY = {
         'byok': 'Add OpenAI key →',
         'local_price': ('≈ {local} · Stripe shows the exact amount in your '
                         'currency at checkout.'),
+        'end_title': ('Preview ends at {n}:00. {missing} min of this episode '
+                      'are not transcribed yet.'),
+        'end_note': ('Copied the free preview ({n} of {m} min). Get the '
+                     'remaining {missing} min for {price}'),
     },
     'es': {
         'title': 'Vista previa gratis: primeros {n} minutos de {m}',
@@ -46,6 +50,10 @@ CARD_COPY = {
         'byok': 'Añadir clave de OpenAI →',
         'local_price': ('≈ {local} · Stripe te muestra el importe exacto en '
                         'tu moneda al pagar.'),
+        'end_title': ('La vista previa termina en {n}:00. Faltan {missing} min '
+                      'de este episodio por transcribir.'),
+        'end_note': ('Copiaste la vista previa gratis ({n} de {m} min). Obtén '
+                     'los {missing} min restantes por {price}'),
     },
     'de': {
         'title': 'Kostenlose Vorschau: die ersten {n} von {m} Minuten',
@@ -64,6 +72,10 @@ CARD_COPY = {
         'byok': 'OpenAI-Schlüssel hinzufügen →',
         'local_price': ('≈ {local} · Stripe zeigt dir an der Kasse den '
                         'genauen Betrag in deiner Währung.'),
+        'end_title': ('Vorschau endet bei {n}:00. {missing} Min. dieser Folge '
+                      'sind noch nicht transkribiert.'),
+        'end_note': ('Kostenlose Vorschau kopiert ({n} von {m} Min.). Hol dir '
+                     'die restlichen {missing} Min. für {price}'),
     },
     'nl': {
         'title': 'Gratis voorproefje: eerste {n} van {m} minuten',
@@ -81,6 +93,10 @@ CARD_COPY = {
         'byok': 'OpenAI-sleutel toevoegen →',
         'local_price': ('≈ {local} · Stripe toont bij het afrekenen het '
                         'exacte bedrag in jouw valuta.'),
+        'end_title': ('Voorproefje eindigt bij {n}:00. {missing} min van deze '
+                      'aflevering is nog niet getranscribeerd.'),
+        'end_note': ('Gratis voorproefje gekopieerd ({n} van {m} min). Haal de '
+                     'resterende {missing} min voor {price}'),
     },
     'fr': {
         'title': f'Aperçu gratuit{_NBSP}: les {{n}} premières minutes sur {{m}}',
@@ -98,6 +114,10 @@ CARD_COPY = {
         'byok': 'Ajouter une clé OpenAI →',
         'local_price': ('≈ {local} · Stripe affiche le montant exact dans '
                         'votre devise au moment du paiement.'),
+        'end_title': (f'L’aperçu s’arrête à {{n}}:00. {{missing}} min de cet '
+                      f'épisode ne sont pas encore transcrites.'),
+        'end_note': (f'Aperçu gratuit copié ({{n}} sur {{m}} min). Obtenez les '
+                     f'{{missing}} min restantes pour {{price}}'),
     },
     'pt': {
         'title': 'Prévia grátis: primeiros {n} de {m} minutos',
@@ -115,6 +135,10 @@ CARD_COPY = {
         'byok': 'Adicionar chave da OpenAI →',
         'local_price': ('≈ {local} · O Stripe mostra o valor exato na sua '
                         'moeda no pagamento.'),
+        'end_title': ('A prévia termina em {n}:00. Faltam {missing} min deste '
+                      'episódio por transcrever.'),
+        'end_note': ('Você copiou a prévia grátis ({n} de {m} min). Obtenha os '
+                     '{missing} min restantes por {price}'),
     },
 }
 
@@ -247,6 +271,7 @@ def partial_card(locale, *, partial_minutes, episode_minutes, offer=None,
         locale = 'en'
     t = CARD_COPY[locale]
     n, m = int(partial_minutes), int(episode_minutes)
+    missing = max(0, m - n)
     out = {
         'locale': locale,
         'title': t['title'].format(n=n, m=m),
@@ -256,6 +281,9 @@ def partial_card(locale, *, partial_minutes, episode_minutes, offer=None,
         'local_price_line': '',
         'note': t['note_none'],
         'button_buy': t['button_unlock'],
+        'end_title': t['end_title'].format(n=n, missing=missing),
+        # Price filled when an offer exists; client falls back to English.
+        'end_note': '',
     }
     if not buy_available:
         return out
@@ -266,10 +294,13 @@ def partial_card(locale, *, partial_minutes, episode_minutes, offer=None,
             out['note'] = t['note_remaining'].format(missing=missing)
             out['button_buy'] = t['button_remaining'].format(
                 missing=missing, price=price)
+            out['end_title'] = t['end_title'].format(n=n, missing=missing)
         else:
             out['note'] = t['note_full'].format(
                 price=price, minutes=int(offer['minutes']))
             out['button_buy'] = t['button_full'].format(m=m, price=price)
+        out['end_note'] = t['end_note'].format(
+            n=n, m=m, missing=missing, price=price)
         local = local_price(offer['amount_cents'], country, locale)
         if local:
             out['local_price_line'] = t['local_price'].format(local=local)
