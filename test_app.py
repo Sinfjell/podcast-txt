@@ -23941,7 +23941,13 @@ def test_status_card_shows_remaining_price_localized(remaining_on):
     assert en['card']['end_title'] == (
         'Preview ends at 60:00. 57 min of this episode are not transcribed yet.')
     assert en['card']['end_note'] == (
-        'Copied the free preview (60 of 117 min). Get the remaining 57 min for $1.49')
+        'Copied the free preview (60 of 117 min). '
+        'Get the remaining 57 min for $1.49')
+    assert en['card']['end_note_downloaded'] == (
+        'Downloaded the free preview (60 of 117 min). '
+        'Get the remaining 57 min for $1.49')
+    # Nudge offer line matches the top button for the same offer.
+    assert en['card']['end_note'].endswith(en['card']['button_buy'])
     es = client.get('/status/rem-status-1', headers={
         'Accept-Language': 'es-ES,es;q=0.9'}).get_json()
     assert es['card']['locale'] == 'es'
@@ -23950,6 +23956,8 @@ def test_status_card_shows_remaining_price_localized(remaining_on):
     assert 'Stripe' in es['card']['local_price_line']
     assert 'end_title' in es['card'] and es['card']['end_title']
     assert 'end_note' in es['card'] and es['card']['end_note']
+    assert es['card']['end_note_downloaded']
+    assert es['card']['end_note'].endswith(es['card']['button_buy'])
     de = client.get('/status/rem-status-1', headers={
         'Accept-Language': 'de'}).get_json()
     assert de['card']['button_buy'].startswith('Restliche 57 Min.')
@@ -24422,3 +24430,21 @@ def test_paywall_shown_dedupes_per_surface_so_partial_extra_surfaces_fire():
     tx = (pathlib.Path(A.__file__).parent / 'templates' / 'transcription.html'
           ).read_text()
     assert "podskriftPaywallBuyClicked('partial_preview', 'partial', {" in tx
+    assert "showPartialCopyNudge(lastStatusData, 'copy')" in tx
+    assert "showPartialCopyNudge(lastStatusData, 'download')" in tx
+
+
+def test_partial_card_nudge_matches_full_episode_button():
+    """Full-episode offer: nudge second sentence is button_buy, not remaining."""
+    card = P.partial_card(
+        'en', partial_minutes=60, episode_minutes=117,
+        offer={'amount_cents': 238, 'minutes': 120},
+        buy_available=True)
+    assert card['button_buy'] == 'Transcribe this episode (117 min) for $2.38'
+    assert card['end_note'] == (
+        'Copied the free preview (60 of 117 min). '
+        'Transcribe this episode (117 min) for $2.38')
+    assert card['end_note_downloaded'] == (
+        'Downloaded the free preview (60 of 117 min). '
+        'Transcribe this episode (117 min) for $2.38')
+    assert 'remaining' not in card['end_note'].lower()

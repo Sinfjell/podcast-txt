@@ -643,7 +643,7 @@
         }
     }
 
-    function showPartialCopyNudge(d) {
+    function showPartialCopyNudge(d, action) {
         if (partialCopyNudgeShown) return;
         if (!d || !d.partial || d.full_transcript_url) return;
         var kind = partialUnlockKind(d);
@@ -653,12 +653,22 @@
         var card_t = d.card || {};
         var missing = partialMinutesMissing(d);
         var price = (d.episode_offer && d.episode_offer.price) || '';
-        var text = card_t.end_note;
+        var isDownload = action === 'download';
+        // Prefer server copy: end_note (Copied) / end_note_downloaded; offer
+        // line matches button_buy (remaining vs full-episode).
+        var text = isDownload
+            ? (card_t.end_note_downloaded || '')
+            : (card_t.end_note || '');
         if (!text) {
-            text = 'Copied the free preview (' + d.partial_minutes + ' of '
-                + d.episode_minutes + ' min). Get the remaining '
-                + (missing != null ? missing : '') + ' min'
-                + (price ? (' for ' + price) : '');
+            var verb = isDownload ? 'Downloaded' : 'Copied';
+            var offerLine = card_t.button_buy
+                || (kind === 'finish'
+                    ? (card_t.button_finish || 'Transcribe the full episode')
+                    : ('Get the remaining '
+                        + (missing != null ? missing : '') + ' min'
+                        + (price ? (' for ' + price) : '')));
+            text = verb + ' the free preview (' + d.partial_minutes + ' of '
+                + d.episode_minutes + ' min). ' + offerLine;
         }
         while (nudge.firstChild) nudge.removeChild(nudge.firstChild);
         var span = document.createElement('span');
@@ -1258,7 +1268,7 @@
             setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
             phCapture('transcript_copied', { task_id: taskId });
             showCopyNextSteps();
-            showPartialCopyNudge(lastStatusData);
+            showPartialCopyNudge(lastStatusData, 'copy');
         });
     };
 
@@ -1376,14 +1386,14 @@
             txt.addEventListener('click', function() {
                 phCapture('transcript_downloaded', { task_id: taskId, format: 'txt' });
                 // Never block the download — nudge is informational only.
-                showPartialCopyNudge(lastStatusData);
+                showPartialCopyNudge(lastStatusData, 'download');
             });
         }
         if (srt && !srt.dataset.phWired) {
             srt.dataset.phWired = '1';
             srt.addEventListener('click', function() {
                 phCapture('transcript_downloaded', { task_id: taskId, format: 'srt' });
-                showPartialCopyNudge(lastStatusData);
+                showPartialCopyNudge(lastStatusData, 'download');
             });
         }
     }

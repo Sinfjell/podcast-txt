@@ -31,8 +31,10 @@ CARD_COPY = {
                         'currency at checkout.'),
         'end_title': ('Preview ends at {n}:00. {missing} min of this episode '
                       'are not transcribed yet.'),
-        'end_note': ('Copied the free preview ({n} of {m} min). Get the '
-                     'remaining {missing} min for {price}'),
+        'nudge_copied': 'Copied',
+        'nudge_downloaded': 'Downloaded',
+        # {offer} is the same line as button_buy (remaining or full-episode).
+        'nudge_preview': '{action} the free preview ({n} of {m} min). {offer}',
     },
     'es': {
         'title': 'Vista previa gratis: primeros {n} minutos de {m}',
@@ -52,8 +54,9 @@ CARD_COPY = {
                         'tu moneda al pagar.'),
         'end_title': ('La vista previa termina en {n}:00. Faltan {missing} min '
                       'de este episodio por transcribir.'),
-        'end_note': ('Copiaste la vista previa gratis ({n} de {m} min). Obtén '
-                     'los {missing} min restantes por {price}'),
+        'nudge_copied': 'Copiaste',
+        'nudge_downloaded': 'Descargaste',
+        'nudge_preview': '{action} la vista previa gratis ({n} de {m} min). {offer}',
     },
     'de': {
         'title': 'Kostenlose Vorschau: die ersten {n} von {m} Minuten',
@@ -74,8 +77,9 @@ CARD_COPY = {
                         'genauen Betrag in deiner Währung.'),
         'end_title': ('Vorschau endet bei {n}:00. {missing} Min. dieser Folge '
                       'sind noch nicht transkribiert.'),
-        'end_note': ('Kostenlose Vorschau kopiert ({n} von {m} Min.). Hol dir '
-                     'die restlichen {missing} Min. für {price}'),
+        'nudge_copied': 'Kopiert',
+        'nudge_downloaded': 'Heruntergeladen',
+        'nudge_preview': '{action} die kostenlose Vorschau ({n} von {m} Min.). {offer}',
     },
     'nl': {
         'title': 'Gratis voorproefje: eerste {n} van {m} minuten',
@@ -95,8 +99,9 @@ CARD_COPY = {
                         'exacte bedrag in jouw valuta.'),
         'end_title': ('Voorproefje eindigt bij {n}:00. {missing} min van deze '
                       'aflevering is nog niet getranscribeerd.'),
-        'end_note': ('Gratis voorproefje gekopieerd ({n} van {m} min). Haal de '
-                     'resterende {missing} min voor {price}'),
+        'nudge_copied': 'Gekopieerd',
+        'nudge_downloaded': 'Gedownload',
+        'nudge_preview': '{action} gratis voorproefje ({n} van {m} min). {offer}',
     },
     'fr': {
         'title': f'Aperçu gratuit{_NBSP}: les {{n}} premières minutes sur {{m}}',
@@ -116,8 +121,10 @@ CARD_COPY = {
                         'votre devise au moment du paiement.'),
         'end_title': (f'L’aperçu s’arrête à {{n}}:00. {{missing}} min de cet '
                       f'épisode ne sont pas encore transcrites.'),
-        'end_note': (f'Aperçu gratuit copié ({{n}} sur {{m}} min). Obtenez les '
-                     f'{{missing}} min restantes pour {{price}}'),
+        'nudge_copied': 'Copié',
+        'nudge_downloaded': 'Téléchargé',
+        'nudge_preview': (f'{{action}} l’aperçu gratuit ({{n}} sur {{m}} min). '
+                          f'{{offer}}'),
     },
     'pt': {
         'title': 'Prévia grátis: primeiros {n} de {m} minutos',
@@ -137,8 +144,9 @@ CARD_COPY = {
                         'moeda no pagamento.'),
         'end_title': ('A prévia termina em {n}:00. Faltam {missing} min deste '
                       'episódio por transcrever.'),
-        'end_note': ('Você copiou a prévia grátis ({n} de {m} min). Obtenha os '
-                     '{missing} min restantes por {price}'),
+        'nudge_copied': 'Você copiou',
+        'nudge_downloaded': 'Você baixou',
+        'nudge_preview': '{action} a prévia grátis ({n} de {m} min). {offer}',
     },
 }
 
@@ -282,8 +290,9 @@ def partial_card(locale, *, partial_minutes, episode_minutes, offer=None,
         'note': t['note_none'],
         'button_buy': t['button_unlock'],
         'end_title': t['end_title'].format(n=n, missing=missing),
-        # Price filled when an offer exists; client falls back to English.
+        # Filled when an offer exists; second sentence matches button_buy.
         'end_note': '',
+        'end_note_downloaded': '',
     }
     if not buy_available:
         return out
@@ -299,8 +308,12 @@ def partial_card(locale, *, partial_minutes, episode_minutes, offer=None,
             out['note'] = t['note_full'].format(
                 price=price, minutes=int(offer['minutes']))
             out['button_buy'] = t['button_full'].format(m=m, price=price)
-        out['end_note'] = t['end_note'].format(
-            n=n, m=m, missing=missing, price=price)
+        # Same unlock line as the top button — remaining or full-episode.
+        offer_line = out['button_buy']
+        out['end_note'] = t['nudge_preview'].format(
+            action=t['nudge_copied'], n=n, m=m, offer=offer_line)
+        out['end_note_downloaded'] = t['nudge_preview'].format(
+            action=t['nudge_downloaded'], n=n, m=m, offer=offer_line)
         local = local_price(offer['amount_cents'], country, locale)
         if local:
             out['local_price_line'] = t['local_price'].format(local=local)
