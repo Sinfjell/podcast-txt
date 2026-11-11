@@ -17,6 +17,8 @@ Keep stem + suffix ≤ 60 characters.
 PAGES = (
     ('landing_generator', '/podcast-transcript-generator'),
     ('landing_spotify', '/spotify-podcast-transcript'),
+    ('landing_de_spotify', '/de/spotify-podcast-transkript'),
+    ('landing_es_spotify', '/es/transcribir-podcast-spotify'),
     ('landing_spotify_no_rss', '/spotify-episode-without-rss'),
     ('landing_spotify_no_transcript', '/spotify-transcript-not-available'),
     ('landing_video_podcast', '/video-podcast-transcript'),
@@ -42,6 +44,8 @@ PAGES = (
 FOOTER = (
     'landing_generator',
     'landing_spotify',
+    'landing_de_spotify',
+    'landing_es_spotify',
     'landing_spotify_no_rss',
     'landing_spotify_no_transcript',
     'landing_video_podcast',
@@ -80,8 +84,14 @@ HREFLANG_SUMMARIZE_GROUP = {
     'de': 'landing_de_summarize',
     'es': 'landing_es_summarize',
 }
-#: All reciprocal hreflang groups (podcast-to-text, summarize, …).
-HREFLANG_GROUPS = (HREFLANG_GROUP, HREFLANG_SUMMARIZE_GROUP)
+#: Reciprocal hreflang group for the Spotify-transcript family (x-default = en).
+HREFLANG_SPOTIFY_GROUP = {
+    'en': 'landing_spotify',
+    'de': 'landing_de_spotify',
+    'es': 'landing_es_spotify',
+}
+#: All reciprocal hreflang groups (podcast-to-text, summarize, Spotify, …).
+HREFLANG_GROUPS = (HREFLANG_GROUP, HREFLANG_SUMMARIZE_GROUP, HREFLANG_SPOTIFY_GROUP)
 #: Kept for callers/tests that still look up the old Norwegian↔English pair.
 HREFLANG_PAIRS = {
     'landing_no': 'landing_podcast_to_text',
@@ -97,6 +107,8 @@ _SUMMARY_GATED = frozenset({
 SHORT_LABELS = {
     'landing_generator': 'Podcast transcript generator',
     'landing_spotify': 'Transcribe a Spotify podcast',
+    'landing_de_spotify': 'Spotify-Podcast transkribieren (Deutsch)',
+    'landing_es_spotify': 'Podcast de Spotify a texto (español)',
     'landing_spotify_no_rss': 'Spotify episode without RSS',
     'landing_spotify_no_transcript': 'Spotify transcript not available',
     'landing_video_podcast': 'Video podcast transcript',
@@ -132,6 +144,8 @@ LANG_LABELS_EN = {
 
 #: Last copy review of /spotify-podcast-transcript (ISO date, Europe/Oslo).
 SPOTIFY_PAGE_UPDATED = '2026-11-04'
+#: Native DE/ES Spotify landings (Europe/Oslo).
+SPOTIFY_NATIVE_UPDATED = '2026-11-11'
 #: Shared dateModified for the Nov 2026 intent landings (Europe/Oslo).
 INTENT_PAGES_UPDATED = '2026-11-04'
 
@@ -139,6 +153,8 @@ INTENT_PAGES_UPDATED = '2026-11-04'
 #: Used by the sitemap ``<lastmod>`` without building the full page copy.
 DECLARED_UPDATED = {
     'landing_spotify': SPOTIFY_PAGE_UPDATED,
+    'landing_de_spotify': SPOTIFY_NATIVE_UPDATED,
+    'landing_es_spotify': SPOTIFY_NATIVE_UPDATED,
     'landing_spotify_no_rss': INTENT_PAGES_UPDATED,
     'landing_spotify_no_transcript': INTENT_PAGES_UPDATED,
     'landing_video_podcast': INTENT_PAGES_UPDATED,
@@ -231,6 +247,14 @@ def related_links(endpoint):
     elif endpoint == 'landing_whole_podcast':
         # Brief: RSS, podcast-to-text, Spotify (/ai is always appended by the template).
         out = ['landing_rss', 'landing_podcast_to_text', 'landing_spotify']
+    elif endpoint == 'landing_de_spotify':
+        out = ['landing_de', 'landing_de_summarize', 'landing_spotify',
+               'landing_apple', 'landing_podcast_to_text', 'landing_free',
+               'landing_generator']
+    elif endpoint == 'landing_es_spotify':
+        out = ['landing_es', 'landing_es_summarize', 'landing_spotify',
+               'landing_apple', 'landing_podcast_to_text', 'landing_free',
+               'landing_generator']
     elif endpoint == 'landing_spotify':
         out = ['landing_spotify_no_rss', 'landing_spotify_no_transcript',
                'landing_video_podcast', 'landing_apple', 'landing_rss',
@@ -288,6 +312,8 @@ RELATED_LABELS = {
         'landing_youtube_vs': 'YouTube eller podcast-transkripsjon (engelsk)',
     },
     'es': {
+        'landing_es': 'Transcribir podcast (español)',
+        'landing_es_summarize': 'Resumir un podcast (español)',
         'landing_spotify': 'Transcribir un podcast de Spotify (en inglés)',
         'landing_spotify_no_rss': 'Episodio de Spotify sin RSS (en inglés)',
         'landing_spotify_no_transcript': 'Transcripción de Spotify no disponible (en inglés)',
@@ -300,6 +326,8 @@ RELATED_LABELS = {
         'landing_generator': 'Generador de transcripciones de podcast (en inglés)',
     },
     'de': {
+        'landing_de': 'Podcast transkribieren (Deutsch)',
+        'landing_de_summarize': 'Podcast zusammenfassen (Deutsch)',
         'landing_spotify': 'Spotify-Podcast transkribieren (Englisch)',
         'landing_spotify_no_rss': 'Spotify-Folge ohne RSS (Englisch)',
         'landing_spotify_no_transcript': 'Spotify-Transkript nicht verfügbar (Englisch)',
@@ -602,7 +630,8 @@ def _price_en(trial, pack, free_trial=False):
     return ' '.join(parts)
 
 
-def _spotify_whole_episode_cost(trial, pack, episode_prices, free_trial=False):
+def _spotify_whole_episode_cost(trial, pack, episode_prices, free_trial=False,
+                                lang='en'):
     """Spotify FAQ: live per-episode prices, or pack_phrase when volume is off.
 
     episode_prices maps episode length (minutes) → price string from
@@ -615,17 +644,50 @@ def _spotify_whole_episode_cost(trial, pack, episode_prices, free_trial=False):
             if not price:
                 continue
             if isinstance(trial, int) and trial > 0:
-                bits.append(f'{ep} min: first {trial} min free, the rest {price}')
+                if lang == 'de':
+                    bits.append(
+                        f'{ep} Min.: erste {trial} Min. gratis, Rest {price}')
+                elif lang == 'es':
+                    bits.append(
+                        f'{ep} min: primeros {trial} min gratis, el resto {price}')
+                else:
+                    bits.append(
+                        f'{ep} min: first {trial} min free, the rest {price}')
             else:
-                bits.append(f'{ep} min: {price}')
+                if lang == 'de':
+                    bits.append(f'{ep} Min.: {price}')
+                else:
+                    bits.append(f'{ep} min: {price}')
         if bits:
+            if lang == 'de':
+                return ('Was kostet eine ganze Folge?',
+                        'Beispiele — ' + '; '.join(bits) + '. '
+                        'Einmalig, MwSt. inklusive, Minuten verfallen nie.')
+            if lang == 'es':
+                return ('¿Cuánto cuesta un episodio completo?',
+                        'Ejemplos — ' + '; '.join(bits) + '. '
+                        'Pago único, IVA incluido, los minutos no caducan.')
             return ('What does a whole episode cost?',
                     'Examples — ' + '; '.join(bits) + '. '
                     'One-time, VAT included, minutes never expire.')
     if pack:
+        if lang == 'de':
+            return ('Was kostet eine ganze Folge?',
+                    f'Minuten kaufst du per Einmalzahlung: {pack_phrase(pack, "de")}. '
+                    'Einmalig, MwSt. inklusive, Minuten verfallen nie, ohne Abo.')
+        if lang == 'es':
+            return ('¿Cuánto cuesta un episodio completo?',
+                    f'Los minutos se compran con un pago único: {pack_phrase(pack, "es")}. '
+                    'Pago único, IVA incluido, los minutos no caducan, sin suscripción.')
         return ('What does a whole episode cost?',
                 f'Minutes are a one-time purchase: {pack_phrase(pack)}. '
                 'One-time, VAT included, minutes never expire, no subscription.')
+    if lang == 'de':
+        return ('Was kostet eine ganze Folge?',
+                _price_de(trial, pack, free_trial=free_trial))
+    if lang == 'es':
+        return ('¿Cuánto cuesta un episodio completo?',
+                _price_es(trial, pack, free_trial=free_trial))
     return ('What does a whole episode cost?',
             _price_en(trial, pack, free_trial=free_trial))
 
@@ -963,6 +1025,379 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
                  'We do not list a fixed free-minute count here because the grant can vary.'),
                 cost_faq,
             ] + common_rest,
+        )
+
+
+    if endpoint == 'landing_de_spotify':
+        # Native German (du-form, matching /de/podcast-transkribieren). Same
+        # facts as landing_spotify; own Spotify hreflang group.
+        example_txt = (
+            '[Illustratives Beispiel — keine echte Folge]\n'
+            'Willkommen zurück. Heute sprechen wir darüber, wie Teams leise ausliefern.\n'
+            'Der interessante Teil ist, was nach dem Launch passiert ist.\n'
+            'Zu den Zahlen kommen wir gleich.'
+        )
+        example_srt = (
+            '1\n'
+            '00:00:04,100 --> 00:00:08,400\n'
+            'Willkommen zurück. Heute sprechen wir darüber, wie Teams leise ausliefern.\n'
+            '\n'
+            '2\n'
+            '00:00:08,400 --> 00:00:11,200\n'
+            'Der interessante Teil ist, was nach dem Launch passiert ist.'
+        )
+        cost_faq = _spotify_whole_episode_cost(
+            trial, pack, episode_prices, free_trial=free_trial, lang='de')
+        free_lede = (
+            ' Link einfügen und Gratisminuten nutzen, wenn die Show einen öffentlichen '
+            'Feed hat — ohne Karte zum Start.'
+            if (free_trial or (isinstance(trial, int) and trial > 0)) else ''
+        )
+        offer = bool(trial) or free_trial
+        button = ('Kostenloses Transkript starten' if offer
+                  else 'Transkript starten')
+        if free_trial or (isinstance(trial, int) and trial > 0):
+            meta = ('Spotify-Podcast-Transkript als .txt und .srt. Gratisminuten bei '
+                    'öffentlichem Feed; auch wenn Spotify keines zeigt.')
+        else:
+            meta = ('Spotify-Podcast-Transkript als .txt und .srt. Mit öffentlichem '
+                    'RSS-Feed — auch wenn Spotify keines zeigt.')
+        return dict(
+            lang='de',
+            title='Spotify-Podcast in Text umwandeln',
+            meta=meta,
+            h1='Spotify-Podcast per Link transkribieren',
+            lede=('Füge einen open.spotify.com-Folgen- oder Shownamen-Link ein. '
+                  'Podskrift findet dieselbe Folge im öffentlichen RSS-Feed der Show '
+                  'und macht aus dem Audio Text zum Kopieren, Durchsuchen und '
+                  'Herunterladen als .txt oder .srt.'
+                  + free_lede),
+            near_top={
+                'before': 'Brauchst du zuerst Spotifys eigenen App-Text? Siehe ',
+                'endpoint': 'guide_spotify_transcript',
+                'anchor': 'wie du Spotifys eigenes Transkript findest und warum es oft fehlt (Englisch)',
+                'after': '.',
+            },
+            placeholder='https://open.spotify.com/episode/…',
+            input_label='Spotify-Folgen- oder Showlink',
+            button=button,
+            will_work=('Funktioniert, wenn die Show auch einen öffentlichen RSS-Feed '
+                       'hat — die meisten haben einen. Spotify Originals, Exklusives '
+                       'und rein videobasierte Shows nicht. Kein YouTube-Tool.'),
+            cta_note=('Du siehst Folge und Preis, bevor du etwas zahlst. Ein '
+                      'kostenloses Konto legst du an, nachdem du die Folge gewählt hast.'),
+            updated=SPOTIFY_NATIVE_UPDATED,
+            compare_title='Spotifys Transkript vs. Podskrift',
+            compare_head=('Funktion', 'Spotify Read Along',
+                          'Spotify for Creators', 'Podskrift'),
+            compare=[
+                ('Beim Hören mitlesen', 'Ja, wenn Spotify eines hat',
+                 'Creator können Folgen-Transkripte prüfen',
+                 'Ja, im Browser nach der Transkription'),
+                ('Volltext kopieren', 'Nein — Hörer können das Transkript nicht vollständig kopieren',
+                 'Creator können mit eigenen Dateien arbeiten',
+                 'Ja — vom Ergebnis kopieren'),
+                ('.txt / .srt herunterladen', 'Kein Export für Hörer',
+                 'Berechtigte Creator können Transkript-Dateien laden oder hochladen',
+                 'Ja — .txt und .srt'),
+                ('Über deine Folgen suchen', 'Nur Mitlesen in dieser Folge',
+                 'Creator-Tools für ihren Katalog',
+                 'Ja — deine Transkript-Bibliothek durchsuchen'),
+                ('Wenn Spotify kein Transkript zeigt', 'Nichts zum Lesen in der App',
+                 'Hängt von Berechtigung und Creator-Einstellungen ab',
+                 'Funktioniert weiter, wenn ein öffentlicher RSS-/Audio-Feed existiert'),
+                ('Sprecherkennzeichnung', 'Kein Export mit Sprechernamen für Hörer',
+                 'Creator-Tools variieren',
+                 'Noch nicht — ein durchgehendes Transkript mit Zeitstempeln'),
+            ],
+            compare_note=('Podskrift gibt Spotifys App-Text nicht als eigenen aus: es '
+                          'transkribiert das öffentliche Audio. Keine Zusammenfassungen '
+                          'auf dieser Seite — den Text kannst du selbst in ChatGPT oder '
+                          'Claude einfügen.'),
+            platform_steps_title='So kopierst du einen Spotify-Folgenlink',
+            platform_steps=[
+                ('iPhone und iPad', [
+                    'Öffne die Folge in der Spotify-App (Folgenseite, nicht die Showseite).',
+                    'Tippe auf ⋯ (Mehr), dann Teilen.',
+                    'Tippe auf Link kopieren.',
+                ]),
+                ('Android', [
+                    'Öffne die Folge in der Spotify-App.',
+                    'Tippe auf ⋮ oder ⋯ (Mehr), dann Teilen.',
+                    'Tippe auf Link kopieren.',
+                ]),
+                ('Desktop-App und Webplayer (open.spotify.com)', [
+                    'Öffne die Folge oder finde sie in der Folgenliste der Show.',
+                    'Klicke auf ⋯ (Weitere Optionen), dann Teilen.',
+                    'Klicke auf Folgenlink kopieren. Er beginnt mit open.spotify.com/episode/.',
+                ]),
+            ],
+            platform_steps_note=('Menünamen folgen Spotifys eigener Hilfe; sie können '
+                                 'zwischen App-Versionen wandern. Ein Showlink funktioniert '
+                                 'auch: du wählst die Folge aus der Liste.'),
+            troubleshoot_title='Wenn ein Spotify-Link nicht funktioniert',
+            troubleshoot_head=('Was du siehst', 'Warum', 'Was du tun kannst'),
+            troubleshoot=[
+                ('Ein Spotify-Exklusiv oder Original',
+                 'Die Show hat keinen öffentlichen RSS-Feed, also kein Audio, das '
+                 'Podskrift holen darf.',
+                 'Suche hier nach dem Shownamen oder prüfe Apple Podcasts. Wenn nichts '
+                 'kommt, lässt sich die Folge nicht transkribieren.'),
+                ('Eine Folge nur für Abonnenten oder bezahlt',
+                 'Das Audio liegt hinter einem Abo, nicht im öffentlichen Feed.',
+                 'Nicht möglich. Kostenlose Folgen derselben Show funktionieren meist.'),
+                ('Eine rein videobasierte Folge',
+                 'Es gibt keine Audioversion im öffentlichen Feed der Show.',
+                 'Nur wenn die Show die Folge auch als Audio veröffentlicht.'),
+                ('Ein Kurzlink (spotify.link/…)',
+                 'Kurze Share-Links werden noch nicht gelesen.',
+                 'Öffne den Kurzlink im Browser, kopiere die Adresse '
+                 'open.spotify.com/episode/… aus der Adresszeile und füge die ein.'),
+            ],
+            example_label=('Illustratives Beispiel — nur .txt-/.srt-Format. '
+                           'Nicht von einer echten Show oder einem Nutzertranskript.'),
+            example_txt=example_txt,
+            example_srt=example_srt,
+            ai_note=('Füge den Text in ChatGPT oder Claude ein zum Zusammenfassen oder '
+                     'Nachfragen, oder verbinde Podskrift, damit sie Transkripte für dich holen.'),
+            steps=[
+                ('Spotify-Link kopieren',
+                 'In Spotify die Folge öffnen, Teilen (oder ⋯), dann Link kopieren.'),
+                ('Hier einfügen',
+                 'Podskrift findet die Folge im öffentlichen RSS-Feed der Show und listet sie. '
+                 'Wähle am besten „Deutsch“ als Sprache.'),
+                ('Lesen oder herunterladen',
+                 'Die Transkription dauert meist ein paar Minuten. Lade .txt oder .srt herunter.'),
+            ],
+            also_related=[
+                ('guide_spotify_transcript',
+                 'Leitfaden: Spotify-Podcast-Transkript holen (Englisch)'),
+            ],
+            faq=[
+                ('Funktioniert das mit jedem Spotify-Podcast?',
+                 'Mit den meisten ja: fast jede Show auf Spotify veröffentlicht auch einen '
+                 'öffentlichen RSS-Feed, und von dort kommt das Audio. Spotify-Exklusives und '
+                 'Folgen nur für Abonnenten haben keinen öffentlichen Feed und lassen sich '
+                 'daher nicht transkribieren. YouTube-URLs werden nicht unterstützt.'),
+                ('Was, wenn die Show nur auf Spotify ist?',
+                 'Podskrift kann sie nicht transkribieren. Manche Shows, die Spotify-only '
+                 'wirken, haben trotzdem einen öffentlichen Feed. Suche hier nach dem '
+                 'Shownamen oder prüfe Apple Podcasts. Wenn nichts kommt, ist es ein '
+                 'echtes Exklusiv.'),
+                ('Kann ich einen Showlink statt eines Folgenlinks einfügen?',
+                 'Ja. Ein Showlink öffnet die Folgenliste; dort wählst du die Folge. '
+                 'Suche nach dem Shownamen funktioniert auch.'),
+                ('Ist das dasselbe wie Spotifys eigenes Transkript?',
+                 'Nein. Podskrift erstellt ein eigenes Transkript aus dem Audio — auch '
+                 'wenn Spotify keines zeigt — und du kannst es kopieren und herunterladen.'),
+                ('Kann ich das Transkript aus der Spotify-App herunterladen?',
+                 'Nein — Spotify exportiert das Hörer-Transkript nicht. Füge den Link hier '
+                 'ein, um deine eigene Kopie als .txt und .srt zu bekommen.'),
+                ('Ist es kostenlos?',
+                 'Neue Konten erhalten Gratisminuten, wenn eine Testphase angeboten wird — '
+                 'ohne Karte zum Start. Längere Folgen zeigen den genauen Preis, bevor du '
+                 'zahlst. Wir nennen hier keine feste Minutenanzahl, weil das Kontingent '
+                 'variieren kann.'),
+                cost_faq,
+                ('Welche Sprachen funktionieren?',
+                 f'{lang_count} Sprachen, mit moderner Spracherkennung. Automatische '
+                 'Erkennung ist Standard; wähle „Deutsch“ für deutsche Folgen — das hilft '
+                 'bei kurzem oder akzentuiertem Audio.'),
+                ('Was bekomme ich?',
+                 'Die vollständige Transkription als Text (.txt) und als Untertitel mit '
+                 'Zeitstempeln (.srt), plus eine Leseansicht im Browser. Transkripte sind '
+                 'privat, es sei denn, du erstellst einen Freigabelink. Noch keine '
+                 'Sprecherkennzeichnung — ein durchgehendes Transkript mit Zeitstempeln.'),
+                ('Was, wenn die Folge länger ist als die Gratisminuten?',
+                 'Du bekommst die ersten Gratisminuten als Vorschau und siehst den genauen '
+                 'Preis für den Rest, bevor du etwas zahlst. Einmalig, Minuten verfallen nie.'),
+            ],
+        )
+
+    if endpoint == 'landing_es_spotify':
+        # Neutral Spanish (tú-form, matching /es/transcribir-podcast). Same
+        # facts as landing_spotify; own Spotify hreflang group.
+        example_txt = (
+            '[Ejemplo ilustrativo — no es un episodio real]\n'
+            'Bienvenidos de nuevo. Hoy hablamos de cómo los equipos lanzan en silencio.\n'
+            'Lo interesante es lo que pasó después del lanzamiento.\n'
+            'En un momento llegamos a los números.'
+        )
+        example_srt = (
+            '1\n'
+            '00:00:04,100 --> 00:00:08,400\n'
+            'Bienvenidos de nuevo. Hoy hablamos de cómo los equipos lanzan en silencio.\n'
+            '\n'
+            '2\n'
+            '00:00:08,400 --> 00:00:11,200\n'
+            'Lo interesante es lo que pasó después del lanzamiento.'
+        )
+        cost_faq = _spotify_whole_episode_cost(
+            trial, pack, episode_prices, free_trial=free_trial, lang='es')
+        free_lede = (
+            ' Pega un enlace y usa minutos de prueba cuando el programa tenga un feed '
+            'público — sin tarjeta para empezar.'
+            if (free_trial or (isinstance(trial, int) and trial > 0)) else ''
+        )
+        offer = bool(trial) or free_trial
+        button = ('Empezar transcripción gratis' if offer
+                  else 'Empezar transcripción')
+        if free_trial or (isinstance(trial, int) and trial > 0):
+            meta = ('Transcripción de podcast de Spotify (.txt y .srt). Minutos gratis '
+                    'si hay feed público; también cuando Spotify no muestra ninguna.')
+        else:
+            meta = ('Transcripción de podcast de Spotify (.txt y .srt). Con feed RSS '
+                    'público — también cuando Spotify no muestra ninguna.')
+        return dict(
+            lang='es',
+            title='Transcribir un podcast de Spotify con un enlace',
+            meta=meta,
+            h1='Transcribir un podcast de Spotify desde un enlace',
+            lede=('Pega un enlace de episodio o de programa de open.spotify.com. '
+                  'Podskrift encuentra el mismo episodio en el feed RSS público del '
+                  'programa y convierte el audio en texto que puedes copiar, buscar '
+                  'y descargar como .txt o .srt.'
+                  + free_lede),
+            near_top={
+                'before': '¿Necesitas primero el texto propio de Spotify en la app? Mira ',
+                'endpoint': 'guide_spotify_transcript',
+                'anchor': 'cómo encontrar la transcripción de Spotify y por qué a menudo falta (en inglés)',
+                'after': '.',
+            },
+            placeholder='https://open.spotify.com/episode/…',
+            input_label='Enlace de episodio o programa de Spotify',
+            button=button,
+            will_work=('Funciona cuando el programa también tiene un feed RSS público — '
+                       'la mayoría lo tiene. Los Originals de Spotify, los exclusivos y '
+                       'los que son solo vídeo, no. No es una herramienta de YouTube.'),
+            cta_note=('Ves el episodio y su precio antes de pagar nada. Creas una cuenta '
+                      'gratis después de elegir el episodio.'),
+            updated=SPOTIFY_NATIVE_UPDATED,
+            compare_title='Transcripción de Spotify vs Podskrift',
+            compare_head=('Función', 'Spotify Read Along',
+                          'Spotify for Creators', 'Podskrift'),
+            compare=[
+                ('Leer mientras escuchas', 'Sí, cuando Spotify tiene una',
+                 'Los creadores pueden revisar transcripciones del episodio',
+                 'Sí, en el navegador tras la transcripción'),
+                ('Copiar el texto completo', 'No — los oyentes no pueden copiar la transcripción completa',
+                 'Los creadores pueden trabajar con sus propios archivos',
+                 'Sí — copia desde la página de resultado'),
+                ('Descargar .txt / .srt', 'Sin exportación para oyentes',
+                 'Creadores elegibles pueden descargar o subir archivos de transcripción',
+                 'Sí — .txt y .srt'),
+                ('Buscar en tus episodios', 'Solo seguimiento en ese episodio',
+                 'Herramientas de creador para su catálogo',
+                 'Sí — busca en tu biblioteca de transcripciones'),
+                ('Cuando Spotify no muestra transcripción', 'Nada que leer en la app',
+                 'Depende de la elegibilidad y de la configuración del creador',
+                 'Sigue funcionando si existe un feed RSS/audio público'),
+                ('Etiquetas de hablantes', 'Sin exportación con nombres de hablantes para oyentes',
+                 'Las herramientas de creador varían',
+                 'Todavía no — una transcripción continua con marcas de tiempo'),
+            ],
+            compare_note=('Podskrift no presenta el texto de la app de Spotify como propio: '
+                          'transcribe el audio público. Sin resúmenes en esta página — puedes '
+                          'pegar el texto en ChatGPT o Claude tú mismo.'),
+            platform_steps_title='Cómo copiar un enlace de episodio de Spotify',
+            platform_steps=[
+                ('iPhone e iPad', [
+                    'Abre el episodio en la app de Spotify (la página del episodio, no la del programa).',
+                    'Toca ⋯ (Más) y luego Compartir.',
+                    'Toca Copiar enlace.',
+                ]),
+                ('Android', [
+                    'Abre el episodio en la app de Spotify.',
+                    'Toca ⋮ o ⋯ (Más) y luego Compartir.',
+                    'Toca Copiar enlace.',
+                ]),
+                ('App de escritorio y reproductor web (open.spotify.com)', [
+                    'Abre el episodio o búscalo en la lista de episodios del programa.',
+                    'Haz clic en ⋯ (Más opciones) y luego Compartir.',
+                    'Haz clic en Copiar enlace del episodio. Empieza por open.spotify.com/episode/.',
+                ]),
+            ],
+            platform_steps_note=('Los nombres de menú siguen la ayuda de Spotify; pueden '
+                                 'cambiar entre versiones de la app. Un enlace de programa '
+                                 'también vale: eliges el episodio de la lista.'),
+            troubleshoot_title='Cuando un enlace de Spotify no funciona',
+            troubleshoot_head=('Lo que ves', 'Por qué', 'Qué hacer'),
+            troubleshoot=[
+                ('Un exclusivo u Original de Spotify',
+                 'El programa no tiene feed RSS público, así que no hay audio que '
+                 'Podskrift pueda descargar.',
+                 'Busca el nombre del programa aquí o mira en Apple Podcasts. Si no '
+                 'aparece nada, no se puede transcribir.'),
+                ('Un episodio solo para suscriptores o de pago',
+                 'El audio está detrás de una suscripción, no en el feed público.',
+                 'No es posible. Los episodios gratuitos del mismo programa suelen funcionar.'),
+                ('Un episodio solo en vídeo',
+                 'No hay versión de audio en el feed público del programa.',
+                 'Solo funciona si el programa también publica el episodio en audio.'),
+                ('Un enlace corto (spotify.link/…)',
+                 'Los enlaces cortos de compartir aún no se leen.',
+                 'Abre el enlace corto en el navegador, copia la dirección '
+                 'open.spotify.com/episode/… de la barra de direcciones y pégala.'),
+            ],
+            example_label=('Ejemplo ilustrativo — solo el formato .txt / .srt. '
+                           'No pertenece a un programa real ni a la transcripción de un usuario.'),
+            example_txt=example_txt,
+            example_srt=example_srt,
+            ai_note=('Pégalo en ChatGPT o Claude para resumir o preguntar, o conecta '
+                     'Podskrift para que obtengan las transcripciones por ti.'),
+            steps=[
+                ('Copia el enlace de Spotify',
+                 'En Spotify, abre el episodio, toca Compartir (o ⋯) y luego Copiar enlace.'),
+                ('Pégalo aquí',
+                 'Podskrift encuentra el episodio en el feed RSS público y lo lista. '
+                 'Elige «Español» como idioma si puedes.'),
+                ('Lee o descarga',
+                 'La transcripción suele tardar unos minutos. Descarga .txt o .srt.'),
+            ],
+            also_related=[
+                ('guide_spotify_transcript',
+                 'Guía: cómo obtener una transcripción de podcast de Spotify (en inglés)'),
+            ],
+            faq=[
+                ('¿Funciona con todos los podcasts de Spotify?',
+                 'Con la mayoría sí: casi todos los programas en Spotify también publican '
+                 'un feed RSS público, y de ahí sale el audio. Los exclusivos de Spotify y '
+                 'los episodios solo para suscriptores no tienen feed público, así que no '
+                 'se pueden transcribir. Las URL de YouTube no están soportadas.'),
+                ('¿Y si el programa es solo de Spotify?',
+                 'Podskrift no puede transcribirlo. Algunos programas que parecen solo de '
+                 'Spotify también publican un feed público. Busca el nombre aquí o mira '
+                 'Apple Podcasts. Si no aparece nada, es un exclusivo de verdad.'),
+                ('¿Puedo pegar un enlace de programa en lugar de un episodio?',
+                 'Sí. Un enlace de programa abre la lista de episodios y eliges ahí. '
+                 'Buscar por el nombre del programa también funciona.'),
+                ('¿Es lo mismo que la transcripción propia de Spotify?',
+                 'No. Podskrift crea su propia transcripción a partir del audio, así que '
+                 'también funciona cuando Spotify no muestra ninguna, y puedes copiarla '
+                 'y descargarla.'),
+                ('¿Puedo descargar la transcripción que muestra Spotify en la app?',
+                 'No — Spotify no exporta la transcripción del oyente. Pega el enlace aquí '
+                 'para obtener tu propia copia como .txt y .srt.'),
+                ('¿Es gratis?',
+                 'Las cuentas nuevas reciben minutos de prueba cuando hay oferta — sin '
+                 'tarjeta para empezar. Los episodios más largos muestran el precio exacto '
+                 'antes de pagar. No fijamos aquí un número concreto de minutos gratis '
+                 'porque la concesión puede variar.'),
+                cost_faq,
+                ('¿Qué idiomas funcionan?',
+                 f'{lang_count} idiomas, con reconocimiento de voz moderno. La detección '
+                 'automática es la opción por defecto; elige «Español» para episodios en '
+                 'español: ayuda con audio corto o con acento.'),
+                ('¿Qué recibo?',
+                 'La transcripción completa como texto (.txt) y como subtítulos con marcas '
+                 'de tiempo (.srt), más una vista de lectura en el navegador. Las '
+                 'transcripciones son privadas salvo que crees un enlace para compartir. '
+                 'Todavía no hay etiquetas de hablantes: una transcripción continua con '
+                 'marcas de tiempo.'),
+                ('¿Y si el episodio dura más que los minutos gratis?',
+                 'Obtienes los primeros minutos gratis como vista previa y ves el precio '
+                 'exacto del resto antes de pagar. Pago único; los minutos no caducan.'),
+            ],
         )
 
     if endpoint == 'landing_spotify_no_rss':

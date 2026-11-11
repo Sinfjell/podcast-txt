@@ -1672,6 +1672,61 @@
       "language": "nl",
       "description": "Waarom val ik niet af terwijl ik 3x per week sport? Waarom maak ik zoveel ruzie op vakantie? Waarom dragen oude mensen ook in de zomer lange mouwen? Wat is kunst? Hoe weten we dat de big bang echt gebeurd is? De meest begeesterende wetenschappers van de vijf Vlaamse universiteiten geven een antwoord op al deze vragen en nog veel.",
       "source": "manual"
+    },
+    {
+      "slug": "cache-me-outside",
+      "name": "Cache Me Outside",
+      "author": "Cache Me Outside",
+      "itunes_id": "1628744959",
+      "feed_url": "https://anchor.fm/s/9de92c88/podcast/rss",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts126/v4/bf/fd/2a/bffd2a83-3722-7b00-24f6-a7a55efd919b/mza_3806397807743238997.jpg/600x600bb.jpg",
+      "language": "us",
+      "description": "Treasure Hunting podcast: we join modern-day treasure hunts because we're desperate. Join in on our brainstorming! We also dive into Lost Treasures throughout history. - Utah Treasure Hunt series: We brainstorm the location of the annual Utah Treasure Hunt containing $25,000. - Where's the Wallet series: Bank of Utah…",
+      "source": "manual"
+    },
+    {
+      "slug": "the-koerner-office-business-ideas-and-deep-dives-with-chris-koerner",
+      "name": "The Koerner Office - Business Ideas and Deep Dives with Chris Koerner",
+      "author": "Chris Koerner",
+      "itunes_id": "1705154662",
+      "feed_url": "https://anchor.fm/s/10796c924/podcast/rss",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts221/v4/25/d6/61/25d6611f-5525-8305-601a-5d83b6393c6d/mza_9053466818269562464.jpg/600x600bb.jpg",
+      "language": "us",
+      "description": "Hey, I'm Chris Koerner - serial entrepreneur, business ideas addict, and your new ADHD business ideas best friend. I've started 75 businesses, with 10 of them being worth 7-8+ figures. I love startup ideas! Want to make money, grow a business, or just start a side hustle? You're in the right spot. This show covers: -…",
+      "source": "manual"
+    },
+    {
+      "slug": "entrevoces",
+      "name": "Entrevoces",
+      "author": "El Colegio de San Luis",
+      "itunes_id": "1790734191",
+      "feed_url": "https://anchor.fm/s/170d1364/podcast/rss",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/6a/6c/ca/6a6cca38-2b2d-d49e-296e-e2d2dfbe33b8/mza_1545741941007300671.jpg/600x600bb.jpg",
+      "language": "es",
+      "description": "Un podcast de comunicación de las Ciencias Sociales y las Humanidades de El Colegio de San Luis",
+      "source": "manual"
+    },
+    {
+      "slug": "dinstinto",
+      "name": "Dinstinto",
+      "author": "David Llano y Daniel Márquez",
+      "itunes_id": "1758820461",
+      "feed_url": "https://feeds.megaphone.fm/GENUINAPERSONASAPIDECV8506252443",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts221/v4/13/f1/7a/13f17a11-8ef6-f52d-0a0d-32898ed2d1f6/mza_14724715106871221691.jpg/600x600bb.jpg",
+      "language": "es",
+      "description": "Convertimos las huellas del éxito en herramientas para tu camino. Cada lunes, conversaciones profundas sobre negocios con fundadores, líderes y expertos que revelan el detrás de cámaras, las decisiones difíciles y los principios reales para construir y escalar negocios.",
+      "source": "manual"
+    },
+    {
+      "slug": "the-sound-of-economics",
+      "name": "The Sound of Economics",
+      "author": "Bruegel",
+      "itunes_id": "1124063625",
+      "feed_url": "https://audioboom.com/channels/4903959.rss",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts221/v4/cc/47/ff/cc47ff7b-9ff8-db36-b10d-f292427ca23a/mza_13808824179151637674.png/600x600bb.jpg",
+      "language": "us",
+      "description": "The Sound of Economics brings you insights, debates, and research-based discussions on economic policy in Europe and beyond. The podcast is produced by Bruegel, an independent and non-doctrinal think tank based in Brussels. It seeks to contribute to European and global economic policy-making through open, fact-based…",
+      "source": "manual"
     }
   ]
 }
