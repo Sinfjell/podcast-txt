@@ -49,6 +49,8 @@ ENDPOINT_SOURCES: dict[str, str] = {
     'guide_claude': 'templates/guides/claude.html',
     'guide_ai_transcripts': 'templates/guide_ai_transcripts.html',
     'guide_spotify_transcript': 'templates/guides/how_to_get_spotify_podcast_transcript.html',
+    'guide_apple_podcasts_transcript': 'templates/guides/how_to_get_apple_podcasts_transcript.html',
+    'guide_any_podcast_transcript': 'templates/guides/how_to_get_a_podcast_transcript.html',
     'contact': 'templates/contact.html',
     'whats_new': 'changelog.json',
     'api_docs': 'docs/customer-api.md',
@@ -65,6 +67,8 @@ ENDPOINT_SOURCES: dict[str, str] = {
 #: Kept here so sitemap lastmod matches the page without importing app.
 DECLARED_GUIDE_UPDATED: dict[str, str] = {
     'guide_spotify_transcript': '2026-11-11',
+    'guide_apple_podcasts_transcript': '2026-11-11',
+    'guide_any_podcast_transcript': '2026-11-11',
 }
 
 _LANDING_SOURCE = 'landing_pages.py'
@@ -182,7 +186,8 @@ def lastmod_for_endpoint(endpoint: str) -> str:
         return git or FALLBACK_LANDING
 
     if endpoint in ('guide_chatgpt', 'guide_claude', 'guide_ai_transcripts',
-                    'guide_spotify_transcript', 'guides_index'):
+                    'guide_spotify_transcript', 'guide_apple_podcasts_transcript',
+                    'guide_any_podcast_transcript', 'guides_index'):
         source = ENDPOINT_SOURCES.get(endpoint)
         if source:
             git = _git_commit_date(source)

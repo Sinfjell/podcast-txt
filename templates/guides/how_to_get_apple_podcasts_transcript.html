@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import button, link_button, page_header, notice %}
+
+{% block title %}How to Get an Apple Podcasts Transcript — Podskrift{% endblock %}
+{% block meta_description %}Where Apple Podcasts shows episode transcripts on iPhone, iPad and Mac, what you can copy, why some episodes have none, and how to download a full .txt / .srt.{% endblock %}
+{% block og_title %}How to Get an Apple Podcasts Transcript{% endblock %}
+{% block og_description %}Find Apple’s in-app transcript, Apple’s documented copy limits, and how to get a full downloadable episode transcript when a public feed exists.{% endblock %}
+
+{% block content %}
+<article class="ds-guide">
+  {{ page_header(
+    "How to get an Apple Podcasts transcript",
+    "Apple Podcasts shows a time-synced transcript in the Podcasts app on iPhone, iPad and Mac when one is available. You can read and search it there; Apple documents copying or sharing up to 200 words with attribution — not a full-episode file. For a complete .txt or .srt, paste the Apple Podcasts link into Podskrift."
+  ) }}
+  <p class="ds-guide__muted ds-landing__updated">Updated <time datetime="{{ guide_updated }}">{{ guide_updated_label }}</time></p>
+
+  <div class="ds-mcp-start">
+    {{ button("Get a downloadable Apple Podcasts transcript", variant="primary", href=url_for('landing_apple')) }}
+    <p class="ds-guide__muted">
+      Podskrift accepts a podcasts.apple.com show or episode link and returns .txt / .srt from the public feed.
+      {% if trial_offered %}
+      New accounts get free trial minutes — no card needed to start.
+      {% endif %}
+    </p>
+  </div>
+
+  {% call notice(variant="info") %}
+    This guide describes Apple’s listener transcript as Apple documents it in Support and Podcasts for Creators.
+    Menu labels can move between app versions. Podskrift does not use or re-host Apple’s in-app text — it transcribes public audio.
+  {% endcall %}
+
+  <section class="ds-guide__section" aria-labelledby="apple-iphone">
+    <h2 id="apple-iphone">Where to find it on iPhone/iPad</h2>
+    <ol class="ds-guide__steps">
+      <li class="ds-guide__step">
+        <h3>Play the episode</h3>
+        <p>
+          Open the Podcasts app and start listening.
+          Apple’s steps are in
+          <a href="https://support.apple.com/en-us/127831" rel="noopener" target="_blank">View episode transcripts on iPhone and iPad</a>.
+        </p>
+      </li>
+      <li class="ds-guide__step">
+        <h3>Open the full-screen player</h3>
+        <p>Tap the mini player at the bottom of the screen to expand the player.</p>
+      </li>
+      <li class="ds-guide__step">
+        <h3>Tap Transcript</h3>
+        <p>
+          Tap the Transcript button. If it is grayed out, Apple says a transcript is not available for that episode.
+          In transcript view you can follow along, search, and tap and hold a section to select or share text.
+        </p>
+      </li>
+    </ol>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="apple-mac">
+    <h2 id="apple-mac">On Mac</h2>
+    <ol class="ds-guide__list">
+      <li>Open the Podcasts app on your Mac (see Apple’s
+        <a href="https://support.apple.com/guide/podcasts/read-along-with-episode-transcripts-pode3855ee98/mac" rel="noopener" target="_blank">Read episode transcripts on Mac</a>).</li>
+      <li>While an episode is playing, click the transcript control in the player.</li>
+      <li>Or select an episode, scroll to the Transcript section, and choose View Transcript.</li>
+      <li>You can search the text and click a paragraph to jump playback to that point.</li>
+    </ol>
+    <p class="ds-guide__muted">
+      Apple notes that transcript availability may vary by language and by country or region.
+    </p>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="apple-missing">
+    <h2 id="apple-missing">Why some episodes have none</h2>
+    <ul class="ds-guide__list">
+      <li>
+        <strong>Language and OS</strong> —
+        Apple Podcasts for Creators lists automatic transcripts for shows in English, Danish, Dutch, Finnish, French, German, Italian, Norwegian, Portuguese, Spanish and Swedish, with iOS&nbsp;17.4 or later
+        (<a href="https://podcasters.apple.com/support/5316-transcripts-on-apple-podcasts" rel="noopener" target="_blank">Transcripts on Apple Podcasts</a>).
+      </li>
+      <li>
+        <strong>Region</strong> —
+        Apple Support says listener transcripts are not available in Belarus and Russia.
+      </li>
+      <li>
+        <strong>Not in the Apple catalog</strong> —
+        Private RSS feeds are not processed in Apple Podcasts Connect, so those episodes do not show transcripts in the app.
+      </li>
+      <li>
+        <strong>Creator settings / quality</strong> —
+        Publishers can change transcript settings per show or episode; Apple may withhold transcripts that fail quality checks; episodes over 10 hours may not be transcribed; explicit episodes can be hidden when content restrictions are on.
+      </li>
+      <li>
+        <strong>New episode delay</strong> —
+        Apple generates transcripts after publish; Creators docs suggest waiting at least 24 hours before troubleshooting a missing one.
+      </li>
+    </ul>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="apple-copy">
+    <h2 id="apple-copy">Can you copy or download it?</h2>
+    <p>
+      On iPhone and iPad you can tap and hold a transcript section to select or share text
+      (<a href="https://support.apple.com/en-us/127831" rel="noopener" target="_blank">Apple Support</a>).
+      That is an in-app reading aid — Apple’s listener help does not describe exporting the whole episode as a file.
+    </p>
+    <p>
+      Apple Support’s Mac guide
+      <a href="https://support.apple.com/guide/podcasts/share-podcasts-pod96aaf8353/mac" rel="noopener" target="_blank">Share podcasts on Mac</a>
+      says that when you share from a transcript you
+      <strong>select up to 200 words</strong>, then Control-click and choose “Share from [timestamp]”.
+      Apple Podcasts for Creators documents the same limit for sharing a transcript
+      (“select and copy up to 200 words”, with attribution linking back to the episode)
+      on
+      <a href="https://podcasters.apple.com/support/5316-transcripts-on-apple-podcasts" rel="noopener" target="_blank">Transcripts on Apple Podcasts</a>.
+      Neither page describes a full-episode .txt or .srt export for listeners.
+    </p>
+    <p class="ds-guide__muted">
+      Show owners can download and edit transcripts in Apple Podcasts Connect for their own episodes.
+      That path is for publishers, not for listeners who need a full export of someone else’s show.
+    </p>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="apple-podskrift">
+    <h2 id="apple-podskrift">Get the whole episode as .txt/.srt</h2>
+    <ol class="ds-guide__steps">
+      <li class="ds-guide__step">
+        <h3>Copy the Apple Podcasts link</h3>
+        <p>In Apple Podcasts, open the episode or show, tap Share, then Copy Link (a podcasts.apple.com URL).</p>
+      </li>
+      <li class="ds-guide__step">
+        <h3>Paste it into Podskrift</h3>
+        <p>
+          Use the
+          <a href="{{ url_for('landing_apple') }}">Apple Podcasts transcript</a>
+          page. Podskrift reads the show’s public feed and lists the episode.
+        </p>
+      </li>
+      <li class="ds-guide__step">
+        <h3>Download .txt or .srt</h3>
+        <p>
+          You get a transcript you can copy and download — including for episodes where Apple’s Transcript button is grayed out, as long as the audio is in the public feed.
+          Subscriber-only Apple Podcasts Subscriptions episodes are not available this way.
+        </p>
+      </li>
+    </ol>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="apple-rss">
+    <h2 id="apple-rss">Check the RSS feed for a publisher transcript</h2>
+    <p>
+      Many hosts publish a transcript file on the episode’s RSS item with the Podcasting 2.0
+      <code>podcast:transcript</code> tag (URL + MIME type; optional language).
+      See the
+      <a href="https://podcasting2.org/docs/podcast-namespace/tags/transcript" rel="noopener" target="_blank">podcast:transcript documentation</a>
+      on podcasting2.org.
+    </p>
+    <p>
+      Open the show’s feed (or the host’s site) and look for that tag, or a “Transcript” link in show notes.
+      If a publisher file exists, that is often the cleanest full-text copy.
+      If you only have the feed URL, you can still transcribe the audio via
+      <a href="{{ url_for('landing_rss') }}">RSS to text</a>
+      or find the feed with
+      <a href="{{ url_for('rss_help') }}">how to find an RSS feed</a>.
+    </p>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="apple-compare">
+    <h2 id="apple-compare">Apple in-app vs RSS vs Podskrift</h2>
+    <div class="table-wrap">
+      <table class="econ-table">
+        <thead>
+          <tr>
+            <th scope="col">Method</th>
+            <th scope="col">Copy</th>
+            <th scope="col">Download</th>
+            <th scope="col">Full episode</th>
+            <th scope="col">Works when Apple shows none</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Apple Podcasts in-app</th>
+            <td>Select/share in the app; Apple documents up to 200 words when sharing</td>
+            <td>No listener .txt / .srt export</td>
+            <td>Read in-app when available</td>
+            <td>No</td>
+          </tr>
+          <tr>
+            <th scope="row">Publisher RSS transcript</th>
+            <td>Yes, if the host publishes a file</td>
+            <td>Yes (linked file)</td>
+            <td>Yes, when provided</td>
+            <td>Yes, when the publisher linked one</td>
+          </tr>
+          <tr>
+            <th scope="row">Podskrift</th>
+            <td>Yes</td>
+            <td>.txt and .srt</td>
+            <td>Yes (public feed audio)</td>
+            <td>Yes, if a public feed exists</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="apple-guide-faq">
+    <h2 id="apple-guide-faq">FAQ</h2>
+    <div class="ds-guide__faq">
+      {% for question, answer in guide_faq %}
+      <details>
+        <summary>{{ question }}</summary>
+        <p>{{ answer }}</p>
+      </details>
+      {% endfor %}
+    </div>
+  </section>
+
+  <nav class="ds-guide__section" aria-labelledby="apple-guide-related">
+    <h2 id="apple-guide-related">Related</h2>
+    <ul class="ds-guide__list">
+      <li><a href="{{ url_for('landing_apple') }}">Apple Podcasts transcript</a></li>
+      <li><a href="{{ url_for('guide_any_podcast_transcript') }}">How to get a transcript of any podcast episode</a></li>
+      <li><a href="{{ url_for('guide_spotify_transcript') }}">How to get a Spotify podcast transcript</a></li>
+      <li><a href="{{ url_for('landing_rss') }}">RSS feed to text</a></li>
+      <li><a href="{{ url_for('guides_index') }}">All guides</a></li>
+      <li><a href="{{ url_for('ai_landing') }}">Use transcripts in ChatGPT and Claude</a></li>
+      <li><a href="{{ url_for('help_page') }}">Help</a></li>
+      <li><a href="{{ url_for('pricing') }}">Pricing</a></li>
+    </ul>
+  </nav>
+
+  <div class="ds-guide__cta">
+    {{ link_button("Open the Apple Podcasts transcript page", href=url_for('landing_apple')) }}
+  </div>
+</article>
+{% endblock %}

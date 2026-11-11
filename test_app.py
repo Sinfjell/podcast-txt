@@ -3900,6 +3900,8 @@ def test_the_sitemap_lists_the_public_pages(trial_on):
     assert any(u.endswith('/guides/claude') for u in locs)
     assert any(u.endswith('/guides/podcast-transcripts-in-chatgpt-and-claude') for u in locs)
     assert any(u.endswith('/guides/how-to-get-spotify-podcast-transcript') for u in locs)
+    assert any(u.endswith('/guides/how-to-get-apple-podcasts-transcript') for u in locs)
+    assert any(u.endswith('/guides/how-to-get-a-podcast-transcript') for u in locs)
     assert any(u.endswith('/register') for u in locs)
     assert not any('/settings' in u or '/history' in u for u in locs), (
         'a session-only page is in the sitemap'
@@ -4117,16 +4119,22 @@ def test_guides_chatgpt_and_claude_pages(trial_on):
     hub_body = hub.data.decode()
     assert '/guides/chatgpt' in hub_body and '/guides/claude' in hub_body
     assert '/guides/how-to-get-spotify-podcast-transcript' in hub_body
+    assert '/guides/how-to-get-apple-podcasts-transcript' in hub_body
+    assert '/guides/how-to-get-a-podcast-transcript' in hub_body
     assert hub_body.count('class="btn btn-primary"') == 1
 
     sitemap = client.get('/sitemap.xml').data.decode()
     assert '/guides/chatgpt' in sitemap
     assert '/guides/claude' in sitemap
     assert '/guides/how-to-get-spotify-podcast-transcript' in sitemap
+    assert '/guides/how-to-get-apple-podcasts-transcript' in sitemap
+    assert '/guides/how-to-get-a-podcast-transcript' in sitemap
     assert '/guides<' in sitemap or '/guides</loc>' in sitemap or sitemap.count('/guides') >= 3
     llms = client.get('/llms.txt').data.decode()
     assert '/guides/chatgpt' in llms and '/guides/claude' in llms
     assert '/guides/how-to-get-spotify-podcast-transcript' in llms
+    assert '/guides/how-to-get-apple-podcasts-transcript' in llms
+    assert '/guides/how-to-get-a-podcast-transcript' in llms
 
 
 def test_guide_ai_transcripts_page_renders(trial_on):
@@ -4826,6 +4834,120 @@ def test_spotify_transcript_guide_has_article_faq_jsonld_and_discovery(trial_on)
     # Intent landing from #194 also points back at this guide.
     no_tx = client.get('/spotify-transcript-not-available').data.decode()
     assert f'href="{path}"' in no_tx
+    # Cross-links to the Apple / any-podcast guides.
+    assert 'href="/guides/how-to-get-apple-podcasts-transcript"' in body
+    assert 'href="/guides/how-to-get-a-podcast-transcript"' in body
+
+
+def _assert_new_transcript_guide(client, *, path, updated_const, faq_fn,
+                                 apple_outbound=False, any_podcast_hrefs=False):
+    """Shared acceptance checks for the Nov 2026 Apple / any-podcast guides."""
+    import json as _json
+    from bs4 import BeautifulSoup
+
+    resp = client.get(path)
+    assert resp.status_code == 200, path
+    body = resp.data.decode()
+    soup = BeautifulSoup(body, 'html.parser')
+    assert soup.find('link', rel='canonical')['href'].endswith(path)
+    robots = soup.find('meta', attrs={'name': 'robots'})
+    assert robots is None or 'noindex' not in (robots.get('content') or '').lower()
+    assert body.count('class="btn btn-primary"') == 1
+    assert 'ds-guide' in body
+    updated = soup.select_one('.ds-landing__updated time')
+    assert updated is not None and updated['datetime'] == updated_const
+    h1 = soup.find('h1')
+    assert h1 is not None
+    first_p = h1.find_next('p')
+    assert first_p is not None
+    assert len(first_p.get_text(' ', strip=True)) <= 400
+    article = soup.select_one('article.ds-guide')
+    assert article is not None
+    tables = article.find_all('table')
+    assert tables, path
+    assert any(len(t.select('tbody tr')) >= 3 for t in tables), path
+    faq_pairs = faq_fn()
+    assert len(faq_pairs) >= 6
+    for question, answer in faq_pairs:
+        assert question in body
+        assert answer in body
+    data = None
+    for tag in soup.find_all('script', type='application/ld+json'):
+        data = _json.loads(tag.string)
+        break
+    assert data and '@graph' in data
+    types = {n['@type'] for n in data['@graph']}
+    assert types >= {'Article', 'FAQPage', 'WebPage'}, types
+    faq = next(n for n in data['@graph'] if n['@type'] == 'FAQPage')
+    assert len(faq['mainEntity']) == len(faq_pairs)
+    for entry, (question, answer) in zip(faq['mainEntity'], faq_pairs):
+        assert entry['name'] == question
+        assert entry['acceptedAnswer']['text'] == answer
+    article_html = article.get_text(' ', strip=True).lower()
+    for banned in ('whisper', 'deepgram', 'assemblyai', 'youtube.com/watch',
+                   'speaker labels included'):
+        assert banned not in article_html, banned
+    if apple_outbound:
+        apple_hosts = 0
+        for a in article.find_all('a', href=True):
+            href = a['href']
+            if 'support.apple.com' in href or 'podcasters.apple.com' in href:
+                apple_hosts += 1
+        assert apple_hosts >= 2, apple_hosts
+        assert 'href="/apple-podcast-transcript"' in body
+    if any_podcast_hrefs:
+        for href in (
+            '/guides/how-to-get-spotify-podcast-transcript',
+            '/guides/how-to-get-apple-podcasts-transcript',
+            '/podcast-to-text',
+            '/rss-to-text',
+            '/spotify-episode-without-rss',
+        ):
+            assert f'href="{href}"' in body, href
+    return body
+
+
+def test_apple_and_any_podcast_transcript_guides(trial_on):
+    """Two new answer-first guides: Article+FAQ, tables, discovery wiring."""
+    client = A.app.test_client()
+    apple_path = '/guides/how-to-get-apple-podcasts-transcript'
+    any_path = '/guides/how-to-get-a-podcast-transcript'
+
+    _assert_new_transcript_guide(
+        client,
+        path=apple_path,
+        updated_const=A.APPLE_GUIDE_UPDATED,
+        faq_fn=A.guide_apple_podcasts_transcript_faq_entries,
+        apple_outbound=True,
+    )
+    _assert_new_transcript_guide(
+        client,
+        path=any_path,
+        updated_const=A.ANY_PODCAST_GUIDE_UPDATED,
+        faq_fn=A.guide_any_podcast_transcript_faq_entries,
+        any_podcast_hrefs=True,
+    )
+
+    sitemap = client.get('/sitemap.xml').data.decode()
+    assert apple_path in sitemap
+    assert any_path in sitemap
+    assert f'<lastmod>{A.APPLE_GUIDE_UPDATED}</lastmod>' in sitemap
+    assert f'<lastmod>{A.ANY_PODCAST_GUIDE_UPDATED}</lastmod>' in sitemap
+
+    llms = client.get('/llms.txt').data.decode()
+    assert apple_path in llms and any_path in llms
+    llms_full = client.get('/llms-full.txt').data.decode()
+    assert apple_path in llms_full and any_path in llms_full
+
+    guides = client.get('/guides').data.decode()
+    help_html = client.get('/help').data.decode()
+    for path in (apple_path, any_path):
+        assert f'href="{path}"' in guides
+        assert f'href="{path}"' in help_html
+
+    assert f'href="{apple_path}"' in client.get('/apple-podcast-transcript').data.decode()
+    assert f'href="{any_path}"' in client.get('/podcast-to-text').data.decode()
+    assert f'href="{any_path}"' in client.get('/').data.decode()
 
 
 def test_homepage_links_spotify_landing_and_guide_in_main(trial_on):

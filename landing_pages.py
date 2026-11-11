@@ -1205,6 +1205,10 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
                 ('Read or download',
                  'Get the transcript in the browser and as .txt or .srt.'),
             ],
+            also_related=[
+                ('guide_apple_podcasts_transcript',
+                 'Guide: how to get an Apple Podcasts transcript'),
+            ],
             faq=[
                 ('Why not just use the transcript in the Apple Podcasts app?',
                  'It stays in the app: you can read it while listening, but not export the '
@@ -1236,6 +1240,10 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
                  'You see the episode list with lengths before anything is charged.'),
                 ('Get the text',
                  'Plain text for reading and quoting, .srt with timestamps for subtitles.'),
+            ],
+            also_related=[
+                ('guide_any_podcast_transcript',
+                 'Guide: how to get a transcript of any podcast episode'),
             ],
             faq=[
                 ('Do I need to upload the audio file?',
