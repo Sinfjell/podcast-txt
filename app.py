@@ -13921,11 +13921,13 @@ the speech model takes the choice as a constraint rather than a hint.
 - [Podcasts]({public_url('podcasts_index')}): show landing pages for popular podcasts
 - [Pricing]({public_url('pricing')}): free trial, one-time minute packs, optional own OpenAI key
 - [Use in ChatGPT & Claude]({public_url('ai_landing')}): connect Podskrift MCP (`/mcp`) in ChatGPT, Claude, Cursor or Claude Code; copyable prompts for your library, marketing, research and routines
-- [Guides]({public_url('guides_index')}): setup walkthroughs for ChatGPT, Claude, Spotify transcripts, and the long-form overview
+- [Guides]({public_url('guides_index')}): setup walkthroughs for ChatGPT, Claude, Apple/Spotify transcripts, any-podcast transcripts, and the long-form overview
 - [Connect Podskrift to ChatGPT]({public_url('guide_chatgpt')}): Plugins → custom MCP server → OAuth
 - [Connect Podskrift to Claude]({public_url('guide_claude')}): Customize → Connectors → custom connector
 - [Guide: podcast transcripts in ChatGPT and Claude]({public_url('guide_ai_transcripts')}): step-by-step connector setup, example asks, and what it costs
 - [How to get a Spotify podcast transcript]({public_url('guide_spotify_transcript')}): Spotify shows an in-app transcript only for some episodes; listeners can't copy or download it — check podcast:transcript in RSS or paste a public-feed link into Podskrift for .txt / .srt
+- [How to get an Apple Podcasts transcript]({public_url('guide_apple_podcasts_transcript')}): where Apple shows transcripts, documented copy limits, and full .txt / .srt from a public link
+- [How to get a transcript of any podcast episode]({public_url('guide_any_podcast_transcript')}): app → RSS publisher file → public-feed transcription; what exclusives cannot do
 - [Help]({public_url('help_page')})
 - [Contact]({public_url('contact')}): hello@podskrift.com — we reply fast
 - [What's new]({public_url('whats_new')}): dated feature list, newest first (build in public)
@@ -13996,6 +13998,9 @@ Yes. Create a key in Settings (`psk_…`) and call the HTTP API: resolve → sta
 - Pricing: {public_url('pricing')}
 - MCP / AI: {public_url('ai_landing')} ({_mcp_connector_url() if mcp_on else 'MCP currently off'})
 - API docs: {public_url('api_docs')}
+- How to get an Apple Podcasts transcript: {public_url('guide_apple_podcasts_transcript')}
+- How to get a transcript of any podcast episode: {public_url('guide_any_podcast_transcript')}
+- How to get a Spotify podcast transcript: {public_url('guide_spotify_transcript')}
 - Sitemap: {public_url('sitemap_xml')}
 - Short LLM index: {public_url('llms_txt')}
 
@@ -14036,6 +14041,7 @@ def sitemap_xml():
             'index', 'podcasts_index', 'pricing', 'ai_landing',
             'guides_index', 'guide_chatgpt', 'guide_claude',
             'guide_ai_transcripts', 'guide_spotify_transcript',
+            'guide_apple_podcasts_transcript', 'guide_any_podcast_transcript',
             'contact', 'whats_new', 'api_docs',
             'help_page', 'rss_help', 'privacy', 'terms', 'register',
             'llms_txt', 'llms_full_txt'):
@@ -14431,6 +14437,12 @@ SPOTIFY_GUIDE_PUBLISHED = '2026-11-04'
 #: Last copy review of /guides/how-to-get-spotify-podcast-transcript.
 SPOTIFY_GUIDE_UPDATED = sitemap_dates.DECLARED_GUIDE_UPDATED[
     'guide_spotify_transcript']
+#: Last copy review of /guides/how-to-get-apple-podcasts-transcript.
+APPLE_GUIDE_UPDATED = sitemap_dates.DECLARED_GUIDE_UPDATED[
+    'guide_apple_podcasts_transcript']
+#: Last copy review of /guides/how-to-get-a-podcast-transcript.
+ANY_PODCAST_GUIDE_UPDATED = sitemap_dates.DECLARED_GUIDE_UPDATED[
+    'guide_any_podcast_transcript']
 
 
 def guide_spotify_transcript_faq_entries():
@@ -14500,6 +14512,108 @@ def guide_spotify_transcript_faq_entries():
     ]
 
 
+def guide_apple_podcasts_transcript_faq_entries():
+    """FAQ on the Apple Podcasts transcript guide (mirrored in FAQPage JSON-LD)."""
+    return [
+        (
+            'Where is the Apple Podcasts transcript on iPhone or iPad?',
+            'Open the Podcasts app, start the episode, expand the mini player, then '
+            'tap Transcript. If the button is grayed out, Apple says no transcript '
+            'is available for that episode. Apple’s steps are in Support article '
+            '“View episode transcripts in Apple Podcasts on iPhone and iPad”.',
+        ),
+        (
+            'Where is it on Mac?',
+            'In the Podcasts app, click the transcript control while an episode '
+            'plays, or select the episode, scroll to Transcript, and choose View '
+            'Transcript. Availability can vary by language and region.',
+        ),
+        (
+            'Why is there no transcript for some episodes?',
+            'Apple generates transcripts for supported languages after publish, and '
+            'only for shows in the Apple Podcasts catalog. Creators can change '
+            'settings; quality checks, explicit-content restrictions, episodes over '
+            '10 hours, private feeds, and a short post-publish delay can all leave '
+            'the Transcript button grayed out. Listener transcripts are not '
+            'available in Belarus and Russia.',
+        ),
+        (
+            'Can I copy or download Apple’s in-app transcript?',
+            'You can select or share text in the app. Apple Support’s Mac guide '
+            '(Share podcasts on Mac) says to select up to 200 words when sharing '
+            'from a transcript; Apple Podcasts for Creators documents the same '
+            'limit with attribution. That is not a full-episode .txt or .srt for '
+            'listeners. Show owners can download transcripts in Apple Podcasts '
+            'Connect for their own episodes.',
+        ),
+        (
+            'How do I get the whole episode as a file?',
+            'Paste the podcasts.apple.com show or episode link into Podskrift’s '
+            'Apple Podcasts transcript page. When the episode is in the public '
+            'feed, you get copyable text plus .txt and .srt downloads — including '
+            'when Apple shows no in-app transcript. Subscriber-only episodes are '
+            'not available that way.',
+        ),
+        (
+            'What about a publisher transcript in the RSS feed?',
+            'Many hosts publish a transcript file with the Podcasting 2.0 '
+            'podcast:transcript tag on the episode item. Check the feed or the '
+            'show’s website first; that publisher file is often the cleanest full '
+            'copy when it exists.',
+        ),
+        (
+            'Is Podskrift free?',
+            'New accounts get free trial minutes when a trial is offered — no card '
+            'needed to start. We do not list a fixed free-minute count here because '
+            'the grant can vary. Longer episodes show the exact price before you pay.',
+        ),
+    ]
+
+
+def guide_any_podcast_transcript_faq_entries():
+    """FAQ on the any-podcast transcript guide (mirrored in FAQPage JSON-LD)."""
+    return [
+        (
+            'What is the fastest way to get a podcast transcript?',
+            'Check the listening app first (Apple Podcasts or Spotify). Then check '
+            'the show’s website or RSS feed for a publisher transcript. If neither '
+            'exists, paste a public Spotify, Apple Podcasts or RSS link into '
+            'Podskrift to transcribe the episode audio.',
+        ),
+        (
+            'Do Apple and Spotify give me a downloadable file?',
+            'No for listeners. Both can show an in-app transcript for some '
+            'episodes; neither offers a full-episode .txt / .srt export to '
+            'listeners. Apple documents sharing or copying up to 200 words with '
+            'attribution.',
+        ),
+        (
+            'What is podcast:transcript in an RSS feed?',
+            'It is the Podcasting 2.0 tag that links an episode to a transcript or '
+            'captions file (URL and MIME type required). When a publisher provides '
+            'one, download that file before paying to re-transcribe the audio.',
+        ),
+        (
+            'Which links work in Podskrift?',
+            'Public Spotify, Apple Podcasts and RSS links, plus direct public audio '
+            'URLs. Video podcasts work when the show also publishes audio in a '
+            'public feed. YouTube watch URLs are not accepted.',
+        ),
+        (
+            'What cannot be transcribed?',
+            'Spotify exclusives and Originals without a public feed, subscriber-only '
+            'or paid episodes, and private or login-gated feeds. There is no public '
+            'audio URL those tools are allowed to fetch.',
+        ),
+        (
+            'Is Podskrift free?',
+            'New accounts get free trial minutes when a trial is offered — no card '
+            'needed to start. We do not list a fixed free-minute count here because '
+            'the grant can vary. Longer episodes show the exact price before you pay.',
+        ),
+    ]
+
+
 @app.route('/guides')
 def guides_index():
     """Hub for setup guides (ChatGPT, Claude, Spotify, and the long-form overview)."""
@@ -14534,6 +14648,72 @@ def guide_spotify_transcript():
                 'description': description,
                 'date_published': SPOTIFY_GUIDE_PUBLISHED,
                 'date_modified': SPOTIFY_GUIDE_UPDATED,
+            },
+        ),
+    )
+
+
+@app.route('/guides/how-to-get-apple-podcasts-transcript')
+def guide_apple_podcasts_transcript():
+    """Honest guide: Apple’s in-app transcript, copy limits, and downloadable alternatives."""
+    faq = guide_apple_podcasts_transcript_faq_entries()
+    page_url = public_url('guide_apple_podcasts_transcript')
+    title = 'How to Get an Apple Podcasts Transcript'
+    description = (
+        'Where Apple Podcasts shows episode transcripts on iPhone, iPad and Mac, '
+        'what you can copy, why some episodes have none, and how to download a '
+        'full .txt / .srt.'
+    )
+    return render_template(
+        'guides/how_to_get_apple_podcasts_transcript.html',
+        guide_faq=faq,
+        guide_updated=APPLE_GUIDE_UPDATED,
+        guide_updated_label=_guide_updated_label(APPLE_GUIDE_UPDATED),
+        trial_offered=bool(advertised_trial_minutes()) or free_trial_offered(),
+        structured_data=_faq_page_structured_data(
+            page_url,
+            title,
+            description,
+            faq,
+            date_modified=APPLE_GUIDE_UPDATED,
+            article={
+                'headline': title,
+                'description': description,
+                'date_published': APPLE_GUIDE_UPDATED,
+                'date_modified': APPLE_GUIDE_UPDATED,
+            },
+        ),
+    )
+
+
+@app.route('/guides/how-to-get-a-podcast-transcript')
+def guide_any_podcast_transcript():
+    """Decision-path guide: in-app, RSS publisher file, or public-feed transcription."""
+    faq = guide_any_podcast_transcript_faq_entries()
+    page_url = public_url('guide_any_podcast_transcript')
+    title = 'How to Get a Transcript of Any Podcast Episode'
+    description = (
+        'A clear path to a podcast transcript: check Apple or Spotify, check the '
+        'RSS podcast:transcript tag, or transcribe from a public feed link. What '
+        'exclusives and private feeds cannot do.'
+    )
+    return render_template(
+        'guides/how_to_get_a_podcast_transcript.html',
+        guide_faq=faq,
+        guide_updated=ANY_PODCAST_GUIDE_UPDATED,
+        guide_updated_label=_guide_updated_label(ANY_PODCAST_GUIDE_UPDATED),
+        trial_offered=bool(advertised_trial_minutes()) or free_trial_offered(),
+        structured_data=_faq_page_structured_data(
+            page_url,
+            title,
+            description,
+            faq,
+            date_modified=ANY_PODCAST_GUIDE_UPDATED,
+            article={
+                'headline': title,
+                'description': description,
+                'date_published': ANY_PODCAST_GUIDE_UPDATED,
+                'date_modified': ANY_PODCAST_GUIDE_UPDATED,
             },
         ),
     )

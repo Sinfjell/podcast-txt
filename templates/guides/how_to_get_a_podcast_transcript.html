@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import button, link_button, page_header, notice %}
+
+{% block title %}How to Get a Transcript of Any Podcast Episode — Podskrift{% endblock %}
+{% block meta_description %}A clear path to a podcast transcript: check Apple or Spotify, check the RSS podcast:transcript tag, or transcribe from a public feed link. What exclusives and private feeds cannot do.{% endblock %}
+{% block og_title %}How to Get a Transcript of Any Podcast Episode{% endblock %}
+{% block og_description %}Four steps to get episode text: in-app transcripts, publisher RSS files, public-feed transcription, and the cases that cannot be transcribed.{% endblock %}
+
+{% block content %}
+<article class="ds-guide">
+  {{ page_header(
+    "How to get a transcript of any podcast episode",
+    "Four steps: (1) Check the app — Apple Podcasts or Spotify may already show a transcript. (2) Check the show’s website or RSS feed for a publisher file (podcast:transcript). (3) If none, paste a public episode link into Podskrift to transcribe from the feed. (4) Spotify exclusives, subscriber-only and private feeds cannot be transcribed this way."
+  ) }}
+  <p class="ds-guide__muted ds-landing__updated">Updated <time datetime="{{ guide_updated }}">{{ guide_updated_label }}</time></p>
+
+  <div class="ds-mcp-start">
+    {{ button("Transcribe from a podcast link", variant="primary", href=url_for('landing_podcast_to_text')) }}
+    <p class="ds-guide__muted">
+      Paste a Spotify, Apple Podcasts or RSS link when you need a downloadable .txt / .srt from public audio.
+      {% if trial_offered %}
+      New accounts get free trial minutes — no card needed to start.
+      {% endif %}
+    </p>
+  </div>
+
+  {% call notice(variant="info") %}
+    Platform behaviour below is summarised from Apple and Spotify’s own docs and from the Podcasting 2.0 transcript tag.
+    Deep how-tos live on the linked guides; this page is the decision path.
+  {% endcall %}
+
+  <section class="ds-guide__section" aria-labelledby="any-apple">
+    <h2 id="any-apple">Apple Podcasts</h2>
+    <p>
+      Many episodes show a time-synced transcript in the Podcasts app on iPhone, iPad and Mac.
+      You can read and search it in-app; Apple documents sharing or copying up to 200 words with attribution, not a full-episode download.
+      Step-by-step:
+      <a href="{{ url_for('guide_apple_podcasts_transcript') }}">How to get an Apple Podcasts transcript</a>.
+      For a full file from a public Apple link, use
+      <a href="{{ url_for('landing_apple') }}">Apple Podcasts transcript</a>.
+    </p>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="any-spotify">
+    <h2 id="any-spotify">Spotify</h2>
+    <p>
+      Some shows offer Spotify’s Read Along / episode transcript in Now Playing on mobile and sometimes on desktop.
+      Listeners cannot export that text as .txt or .srt.
+      Details:
+      <a href="{{ url_for('guide_spotify_transcript') }}">How to get a Spotify podcast transcript</a>.
+      When the show also has a public RSS feed, paste the Spotify link into Podskrift.
+      True exclusives and subscriber-only episodes without a public feed cannot be transcribed — see
+      <a href="{{ url_for('landing_spotify_no_rss') }}">Spotify episode without RSS</a>.
+    </p>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="any-rss">
+    <h2 id="any-rss">RSS feeds and other apps</h2>
+    <p>
+      Every public podcast has an RSS feed. Publishers can attach a transcript with the Podcasting 2.0
+      <code>podcast:transcript</code> tag
+      (<a href="https://podcasting2.org/docs/podcast-namespace/tags/transcript" rel="noopener" target="_blank">podcasting2.org docs</a>).
+      Check the feed or the show’s website first.
+      If there is audio but no transcript file, paste the feed URL into
+      <a href="{{ url_for('landing_rss') }}">RSS to text</a>
+      or use
+      <a href="{{ url_for('landing_podcast_to_text') }}">podcast to text</a>
+      with any public link.
+      Need the feed URL?
+      <a href="{{ url_for('rss_help') }}">How to find an RSS feed</a>.
+    </p>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="any-video">
+    <h2 id="any-video">Video podcasts</h2>
+    <p>
+      Podskrift transcribes the public <em>audio</em> feed for a show — not a pasted YouTube watch URL or a video-only page with no audio enclosure.
+      If the video podcast also publishes audio in RSS (most do), that path works.
+      See
+      <a href="{{ url_for('landing_video_podcast') }}">video podcast transcript</a>.
+    </p>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="any-which">
+    <h2 id="any-which">Which method should I use?</h2>
+    <div class="table-wrap">
+      <table class="econ-table">
+        <thead>
+          <tr>
+            <th scope="col">Situation</th>
+            <th scope="col">Try first</th>
+            <th scope="col">Then</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Listening in Apple Podcasts</th>
+            <td>In-app Transcript button</td>
+            <td>Publisher RSS file, or <a href="{{ url_for('landing_apple') }}">paste the Apple link</a></td>
+          </tr>
+          <tr>
+            <th scope="row">Listening on Spotify</th>
+            <td>Read Along in Now Playing</td>
+            <td>Public feed via Spotify link, or <a href="{{ url_for('landing_spotify_no_rss') }}">check if there is no RSS</a></td>
+          </tr>
+          <tr>
+            <th scope="row">Any public show / other apps</th>
+            <td>Show site or <code>podcast:transcript</code> in RSS</td>
+            <td><a href="{{ url_for('landing_podcast_to_text') }}">Podcast to text</a> or <a href="{{ url_for('landing_rss') }}">RSS to text</a></td>
+          </tr>
+          <tr>
+            <th scope="row">Video podcast with an audio feed</th>
+            <td>Same as RSS / Apple / Spotify link</td>
+            <td><a href="{{ url_for('landing_video_podcast') }}">Video podcast transcript</a></td>
+          </tr>
+          <tr>
+            <th scope="row">Exclusive, subscriber-only or private feed</th>
+            <td>Publisher’s own download, if any</td>
+            <td>Not available via public-feed tools</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="any-guide-faq">
+    <h2 id="any-guide-faq">FAQ</h2>
+    <div class="ds-guide__faq">
+      {% for question, answer in guide_faq %}
+      <details>
+        <summary>{{ question }}</summary>
+        <p>{{ answer }}</p>
+      </details>
+      {% endfor %}
+    </div>
+  </section>
+
+  <nav class="ds-guide__section" aria-labelledby="any-guide-related">
+    <h2 id="any-guide-related">Related</h2>
+    <ul class="ds-guide__list">
+      <li><a href="{{ url_for('guide_apple_podcasts_transcript') }}">How to get an Apple Podcasts transcript</a></li>
+      <li><a href="{{ url_for('guide_spotify_transcript') }}">How to get a Spotify podcast transcript</a></li>
+      <li><a href="{{ url_for('landing_podcast_to_text') }}">Podcast to text</a></li>
+      <li><a href="{{ url_for('landing_rss') }}">RSS feed to text</a></li>
+      <li><a href="{{ url_for('landing_spotify_no_rss') }}">Spotify episode without RSS</a></li>
+      <li><a href="{{ url_for('landing_video_podcast') }}">Video podcast transcript</a></li>
+      <li><a href="{{ url_for('guides_index') }}">All guides</a></li>
+      <li><a href="{{ url_for('help_page') }}">Help</a></li>
+      <li><a href="{{ url_for('pricing') }}">Pricing</a></li>
+    </ul>
+  </nav>
+
+  <div class="ds-guide__cta">
+    {{ link_button("Open podcast to text", href=url_for('landing_podcast_to_text')) }}
+  </div>
+</article>
+{% endblock %}

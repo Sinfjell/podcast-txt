@@ -35,6 +35,20 @@
       {{ link_button("Open Spotify transcript guide", href=url_for('guide_spotify_transcript')) }}
     {% endcall %}
 
+    {% call section(title="How to get an Apple Podcasts transcript", variant="bordered") %}
+      <p class="ds-guide__muted">
+        Where Apple shows transcripts on iPhone, iPad and Mac, what you can copy, and how to download a full .txt / .srt.
+      </p>
+      {{ link_button("Open Apple Podcasts transcript guide", href=url_for('guide_apple_podcasts_transcript')) }}
+    {% endcall %}
+
+    {% call section(title="How to get a transcript of any podcast episode", variant="bordered") %}
+      <p class="ds-guide__muted">
+        A four-step path: check the app, check the RSS publisher file, transcribe from a public link, and know what exclusives cannot do.
+      </p>
+      {{ link_button("Open any-podcast transcript guide", href=url_for('guide_any_podcast_transcript')) }}
+    {% endcall %}
+
     {% call section(title="Podcast transcripts in ChatGPT and Claude", variant="bordered") %}
       <p class="ds-guide__muted">
         Longer overview: how the tools work, pricing, Cursor / VS Code / Claude Code, and FAQ.
