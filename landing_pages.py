@@ -829,15 +829,23 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
             'no card needed to start.'
             if (free_trial or (isinstance(trial, int) and trial > 0)) else ''
         )
+        # Preferred "(Free Trial)" stem is 61 with the brand suffix — use the
+        # brief's shorter action/intent stem so title stays ≤ TITLE_MAX.
         return dict(
             lang='en',
-            title='Spotify Podcast Transcript – Free (2026)',
+            title='Transcribe a Spotify Podcast to Text',
             meta=spotify_meta,
-            h1='Spotify Podcast Transcript – Free, Copy & Download (2026)',
+            h1='Spotify podcast transcript: copy and download as text',
             lede=('Paste an open.spotify.com episode or show link. Podskrift finds the '
                   'same episode in the show’s public RSS feed and turns the audio into '
                   'text you can copy, search in your library, and download as .txt or .srt.'
                   + free_lede),
+            near_top={
+                'before': 'Need Spotify’s own in-app text first? See ',
+                'endpoint': 'guide_spotify_transcript',
+                'anchor': "how to find Spotify's own transcript and why it's often missing",
+                'after': '.',
+            },
             placeholder='https://open.spotify.com/episode/…',
             input_label='Spotify episode or show link',
             button=start,

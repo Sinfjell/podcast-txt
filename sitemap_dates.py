@@ -64,7 +64,7 @@ ENDPOINT_SOURCES: dict[str, str] = {
 #: Guides (and similar) that publish an explicit JSON-LD dateModified.
 #: Kept here so sitemap lastmod matches the page without importing app.
 DECLARED_GUIDE_UPDATED: dict[str, str] = {
-    'guide_spotify_transcript': '2026-11-04',
+    'guide_spotify_transcript': '2026-11-11',
 }
 
 _LANDING_SOURCE = 'landing_pages.py'
