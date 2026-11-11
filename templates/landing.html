@@ -22,6 +22,9 @@
   {% if page.updated %}
   <p class="ds-guide__muted ds-landing__updated">Updated <time datetime="{{ page.updated }}">{{ page.updated_label }}</time></p>
   {% endif %}
+  {% if page.near_top %}
+  <p class="ds-guide__muted">{{ page.near_top.before }}<a href="{{ url_for(page.near_top.endpoint) }}">{{ page.near_top.anchor }}</a>{{ page.near_top.after }}</p>
+  {% endif %}
 
   {# GET to the home page: the home search box detects Spotify / Apple / RSS /
      audio links and runs the normal flow, so there is one paste path, not two. #}

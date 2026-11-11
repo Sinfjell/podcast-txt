@@ -2,15 +2,15 @@
 {% from "components/macros.html" import button, link_button, page_header, notice %}
 
 {% block title %}How to Get a Spotify Podcast Transcript — Podskrift{% endblock %}
-{% block meta_description %}Find Spotify’s Read Along transcript on mobile and desktop, why it’s missing, why you can’t export it, and how to get .txt / .srt when a public feed exists.{% endblock %}
+{% block meta_description %}Spotify shows an in-app transcript only for some episodes; listeners can’t copy or download it. Find Read Along, check podcast:transcript in RSS, or get .txt / .srt from a public feed.{% endblock %}
 {% block og_title %}How to Get a Spotify Podcast Transcript{% endblock %}
-{% block og_description %}Spotify’s in-app transcript, why it may be missing, and honest alternatives — including Podskrift when a public feed exists.{% endblock %}
+{% block og_description %}Where Spotify’s transcript is, why it’s often missing, why listeners can’t download it, and how to get a text file from a public feed.{% endblock %}
 
 {% block content %}
 <article class="ds-guide">
   {{ page_header(
     "How to get a Spotify podcast transcript",
-    "Spotify can show a Read Along transcript for some episodes. Here is where to find it, why it is often missing, why you cannot export it, and what to do instead."
+    "Spotify shows an in-app transcript only for some episodes, you can't copy or download it as a listener, and to get a text file you transcribe the episode from the show's public feed."
   ) }}
   <p class="ds-guide__muted ds-landing__updated">Updated <time datetime="{{ guide_updated }}">{{ guide_updated_label }}</time></p>
 
@@ -25,92 +25,164 @@
   </div>
 
   {% call notice(variant="info") %}
-    This guide describes Spotify’s listener transcript as Spotify documents it in Help and Community answers.
+    This guide describes Spotify’s listener transcript as Spotify documents it in
+    <a href="https://support.spotify.com/us/creators/article/managing-episode-transcripts-on-spotify/" rel="noopener" target="_blank">Spotify for Creators Help</a>
+    and the
+    <a href="https://newsroom.spotify.com/2023-09-28/international-podcast-day-transcripts-chapters-show-pages-global/" rel="noopener" target="_blank">28 September 2023 newsroom post</a>.
     Menu labels move between app versions. Podskrift does not use or re-host Spotify’s in-app text — it transcribes public audio.
   {% endcall %}
 
   <section class="ds-guide__section" aria-labelledby="spotify-mobile">
-    <h2 id="spotify-mobile">On iPhone and Android</h2>
+    <h2 id="spotify-mobile">Where is the transcript on iPhone/Android?</h2>
     <ol class="ds-guide__steps">
       <li class="ds-guide__step">
         <h3>Play the episode</h3>
-        <p>Open the episode in the Spotify app and start playback. The transcript only appears once the episode is playing or loaded in Now Playing.</p>
+        <p>Open the episode in the Spotify mobile app and start playback. Spotify says listeners see transcripts in the Now Playing View and on episode pages in the mobile app.</p>
       </li>
       <li class="ds-guide__step">
         <h3>Open full-screen Now Playing</h3>
         <p>Tap the mini player at the bottom so the episode fills the screen.</p>
       </li>
       <li class="ds-guide__step">
-        <h3>Scroll to the transcript</h3>
+        <h3>Scroll to Read Along</h3>
         <p>
-          Scroll down past the controls. On some versions a transcript / Read Along card replaces the cover art;
-          on others it sits under <strong>About this episode</strong>. Tap the card to read along while the audio plays.
+          Scroll down the Now Playing View to find the transcript, then tap the card to follow along full screen while the audio plays
+          (Spotify’s newsroom calls this <strong>Read Along</strong>).
+          On some app versions the card replaces the cover art; on others it sits under <strong>About this episode</strong>.
         </p>
       </li>
     </ol>
   </section>
 
   <section class="ds-guide__section" aria-labelledby="spotify-desktop">
-    <h2 id="spotify-desktop">On desktop and the web player</h2>
+    <h2 id="spotify-desktop">On desktop and the web player?</h2>
     <ol class="ds-guide__list">
       <li>Play the episode in the Spotify desktop app or at open.spotify.com.</li>
       <li>Open the <strong>Now Playing</strong> panel on the right (the control near the bottom-right of the player).</li>
       <li>Scroll that panel. Where a transcript exists, Read Along / Episode transcript appears there.</li>
     </ol>
     <p class="ds-guide__muted">
-      Some auto-generated transcripts are available on mobile only. If you see one on your phone and nothing on desktop, that can be expected.
+      Spotify’s published help focuses on the mobile Now Playing View. Some auto-generated transcripts are available on mobile only.
+      If you see one on your phone and nothing on desktop, that can be expected.
     </p>
   </section>
 
   <section class="ds-guide__section" aria-labelledby="spotify-missing">
-    <h2 id="spotify-missing">Why the transcript is missing</h2>
+    <h2 id="spotify-missing">Why is there no transcript?</h2>
     <ul class="ds-guide__list">
-      <li><strong>Eligibility</strong> — Spotify generates transcripts only for select shows, not the whole catalogue.</li>
-      <li><strong>Language</strong> — auto transcripts cover a limited set of languages (Spotify for Creators lists eligibility for select English, French, German, Spanish and Portuguese shows).</li>
-      <li><strong>Creator turned it off</strong> — in Spotify for Creators, publishers can disable transcripts per episode or for the show.</li>
+      <li><strong>Eligibility</strong> — Spotify generates transcripts only for select shows, not the whole catalogue (the 2023 newsroom post described a rollout to millions of episodes, not every show).</li>
+      <li><strong>Creator turned it off</strong> — in Spotify for Creators, publishers can disable transcripts per episode or for the whole show.</li>
       <li><strong>Desktop limits</strong> — not every transcript that appears on mobile is shown on desktop or the web player.</li>
       <li><strong>App version</strong> — older clients may hide the control; update Spotify and try again before concluding there is none.</li>
     </ul>
   </section>
 
   <section class="ds-guide__section" aria-labelledby="spotify-export">
-    <h2 id="spotify-export">You cannot copy or export Spotify’s listener transcript</h2>
+    <h2 id="spotify-export">Can you copy or download it?</h2>
     <p>
       Spotify’s Read Along text is for following along in the app. Listeners cannot select the full transcript,
-      download .txt or .srt, or export it into another tool. Spotify may offer sharing a short quote from Read Along;
-      that is not a full-episode export.
+      download .txt or .srt, or export it into another tool. Spotify’s download and upload tools are for
+      <em>creators</em> in Spotify for Creators (VTT/SRT for their own eligible episodes), not for listeners.
     </p>
     <p class="ds-guide__muted">
       Creators with access to <a href="https://creators.spotify.com" rel="noopener" target="_blank">Spotify for Creators</a>
       can view, download or upload transcripts for <em>their own</em> eligible episodes — that path is for show owners, not listeners.
+      See
+      <a href="https://support.spotify.com/us/creators/article/managing-episode-transcripts-on-spotify/" rel="noopener" target="_blank">Managing episode transcripts on Spotify</a>.
     </p>
   </section>
 
+  <section class="ds-guide__section" aria-labelledby="spotify-download-text">
+    <h2 id="spotify-download-text">How to download a Spotify podcast transcript as a text file</h2>
+    <ol class="ds-guide__list">
+      <li>Copy the episode link from Spotify (Share → Copy link). It should start with <code>open.spotify.com/episode/</code>. A show link works too.</li>
+      <li>Paste it into <a href="{{ url_for('landing_spotify') }}">Podskrift’s Spotify transcript page</a>.</li>
+      <li>Confirm the matched episode from the show’s public RSS feed, then start transcription.</li>
+      <li>When it finishes, copy the text or download <strong>.txt</strong> and <strong>.srt</strong>.</li>
+    </ol>
+    <p>
+      Limits: only episodes that also appear in a public feed. Spotify exclusives, Originals and subscriber-only
+      episodes without a public RSS feed have no audio Podskrift can fetch — see
+      <a href="{{ url_for('landing_spotify_no_rss') }}">Spotify episode without RSS</a>.
+      This still works when Spotify shows no Read Along, as long as a public feed exists —
+      <a href="{{ url_for('landing_spotify_no_transcript') }}">Spotify transcript not available</a>.
+    </p>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="spotify-rss-transcript">
+    <h2 id="spotify-rss-transcript">Check the show’s RSS feed for a ready-made transcript</h2>
+    <p>
+      Some podcast hosts publish a ready-made transcript in the show’s public RSS feed using the Podcasting 2.0
+      <code>podcast:transcript</code> tag. That tag links to a transcript or captions file (often VTT or SRT;
+      plain text and other types are allowed too). Multiple tags can appear for multiple formats.
+      See the
+      <a href="https://podcasting2.org/docs" rel="noopener" target="_blank">Podcasting 2.0 docs</a>
+      and the
+      <a href="https://podcasting2.org/docs/podcast-namespace/tags/transcript" rel="noopener" target="_blank"><code>podcast:transcript</code> tag</a>.
+    </p>
+    <p>
+      Spotify for Creators can also
+      <a href="https://support.spotify.com/us/creators/article/managing-episode-transcripts-on-spotify/" rel="noopener" target="_blank">distribute creator transcripts across other platforms via RSS</a>
+      when the creator turns that setting on. If the host already publishes a file, download that before re-transcribing.
+      Need the feed URL? See <a href="{{ url_for('rss_help') }}">how to find an RSS feed</a>.
+    </p>
+  </section>
+
+  <section class="ds-guide__section" aria-labelledby="spotify-ways">
+    <h2 id="spotify-ways">Ways to get a Spotify transcript</h2>
+    <div class="econ-table-wrap">
+      <table class="econ-table">
+        <thead>
+          <tr>
+            <th scope="col">Way</th>
+            <th scope="col">Who can use it</th>
+            <th scope="col">Copy?</th>
+            <th scope="col">Download?</th>
+            <th scope="col">Works when Spotify shows none?</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Spotify Read Along</th>
+            <td>Listeners, when Spotify has generated one</td>
+            <td>No full-episode copy</td>
+            <td>No listener export</td>
+            <td>No — nothing to open in the app</td>
+          </tr>
+          <tr>
+            <th scope="row">Spotify for Creators</th>
+            <td>Show owners of eligible episodes</td>
+            <td>Creators can work with their files</td>
+            <td>Yes — VTT/SRT for their own shows</td>
+            <td>Only if that creator enables or uploads one</td>
+          </tr>
+          <tr>
+            <th scope="row">Show’s RSS <code>podcast:transcript</code></th>
+            <td>Anyone who can fetch the public feed</td>
+            <td>Yes, from the linked file</td>
+            <td>Yes — host-published VTT/SRT/text</td>
+            <td>Yes, when the host published a file</td>
+          </tr>
+          <tr>
+            <th scope="row">Paste link into Podskrift</th>
+            <td>Anyone with a public-feed episode</td>
+            <td>Yes — from the result page</td>
+            <td>Yes — .txt and .srt</td>
+            <td>Yes, if a public RSS/audio feed exists</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
   <section class="ds-guide__section" aria-labelledby="spotify-alternatives">
-    <h2 id="spotify-alternatives">Alternatives</h2>
+    <h2 id="spotify-alternatives">Related options</h2>
     <ul class="ds-guide__list">
-      <li>
-        <strong>Podskrift</strong> —
-        Paste the Spotify episode or show link.
-        When the show also publishes a public RSS feed (most do), you get a transcript you can copy and download as .txt and .srt —
-        including episodes where Spotify shows no Read Along.
-        <a href="{{ url_for('landing_spotify') }}">Spotify podcast transcript</a>.
-      </li>
       <li>
         <strong>Apple Podcasts or the public RSS feed</strong> —
         If the show is listed outside Spotify, you can paste that link instead.
         See <a href="{{ url_for('landing_apple') }}">Apple Podcasts</a> or
         <a href="{{ url_for('rss_help') }}">how to find an RSS feed</a>.
-      </li>
-      <li>
-        <strong>Spotify exclusives / subscriber-only</strong> —
-        No public feed means no audio Podskrift can fetch. Those episodes cannot be transcribed here.
-        See <a href="{{ url_for('landing_spotify_no_rss') }}">Spotify episode without RSS</a>.
-      </li>
-      <li>
-        <strong>Spotify shows no Read Along</strong> —
-        When the app has no transcript but a public feed exists,
-        <a href="{{ url_for('landing_spotify_no_transcript') }}">Spotify transcript not available</a>.
       </li>
       <li>
         <strong>Video podcasts</strong> —

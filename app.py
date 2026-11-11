@@ -13832,9 +13832,19 @@ def _llms_body(*, full=False):
         label = landing_pages_mod.LANG_LABELS_EN.get(lang)
         return f' ({label})' if label else ''
 
+    def _llms_landing_blurb(endpoint):
+        # One-line descriptions for answer-engine discovery; keep Spotify in sync
+        # with the answer-first guide / landing copy.
+        if endpoint == 'landing_spotify':
+            return ('Paste an open.spotify.com link; get a copyable .txt / .srt '
+                    'when the show has a public feed — including when Spotify '
+                    'shows no Read Along')
+        return ''
+
     landing_lines = '\n'.join(
         f'- [{landing_page_data(e)["title"]}]({public_url(e)})'
         + _llms_landing_label(e)
+        + (f': {_llms_landing_blurb(e)}' if _llms_landing_blurb(e) else '')
         for e, _ in landing_pages_mod.public_pages())
     mcp_on = mcp_server_mod.mcp_enabled()
     mcp_section = (f"""## Use it from ChatGPT, Claude and other AI apps (MCP)
@@ -13915,7 +13925,7 @@ the speech model takes the choice as a constraint rather than a hint.
 - [Connect Podskrift to ChatGPT]({public_url('guide_chatgpt')}): Plugins → custom MCP server → OAuth
 - [Connect Podskrift to Claude]({public_url('guide_claude')}): Customize → Connectors → custom connector
 - [Guide: podcast transcripts in ChatGPT and Claude]({public_url('guide_ai_transcripts')}): step-by-step connector setup, example asks, and what it costs
-- [How to get a Spotify podcast transcript]({public_url('guide_spotify_transcript')}): Spotify Read Along on mobile/desktop, why it is missing, and downloadable alternatives
+- [How to get a Spotify podcast transcript]({public_url('guide_spotify_transcript')}): Spotify shows an in-app transcript only for some episodes; listeners can't copy or download it — check podcast:transcript in RSS or paste a public-feed link into Podskrift for .txt / .srt
 - [Help]({public_url('help_page')})
 - [Contact]({public_url('contact')}): hello@podskrift.com — we reply fast
 - [What's new]({public_url('whats_new')}): dated feature list, newest first (build in public)
@@ -14416,6 +14426,8 @@ def ai_landing():
     )
 
 
+#: First published date of /guides/how-to-get-spotify-podcast-transcript.
+SPOTIFY_GUIDE_PUBLISHED = '2026-11-04'
 #: Last copy review of /guides/how-to-get-spotify-podcast-transcript.
 SPOTIFY_GUIDE_UPDATED = sitemap_dates.DECLARED_GUIDE_UPDATED[
     'guide_spotify_transcript']
@@ -14454,6 +14466,23 @@ def guide_spotify_transcript_faq_entries():
             'download for listeners.',
         ),
         (
+            'How do I download a Spotify podcast transcript as a text file?',
+            'Paste the open.spotify.com episode or show link into Podskrift. When '
+            'the show also publishes a public RSS feed, Podskrift transcribes the '
+            'audio and you can download .txt and .srt. Spotify exclusives and '
+            'subscriber-only episodes without a public feed cannot be transcribed '
+            'this way. Show owners can download their own eligible transcripts in '
+            'Spotify for Creators.',
+        ),
+        (
+            'Does the RSS feed sometimes include a transcript?',
+            'Yes. Some hosts publish a Podcasting 2.0 podcast:transcript tag that '
+            'points at a VTT, SRT or plain-text file for that episode. Check the '
+            'show’s public RSS (or ask the host) before re-transcribing. Spotify '
+            'for Creators can also distribute creator transcripts via RSS when '
+            'the creator enables that setting.',
+        ),
+        (
             'What are the alternatives?',
             'If the show publishes a public RSS or Apple Podcasts feed, paste the '
             'Spotify (or Apple) link into Podskrift to get a copyable transcript '
@@ -14484,9 +14513,9 @@ def guide_spotify_transcript():
     page_url = public_url('guide_spotify_transcript')
     title = 'How to Get a Spotify Podcast Transcript'
     description = (
-        'Find Spotify’s Read Along transcript on mobile and desktop, why it’s '
-        'missing, why you can’t export it, and how to get .txt / .srt when a '
-        'public feed exists.'
+        'Spotify shows an in-app transcript only for some episodes; listeners '
+        'can’t copy or download it. Find Read Along, check podcast:transcript in '
+        'RSS, or get .txt / .srt from a public feed.'
     )
     return render_template(
         'guides/how_to_get_spotify_podcast_transcript.html',
@@ -14503,7 +14532,7 @@ def guide_spotify_transcript():
             article={
                 'headline': title,
                 'description': description,
-                'date_published': SPOTIFY_GUIDE_UPDATED,
+                'date_published': SPOTIFY_GUIDE_PUBLISHED,
                 'date_modified': SPOTIFY_GUIDE_UPDATED,
             },
         ),

@@ -4706,8 +4706,9 @@ def test_spotify_landing_shows_updated_date_platform_steps_and_troubleshooting(t
     assert webpage and webpage['dateModified'] == lp.SPOTIFY_PAGE_UPDATED
     assert lp.SPOTIFY_PAGE_UPDATED == '2026-11-04'
     h1 = soup.find('h1').get_text(' ', strip=True)
-    assert 'Spotify Podcast Transcript' in h1 and 'Free' in h1 and '2026' in h1
-    assert 'Copy' in h1 and 'Download' in h1
+    assert 'Spotify podcast transcript' in h1
+    assert 'copy and download as text' in h1.lower()
+    assert '2026' not in h1
     # SEO free claim: trial minutes, never a fixed minute count in title/meta/lede.
     title = soup.find('title').get_text()
     meta = soup.find('meta', attrs={'name': 'description'})['content']
@@ -4717,6 +4718,15 @@ def test_spotify_landing_shows_updated_date_platform_steps_and_troubleshooting(t
         assert not re.search(r'\b\d+\s+minutes?\s+free\b', surface, re.I), surface
     if A.advertised_trial_minutes() or A.free_trial_offered():
         assert 'free trial minutes' in (meta + ' ' + lede_text).lower()
+    assert 'Transcribe a Spotify Podcast to Text' in title
+    assert '2026' not in title
+    assert len(title) <= lp.TITLE_MAX
+    assert 'href="/guides/how-to-get-spotify-podcast-transcript"' in html
+    near_top = soup.find(
+        'a', href='/guides/how-to-get-spotify-podcast-transcript')
+    assert near_top is not None
+    assert "how to find Spotify's own transcript and why it's often missing" in (
+        near_top.get_text(' ', strip=True))
     compare = soup.select_one('#landing-compare').parent
     assert 'Spotify Read Along' in compare.get_text()
     assert 'Podskrift' in compare.get_text()
@@ -4749,14 +4759,32 @@ def test_spotify_transcript_guide_has_article_faq_jsonld_and_discovery(trial_on)
     assert 'ds-guide' in body
     updated = soup.select_one('.ds-landing__updated time')
     assert updated is not None and updated['datetime'] == A.SPOTIFY_GUIDE_UPDATED
-    assert updated.get_text(strip=True) == '4 November 2026'
+    assert updated.get_text(strip=True) == '11 November 2026'
+    assert A.SPOTIFY_GUIDE_UPDATED == '2026-11-11'
+    assert A.SPOTIFY_GUIDE_PUBLISHED == '2026-11-04'
     for needle in (
-        'Now Playing', 'Read Along', 'desktop', 'eligible', 'language',
-        'turned it off', 'cannot export', 'Spotify for Creators',
+        'Now Playing', 'Read Along', 'desktop', 'eligible',
+        'turned it off', 'Spotify for Creators',
         'public RSS', 'free trial minutes',
+        'text file', 'podcast:transcript', 'podcasting2.org',
     ):
         assert needle.lower() in body.lower(), needle
+    spotify_refs = [
+        a for a in soup.find_all('a', href=True)
+        if 'support.spotify.com' in a['href'] or 'newsroom.spotify.com' in a['href']
+    ]
+    assert len(spotify_refs) >= 2
+    guide_table = soup.select_one('article.ds-guide table')
+    assert guide_table is not None
+    assert len(guide_table.select('tbody tr')) >= 4
+    h1 = soup.find('h1')
+    first_p = h1.find_next('p') if h1 else None
+    first_p_text = first_p.get_text(' ', strip=True) if first_p else ''
+    assert len(first_p_text) <= 400
+    assert ('can\'t' in first_p_text.lower() or 'cannot' in first_p_text.lower())
+    assert 'download' in first_p_text.lower()
     faq_pairs = A.guide_spotify_transcript_faq_entries()
+    assert len(faq_pairs) >= 8
     for question, answer in faq_pairs:
         assert question in body
         assert answer in body
@@ -4769,7 +4797,7 @@ def test_spotify_transcript_guide_has_article_faq_jsonld_and_discovery(trial_on)
     assert types >= {'Article', 'FAQPage', 'WebPage'}, types
     article = next(n for n in data['@graph'] if n['@type'] == 'Article')
     assert article['dateModified'] == A.SPOTIFY_GUIDE_UPDATED
-    assert article['datePublished'] == A.SPOTIFY_GUIDE_UPDATED
+    assert article['datePublished'] == A.SPOTIFY_GUIDE_PUBLISHED
     faq = next(n for n in data['@graph'] if n['@type'] == 'FAQPage')
     assert len(faq['mainEntity']) == len(faq_pairs)
     for entry, (question, answer) in zip(faq['mainEntity'], faq_pairs):
@@ -4785,6 +4813,8 @@ def test_spotify_transcript_guide_has_article_faq_jsonld_and_discovery(trial_on)
     assert path in sitemap and f'<lastmod>{A.SPOTIFY_GUIDE_UPDATED}</lastmod>' in sitemap
     llms = client.get('/llms.txt').data.decode()
     assert path in llms
+    assert 'can\'t copy or download' in llms.lower() or 'cannot copy or download' in llms.lower()
+    assert 'podcast:transcript' in llms
     assert f'href="{path}"' in client.get('/guides').data.decode()
     help_html = client.get('/help').data.decode()
     assert f'href="{path}"' in help_html
@@ -4796,6 +4826,48 @@ def test_spotify_transcript_guide_has_article_faq_jsonld_and_discovery(trial_on)
     # Intent landing from #194 also points back at this guide.
     no_tx = client.get('/spotify-transcript-not-available').data.decode()
     assert f'href="{path}"' in no_tx
+
+
+def test_homepage_links_spotify_landing_and_guide_in_main(trial_on):
+    """Homepage body (not only footer) links the Spotify landing and guide."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(A.app.test_client().get('/').data.decode(), 'html.parser')
+    main = soup.find('main')
+    assert main is not None
+    landing = [
+        a for a in main.find_all('a', href=True)
+        if a['href'].endswith('/spotify-podcast-transcript')
+        and 'Spotify podcast transcript' in a.get_text(' ', strip=True)
+    ]
+    assert landing
+    guide = [
+        a for a in main.find_all('a', href=True)
+        if a['href'].endswith('/guides/how-to-get-spotify-podcast-transcript')
+    ]
+    assert guide
+    assert any(
+        a.get_text(strip=True) == 'How to get a Spotify podcast transcript'
+        for a in guide
+    )
+
+
+def test_spotify_landing_title_and_guide_link_seo_cluster(trial_on):
+    """Action/intent title, self-canonical, indexable, guide cross-link."""
+    from bs4 import BeautifulSoup
+    import landing_pages as lp
+    resp = A.app.test_client().get('/spotify-podcast-transcript')
+    assert resp.status_code == 200
+    assert 'noindex' not in (resp.headers.get('X-Robots-Tag') or '').lower()
+    soup = BeautifulSoup(resp.data.decode(), 'html.parser')
+    title = soup.find('title').get_text(strip=True)
+    assert 'Transcribe a Spotify Podcast to Text' in title
+    assert '2026' not in title
+    assert len(title) <= lp.TITLE_MAX
+    assert soup.find('h1').get_text(' ', strip=True).lower().startswith(
+        'spotify podcast transcript')
+    assert soup.find('link', rel='canonical')['href'].endswith(
+        '/spotify-podcast-transcript')
+    assert soup.find('a', href='/guides/how-to-get-spotify-podcast-transcript')
 
 
 def test_only_pages_with_an_updated_date_get_date_modified(trial_on):
