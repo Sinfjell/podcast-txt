@@ -24242,9 +24242,18 @@ BATCH7_SHOW_SLUGS = (
     'lage-der-nation-der-politik-podcast-aus-berlin',
     'nadie-sabe-nada',
     'transfert',
-    'muschio-selvaggio',
+    'tintoria',
     'forklart',
     'mamilos',
+)
+
+#: Held-back shows from the all-lang rollout, plus Muschio→Tintoria replacement.
+BATCH8_SHOW_SLUGS = (
+    'hugo-decrypte',
+    'la-ruina',
+    'sinnsyn',
+    'projeto-humanos',
+    'boekestijn-en-de-wijk',
 )
 
 
@@ -24264,10 +24273,11 @@ def test_batch7_show_pages_render_index_and_sitemap(trial_on):
         'lage-der-nation-der-politik-podcast-aus-berlin': 'Lage der Nation',
         'nadie-sabe-nada': 'Nadie Sabe Nada',
         'transfert': 'Transfert',
-        'muschio-selvaggio': 'Muschio Selvaggio',
+        'tintoria': 'Tintoria',
         'forklart': 'Forklart',
         'mamilos': 'Mamilos',
     }
+    assert 'muschio-selvaggio' not in curated_slugs
     for slug in BATCH7_SHOW_SLUGS:
         assert slug in curated_slugs, slug
         resp = client.get(f'/podcasts/{slug}')
@@ -24287,6 +24297,70 @@ def test_batch7_show_pages_render_index_and_sitemap(trial_on):
     assert any(loc.endswith('/fr/transcrire-podcast-spotify') for loc in locs)
     assert any(loc.endswith('/de/apple-podcast-transkript') for loc in locs)
     assert any(loc.endswith('/no/apple-podcasts-transkript') for loc in locs)
+
+
+def test_batch8_held_back_shows_and_native_copy_fixes(trial_on):
+    """Held-back shows + native landing copy fixes from the follow-up PR."""
+    import xml.etree.ElementTree as ET
+    import show_pages as SP
+    import landing_pages as lp
+    client = A.app.test_client()
+    curated = SP.load_curated_shows()
+    curated_slugs = {s['slug'] for s in curated}
+    names = {
+        'hugo-decrypte': 'Hugo',
+        'la-ruina': 'La Ruina',
+        'sinnsyn': 'SinnSyn',
+        'projeto-humanos': 'Projeto Humanos',
+        'boekestijn-en-de-wijk': 'Boekestijn en De Wijk',
+    }
+    for slug in BATCH8_SHOW_SLUGS:
+        assert slug in curated_slugs, slug
+        resp = client.get(f'/podcasts/{slug}')
+        assert resp.status_code == 200, slug
+        assert names[slug] in resp.data.decode()
+    locs = [el.text for el in ET.fromstring(client.get('/sitemap.xml').data).iter(
+        '{http://www.sitemaps.org/schemas/sitemap/0.9}loc')]
+    for slug in BATCH8_SHOW_SLUGS:
+        assert any(loc.endswith(f'/podcasts/{slug}') for loc in locs), slug
+    core = 21
+    expected = core + len(lp.public_pages()) + len(curated)
+    assert len(locs) == expected
+    assert len(BATCH8_SHOW_SLUGS) == 5
+
+    # Language fixes on native landings (copy + FAQ schema).
+    nb_apple = client.get('/no/apple-podcasts-transkript').data.decode()
+    assert 'Hva koster det?' in nb_apple
+    assert 'Hva kostet det?' not in nb_apple
+    assert 'Apple Podcasts til tekst' in nb_apple
+    assert 'Apple Podcasts-podcast til tekst' not in nb_apple
+
+    pt_apple = client.get('/pt/transcrever-apple-podcasts').data.decode()
+    assert 'A Apple mostra' in pt_apple
+    assert 'O Apple mostra' not in pt_apple
+
+    nl_spotify = client.get('/nl/spotify-podcast-naar-tekst').data.decode()
+    assert 'korte of geaccentueerde audio' in nl_spotify
+    assert 'bij kort of geaccentueerd audio' not in nl_spotify
+    assert 'Nederlands' in nl_spotify
+    assert '\\"Nederlands\\"' in nl_spotify or '"Nederlands"' in nl_spotify
+    assert '« Nederlands »' not in nl_spotify
+    assert '«Nederlands»' not in nl_spotify
+
+    nl_apple = client.get('/nl/apple-podcast-transcriptie').data.decode()
+    assert 'Apple Podcasts naar tekst' in nl_apple
+    assert 'Apple Podcasts-podcast naar tekst' not in nl_apple
+    assert 'korte of geaccentueerde audio' in nl_apple
+    assert 'bij kort of geaccentueerd audio' not in nl_apple
+
+    nb_spotify = client.get('/no/spotify-podcast-transkript').data.decode()
+    assert 'ren Spotify-eksklusiv podkast' in nb_spotify
+    assert 'et ekte eksklusiv' not in nb_spotify
+    assert 'Et Spotify-eksklusiv' not in nb_spotify
+
+    # Brazilian Portuguese tax wording (not European IVA) on Spotify cost FAQ.
+    pt_spotify = client.get('/pt/transcrever-podcast-spotify').data.decode()
+    assert 'impostos inclusos' in pt_spotify or 'IVA' not in pt_spotify.split('Quanto custa')[-1][:400]
 
 
 def test_spotify_landing_will_work_line_and_cta_note(trial_on):

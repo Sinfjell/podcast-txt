@@ -164,7 +164,7 @@ SHORT_LABELS = {
     'landing_de_apple': 'Apple Podcasts transkribieren (Deutsch)',
     'landing_es_apple': 'Transcribir Apple Podcasts (español)',
     'landing_fr_apple': 'Transcrire Apple Podcasts (français)',
-    'landing_nl_apple': 'Apple Podcasts transcriptie (Nederlands)',
+    'landing_nl_apple': 'Apple Podcasts naar tekst (Nederlands)',
     'landing_it_apple': 'Trascrivere Apple Podcasts (italiano)',
     'landing_pt_apple': 'Transcrever Apple Podcasts (português)',
     'landing_no_apple': 'Apple Podcasts til tekst (norsk)',
@@ -501,7 +501,7 @@ RELATED_LABELS = {
     },
     'nl': {
         'landing_nl_spotify': 'Spotify-podcast naar tekst (Nederlands)',
-        'landing_nl_apple': 'Apple Podcasts transcriptie (Nederlands)',
+        'landing_nl_apple': 'Apple Podcasts naar tekst (Nederlands)',
         'landing_spotify': 'Spotify-podcast transcriberen (Engels)',
         'landing_spotify_no_rss': 'Spotify-aflevering zonder RSS (Engels)',
         'landing_spotify_no_transcript': 'Spotify-transcript niet beschikbaar (Engels)',
@@ -852,7 +852,7 @@ def _spotify_whole_episode_cost(trial, pack, episode_prices, free_trial=False,
                         'Pagamento unico, IVA inclusa, i minuti non scadono.')
             if lang == 'pt':
                 return (q, f'Exemplos — {joined}. '
-                        'Pagamento único, IVA incluído, os minutos não expiram.')
+                        'Pagamento único, impostos inclusos, os minutos não expiram.')
             if lang in ('nb', 'no'):
                 return (q, f'Eksempler — {joined}. '
                         'Engangskjøp, MVA inkludert, minuttene utløper aldri.')
@@ -878,7 +878,7 @@ def _spotify_whole_episode_cost(trial, pack, episode_prices, free_trial=False,
                     'Pagamento unico, IVA inclusa, i minuti non scadono, senza abbonamento.')
         if lang == 'pt':
             return (q, f'Os minutos são uma compra única: {phrase}. '
-                    'Pagamento único, IVA incluído, os minutos não expiram, sem assinatura.')
+                    'Pagamento único, impostos inclusos, os minutos não expiram, sem assinatura.')
         if lang in ('nb', 'no'):
             return (q, f'Minutter kjøpes én gang: {phrase}. '
                     'Engangskjøp, MVA inkludert, minuttene utløper aldri, uten abonnement.')
@@ -1916,7 +1916,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
                  'Open in Spotify de aflevering, tik op Delen (of ⋯), daarna Link kopiëren.'),
                 ('Plak hem hier',
                  'Podskrift vindt de aflevering in de openbare RSS-feed en toont hem. '
-                 'Kies bij voorkeur « Nederlands » als taal.'),
+                 'Kies bij voorkeur "Nederlands" als taal.'),
                 ('Lees of download',
                  'Transcriptie duurt meestal een paar minuten. Download .txt of .srt.'),
             ],
@@ -1951,8 +1951,8 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
                 cost_faq,
                 ('Welke talen worden ondersteund?',
                  f'{lang_count} talen, met moderne spraakherkenning. Automatische detectie is '
-                 'standaard; kies « Nederlands » voor Nederlandse afleveringen — dat helpt bij '
-                 'kort of geaccentueerd audio.'),
+                 'standaard; kies "Nederlands" voor Nederlandse afleveringen — dat helpt bij '
+                 'korte of geaccentueerde audio.'),
                 ('Wat krijg ik?',
                  'De volledige transcriptie als tekst (.txt) en als ondertitels met '
                  'tijdstempels (.srt), plus een leesweergave in de browser. Transcripties '
@@ -2441,7 +2441,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
             troubleshoot_title='Når en Spotify-lenke ikke fungerer',
             troubleshoot_head=('Hva du ser', 'Hvorfor', 'Hva du kan gjøre'),
             troubleshoot=[
-                ('Et Spotify-eksklusiv eller Original',
+                ('En ren Spotify-eksklusiv podkast eller Original',
                  'Podkasten har ingen offentlig RSS-feed, altså ingen lyd Podskrift '
                  'kan hente.',
                  'Søk etter podkastnavnet her eller sjekk Apple Podcasts. Hvis ingenting '
@@ -2486,7 +2486,8 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
                 ('Hva om podkasten bare finnes på Spotify?',
                  'Podskrift kan ikke transkribere den. Noen podkaster som virker '
                  'Spotify-only har likevel offentlig feed. Søk navnet her eller sjekk '
-                 'Apple Podcasts. Hvis ingenting dukker opp, er det et ekte eksklusiv.'),
+                 'Apple Podcasts. Hvis ingenting dukker opp, er det en ren '
+                 'Spotify-eksklusiv podkast.'),
                 ('Kan jeg lime inn en podkastlenke i stedet for episodelenke?',
                  'Ja. En podkastlenke åpner episodelisten; der velger du episoden. '
                  'Å søke etter podkastnavnet fungerer også.'),
@@ -2642,7 +2643,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
         free_nl = _free_bit(trial, free_trial, 'nl')
         return dict(
             lang='nl',
-            title='Apple Podcasts-podcast naar tekst',
+            title='Apple Podcasts naar tekst',
             meta=('Plak een Apple Podcasts-link en download .txt en .srt. '
                   f'Alleen openbare feeds. {free_nl.capitalize()}.'),
             h1='Podcast van Apple Podcasts transcriberen via een link',
@@ -2672,7 +2673,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
                  'Ja. Een showlink opent de afleveringslijst om er een te kiezen.'),
                 ('Wat kost het?', _price_nl(trial, pack, free_trial=free_trial)),
                 ('Welke talen werken?',
-                 f'{lang_count} talen, met moderne spraakherkenning. Automatische detectie is standaard; kies zelf de taal bij kort of geaccentueerd audio.'),
+                 f'{lang_count} talen, met moderne spraakherkenning. Automatische detectie is standaard; kies zelf de taal bij korte of geaccentueerde audio.'),
                 ('Wat krijg ik?',
                  'De volledige transcriptie als tekst (.txt) en ondertitels met tijdstempels (.srt), plus een leesweergave in de browser. Transcripties blijven privé tenzij u een deellink aanmaakt.'),
             ],
@@ -2728,7 +2729,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
             meta=('Cole um link do Apple Podcasts e baixe .txt e .srt. '
                   f'Apenas feeds públicos. {free_pt.capitalize()}.'),
             h1='Transcrever podcast do Apple Podcasts pelo link',
-            lede=('O Apple mostra transcrições no app de muitos podcasts, mas você não pode exportá-las. Cole o link do Apple Podcasts aqui e receba o texto em arquivos.'),
+            lede=('A Apple mostra transcrições no app de muitos podcasts, mas você não pode exportá-las. Cole o link do Apple Podcasts aqui e receba o texto em arquivos.'),
             placeholder='https://podcasts.apple.com/…',
             input_label='Link de episódio ou podcast do Apple Podcasts',
             button=_start_button(trial, 'pt', free_trial=free_trial),
@@ -2764,7 +2765,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
         free_nb = _free_bit(trial, free_trial, 'nb')
         return dict(
             lang='nb',
-            title='Apple Podcasts-podcast til tekst',
+            title='Apple Podcasts til tekst',
             meta=('Lim inn en Apple Podcasts-lenke og last ned .txt og .srt. '
                   f'Bare offentlige feeds. {free_nb.capitalize()}.'),
             h1='Transkriber podkast fra Apple Podcasts-lenke',
@@ -2792,7 +2793,7 @@ def build(endpoint, *, trial, pack, lang_count, episode_prices=None,
                  'Nei. Bare episoder i den offentlige feeden kan transkriberes.'),
                 ('Fungerer en podkastlenke?',
                  'Ja. En podkastlenke åpner episodelisten slik at du kan velge en.'),
-                ('Hva kostet det?', _price_no(trial, pack, free_trial=free_trial)),
+                ('Hva koster det?', _price_no(trial, pack, free_trial=free_trial)),
                 ('Hvilke språk fungerer?',
                  f'{lang_count} språk, med moderne talegjenkjenning. Automatisk gjenkjenning er standard; velg språket selv på kort eller aksentert lyd.'),
                 ('Hva får jeg?',
