@@ -13481,6 +13481,7 @@ def _landing_episode_prices(trial):
 
 def _spotify_price_line(trial, pack, lang='en'):
     """Expectation line under the Spotify landing input (honest about long eps)."""
+    pack_lang = 'nb' if lang in ('nb', 'no') else lang
     if trial and pack:
         # Same path as the partial-preview card: shortfall for (trial + 60).
         offer = episode_offer(trial + 60, trial) if VOLUME_PRICING_ENABLED else None
@@ -13496,6 +13497,35 @@ def _spotify_price_line(trial, pack, lang='en'):
                         f'minutos gratis y puedes terminar el episodio desde '
                         f'{offer["price"]}. Pago único, los minutos no caducan, '
                         f'sin suscripción.')
+            if lang == 'fr':
+                return (f'{trial} minutes gratuites, sans carte. La plupart des '
+                        f'épisodes durent plus longtemps : vous obtenez les '
+                        f'{trial} premières minutes gratuites et pouvez terminer '
+                        f'l’épisode à partir de {offer["price"]}. Paiement unique, '
+                        f'les minutes n’expirent jamais, sans abonnement.')
+            if lang == 'nl':
+                return (f'{trial} minuten gratis, zonder kaart. De meeste '
+                        f'afleveringen duren langer: u krijgt de eerste {trial} '
+                        f'minuten gratis en kunt de aflevering vanaf '
+                        f'{offer["price"]} afmaken. Eenmalig, minuten verlopen '
+                        f'nooit, geen abonnement.')
+            if lang == 'it':
+                return (f'{trial} minuti gratis, senza carta. La maggior parte '
+                        f'degli episodi dura di più: ottiene i primi {trial} '
+                        f'minuti gratis e può finire l’episodio da '
+                        f'{offer["price"]}. Pagamento unico, i minuti non '
+                        f'scadono, senza abbonamento.')
+            if lang == 'pt':
+                return (f'{trial} minutos grátis, sem cartão. A maioria dos '
+                        f'episódios é mais longa: você ganha os primeiros '
+                        f'{trial} minutos grátis e pode terminar o episódio a '
+                        f'partir de {offer["price"]}. Pagamento único, os '
+                        f'minutos não expiram, sem assinatura.')
+            if lang in ('nb', 'no'):
+                return (f'{trial} gratisminutter, uten kort. De fleste episoder '
+                        f'er lengre: du får de første {trial} minuttene gratis '
+                        f'og kan fullføre episoden fra {offer["price"]}. '
+                        f'Engangskjøp, minuttene utløper aldri, uten abonnement.')
             return (f'{trial} minutes free, no card. Most episodes run longer: '
                     f'you get the first {trial} minutes free and can finish the '
                     f'episode from {offer["price"]}. One-time, minutes never '
@@ -13508,6 +13538,26 @@ def _spotify_price_line(trial, pack, lang='en'):
             return (f'{trial} minutos gratis, sin tarjeta. Después '
                     f'{landing_pages_mod.pack_phrase(pack, "es")}. Pago único, '
                     f'los minutos no caducan, sin suscripción.')
+        if lang == 'fr':
+            return (f'{trial} minutes gratuites, sans carte. Ensuite '
+                    f'{landing_pages_mod.pack_phrase(pack, "fr")}. Paiement '
+                    f'unique, les minutes n’expirent jamais, sans abonnement.')
+        if lang == 'nl':
+            return (f'{trial} minuten gratis, zonder kaart. Daarna '
+                    f'{landing_pages_mod.pack_phrase(pack, "nl")}. Eenmalig, '
+                    f'minuten verlopen nooit, geen abonnement.')
+        if lang == 'it':
+            return (f'{trial} minuti gratis, senza carta. Poi '
+                    f'{landing_pages_mod.pack_phrase(pack, "it")}. Pagamento '
+                    f'unico, i minuti non scadono, senza abbonamento.')
+        if lang == 'pt':
+            return (f'{trial} minutos grátis, sem cartão. Depois '
+                    f'{landing_pages_mod.pack_phrase(pack, "pt")}. Pagamento '
+                    f'único, os minutos não expiram, sem assinatura.')
+        if lang in ('nb', 'no'):
+            return (f'{trial} gratisminutter, uten kort. Deretter '
+                    f'{landing_pages_mod.pack_phrase(pack, "nb")}. Engangskjøp, '
+                    f'minuttene utløper aldri, uten abonnement.')
         return (f'{trial} minutes free, no card. Then '
                 f'{landing_pages_mod.pack_phrase(pack)}. One-time, minutes '
                 f'never expire, no subscription.')
@@ -13527,6 +13577,50 @@ def _spotify_price_line(trial, pack, lang='en'):
             bits.append(
                 f'Después {landing_pages_mod.pack_phrase(pack, "es")}, '
                 f'sin suscripción.')
+        return ' '.join(bits)
+    if lang == 'fr':
+        bits = [f'{trial} minutes gratuites.'] if trial else []
+        if not trial and free_trial_offered():
+            bits = ['Essayez gratuitement, sans carte.']
+        if pack:
+            bits.append(
+                f'Ensuite {landing_pages_mod.pack_phrase(pack, "fr")}, '
+                f'sans abonnement.')
+        return ' '.join(bits)
+    if lang == 'nl':
+        bits = [f'{trial} minuten gratis.'] if trial else []
+        if not trial and free_trial_offered():
+            bits = ['Probeer gratis, zonder kaart.']
+        if pack:
+            bits.append(
+                f'Daarna {landing_pages_mod.pack_phrase(pack, "nl")}, '
+                f'geen abonnement.')
+        return ' '.join(bits)
+    if lang == 'it':
+        bits = [f'{trial} minuti gratis.'] if trial else []
+        if not trial and free_trial_offered():
+            bits = ['Provi gratis, senza carta.']
+        if pack:
+            bits.append(
+                f'Poi {landing_pages_mod.pack_phrase(pack, "it")}, '
+                f'senza abbonamento.')
+        return ' '.join(bits)
+    if lang == 'pt':
+        bits = [f'{trial} minutos grátis.'] if trial else []
+        if not trial and free_trial_offered():
+            bits = ['Experimente grátis, sem cartão.']
+        if pack:
+            bits.append(
+                f'Depois {landing_pages_mod.pack_phrase(pack, "pt")}, '
+                f'sem assinatura.')
+        return ' '.join(bits)
+    if lang in ('nb', 'no'):
+        bits = [f'{trial} gratisminutter.'] if trial else []
+        if not trial and free_trial_offered():
+            bits = ['Prøv gratis, uten kort.']
+        if pack:
+            bits.append(
+                f'Deretter {landing_pages_mod.pack_phrase(pack, "nb")}.')
         return ' '.join(bits)
     bits = [f'{trial} minutes free.'] if trial else []
     if not trial and free_trial_offered():
@@ -13710,7 +13804,11 @@ def _render_landing(endpoint):
     trial = advertised_trial_minutes()
     pack = _landing_pack()
     ui_lang = page['lang']
-    if endpoint in ('landing_spotify', 'landing_de_spotify', 'landing_es_spotify'):
+    if endpoint in (
+        'landing_spotify', 'landing_de_spotify', 'landing_es_spotify',
+        'landing_fr_spotify', 'landing_nl_spotify', 'landing_it_spotify',
+        'landing_pt_spotify', 'landing_no_spotify',
+    ):
         price_line = _spotify_price_line(trial, pack, lang=ui_lang)
     else:
         price_line = _landing_price_line(ui_lang, trial, pack)

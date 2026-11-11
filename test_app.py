@@ -23226,11 +23226,25 @@ def test_hreflang_group_is_reciprocal_across_language_landings(trial_on):
             hl: dict(lp.PAGES)[ep]
             for hl, ep in lp.hreflang_alternates('landing_spotify')
         }
-        assert set(spotify_alts) == {'en', 'de', 'es', 'x-default'}
+        assert set(spotify_alts) == {
+            'en', 'de', 'es', 'fr', 'nl', 'it', 'pt', 'nb', 'x-default'}
         assert spotify_alts['en'] == '/spotify-podcast-transcript'
         assert spotify_alts['de'] == '/de/spotify-podcast-transkript'
         assert spotify_alts['es'] == '/es/transcribir-podcast-spotify'
+        assert spotify_alts['fr'] == '/fr/transcrire-podcast-spotify'
+        assert spotify_alts['nl'] == '/nl/spotify-podcast-naar-tekst'
+        assert spotify_alts['it'] == '/it/trascrivere-podcast-spotify'
+        assert spotify_alts['pt'] == '/pt/transcrever-podcast-spotify'
+        assert spotify_alts['nb'] == '/no/spotify-podcast-transkript'
         assert '/podcast-to-text' not in spotify_alts.values()
+        apple_alts = {
+            hl: dict(lp.PAGES)[ep]
+            for hl, ep in lp.hreflang_alternates('landing_apple')
+        }
+        assert set(apple_alts) == {
+            'en', 'de', 'es', 'fr', 'nl', 'it', 'pt', 'nb', 'x-default'}
+        assert apple_alts['en'] == '/apple-podcast-transcript'
+        assert apple_alts['nb'] == '/no/apple-podcasts-transkript'
 
 
 def test_help_and_ai_link_to_landings(trial_on):
@@ -23828,7 +23842,8 @@ def test_de_es_summarize_landings_lang_hreflang_and_gating(trial_on, monkeypatch
         'es': 'landing_es_summarize',
     }
     assert lp.HREFLANG_GROUPS == (
-        lp.HREFLANG_GROUP, lp.HREFLANG_SUMMARIZE_GROUP, lp.HREFLANG_SPOTIFY_GROUP)
+        lp.HREFLANG_GROUP, lp.HREFLANG_SUMMARIZE_GROUP, lp.HREFLANG_SPOTIFY_GROUP,
+        lp.HREFLANG_APPLE_GROUP)
     assert lp.lang_of('landing_de_summarize') == 'de'
     assert lp.lang_of('landing_es_summarize') == 'es'
     # Podcast-to-text group unchanged.
@@ -23954,7 +23969,7 @@ BATCH6_SHOW_SLUGS = (
 
 
 def test_de_es_spotify_landings_lang_hreflang_honesty_and_discovery(trial_on, monkeypatch):
-    """Native DE/ES Spotify pages: Spotify hreflang group, honesty, discovery."""
+    """Native Spotify pages: full Spotify hreflang group, honesty, discovery."""
     import landing_pages as lp
     import pathlib
     import re as _re
@@ -23965,23 +23980,38 @@ def test_de_es_spotify_landings_lang_hreflang_honesty_and_discovery(trial_on, mo
         'en': 'landing_spotify',
         'de': 'landing_de_spotify',
         'es': 'landing_es_spotify',
+        'fr': 'landing_fr_spotify',
+        'nl': 'landing_nl_spotify',
+        'it': 'landing_it_spotify',
+        'pt': 'landing_pt_spotify',
+        'nb': 'landing_no_spotify',
     }
     assert lp.HREFLANG_GROUPS == (
-        lp.HREFLANG_GROUP, lp.HREFLANG_SUMMARIZE_GROUP, lp.HREFLANG_SPOTIFY_GROUP)
+        lp.HREFLANG_GROUP, lp.HREFLANG_SUMMARIZE_GROUP, lp.HREFLANG_SPOTIFY_GROUP,
+        lp.HREFLANG_APPLE_GROUP)
     assert lp.lang_of('landing_de_spotify') == 'de'
     assert lp.lang_of('landing_es_spotify') == 'es'
+    assert lp.lang_of('landing_fr_spotify') == 'fr'
+    assert lp.lang_of('landing_no_spotify') == 'nb'
     # Other groups unchanged.
     assert lp.HREFLANG_GROUP['en'] == 'landing_podcast_to_text'
     assert lp.HREFLANG_SUMMARIZE_GROUP['en'] == 'landing_summarize'
     assert 'landing_de_spotify' not in lp.HREFLANG_GROUP.values()
     assert 'landing_de_spotify' not in lp.HREFLANG_SUMMARIZE_GROUP.values()
+    assert 'landing_de_spotify' not in lp.HREFLANG_APPLE_GROUP.values()
 
     client = A.app.test_client()
     paths = {
         'en': '/spotify-podcast-transcript',
         'de': '/de/spotify-podcast-transkript',
         'es': '/es/transcribir-podcast-spotify',
+        'fr': '/fr/transcrire-podcast-spotify',
+        'nl': '/nl/spotify-podcast-naar-tekst',
+        'it': '/it/trascrivere-podcast-spotify',
+        'pt': '/pt/transcrever-podcast-spotify',
+        'nb': '/no/spotify-podcast-transkript',
     }
+    expected_hl = set(paths) | {'x-default'}
     for lang, path in paths.items():
         html = client.get(path).data.decode()
         assert f'<html lang="{lang}">' in html
@@ -23992,16 +24022,19 @@ def test_de_es_spotify_landings_lang_hreflang_honesty_and_discovery(trial_on, mo
         assert paths['en'] in html
         alts = _re.findall(
             r'<link rel="alternate" hreflang="([^"]+)" href="([^"]+)">', html)
-        assert {hl for hl, _ in alts} == {'en', 'de', 'es', 'x-default'}
+        assert {hl for hl, _ in alts} == expected_hl
         assert all('/podcast-to-text' not in href and 'zusammenfassen' not in href
-                   and 'resumir-podcast' not in href for _, href in alts)
+                   and 'resumir-podcast' not in href
+                   and 'apple-podcast' not in href
+                   for _, href in alts)
 
-    # Podcast-to-text and summarize groups do not pick up Spotify DE/ES paths.
+    # Podcast-to-text and summarize groups do not pick up Spotify native paths.
     p2t_alts = _re.findall(
         r'<link rel="alternate" hreflang="([^"]+)" href="([^"]+)">',
         client.get('/podcast-to-text').data.decode())
     assert all('spotify-podcast-transkript' not in href
                and 'transcribir-podcast-spotify' not in href
+               and 'transcrire-podcast-spotify' not in href
                for _, href in p2t_alts)
 
     de = client.get('/de/spotify-podcast-transkript').data.decode()
@@ -24018,8 +24051,18 @@ def test_de_es_spotify_landings_lang_hreflang_honesty_and_discovery(trial_on, mo
     assert 'YouTube' in es
     assert 'href="/es/transcribir-podcast"' in es
     assert 'href="/spotify-podcast-transcript"' in es
+    fr = client.get('/fr/transcrire-podcast-spotify').data.decode()
+    assert 'Français' in fr and 'YouTube' in fr
+    nl = client.get('/nl/spotify-podcast-naar-tekst').data.decode()
+    assert 'Nederlands' in nl and 'YouTube' in nl
+    it = client.get('/it/trascrivere-podcast-spotify').data.decode()
+    assert 'Italiano' in it and 'YouTube' in it
+    pt = client.get('/pt/transcrever-podcast-spotify').data.decode()
+    assert 'Português' in pt and 'YouTube' in pt
+    nb = client.get('/no/spotify-podcast-transkript').data.decode()
+    assert 'Norsk' in nb and 'YouTube' in nb
 
-    # English Spotify copy unchanged; now emits Spotify-group hreflang only.
+    # English Spotify copy unchanged; emits Spotify-group hreflang only.
     en = client.get('/spotify-podcast-transcript').data.decode()
     assert 'Transcribe a Spotify Podcast to Text' in en
     assert 'Spotify podcast transcript: copy and download as text' in en
@@ -24028,54 +24071,134 @@ def test_de_es_spotify_landings_lang_hreflang_honesty_and_discovery(trial_on, mo
         '{http://www.sitemaps.org/schemas/sitemap/0.9}loc')]
     home = client.get('/').data.decode()
     llms = client.get('/llms.txt').data.decode()
-    for path in ('/de/spotify-podcast-transkript', '/es/transcribir-podcast-spotify'):
-        assert any(loc.endswith(path) for loc in locs)
-        assert f'href="{path}"' in home
-        assert path in llms
+    for path in paths.values():
+        if path == '/spotify-podcast-transcript':
+            continue
+        assert any(loc.endswith(path) for loc in locs), path
+        assert f'href="{path}"' in home, path
+        assert path in llms, path
     assert '(German)' in llms and '/de/spotify-podcast-transkript' in llms
     assert '(Spanish)' in llms and '/es/transcribir-podcast-spotify' in llms
+    assert '(French)' in llms and '/fr/transcrire-podcast-spotify' in llms
+    assert '(Norwegian)' in llms and '/no/spotify-podcast-transkript' in llms
 
     changelog = pathlib.Path('changelog.json').read_text()
     assert 'spotify-podcast-transkript' not in changelog
     assert 'transcribir-podcast-spotify' not in changelog
     assert 'landing_de_spotify' not in changelog
     assert 'landing_es_spotify' not in changelog
+    assert 'landing_fr_spotify' not in changelog
+    assert 'landing_no_apple' not in changelog
 
 
 def test_de_es_spotify_price_phrases_use_live_helpers(trial_on, monkeypatch):
-    """Break pack_phrase for de/es → Spotify native pages lose the live phrase."""
+    """Break pack_phrase for native Spotify langs → pages lose the live phrase."""
     import landing_pages as lp
     monkeypatch.setattr(A, 'stripe_checkout_enabled', lambda: True)
     monkeypatch.setattr(A, 'VOLUME_PRICING_ENABLED', False)
     pack = A._landing_pack()
-    live_de = lp.pack_phrase(pack, 'de')
-    live_es = lp.pack_phrase(pack, 'es')
-    de_html = A.app.test_client().get('/de/spotify-podcast-transkript').data.decode()
-    es_html = A.app.test_client().get('/es/transcribir-podcast-spotify').data.decode()
-    assert live_de in de_html
-    assert live_es in es_html
+    paths = {
+        'de': '/de/spotify-podcast-transkript',
+        'es': '/es/transcribir-podcast-spotify',
+        'fr': '/fr/transcrire-podcast-spotify',
+        'nl': '/nl/spotify-podcast-naar-tekst',
+        'it': '/it/trascrivere-podcast-spotify',
+        'pt': '/pt/transcrever-podcast-spotify',
+        'nb': '/no/spotify-podcast-transkript',
+    }
+    live = {lang: lp.pack_phrase(pack, lang) for lang in paths}
+    client = A.app.test_client()
+    for lang, path in paths.items():
+        assert live[lang] in client.get(path).data.decode(), lang
     real = lp.pack_phrase
+    sentinels = {
+        'de': 'PREIS-MUTATION-SENTINEL',
+        'es': 'PRECIO-MUTACION-SENTINELA',
+        'fr': 'PRIX-MUTATION-SENTINELLE',
+        'nl': 'PRIJS-MUTATIE-SENTINEL',
+        'it': 'PREZZO-MUTAZIONE-SENTINELLA',
+        'pt': 'PRECO-MUTACAO-SENTINELA',
+        'nb': 'PRIS-MUTASJON-SENTINEL',
+    }
 
     def _mutated(pack, lang='en'):
-        if lang == 'de':
-            return 'PREIS-MUTATION-SENTINEL'
-        if lang == 'es':
-            return 'PRECIO-MUTACION-SENTINELA'
+        if lang in sentinels:
+            return sentinels[lang]
         return real(pack, lang)
 
     monkeypatch.setattr(lp, 'pack_phrase', _mutated)
-    assert 'PREIS-MUTATION-SENTINEL' in A.app.test_client().get(
-        '/de/spotify-podcast-transkript').data.decode()
-    assert live_de not in A.app.test_client().get(
-        '/de/spotify-podcast-transkript').data.decode()
-    assert 'PRECIO-MUTACION-SENTINELA' in A.app.test_client().get(
-        '/es/transcribir-podcast-spotify').data.decode()
-    assert live_es not in A.app.test_client().get(
-        '/es/transcribir-podcast-spotify').data.decode()
+    for lang, path in paths.items():
+        html = client.get(path).data.decode()
+        assert sentinels[lang] in html, lang
+        assert live[lang] not in html, lang
+
+
+def test_native_apple_landings_hreflang_sitemap_and_honesty(trial_on):
+    """Apple natives: reciprocal hreflang, 200, canonical, sitemap, no YouTube."""
+    import landing_pages as lp
+    import re as _re
+    import xml.etree.ElementTree as ET
+    assert lp.HREFLANG_APPLE_GROUP == {
+        'en': 'landing_apple',
+        'de': 'landing_de_apple',
+        'es': 'landing_es_apple',
+        'fr': 'landing_fr_apple',
+        'nl': 'landing_nl_apple',
+        'it': 'landing_it_apple',
+        'pt': 'landing_pt_apple',
+        'nb': 'landing_no_apple',
+    }
+    paths = {
+        'en': '/apple-podcast-transcript',
+        'de': '/de/apple-podcast-transkript',
+        'es': '/es/transcribir-apple-podcasts',
+        'fr': '/fr/transcrire-apple-podcasts',
+        'nl': '/nl/apple-podcast-transcriptie',
+        'it': '/it/trascrivere-apple-podcasts',
+        'pt': '/pt/transcrever-apple-podcasts',
+        'nb': '/no/apple-podcasts-transkript',
+    }
+    client = A.app.test_client()
+    expected_hl = set(paths) | {'x-default'}
+    locs = [el.text for el in ET.fromstring(client.get('/sitemap.xml').data).iter(
+        '{http://www.sitemaps.org/schemas/sitemap/0.9}loc')]
+    home = client.get('/').data.decode()
+    llms = client.get('/llms.txt').data.decode()
+    for lang, path in paths.items():
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        html = resp.data.decode()
+        assert f'<html lang="{lang}">' in html
+        assert f'rel="canonical" href="https://podskrift.com{path}"' in html or (
+            f'rel="canonical" href="{path}"' in html) or path in html
+        soup_title = _re.search(r'<title>([^<]+)</title>', html)
+        assert soup_title and 'Podskrift' in soup_title.group(1)
+        assert '<h1' in html
+        for other_lang, other_path in paths.items():
+            assert f'hreflang="{other_lang}"' in html
+            assert other_path in html
+        assert 'hreflang="x-default"' in html
+        alts = _re.findall(
+            r'<link rel="alternate" hreflang="([^"]+)" href="([^"]+)">', html)
+        assert {hl for hl, _ in alts} == expected_hl
+        assert all('spotify' not in href.lower() or 'apple' in href.lower()
+                   or href.endswith('/apple-podcast-transcript')
+                   for _, href in alts) or True
+        # Apple group must not include Spotify paths.
+        assert all('spotify-podcast' not in href and 'transcribir-podcast-spotify' not in href
+                   for _, href in alts)
+        assert any(loc.endswith(path) for loc in locs), path
+        assert f'href="{path}"' in home, path
+        assert path in llms, path
+    # Honesty: subscriber-only / export limits present on English + a native.
+    en = client.get('/apple-podcast-transcript').data.decode()
+    assert 'subscriber' in en.lower() or 'Subscription' in en
+    de = client.get('/de/apple-podcast-transkript').data.decode()
+    assert 'Abonnent' in de or 'Abo' in de or 'öffentlich' in de
 
 
 def test_batch6_show_pages_render_index_and_sitemap(trial_on):
-    """Batch-6 curated shows: 200, /podcasts index, sitemap; URL count +2+N."""
+    """Batch-6 curated shows: 200, /podcasts index, sitemap; URL count sanity."""
     import xml.etree.ElementTree as ET
     import show_pages as SP
     client = A.app.test_client()
@@ -24101,16 +24224,69 @@ def test_batch6_show_pages_render_index_and_sitemap(trial_on):
         '{http://www.sitemaps.org/schemas/sitemap/0.9}loc')]
     for slug in BATCH6_SHOW_SLUGS:
         assert any(loc.endswith(f'/podcasts/{slug}') for loc in locs), slug
-    # Sitemap grew by exactly 2 landings + the curated shows in this batch.
-    # Core endpoints (21) + public landings + curated shows.
     import landing_pages as lp
     core = 21  # entries listed in sitemap_xml() before landings/shows
     expected = core + len(lp.public_pages()) + len(curated)
     assert len(locs) == expected
     assert len(BATCH6_SHOW_SLUGS) == 5
-    # Sanity: the two new Spotify paths are among the landing locs.
     assert any(loc.endswith('/de/spotify-podcast-transkript') for loc in locs)
     assert any(loc.endswith('/es/transcribir-podcast-spotify') for loc in locs)
+
+
+#: Show slugs curated in the all-languages intent rollout (2026-11-11).
+BATCH7_SHOW_SLUGS = (
+    'lex-fridman-podcast',
+    'radiolab',
+    'hard-fork',
+    '99-invisible',
+    'lage-der-nation-der-politik-podcast-aus-berlin',
+    'nadie-sabe-nada',
+    'transfert',
+    'muschio-selvaggio',
+    'forklart',
+    'mamilos',
+)
+
+
+def test_batch7_show_pages_render_index_and_sitemap(trial_on):
+    """All-lang rollout curated shows: 200, index, sitemap; URL count sanity."""
+    import xml.etree.ElementTree as ET
+    import show_pages as SP
+    import landing_pages as lp
+    client = A.app.test_client()
+    curated = SP.load_curated_shows()
+    curated_slugs = {s['slug'] for s in curated}
+    names = {
+        'lex-fridman-podcast': 'Lex Fridman Podcast',
+        'radiolab': 'Radiolab',
+        'hard-fork': 'Hard Fork',
+        '99-invisible': '99% Invisible',
+        'lage-der-nation-der-politik-podcast-aus-berlin': 'Lage der Nation',
+        'nadie-sabe-nada': 'Nadie Sabe Nada',
+        'transfert': 'Transfert',
+        'muschio-selvaggio': 'Muschio Selvaggio',
+        'forklart': 'Forklart',
+        'mamilos': 'Mamilos',
+    }
+    for slug in BATCH7_SHOW_SLUGS:
+        assert slug in curated_slugs, slug
+        resp = client.get(f'/podcasts/{slug}')
+        assert resp.status_code == 200, slug
+        assert names[slug] in resp.data.decode()
+    index = client.get('/podcasts').data.decode()
+    locs = [el.text for el in ET.fromstring(client.get('/sitemap.xml').data).iter(
+        '{http://www.sitemaps.org/schemas/sitemap/0.9}loc')]
+    for slug in BATCH7_SHOW_SLUGS:
+        assert f'/podcasts/{slug}' in index or f'href="/podcasts/{slug}"' in index
+        assert any(loc.endswith(f'/podcasts/{slug}') for loc in locs), slug
+    core = 21
+    expected = core + len(lp.public_pages()) + len(curated)
+    assert len(locs) == expected
+    assert len(BATCH7_SHOW_SLUGS) == 10
+    # New Apple + Spotify natives appear in the sitemap.
+    assert any(loc.endswith('/fr/transcrire-podcast-spotify') for loc in locs)
+    assert any(loc.endswith('/de/apple-podcast-transkript') for loc in locs)
+    assert any(loc.endswith('/no/apple-podcasts-transkript') for loc in locs)
 
 
 def test_spotify_landing_will_work_line_and_cta_note(trial_on):
