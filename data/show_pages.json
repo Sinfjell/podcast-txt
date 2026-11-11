@@ -1806,14 +1806,14 @@
       "source": "manual"
     },
     {
-      "slug": "muschio-selvaggio",
-      "name": "Muschio Selvaggio",
-      "author": "Muschio Selvaggio",
-      "itunes_id": "1495854773",
-      "feed_url": "https://feeds.megaphone.fm/SONY5453391992",
-      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/01/3c/51/013c51b3-fa3f-d7d4-47fc-f64279364213/mza_15028446243390608560.jpg/600x600bb.jpg",
+      "slug": "tintoria",
+      "name": "Tintoria",
+      "author": "OnePodcast - The Comedy Club",
+      "itunes_id": "1434243021",
+      "feed_url": "https://feeds.megaphone.fm/AMCS7780999547",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/61/cc/47/61cc4761-550c-2e15-8bde-96ebe3d71b42/mza_9135649439104772256.jpg/600x600bb.jpg",
       "language": "it",
-      "description": "Il podcast dedicato a temi di cultura e società con ospiti diversi ad ogni puntata. Approfondimento, serietà, gioco e imprevedibilità.",
+      "description": "Due stand-up comedian e tantissimi ospiti d'eccezione. Tintoria è il talk di Daniele Tinti e Stefano Rapone prodotto da THE COMEDY CLUB — nato nel 2018 come primo podcast italiano condotto da due stand-up comedian.",
       "source": "manual"
     },
     {
@@ -1836,6 +1836,61 @@
       "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/52/2e/43/522e43d1-dba5-3aaa-6d54-a2da35c58ae4/mza_12148326130616895757.jpg/600x600bb.jpg",
       "language": "br",
       "description": "Bem-vindo ao Mamilos, um espaço pra gente conversar de peito aberto sobre tudo. Toda terça-feira é dia de mergulhar em polêmicas com o Mamilos Debate.",
+      "source": "manual"
+    },
+    {
+      "slug": "hugo-decrypte",
+      "name": "HugoDécrypte - Actus et interviews",
+      "author": "Hugo Décrypte",
+      "itunes_id": 1552365367,
+      "feed_url": "https://feeds.acast.com/public/shows/95497e34-ecc2-596a-b910-bb3342918621",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts221/v4/99/8f/f2/998ff2e2-df8b-3569-4624-13843d12c9e3/mza_14083435330052627150.jpeg/600x600bb.jpg",
+      "language": "fr",
+      "description": "Actualités et interviews décryptées — le podcast d’Hugo Décrypte pour suivre et comprendre l’actualité.",
+      "source": "manual"
+    },
+    {
+      "slug": "la-ruina",
+      "name": "La Ruina",
+      "author": "La Ruina",
+      "itunes_id": 1455818214,
+      "feed_url": "https://anchor.fm/s/a4e7fe88/podcast/rss",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts114/v4/1c/41/de/1c41de2b-e3c5-4640-1f7a-1e56690f4dc3/mza_1199734298903823958.jpg/600x600bb.jpg",
+      "language": "es",
+      "description": "Ignatius Farray y Tomàs Fuentes conversan con invitados sobre sus peores momentos y las historias más absurdas de la vida.",
+      "source": "manual"
+    },
+    {
+      "slug": "sinnsyn",
+      "name": "SinnSyn",
+      "author": "Psykolog Sondre Risholm Liverød & Acast",
+      "itunes_id": 1135301304,
+      "feed_url": "https://feeds.acast.com/public/shows/5b9e7ed2f1badce55455ddad",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts112/v4/85/bd/53/85bd53f0-815a-1103-2210-81c081977390/mza_11755695688128973875.jpeg/600x600bb.jpg",
+      "language": "no",
+      "description": "Psykolog Sondre Risholm Liverød snakker om sinn, følelser og hvordan vi forstår oss selv og andre — ukentlige episoder om psykologi.",
+      "source": "manual"
+    },
+    {
+      "slug": "projeto-humanos",
+      "name": "Projeto Humanos",
+      "author": "Ivan Mizanzuk",
+      "itunes_id": 1023477643,
+      "feed_url": "https://anchor.fm/s/10e595e0c/podcast/rss",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts221/v4/c3/79/5f/c3795fb0-b58c-7cf8-f038-4716650c604f/mza_11387436950990453858.jpg/600x600bb.jpg",
+      "language": "br",
+      "description": "Ivan Mizanzuk investiga crimes reais e histórias humanas em formatos documentais longos, com apuração profunda e narrativa envolvente.",
+      "source": "manual"
+    },
+    {
+      "slug": "boekestijn-en-de-wijk",
+      "name": "Boekestijn en De Wijk",
+      "author": "BNR Nieuwsradio",
+      "itunes_id": 1076289388,
+      "feed_url": "https://www.omnycontent.com/d/playlist/8257a063-6be9-42fa-b892-acd4013b1255/183dc0a5-9b77-48f3-9970-acef00cf8471/790dd6fa-cb55-4956-ba88-acef00cfc0f6/podcast.rss",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts112/v4/7d/f0/e7/7df0e76d-b705-cf2a-94c6-a10ff291497e/mza_16718794314625024290.jpg/600x600bb.jpg",
+      "language": "nl",
+      "description": "Arend Jan Boekestijn en Han ten Broeke (BNR) analyseren de internationale politiek — scherp, actueel en zonder omwegen.",
       "source": "manual"
     }
   ]
