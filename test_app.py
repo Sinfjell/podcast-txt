@@ -22036,10 +22036,64 @@ def test_stt_soniox_known_language_routes(soniox_on):
     assert STT.route_job('trial', 'en', 600, 0)[0] == STT.PROVIDER_TOGETHER
 
 
-def test_stt_soniox_unknown_language_keeps_detection_flow(soniox_on):
-    """Auto-detect (empty language) never takes the Soniox path."""
+def test_stt_soniox_unknown_language_goes_to_soniox_auto(soniox_on, monkeypatch):
+    """Auto-detect (empty language) starts on Soniox with language ID."""
+    assert STT.route_job('trial', '', 600, 0) == (
+        STT.PROVIDER_SONIOX, 'soniox_auto')
+    over = STT.SONIOX_MAX_SECONDS + 60
+    assert STT.route_job('trial', '', 600, 0, audio_seconds=over) == (
+        STT.PROVIDER_TOGETHER, 'rollout')
+    # Rollback switch restores the Together part-1 probe.
+    monkeypatch.setenv('STT_SONIOX_AUTO', '0')
     assert STT.route_job('trial', '', 600, 0) == (
         STT.PROVIDER_TOGETHER, 'rollout')
+
+
+def test_stt_soniox_auto_needs_overlay_on(monkeypatch, soniox_on):
+    monkeypatch.delenv('STT_SONIOX_LANGUAGES')
+    assert STT.route_job('trial', '', 600, 0) == (
+        STT.PROVIDER_TOGETHER, 'rollout')
+
+
+def test_stt_soniox_tested_languages_added_when_overlay_on(soniox_on):
+    """Languages that beat whisper-1 in the 2026-11-13 test leave whisper-1."""
+    for lang in ('tr', 'cs', 'id', 'cy', 'eu', 'is', 'ja', 'ko', 'ar',
+                 'el', 'hi', 'ru'):
+        assert STT.route_job('trial', lang, 600, 0) == (
+            STT.PROVIDER_SONIOX, 'soniox_language'), lang
+    # Untested languages outside Together keep whisper-1, and so does zh
+    # (Simplified-script / long-segment issues in the test).
+    for lang in ('ka', 'zh'):
+        assert STT.route_job('trial', lang, 600, 0) == (
+            STT.PROVIDER_OPENAI, 'language_not_rolled_out'), lang
+    # Together languages are untouched.
+    assert STT.route_job('trial', 'en', 600, 0)[0] == STT.PROVIDER_TOGETHER
+
+
+def test_stt_soniox_tested_languages_respect_off_and_exclude(monkeypatch, soniox_on):
+    monkeypatch.setenv('STT_SONIOX_EXCLUDE_LANGUAGES', 'ja, IS')
+    assert STT.route_job('trial', 'ja', 600, 0)[0] == STT.PROVIDER_OPENAI
+    assert STT.route_job('trial', 'is', 600, 0)[0] == STT.PROVIDER_OPENAI
+    assert STT.route_job('trial', 'tr', 600, 0)[0] == STT.PROVIDER_SONIOX
+    # Excluding an env-listed language works too.
+    monkeypatch.setenv('STT_SONIOX_EXCLUDE_LANGUAGES', 'de')
+    assert STT.route_job('trial', 'de', 600, 0)[0] == STT.PROVIDER_OPENAI
+    # Overlay off (empty list) → tested defaults are off as well.
+    monkeypatch.setenv('STT_SONIOX_LANGUAGES', '')
+    monkeypatch.delenv('STT_SONIOX_EXCLUDE_LANGUAGES')
+    assert STT.soniox_languages() == set()
+    assert STT.route_job('trial', 'tr', 600, 0)[0] == STT.PROVIDER_OPENAI
+
+
+def test_stt_soniox_hint_only_for_published_languages():
+    assert STT.soniox_hint_language('tr') == 'tr'
+    assert STT.soniox_hint_language(' CY ') == 'cy'
+    assert STT.soniox_hint_language('is') == ''  # Soniox 400s on this hint
+    assert STT.soniox_hint_language('') == ''
+    assert STT.soniox_majority_language([
+        {'text': 'a', 'language': 'eu'}, {'text': 'b', 'language': 'es'},
+        {'text': 'c', 'language': 'eu'}, {'text': 'd'}]) == 'eu'
+    assert STT.soniox_majority_language([{'text': 'x'}]) == ''
 
 
 def test_stt_soniox_over_max_duration_falls_through(soniox_on):
@@ -22276,7 +22330,12 @@ def test_stt_after_detect_route_helper(soniox_on):
         STT.PROVIDER_SONIOX, 'soniox_after_detect')
     assert STT.after_detect_route('en') == (
         STT.PROVIDER_OPENAI, 'language_not_rolled_out')
+    # tr passed the 2026-11-13 test → Soniox; zh and untested ka stay on whisper-1.
+    assert STT.after_detect_route('tr') == (
+        STT.PROVIDER_SONIOX, 'soniox_after_detect')
     assert STT.after_detect_route('zh') == (
+        STT.PROVIDER_OPENAI, 'language_not_rolled_out')
+    assert STT.after_detect_route('ka') == (
         STT.PROVIDER_OPENAI, 'language_not_rolled_out')
     over = STT.SONIOX_MAX_SECONDS + 1
     assert STT.after_detect_route('pl', audio_seconds=over)[0] == STT.PROVIDER_OPENAI
@@ -22324,9 +22383,10 @@ def test_stt_auto_detect_en_stays_on_together(tmp_path, soniox_on):
     assert job.provider_label() == STT.PROVIDER_TOGETHER
 
 
-def test_stt_auto_detect_zh_goes_to_whisper1(tmp_path, soniox_on):
-    zh_text = ' '.join(['词'] * 40)
-    tg = _ScriptedClient(_result(zh_text, [_seg(0, 20, ' ' + zh_text)], 'zh'))
+def test_stt_auto_detect_untested_goes_to_whisper1(tmp_path, soniox_on):
+    """Together probe (STT_SONIOX_AUTO=0 path) + untested language → whisper-1."""
+    zh_text = ' '.join(['სიტყვა'] * 40)
+    tg = _ScriptedClient(_result(zh_text, [_seg(0, 20, ' ' + zh_text)], 'ka'))
     oa = _ScriptedClient()
     job = _job(tg)
     r = A._transcribe_chunk_routed(
@@ -22335,7 +22395,7 @@ def test_stt_auto_detect_zh_goes_to_whisper1(tmp_path, soniox_on):
     assert oa.calls == []
     assert job.provider == STT.PROVIDER_OPENAI
     assert job.reason == 'language_not_rolled_out'
-    assert job.pinned_language == 'zh'
+    assert job.pinned_language == 'ka'
     assert job.provider_label() == STT.PROVIDER_TOGETHER
     # Later chunks stay on whisper-1.
     A._transcribe_chunk_routed(
@@ -22412,6 +22472,98 @@ def test_stt_auto_detect_byok_unchanged(tmp_path, soniox_on):
     assert r.text == 'whisper default'
     assert len(oa.calls) == 1
     assert job.provider_label() == STT.PROVIDER_OPENAI
+
+
+def test_stt_soniox_unlisted_hint_uses_language_id(tmp_path, soniox_on, monkeypatch):
+    """is is routed to Soniox but never sent as a hint (Soniox 400s on it)."""
+    calls = _soniox_http_script(monkeypatch)
+    job = A.SttJob(STT.PROVIDER_SONIOX, 'soniox_language', task_id='sx-is')
+    A._transcribe_chunk_routed(
+        job, _ScriptedClient(), _chunk(tmp_path), 'is', chunk_seconds=60)
+    create = next(c for c in calls if c['method'] == 'POST' and c['json'])
+    assert 'language_hints' not in create['json']
+    assert create['json']['enable_language_identification'] is True
+
+
+def _lang_tokens(text, lang):
+    toks = _soniox_tokens_for(text)
+    for t in toks:
+        t['language'] = lang
+    return toks
+
+
+def test_stt_soniox_auto_pins_detected_language(tmp_path, soniox_on, monkeypatch):
+    """soniox_auto: language ID on, majority token language pinned, stays on Soniox."""
+    eu_text = ' '.join(['hitza'] * 40)
+    calls = _soniox_http_script(
+        monkeypatch, transcript_text=eu_text,
+        transcript_tokens=_lang_tokens(eu_text, 'eu'))
+    oa = _ScriptedClient()
+    job = A.SttJob(STT.PROVIDER_SONIOX, 'soniox_auto', audio_seconds=1800)
+    r = A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path), '', chunk_seconds=60)
+    create = next(c for c in calls if c['method'] == 'POST' and c['json'])
+    assert create['json']['enable_language_identification'] is True
+    assert 'language_hints' not in create['json']
+    assert r.language == 'eu'
+    assert job.pinned_language == 'eu'
+    assert job.provider == STT.PROVIDER_SONIOX
+    assert job.events['fallback_language'] == 0
+    assert oa.calls == []
+    # Next part sends the pinned language as a hint.
+    calls2 = _soniox_http_script(
+        monkeypatch, transcript_text=eu_text,
+        transcript_tokens=_soniox_tokens_for(eu_text))
+    A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path, 'p2.mp3'), 'eu', chunk_seconds=60)
+    create2 = next(c for c in calls2 if c['method'] == 'POST' and c['json'])
+    assert create2['json']['language_hints'] == ['eu']
+    assert job.provider_label() == STT.PROVIDER_SONIOX
+
+
+def test_stt_soniox_auto_english_stays_on_soniox(tmp_path, soniox_on, monkeypatch):
+    text = ' '.join(['word'] * 40)
+    _soniox_http_script(monkeypatch, transcript_text=text,
+                        transcript_tokens=_lang_tokens(text, 'en'))
+    job = A.SttJob(STT.PROVIDER_SONIOX, 'soniox_auto')
+    A._transcribe_chunk_routed(
+        job, _ScriptedClient(), _chunk(tmp_path), '', chunk_seconds=60)
+    assert job.pinned_language == 'en'
+    assert job.provider == STT.PROVIDER_SONIOX
+
+
+def test_stt_soniox_auto_untested_language_finishes_on_whisper1(
+        tmp_path, soniox_on, monkeypatch):
+    text = ' '.join(['სიტყვა'] * 40)
+    _soniox_http_script(monkeypatch, transcript_text=text,
+                        transcript_tokens=_lang_tokens(text, 'ka'))
+    oa = _ScriptedClient()
+    job = A.SttJob(STT.PROVIDER_SONIOX, 'soniox_auto')
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), '', chunk_seconds=60)
+    assert r.text  # Soniox part 1 is kept
+    assert oa.calls == []
+    assert job.pinned_language == 'ka'
+    assert job.provider == STT.PROVIDER_OPENAI
+    assert job.reason == 'language_not_rolled_out'
+    assert job.fallback_language == 'ka'
+    assert job.events['fallback_language'] == 1
+    A._transcribe_chunk_routed(
+        job, oa, _chunk(tmp_path, 'p2.mp3'), 'ka', chunk_seconds=60)
+    assert len(oa.calls) == 1
+    assert job.provider_label() == 'mixed'
+
+
+def test_stt_soniox_auto_error_falls_back_to_whisper1(tmp_path, soniox_on, monkeypatch):
+    def boom(method, url, **kw):
+        raise A.SonioxApiError(503)
+
+    monkeypatch.setattr(A.httpx, 'request', boom)
+    oa = _ScriptedClient()
+    job = A.SttJob(STT.PROVIDER_SONIOX, 'soniox_auto')
+    r = A._transcribe_chunk_routed(job, oa, _chunk(tmp_path), '', chunk_seconds=60)
+    assert r.text == 'whisper default'
+    assert len(oa.calls) == 1
+    assert job.fallback_reason == 'soniox_error'
 
 
 def test_stt_soniox_after_detect_error_falls_back_to_whisper1(

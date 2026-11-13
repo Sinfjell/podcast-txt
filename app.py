@@ -4107,9 +4107,11 @@ def _whisper_transcribe_chunk(openai_client, chunk_file, language, *,
 # sends matching jobs (STT_SCRIBE_FUNDING, default paid) to ElevenLabs scribe_v2.
 # STT_SONIOX_LANGUAGES (independent overlay) sends known languages to Soniox
 # stt-async-v5 one async job per standard 900 s part (episode cap 300 min);
-# empty list = off. Auto-detect: Together part 1 may detect a Soniox-list
-# language → remaining parts switch to Soniox (route_reason
-# soniox_after_detect); Together's part-1 text is kept when usable.
+# empty list = off; SONIOX_TESTED_LANGUAGES are added once it is on.
+# Auto-detect: part 1 runs on Soniox with language ID (route_reason
+# soniox_auto, STT_SONIOX_AUTO=0 to roll back); the detected language is
+# pinned + stored. Without Soniox, Together part 1 may detect a Soniox-list
+# language → remaining parts switch to Soniox (soniox_after_detect).
 # Every failure mode falls back to whisper-1 for that chunk on the platform
 # OpenAI client (Soniox whole-job failures fall back for the whole job):
 #   429/5xx/dropped connection -> retried, then whisper-1
@@ -4543,15 +4545,18 @@ def _soniox_transcribe(path, language, *, label='', job=None, task_id=None,
                 raise SonioxApiError(0, 'soniox_upload_missing_id')
             create_body_source = {'file_id': file_id}
 
+        # Hint only codes on Soniox's published list (others, e.g. ``is``,
+        # are rejected with 400 but transcribe well with language ID on).
+        hint = stt_mod.soniox_hint_language(language)
         create_body = {
             'model': stt_mod.SONIOX_MODEL,
             # Never translate — keep the spoken language.
-            'enable_language_identification': not bool(language),
+            'enable_language_identification': not bool(hint),
             'enable_speaker_diarization': False,
             **create_body_source,
         }
-        if language:
-            create_body['language_hints'] = [language]
+        if hint:
+            create_body['language_hints'] = [hint]
         if task_id:
             create_body['client_reference_id'] = str(task_id)[:256]
 
@@ -4589,8 +4594,11 @@ def _soniox_transcribe(path, language, *, label='', job=None, task_id=None,
             key=key, job=job, label=label or 'transcript')
         tokens = transcript.get('tokens') or []
         api_text = transcript.get('text') or ''
+        # Language ID run: majority token language, so auto-detect jobs pin
+        # and store a real code instead of NULL.
+        detected = '' if hint else stt_mod.soniox_majority_language(tokens)
         text, seg_dicts, _words = stt_mod.soniox_tokens_to_result(
-            tokens, language=language or '', text=api_text)
+            tokens, language=language or detected or '', text=api_text)
         segs = [types.SimpleNamespace(start=s['start'], end=s['end'],
                                       text=s['text'])
                 for s in seg_dicts]
@@ -4613,7 +4621,7 @@ def _soniox_transcribe(path, language, *, label='', job=None, task_id=None,
         return types.SimpleNamespace(
             text=text,
             segments=segs,
-            language=language or None,
+            language=language or detected or None,
             tokens=tokens,
             billed_usd=billed,
             latency_ms=latency_ms,
@@ -5090,7 +5098,6 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
             billed = getattr(result, 'billed_usd', None)
             job.charge(stt_mod.PROVIDER_SONIOX, chunk_seconds, exact_usd=billed,
                        count_chunk=True)
-            return result
         except Exception as exc:  # noqa: BLE001
             job.events['fallback_error'] += 1
             job.fallback_reason = 'soniox_error'
@@ -5100,6 +5107,26 @@ def _transcribe_chunk_routed(job, openai_client, chunk_file, language, *,
                 'stt soniox fallback to whisper-1 for %s: %s %s',
                 label, type(exc).__name__, getattr(exc, 'status_code', ''))
             return openai_call(charge_as=stt_mod.PROVIDER_OPENAI)
+
+        if not language:
+            # Auto-detect part (soniox_auto): pin Soniox's language so later
+            # parts send it as a hint and the task stores it. Languages that
+            # are neither on the Soniox nor the Together list (untested or a
+            # junk detection) finish on whisper-1, keeping this part.
+            detected = detection_language_code(getattr(result, 'language', None))
+            if detected:
+                job.pinned_language = detected
+                if not stt_mod.soniox_keeps_detected(detected):
+                    job.events['fallback_language'] += 1
+                    app.logger.info(
+                        'stt language %r after Soniox detect is not rolled out; '
+                        'whisper-1 for the rest of task %s (keeping Soniox part 1)',
+                        detected, task_id)
+                    job.provider = stt_mod.PROVIDER_OPENAI
+                    job.reason = 'language_not_rolled_out'
+                    job.openai_model = stt_mod.OPENAI_MODEL
+                    job.fallback_language = detected
+        return result
 
     # --- ElevenLabs Scribe v2 -------------------------------------------------
     if job.provider == stt_mod.PROVIDER_SCRIBE:
