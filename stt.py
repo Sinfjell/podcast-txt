@@ -17,14 +17,20 @@ delete). Episodes longer than ``SONIOX_MAX_SECONDS`` (300 min, Soniox's
 per-file cap — we keep the episode under it) stay on Together/whisper.
 Empty language list = feature off.
 
-Unknown language (picker auto + no feed language): Together (or Scribe)
-runs part 1 to detect. If the detected code is in ``STT_SONIOX_LANGUAGES``
-and Soniox is configured, remaining parts switch to Soniox
-(``soniox_after_detect``) and Together's part-1 text is kept when usable.
-Otherwise languages outside ``STT_TOGETHER_LANGUAGES`` (e.g. ``zh``) still
-go to whisper-1 for the rest of the job. Starting Soniox with an empty
-language would either bill it for languages we never intended to route or
-require a throwaway first pass — neither is practical.
+Unknown language (picker auto + no feed language): with the Soniox overlay
+on (and ``STT_SONIOX_AUTO`` not 0), part 1 goes to Soniox with language
+identification (``soniox_auto``). The majority token language is pinned and
+stored on the task; Soniox-list and Together-list languages stay on Soniox,
+anything else moves the remaining parts to whisper-1. Without Soniox,
+Together (or Scribe) runs part 1 to detect; a detected code on
+``STT_SONIOX_LANGUAGES`` switches the rest to Soniox (``soniox_after_detect``)
+and other languages outside ``STT_TOGETHER_LANGUAGES`` go to whisper-1.
+
+Once the overlay is on, ``SONIOX_TESTED_LANGUAGES`` (passed the 2026-11-13
+Soniox-vs-whisper-1 test) are added to ``STT_SONIOX_LANGUAGES``;
+``STT_SONIOX_EXCLUDE_LANGUAGES`` takes single languages back out. Hints are
+only sent for codes on Soniox's published list (others, e.g. ``is``, run
+with language identification — a hint would be rejected with HTTP 400).
 
 Optional ``STT_SONIOX_FALLBACK=1`` uses Soniox instead of whisper-1 when a
 Together gap/error would otherwise fall back (per chunk). Default off.
@@ -54,6 +60,10 @@ Rollout (all env, read at call time so a restart is not needed in tests):
   STT_SCRIBE_USD_PER_MIN    0.00366 (billed fiat from the Oct 2026 test)
   STT_SONIOX_LANGUAGES      empty (default = off) -- e.g. de,nl,he,hu,fi,pl
   SONIOX_API_KEY            required for Soniox (never log it)
+  STT_SONIOX_EXCLUDE_LANGUAGES  empty -- per-language rollback of the overlay
+                            (incl. SONIOX_TESTED_LANGUAGES), e.g. ja,is
+  STT_SONIOX_AUTO           1 (default) -- auto-detect jobs start on Soniox
+                            with language ID; 0 = old Together part-1 probe
   STT_SONIOX_FALLBACK       0 (default) -- 1 = Soniox instead of whisper-1
                             for Together gap/error fallbacks
   STT_SONIOX_USD_PER_MIN    0.00191 (benchmark blended when tokens unavailable)
@@ -104,6 +114,23 @@ SONIOX_INPUT_AUDIO_TOKENS_PER_HOUR = 30_000
 SONIOX_OUTPUT_TOKENS_PER_CHAR = 0.3
 # Group tokens into whisper-shaped segments (~sentence / 10 s).
 SONIOX_SEGMENT_MAX_SECONDS = 10.0
+# Languages that passed the 2026-11-13 quality test against whisper-1
+# (/workspace/stt-quality-1113): real prod episodes (eu, is) plus public
+# podcasts. Added to STT_SONIOX_LANGUAGES whenever the overlay is on.
+# zh is deliberately absent: Soniox returns Simplified script for Taiwanese
+# Mandarin (whisper-1 keeps Traditional) and groups CJK tokens into 60 s+
+# segments, so it stays on whisper-1 until both are handled.
+SONIOX_TESTED_LANGUAGES = frozenset({
+    'ar', 'cs', 'cy', 'el', 'eu', 'hi', 'id', 'is', 'ja', 'ko', 'ru', 'tr',
+})
+# Soniox's published language list (language_hints accepts only these).
+SONIOX_HINT_LANGUAGES = frozenset({
+    'af', 'sq', 'ar', 'az', 'eu', 'be', 'bn', 'bs', 'bg', 'ca', 'zh', 'hr',
+    'cs', 'da', 'nl', 'en', 'et', 'fi', 'fr', 'gl', 'de', 'el', 'gu', 'he',
+    'hi', 'hu', 'id', 'it', 'ja', 'kn', 'kk', 'ko', 'lv', 'lt', 'mk', 'ms',
+    'ml', 'mr', 'no', 'fa', 'pl', 'pt', 'pa', 'ro', 'ru', 'sr', 'sk', 'sl',
+    'es', 'sw', 'sv', 'tl', 'ta', 'te', 'th', 'tr', 'uk', 'ur', 'vi', 'cy',
+})
 
 PROVIDER_OPENAI = 'whisper-1'
 PROVIDER_TOGETHER = 'together'
@@ -254,9 +281,76 @@ def soniox_api_key():
 
 
 def soniox_languages():
-    """Languages routed to Soniox (per 900 s part). Empty set = feature off."""
+    """Languages routed to Soniox (per 900 s part). Empty set = feature off.
+
+    ``STT_SONIOX_LANGUAGES`` turns the overlay on; once it is on, the
+    languages that passed the 2026-11-13 Soniox-vs-whisper-1 test
+    (``SONIOX_TESTED_LANGUAGES``) are added so they leave the $0.006/min
+    whisper-1 path without an env edit. ``STT_SONIOX_EXCLUDE_LANGUAGES``
+    takes single languages back out (per-language rollback).
+    """
     raw = _env('STT_SONIOX_LANGUAGES', '')
+    langs = {p.strip().lower() for p in raw.split(',') if p.strip()}
+    if not langs:
+        return set()
+    return (langs | set(SONIOX_TESTED_LANGUAGES)) - soniox_excluded_languages()
+
+
+def soniox_excluded_languages():
+    """Per-language rollback for the Soniox overlay (comma list)."""
+    raw = _env('STT_SONIOX_EXCLUDE_LANGUAGES', '')
     return {p.strip().lower() for p in raw.split(',') if p.strip()}
+
+
+def soniox_hint_language(language):
+    """``language_hints`` value for Soniox, or '' to let Soniox identify it.
+
+    Soniox rejects hints outside its published list with HTTP 400 (``is``
+    did in the 2026-11-13 test) even though it transcribes them well with
+    language identification on, so only listed codes are sent as hints.
+    """
+    code = (language or '').strip().lower()
+    return code if code in SONIOX_HINT_LANGUAGES else ''
+
+
+def soniox_auto_enabled():
+    """Auto-detect jobs (no language) start on Soniox with language ID.
+
+    On by default whenever the Soniox overlay is on (``STT_SONIOX_AUTO=0``
+    rolls back to the Together part-1 probe). Together's whisper-large-v3
+    probe misdetected English as Welsh and returned a Welsh translation for
+    part 1, and garbled Basque/Icelandic, in the 2026-11-13 test; Soniox
+    identified all of them correctly.
+    """
+    if not soniox_api_key() or not soniox_languages():
+        return False
+    raw = _env('STT_SONIOX_AUTO', '1').lower()
+    return raw in ('1', 'true', 'yes', 'on')
+
+
+def soniox_keeps_detected(detected):
+    """After a Soniox auto-detect part: may the rest of the job stay on Soniox?
+
+    Yes for Soniox-list languages and for languages already on Together
+    (Soniox is their tested gap fallback). Anything else (untested or junk
+    detection) moves the remaining parts to whisper-1, like the Together
+    probe did before.
+    """
+    code = (detected or '').strip().lower()
+    return bool(code) and (code in soniox_languages()
+                           or code in together_languages())
+
+
+def soniox_majority_language(tokens):
+    """Most common per-token ``language`` from a Soniox language-ID run."""
+    counts = {}
+    for tok in tokens or []:
+        code = (tok.get('language') or '').strip().lower() if isinstance(tok, dict) else ''
+        if code:
+            counts[code] = counts.get(code, 0) + 1
+    if not counts:
+        return ''
+    return max(counts.items(), key=lambda kv: kv[1])[0]
 
 
 def soniox_fallback_enabled():
@@ -502,8 +596,9 @@ def route_job(key_source, language, trial_seconds=0, paid_seconds=0,
 
     Soniox overlay: a known language in ``STT_SONIOX_LANGUAGES`` (with API key)
     wins over Together/Scribe for platform jobs (one async job per standard
-    part). Empty/unknown language never routes to Soniox (see module
-    docstring). Episodes longer than ``SONIOX_MAX_SECONDS`` keep the
+    part). Empty/unknown language goes to Soniox with language
+    identification (``soniox_auto``) when the overlay is on and
+    ``STT_SONIOX_AUTO`` is not 0. Episodes longer than ``SONIOX_MAX_SECONDS`` keep the
     non-Soniox path when ``audio_seconds`` is provided.
     """
     if key_source != 'trial':
@@ -519,6 +614,11 @@ def route_job(key_source, language, trial_seconds=0, paid_seconds=0,
             pass
         else:
             return PROVIDER_SONIOX, 'soniox_language'
+    # Unknown language: Soniox with language identification on part 1
+    # (cheaper than the old Together probe + whisper-1 rest, and it does not
+    # misdetect/translate the way whisper-large-v3 did).
+    if not lang and soniox_auto_enabled() and soniox_within_duration(audio_seconds):
+        return PROVIDER_SONIOX, 'soniox_auto'
 
     setting = provider_setting()
 

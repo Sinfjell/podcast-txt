@@ -499,15 +499,27 @@ language is known (picker or RSS, `nb-NO`→`no`) and listed in
 `STT_SONIOX_LANGUAGES`, each standard 900 s part goes to Soniox `stt-async-v5`
 (upload + poll + delete). Episodes longer than 300 minutes keep the
 Together/whisper path. Empty list = feature off. BYOK stays on OpenAI.
-Unknown language (picker auto + no feed language): Together (or Scribe) still
-detects on part 1. If the detected code is in `STT_SONIOX_LANGUAGES`, remaining
-parts switch to Soniox (`route_reason=soniox_after_detect`, `stt_provider` is
-`mixed` when both Together and Soniox served chunks). Otherwise languages
-outside the Together list (e.g. `zh`) keep going to whisper-1.
+Once the list is non-empty, the languages that passed the 2026-11-13
+Soniox-vs-whisper-1 test (`SONIOX_TESTED_LANGUAGES` in `stt.py`: ar, cs, cy,
+el, eu, hi, id, is, ja, ko, ru, tr) are added automatically. `zh` stays on
+whisper-1 (Soniox returns Simplified script for Taiwanese Mandarin and very
+long CJK segments).
+`language_hints` is only sent for codes on Soniox's published list; others
+(e.g. `is`) run with language identification instead (a hint returns 400).
+
+Unknown language (picker auto + no feed language): part 1 goes to Soniox with
+language identification (`route_reason=soniox_auto`). The majority token
+language is pinned for later parts and stored on the task. Soniox-list and
+Together-list languages stay on Soniox; anything else finishes on whisper-1.
+With `STT_SONIOX_AUTO=0` the old flow returns: Together (or Scribe) detects on
+part 1, Soniox-list languages switch to Soniox (`soniox_after_detect`), other
+languages outside the Together list go to whisper-1.
 
 | Var | Default | Notes |
 | --- | --- | --- |
 | `STT_SONIOX_LANGUAGES` | empty (= off) | Comma list, e.g. `de,nl,he,hu,fi,pl`. **Rollback:** empty / unset + restart. |
+| `STT_SONIOX_EXCLUDE_LANGUAGES` | empty | Per-language rollback (also removes tested defaults), e.g. `ja,is`. Restart after editing. |
+| `STT_SONIOX_AUTO` | `1` | `0` = auto-detect jobs go back to the Together part-1 probe. |
 | `SONIOX_API_KEY` | unset | Required when the list is non-empty. **Never log or surface it.** |
 | `STT_SONIOX_FALLBACK` | `0` | `1` = use Soniox instead of whisper-1 when a Together gap/error would fall back (per chunk). |
 | `STT_SONIOX_USD_PER_MIN` | `0.00191` | Blended minute rate when token counts are unavailable. |
