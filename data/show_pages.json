@@ -1892,6 +1892,204 @@
       "language": "nl",
       "description": "Arend Jan Boekestijn en Han ten Broeke (BNR) analyseren de internationale politiek — scherp, actueel en zonder omwegen.",
       "source": "manual"
+    },
+    {
+      "slug": "cisne-rojo",
+      "name": "Cisne Rojo",
+      "author": "Wondery",
+      "itunes_id": "1687980538",
+      "feed_url": "https://rss.art19.com/alternate_feeds/user/cisne-rojo/Cbg6BJ7sKHwStkkmp3GR4JbkqR_YwOMV",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts126/v4/aa/3a/62/aa3a62db-04bc-4d54-a350-263083f84593/mza_2939657966485776043.jpeg/600x600bb.jpg",
+      "language": "es",
+      "description": "Sara es la principal accionista de Summer-Petersen, una importante compañía de servicios financieros. Es la ejecutiva más agresiva. La que no tiene miedo. Si se trata de negocios, la información es poder y Sara ve lo que otros no ven.",
+      "source": "manual"
+    },
+    {
+      "slug": "red-de-lente",
+      "name": "Red de Lente",
+      "author": "Dirk de Bekker & CLM",
+      "itunes_id": "1623771026",
+      "feed_url": "https://reddelente.nl/feed/podcast/default-podcast/",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts112/v4/80/ea/12/80ea1239-0d20-1436-ad63-2f1d2245d31c/mza_12534928200777530701.jpg/600x600bb.jpg",
+      "language": "nl",
+      "description": "Welke impact hebben bestrijdingsmiddelen op ons en ons milieu? Waarom gebruiken we ze? Broodnodig of zijn we eraan verslaafd geraakt? Schaden ze onze gezondheid? En zijn er alternatieven? Wetenschapsjournalist Dirk de Bekker neemt je mee op een zoektocht naar antwoorden.",
+      "source": "manual"
+    },
+    {
+      "slug": "ted-talks-daily",
+      "name": "TED Talks Daily",
+      "author": "TED",
+      "itunes_id": "160904630",
+      "feed_url": "https://feeds.acast.com/public/shows/67587e77c705e441797aff96",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts116/v4/2e/cf/99/2ecf996f-71f7-604f-b0a0-43116b9d6619/mza_10257768296573848480.png/600x600bb.jpg",
+      "language": "us",
+      "description": "Ideas change everything from the TED Conference",
+      "source": "manual"
+    },
+    {
+      "slug": "the-frye-show",
+      "name": "The Frye Show",
+      "author": "Robbie J Frye | El Gringo Lo.CO",
+      "itunes_id": "1092995967",
+      "feed_url": "https://anchor.fm/s/1047c2f2c/podcast/rss",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/68/e3/08/68e30856-cf1c-a563-13dd-73adf6414b33/mza_2788980020229629826.jpg/600x600bb.jpg",
+      "language": "es",
+      "description": "Robbie J Frye es el host de The Frye Show. Este podcast es una celebración de personas que no aceptan la vida tal como es, la abrazan, la cambian, la mejoran y dejan su huella en ella.",
+      "source": "manual"
+    },
+    {
+      "slug": "redefining-energy",
+      "name": "Redefining Energy",
+      "author": "Laurent Segalen and Gerard Reid",
+      "itunes_id": "1439197083",
+      "feed_url": "https://www.spreaker.com/show/3170008/episodes/feed",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/b1/bc/55/b1bc55fc-8921-171b-0606-8eb9b1e3c9e2/mza_16208503064123491808.jpg/600x600bb.jpg",
+      "language": "us",
+      "description": "Two investment bankers weekly explore how tech, finance, markets and regulations are radically redefining the world of energy: Renewable Energy, Electric Cars, Hydrogen, Battery Storage, Digitisation. Your co-hosts: from Berlin, Gerard Reid and from London, Laurent Segalen.",
+      "source": "manual"
+    },
+    {
+      "slug": "the-knowledge-project",
+      "name": "The Knowledge Project",
+      "author": "Shane Parrish",
+      "itunes_id": "990149481",
+      "feed_url": "https://feeds.megaphone.fm/FSMI7575968096",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/4a/9c/e2/4a9ce2fd-ddf6-0d00-8760-4e7167378ecf/mza_16600443422050351456.jpeg/600x600bb.jpg",
+      "language": "us",
+      "description": "Uncovering the timeless principles that drive success. The Knowledge Project is your key to understanding how the world’s most successful people think, decide, and solve problems. Hosted by Shane Parrish.",
+      "source": "manual"
+    },
+    {
+      "slug": "lifestyle-of-longevity",
+      "name": "Lifestyle of Longevity",
+      "author": "Dr. Kati Ernst & Kristine Zeller",
+      "itunes_id": "1724582168",
+      "feed_url": "https://feeds.acast.com/public/shows/664f0e657a8a050012c98e18",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/88/39/2d/88392d11-c150-8aa3-7662-8f3646dae076/mza_2742714159970281479.jpeg/600x600bb.jpg",
+      "language": "de",
+      "description": "Im Lifestyle of Longevity Podcast nehmen wir - Kati und Kristine - euch mit auf unserer Reise zu einem langen und gesunden Leben. Wir beschäftigen uns seit Jahren mit Langlebigkeit und teilen hier unsere Erkenntnisse und Erfahrungen.",
+      "source": "manual"
+    },
+    {
+      "slug": "philosophize-this",
+      "name": "Philosophize This!",
+      "author": "Stephen West",
+      "itunes_id": "659155419",
+      "feed_url": "https://feeds.megaphone.fm/QCD6036500916",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/c1/b7/51/c1b751eb-ab38-f11c-d6c1-0a9de79b7061/mza_12134548126279202007.jpg/600x600bb.jpg",
+      "language": "us",
+      "description": "Beginner friendly if listened to in order! For anyone interested in an educational podcast about philosophy where you don't need to be a graduate-level philosopher to understand it. In chronological order, the thinkers and ideas that forged the world we live in are broken down and explained.",
+      "source": "manual"
+    },
+    {
+      "slug": "minha-igreja-na-cidade",
+      "name": "Minha Igreja Na Cidade",
+      "author": "Minha Igreja na Cidade",
+      "itunes_id": "1608210720",
+      "feed_url": "https://anchor.fm/s/81480608/podcast/rss",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/40/1f/c3/401fc3f1-1528-6d08-ec65-0933717bd0b1/mza_2097231886030754611.jpg/600x600bb.jpg",
+      "language": "br",
+      "description": "Seja bem vindo ao canal da @MinhaIgrejaNaCidade! Aqui você será ministrado pelo evangelho da graça de Deus, que tem poder para te nutrir, impulsionar e inspirar.",
+      "source": "manual"
+    },
+    {
+      "slug": "wissen-mit-johnny",
+      "name": "Wissen mit Johnny",
+      "author": "Johnny",
+      "itunes_id": "1764846386",
+      "feed_url": "https://anchor.fm/s/f8b3e284/podcast/rss",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts221/v4/7f/57/dc/7f57dcbb-5408-85ab-1606-3de78445e2ce/mza_18443309446564372383.jpg/600x600bb.jpg",
+      "language": "de",
+      "description": "\"Das sollte man aber wissen\" - Jeder von uns hat diesen Satz schon einmal gehört und in diesem Podcast kümmern wir uns kurz und knapp um genau diese Themen - indem wir in sie eintauchen!",
+      "source": "manual"
+    },
+    {
+      "slug": "aspire-with-emma-grede",
+      "name": "Aspire with Emma Grede",
+      "author": "Emma Grede | Audacy",
+      "itunes_id": "1811878340",
+      "feed_url": "https://rss.amperwave.net/v2/feed/audacynetwork/emma-grede",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/b5/69/31/b569316b-55c7-a7f7-c586-bc3ee0b3b440/mza_17045015706295888832.png/600x600bb.jpg",
+      "language": "us",
+      "description": "Build the life of your dreams and learn from the world’s most successful people. Emma Grede wants you to make the most of your life through thought-provoking conversations with successful and smart guests.",
+      "source": "manual"
+    },
+    {
+      "slug": "celebration-church-international",
+      "name": "Celebration Church International",
+      "author": "Endless Life with Emmanuel Iren",
+      "itunes_id": "1482679477",
+      "feed_url": "https://sermons-api.essantra.joincci.org/rss.xml",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts221/v4/16/a3/0b/16a30b5e-5746-32f3-f2e7-8dcfbdfcdcf1/mza_8254351263932049358.jpg/600x600bb.jpg",
+      "language": "us",
+      "description": "Welcome to the official Celebration Church International sermons feed, where you’ll find the latest sermons and teachings from Celebration Church International. Each week, expect a message that fuels your progress and joy in the faith.",
+      "source": "manual"
+    },
+    {
+      "slug": "timothy-keller-sermons-podcast-by-gospel-in-life",
+      "name": "Timothy Keller Sermons Podcast by Gospel in Life",
+      "author": "Tim Keller",
+      "itunes_id": "352660924",
+      "feed_url": "https://podcast.gospelinlife.com/feed.xml",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts126/v4/9b/89/18/9b8918d2-5a02-e3f4-18dc-787a747122e4/mza_6961486960125567640.jpg/600x600bb.jpg",
+      "language": "us",
+      "description": "Sermons by Tim Keller, founder of Redeemer Presbyterian Church in NYC and NY Times best-selling author of \"The Reason for God: Belief in an Age of Skepticism.\" For more sermons and resources, visit https://gospelinlife.com.",
+      "source": "manual"
+    },
+    {
+      "slug": "invest-like-the-best-with-patrick-o-shaughnessy",
+      "name": "Invest Like the Best with Patrick O'Shaughnessy",
+      "author": "Colossus | Investing & Business Podcasts",
+      "itunes_id": "1154105909",
+      "feed_url": "https://feeds.megaphone.fm/CLS2859450455",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/61/ae/be/61aebe7a-06e8-7390-3ae5-f2fc5889e36c/mza_10827489189939068066.jpg/600x600bb.jpg",
+      "language": "us",
+      "description": "Conversations with the best investors and business leaders in the world. We explore their ideas, methods, and stories to help you better invest your time and money.",
+      "source": "manual"
+    },
+    {
+      "slug": "sports-management-podcast",
+      "name": "Sports Management Podcast",
+      "author": "Marcus Filipsson",
+      "itunes_id": "1531631035",
+      "feed_url": "https://rss.pdrl.fm/8c6a2b/feeds.libsyn.com/290555/rss/?redirect=false",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/64/f2/9b/64f29b9e-f4d2-3247-485b-6b6aee24e507/mza_11524118864884609058.png/600x600bb.jpg",
+      "language": "us",
+      "description": "Conversations Shaping the Future of Sport",
+      "source": "manual"
+    },
+    {
+      "slug": "black-box-la-scatola-nera-della-finanza",
+      "name": "Black Box - La scatola nera della finanza",
+      "author": "Guido Brera e Gian Luca Comandini - Chora Media",
+      "itunes_id": "1648334875",
+      "feed_url": "https://feeds.megaphone.fm/BCS7148028594",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/49/5f/ba/495fba67-4f38-e057-0ff5-ba144e78f5b0/mza_12972480367148405188.jpeg/600x600bb.jpg",
+      "language": "it",
+      "description": "La finanza è un universo complesso, regolato da flussi che scorrono ovunque e da algoritmi indecifrabili. La finanza è il liquido in cui siamo immersi, senza saperlo. Questa serie racconta i meccanismi della finanza globale per entrare nel cuore del dispositivo: nella sua scatola nera.",
+      "source": "manual"
+    },
+    {
+      "slug": "the-psychology-of-your-20s",
+      "name": "The Psychology of your 20s",
+      "author": "iHeartPodcasts",
+      "itunes_id": "1573710078",
+      "feed_url": "https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/bc44988a-a82a-4291-ab8b-afdd01187fa8/39e2f432-53df-43b8-a7b9-afdd01187fc4/podcast.rss",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/f8/1e/93/f81e9349-1f81-0901-06e2-9fcb97f916ce/mza_6543407769057947677.jpg/600x600bb.jpg",
+      "language": "us",
+      "description": "A podcast that explains how everything is psychology. Even your 20s. Hosted by Jemma Sbeg, each Tuesday and Friday we deep dive into the science and psychology behind a topic, concept or universal experience that defines our 20s.",
+      "source": "manual"
+    },
+    {
+      "slug": "feel-better-live-more-with-dr-rangan-chatterjee",
+      "name": "Feel Better, Live More with Dr Rangan Chatterjee",
+      "author": "Dr Rangan Chatterjee: GP & Author",
+      "itunes_id": "1333552422",
+      "feed_url": "https://feeds.megaphone.fm/feelbetterlivemore",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts221/v4/82/14/44/8214441d-06f9-5beb-79d6-2c95ed1448cc/mza_2571811512276130369.jpg/600x600bb.jpg",
+      "language": "us",
+      "description": "“Health has become overcomplicated. I aim to simplify it” In this podcast, we hear stories from leading health experts and exciting personalities who offer easy health life-hacks, expert advice and debunk common health myths giving you the tools to revolutionise how you eat, sleep, move and relax.",
+      "source": "manual"
     }
   ]
 }

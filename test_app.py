@@ -24515,6 +24515,83 @@ def test_batch8_held_back_shows_and_native_copy_fixes(trial_on):
     assert 'impostos inclusos' in pt_spotify or 'IVA' not in pt_spotify.split('Quanto custa')[-1][:400]
 
 
+#: Curated show pages from landing batch 7 (2026-11-13). Founder Mode skipped
+#: (ambiguous iTunes match). Feel Better was not already present — included.
+LANDING_BATCH7_SHOW_SLUGS = (
+    'cisne-rojo',
+    'red-de-lente',
+    'ted-talks-daily',
+    'the-frye-show',
+    'redefining-energy',
+    'the-knowledge-project',
+    'lifestyle-of-longevity',
+    'philosophize-this',
+    'minha-igreja-na-cidade',
+    'wissen-mit-johnny',
+    'aspire-with-emma-grede',
+    'celebration-church-international',
+    'timothy-keller-sermons-podcast-by-gospel-in-life',
+    'invest-like-the-best-with-patrick-o-shaughnessy',
+    'sports-management-podcast',
+    'black-box-la-scatola-nera-della-finanza',
+    'the-psychology-of-your-20s',
+    'feel-better-live-more-with-dr-rangan-chatterjee',
+)
+
+
+def test_landing_batch7_show_pages_render_index_and_sitemap(trial_on):
+    """Landing batch 7 curated shows: 200, index, sitemap; count rises by N."""
+    import xml.etree.ElementTree as ET
+    import show_pages as SP
+    import landing_pages as lp
+    client = A.app.test_client()
+    curated = SP.load_curated_shows()
+    curated_slugs = {s['slug'] for s in curated}
+    names = {
+        'cisne-rojo': 'Cisne Rojo',
+        'red-de-lente': 'Red de Lente',
+        'ted-talks-daily': 'TED Talks Daily',
+        'the-frye-show': 'The Frye Show',
+        'redefining-energy': 'Redefining Energy',
+        'the-knowledge-project': 'The Knowledge Project',
+        'lifestyle-of-longevity': 'Lifestyle of Longevity',
+        'philosophize-this': 'Philosophize This!',
+        'minha-igreja-na-cidade': 'Minha Igreja Na Cidade',
+        'wissen-mit-johnny': 'Wissen mit Johnny',
+        'aspire-with-emma-grede': 'Aspire with Emma Grede',
+        'celebration-church-international': 'Celebration Church International',
+        'timothy-keller-sermons-podcast-by-gospel-in-life':
+            'Timothy Keller Sermons Podcast by Gospel in Life',
+        'invest-like-the-best-with-patrick-o-shaughnessy':
+            "Invest Like the Best with Patrick O'Shaughnessy",
+        'sports-management-podcast': 'Sports Management Podcast',
+        'black-box-la-scatola-nera-della-finanza':
+            'Black Box - La scatola nera della finanza',
+        'the-psychology-of-your-20s': 'The Psychology of your 20s',
+        'feel-better-live-more-with-dr-rangan-chatterjee':
+            'Feel Better, Live More with Dr Rangan Chatterjee',
+    }
+    assert len(LANDING_BATCH7_SHOW_SLUGS) == 18
+    for slug in LANDING_BATCH7_SHOW_SLUGS:
+        assert slug in curated_slugs, slug
+        resp = client.get(f'/podcasts/{slug}')
+        assert resp.status_code == 200, slug
+        assert names[slug] in resp.data.decode()
+    index = client.get('/podcasts').data.decode()
+    locs = [el.text for el in ET.fromstring(client.get('/sitemap.xml').data).iter(
+        '{http://www.sitemaps.org/schemas/sitemap/0.9}loc')]
+    for slug in LANDING_BATCH7_SHOW_SLUGS:
+        assert f'/podcasts/{slug}' in index or f'href="/podcasts/{slug}"' in index
+        assert any(loc.endswith(f'/podcasts/{slug}') for loc in locs), slug
+    core = 21
+    # Sitemap grows by exactly the newly curated show pages (not a hard-coded total).
+    without_batch = (
+        core + len(lp.public_pages())
+        + (len(curated) - len(LANDING_BATCH7_SHOW_SLUGS)))
+    assert len(locs) == without_batch + len(LANDING_BATCH7_SHOW_SLUGS)
+    assert len(locs) == core + len(lp.public_pages()) + len(curated)
+
+
 def test_spotify_landing_will_work_line_and_cta_note(trial_on):
     html = A.app.test_client().get('/spotify-podcast-transcript').data.decode()
     assert 'Spotify Originals' in html and 'exclusives' in html.lower()
