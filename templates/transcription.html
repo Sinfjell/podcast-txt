@@ -186,6 +186,18 @@
         color: var(--muted); text-decoration: underline; text-underline-offset: 2px;
     }
     .paywall-byok-alt a:hover { color: var(--accent); }
+    .feedback-card { margin-top: 16px; }
+    .feedback-title { font-weight: 700; font-size: 15px; margin: 0 0 6px; }
+    .feedback-lede { margin: 0 0 12px; line-height: 1.55; }
+    .feedback-reasons {
+        display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px;
+    }
+    .feedback-reason.is-selected {
+        border-color: var(--accent); color: var(--accent); font-weight: 600;
+    }
+    .feedback-comment-label { display: block; margin: 0 0 6px; font-size: 13px; }
+    .feedback-comment { width: 100%; margin: 0 0 12px; min-height: 72px; }
+    .feedback-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 </style>
 
 <!-- A Podskrift limit (episode too long / too large), not a crash: said as
@@ -205,6 +217,42 @@
     </div>
     <div class="text-center mt-2">
         <a href="{{ url_for('index') }}" class="btn btn-secondary">Start over</a>
+    </div>
+</div>
+
+<!-- Owner-only quality feedback (not on public /t/ share links). -->
+<div id="feedbackCard" class="hidden card mb-2 feedback-card" data-testid="feedback-card">
+    <div class="card-body">
+        <p class="feedback-title">Not satisfied?</p>
+        <p class="text-sm text-muted feedback-lede">
+            Tell us what went wrong — it helps us improve transcripts.
+        </p>
+        <div class="feedback-reasons" id="feedbackReasons" role="group" aria-label="Reason">
+            <button type="button" class="btn btn-sm btn-secondary feedback-reason"
+                    data-reason="wrong_language">Wrong language</button>
+            <button type="button" class="btn btn-sm btn-secondary feedback-reason"
+                    data-reason="bad_speakers">Bad speakers</button>
+            <button type="button" class="btn btn-sm btn-secondary feedback-reason"
+                    data-reason="missing_parts">Missing parts</button>
+            <button type="button" class="btn btn-sm btn-secondary feedback-reason"
+                    data-reason="bad_timestamps">Bad timestamps</button>
+            <button type="button" class="btn btn-sm btn-secondary feedback-reason"
+                    data-reason="other">Other</button>
+        </div>
+        <label class="form-label feedback-comment-label" for="feedbackComment">
+            Optional comment
+        </label>
+        <textarea id="feedbackComment" class="form-input feedback-comment"
+                  rows="3" maxlength="2000"
+                  placeholder="Anything else we should know?"></textarea>
+        <div class="feedback-actions">
+            <button type="button" class="btn btn-sm btn-secondary" id="feedbackSubmitBtn"
+                    disabled>Send feedback</button>
+        </div>
+        <p id="feedbackThanks" class="text-sm hidden" role="status" data-testid="feedback-thanks">
+            Thanks — we got your feedback.
+        </p>
+        <p id="feedbackError" class="text-sm text-muted hidden" role="alert"></p>
     </div>
 </div>
 
@@ -350,12 +398,13 @@
     var UNLOCK_LABEL = {{ ('Unlock the full episode')|tojson }};
     var RESULT_OFFER_LABEL = {{ ('Transcribe your next episode: ' ~ credit_pack_minutes ~ ' min for $' ~ credit_pack_price_usd)|tojson }};
     var BUY_URL = {{ url_for('billing_checkout')|tojson }};
-    var CSRF_TOKEN = {% if stripe_buy_enabled and current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
+    var CSRF_TOKEN = {% if current_user.is_authenticated %}{{ csrf_token()|tojson }}{% else %}""{% endif %};
     var SETTINGS_OPENAI = {{ url_for('settings')|tojson }} + '#openai';
     var START_URL = {{ url_for('start_transcription')|tojson }};
     var RELATED_URL = {{ url_for('related_episodes', task_id=task_id)|tojson }};
     var SHARE_URL = {{ url_for('transcription_share', task_id=task_id)|tojson }};
     var SHARE_REVOKE_URL = {{ url_for('transcription_share_revoke', task_id=task_id)|tojson }};
+    var FEEDBACK_URL = {{ url_for('transcription_feedback', task_id=task_id)|tojson }};
     var resultViewed = false;
     var resultOfferShown = false;
     var partialPreviewShown = false;
@@ -1157,6 +1206,7 @@
             if (d.download_txt || d.download_srt) show(el('downloadGroup'), true);
             show(el('copyBtn'), true);
             show(el('shareBtn'), true);
+            showFeedbackCard();
             loadShareState();
             show(el('listenLinksMount'), !!(el('listenLinksMount')
                 && el('listenLinksMount').querySelector('.listen-block')));
@@ -1582,8 +1632,97 @@
             });
     }
 
+    var feedbackReason = null;
+    var feedbackSent = false;
+
+    function showFeedbackCard() {
+        var card = el('feedbackCard');
+        if (!card || feedbackSent) return;
+        show(card, true);
+    }
+
+    function syncFeedbackSubmit() {
+        var btn = el('feedbackSubmitBtn');
+        if (!btn) return;
+        btn.disabled = !feedbackReason || feedbackSent;
+    }
+
+    function wireFeedbackControls() {
+        var reasons = el('feedbackReasons');
+        if (reasons) {
+            reasons.addEventListener('click', function(ev) {
+                var btn = ev.target && ev.target.closest
+                    ? ev.target.closest('.feedback-reason') : null;
+                if (!btn) return;
+                feedbackReason = btn.getAttribute('data-reason') || null;
+                Array.prototype.forEach.call(
+                    reasons.querySelectorAll('.feedback-reason'),
+                    function(b) {
+                        b.classList.toggle('is-selected', b === btn);
+                    }
+                );
+                syncFeedbackSubmit();
+            });
+        }
+        var submit = el('feedbackSubmitBtn');
+        if (submit) {
+            submit.addEventListener('click', function() {
+                if (!feedbackReason || feedbackSent) return;
+                submit.disabled = true;
+                var comment = (el('feedbackComment') && el('feedbackComment').value) || '';
+                fetch(FEEDBACK_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-Token': CSRF_TOKEN || ''
+                    },
+                    body: JSON.stringify({
+                        kind: 'transcript_quality',
+                        reason: feedbackReason,
+                        message: comment,
+                        rating: 1
+                    })
+                })
+                    .then(function(r) { return r.json().then(function(j) {
+                        return { ok: r.ok, status: r.status, body: j };
+                    }); })
+                    .then(function(res) {
+                        if (!res.ok) {
+                            var err = el('feedbackError');
+                            if (err) {
+                                err.textContent = (res.body && res.body.message)
+                                    || 'Could not send feedback. Try again.';
+                                show(err, true);
+                            }
+                            syncFeedbackSubmit();
+                            return;
+                        }
+                        feedbackSent = true;
+                        show(el('feedbackThanks'), true);
+                        show(el('feedbackReasons'), false);
+                        show(el('feedbackComment'), false);
+                        var label = document.querySelector('.feedback-comment-label');
+                        if (label) show(label, false);
+                        show(submit, false);
+                        var errClear = el('feedbackError');
+                        if (errClear) show(errClear, false);
+                    })
+                    .catch(function() {
+                        var err = el('feedbackError');
+                        if (err) {
+                            err.textContent = 'Could not send feedback. Try again.';
+                            show(err, true);
+                        }
+                        syncFeedbackSubmit();
+                    });
+            });
+        }
+        syncFeedbackSubmit();
+    }
+
     wireDownloadTracking();
     wireShareControls();
+    wireFeedbackControls();
     show(el('resultBanner'), false);
     show(el('errorContainer'), false);
     show(el('nextSteps'), false);
