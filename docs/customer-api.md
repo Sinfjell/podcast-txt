@@ -213,16 +213,36 @@ Example response (ready):
 }
 ```
 
+## POST /api/v1/feedback
+
+Send product feedback (bugs, feature ideas, transcript quality). Same writer as
+the MCP `report_feedback` tool and the logged-in result-page widget.
+
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer psk_…" \
+  -H "Content-Type: application/json" \
+  -d '{"kind":"bug","message":"Describe the problem in 10–2000 characters."}' \
+  https://podskrift.com/api/v1/feedback
+```
+
+Body fields: `kind` (`bug` | `feature` | `transcript_quality` | `other`),
+`message` (10–2000 chars; empty allowed only for web quality ratings with a
+`reason`), optional `task_id`, `reason`
+(`wrong_language` | `bad_speakers` | `missing_parts` | `bad_timestamps` |
+`other`), optional `rating` (1–5 or thumbs). Rate limit: 5/hour and 15/day per
+user. One `transcript_quality` rating per user×task (upsert).
+
 ## Errors
 
 | Status | Meaning |
 | --- | --- |
-| `400` | Bad input (missing fields, invalid `date`, unsupported `format`) |
+| `400` | Bad input (missing fields, invalid `date`, unsupported `format`, invalid feedback) |
 | `401` | Missing / wrong / revoked key |
 | `402` | Trial exhausted (or episode past the trial per-episode cap) |
 | `403` | No OpenAI key available for the account (trial off and no key in Settings) |
 | `404` | Not found (catalog miss, or another account’s job) |
-| `429` | Too many transcription starts, or too many jobs already in flight |
+| `429` | Too many transcription starts, jobs in flight, or feedback submissions |
 
 <!-- mcp-section -->
 ## MCP (ChatGPT / Claude / Cursor)
@@ -242,25 +262,29 @@ as this HTTP API.
 | `search_podcasts` | Find shows by name (Apple Podcasts directory) |
 | `list_episodes` | Recent episodes for a show name or feed URL |
 | `list_my_transcripts` | List *your* existing transcripts (History); filter/search/paginate |
-| `get_my_transcript` | Fetch one past transcript by `task_id` (never charges; supports paging) |
-| `get_transcript` | Return text if ready, or start transcription and return a `job_id` |
-| `get_transcript_status` | Poll a `job_id` until `ready` / `failed` (waits briefly server-side) |
+| `get_my_transcript` | Fetch one past transcript by `task_id` (never charges; supports paging). Includes a ready `summary` when stored. |
+| `get_transcript` | Return text if ready (with ready `summary` when stored), or start transcription. Metered starts require `confirm=true` after an estimate step. |
+| `get_transcript_status` | Poll by `task_id` (`job_id` is a deprecated alias) until `ready` / `failed` |
+| `search_transcript` | Search one of *your* transcripts; returns snippets with segment timestamps |
+| `report_feedback` | Report bugs, feature requests, or transcript-quality issues |
 
 When the user asks about past transcripts (“what have I transcribed?”), use
 `list_my_transcripts` / `get_my_transcript`. Re-fetching an episode you already
 transcribed via `get_transcript` is free (`cost_minutes: 0`).
 
-`get_transcript` reports `cost_minutes` and remaining balance before/after, plus
-a short `balance_fact` line for metered accounts (skipped for BYOK). If the
-episode is longer than your remaining minutes, it returns a structured
-`insufficient_balance` payload (`episode_minutes`, `minutes_left`,
-`shortfall_minutes`, optional partial-preview note, and a pricing information
-link — not a checkout deep link). Starting a job returns `task_id` /
-`job_id` with a rough ETA window (`eta_seconds_low` / `eta_seconds_high` /
-`eta_text`) and a `next_step` telling the model to call
+For metered accounts (trial / paid minutes), `get_transcript` first returns
+`confirmation_required` with duration, `cost_minutes`, and remaining balance —
+call again with the same arguments plus `confirm=true` to start and charge.
+BYOK skips confirmation. If the episode is longer than your remaining minutes,
+it returns a structured `insufficient_balance` payload (`episode_minutes`,
+`minutes_left`, `shortfall_minutes`, optional partial-preview note, and a
+pricing information link — not a checkout deep link). Starting a job returns
+`task_id` / `job_id` with a rough ETA window (`eta_seconds_low` /
+`eta_seconds_high` / `eta_text`) and a `next_step` telling the model to call
 `get_transcript_status` after ~N seconds. While in progress, status responses
 include the same ETA fields; when ready they include transcript text by default
-(page with `offset` / `max_chars` / `next_offset`, or set `include_text` false).
+(page with `offset` / `max_chars` / `next_offset`, or set `include_text` false)
+and any stored ready `summary`.
 
 **Cursor example** (`~/.cursor/mcp.json` or project config):
 

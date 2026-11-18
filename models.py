@@ -253,6 +253,37 @@ class TranscriptionTask(db.Model):
     source_client = db.Column(db.String(64), nullable=True)
 
 
+class Feedback(db.Model):
+    """Customer feedback from MCP, API, or the logged-in result-page widget.
+
+    ``transcript_quality`` is unique per user×task (upsert). Rate limits are
+    enforced by counting rows in this table (cross-worker). Never store
+    transcript body here — message is the user's free-text comment only.
+    """
+    __tablename__ = 'feedback'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False,
+                        index=True)
+    # mcp | api | web
+    source = db.Column(db.String(16), nullable=False)
+    # bug | feature | transcript_quality | other
+    kind = db.Column(db.String(32), nullable=False)
+    # 10–2000 chars normally; empty allowed for web transcript_quality + reason.
+    message = db.Column(db.Text, nullable=False, default='', server_default='')
+    task_id = db.Column(db.String(36), db.ForeignKey('transcription_tasks.id'),
+                        nullable=True, index=True)
+    # wrong_language | bad_speakers | missing_parts | bad_timestamps | other
+    reason = db.Column(db.String(64), nullable=True)
+    # 1–5 (thumbs up/down mapped to 5/1)
+    rating = db.Column(db.Integer, nullable=True)
+    # User-Agent / MCP client name (truncated).
+    client = db.Column(db.String(512), nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc),
+                           onupdate=lambda: datetime.now(timezone.utc))
+
+
 class TranscriptShare(db.Model):
     """Opt-in public share link for a completed transcript.
 

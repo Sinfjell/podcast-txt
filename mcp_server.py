@@ -55,6 +55,9 @@ _MCP_LIST_DEFAULT_LIMIT = 20
 _MCP_LIST_MAX_LIMIT = 100
 _MCP_TEXT_DEFAULT_CHARS = 24000
 _MCP_TEXT_MAX_CHARS = 100000
+_MCP_SEARCH_DEFAULT_LIMIT = 10
+_MCP_SEARCH_MAX_LIMIT = 50
+_MCP_SEARCH_SNIPPET_CHARS = 160
 
 
 def _mcp_wait_seconds() -> float:
@@ -611,7 +614,9 @@ def _tool_defs() -> list[dict]:
                 'Fetch an existing transcript by task_id from list_my_transcripts. '
                 'Never starts a new job and never charges minutes. For long text, '
                 'page with offset / max_chars (follow next_offset). Optional format: '
-                'txt (default), srt, or segments (timestamped).'
+                'txt (default), srt, or segments (timestamped). When a ready AI '
+                'summary is already stored for the task, includes it as `summary` '
+                '(null/absent if none).'
             ),
             'inputSchema': {
                 'type': 'object',
@@ -649,10 +654,16 @@ def _tool_defs() -> list[dict]:
                 'Get a transcript for an episode. If this account already has it, '
                 'returns the text for free (cost_minutes 0) — also use '
                 'list_my_transcripts / get_my_transcript for “my past transcripts”. '
-                'Otherwise starts transcription (same trial / paid / BYOK rules as '
-                'the website) and returns task_id / job_id plus a rough ETA window '
-                '(eta_seconds_low/high + eta_text; not a promise) and next_step: '
-                'call get_transcript_status with that task_id after ~N seconds. '
+                'When a ready AI summary is already stored, includes it as '
+                '`summary` (null/absent if none). '
+                'Otherwise, for metered accounts (trial / paid minutes), first '
+                'returns an estimate (duration, minutes to charge, remaining '
+                'balance) with confirmation_required=true — call again with the '
+                'same arguments plus confirm=true to start and charge. BYOK '
+                '(own OpenAI key) starts without confirm. After start, returns '
+                'task_id / job_id plus a rough ETA window (eta_seconds_low/high + '
+                'eta_text; not a promise) and next_step: call '
+                'get_transcript_status with that task_id after ~N seconds. '
                 'While in progress the server may wait briefly, then return '
                 'in_progress with progress and the same ETA fields (do not ask the '
                 'user to remind you; a transcript-ready email is sent when done). '
@@ -693,6 +704,15 @@ def _tool_defs() -> list[dict]:
                         'type': 'string',
                         'description': 'Optional rss_url from list_episodes.',
                     },
+                    'confirm': {
+                        'type': 'boolean',
+                        'description': (
+                            'Required true to start a metered (trial/paid) '
+                            'transcription after reviewing the estimate. '
+                            'Omit or false → estimate only, no charge. '
+                            'Ignored for BYOK and when reusing an existing job.'
+                        ),
+                    },
                 },
                 'required': ['episode'],
             },
@@ -705,11 +725,13 @@ def _tool_defs() -> list[dict]:
         {
             'name': 'get_transcript_status',
             'description': (
-                'Poll a transcription job by task_id / job_id from get_transcript. '
+                'Poll a transcription job by task_id from get_transcript '
+                '(job_id is a deprecated alias). '
                 'Waits briefly server-side if still running, then returns ready, '
                 'failed, or in_progress. When ready, includes transcript text by '
                 'default (same offset / max_chars / next_offset paging as '
-                'get_my_transcript; set include_text false for status only). '
+                'get_my_transcript; set include_text false for status only) and '
+                'any stored ready `summary` (null/absent if none). '
                 'In progress includes eta_seconds_low/high + eta_text and next_step '
                 'to call this tool again after ~N seconds — do not ask the user to '
                 'remind you. A transcript-ready email is sent when done.'
@@ -717,16 +739,17 @@ def _tool_defs() -> list[dict]:
             'inputSchema': {
                 'type': 'object',
                 'properties': {
+                    'task_id': {
+                        'type': 'string',
+                        'description': (
+                            'Task id returned by get_transcript (preferred).'
+                        ),
+                    },
                     'job_id': {
                         'type': 'string',
                         'description': (
-                            'Job id / task_id returned by get_transcript '
-                            '(alias: task_id).'
+                            'Deprecated alias for task_id — prefer task_id.'
                         ),
-                    },
-                    'task_id': {
-                        'type': 'string',
-                        'description': 'Alias for job_id.',
                     },
                     'include_text': {
                         'type': 'boolean',
@@ -750,11 +773,91 @@ def _tool_defs() -> list[dict]:
                         ),
                     },
                 },
-                'required': ['job_id'],
+                # Prefer task_id; job_id remains a deprecated alias. Either is
+                # accepted at runtime so older agents keep working.
             },
             'annotations': {
                 'readOnlyHint': True,
                 'openWorldHint': True,
+            },
+        },
+        {
+            'name': 'search_transcript',
+            'description': (
+                'Search one of the signed-in user’s own transcripts for a query. '
+                'Returns matching snippets with segment start/end timestamps '
+                '(case-insensitive). Only the caller’s tasks; never other accounts.'
+            ),
+            'inputSchema': {
+                'type': 'object',
+                'properties': {
+                    'task_id': {
+                        'type': 'string',
+                        'description': 'task_id from list_my_transcripts / get_transcript.',
+                    },
+                    'query': {
+                        'type': 'string',
+                        'description': 'Search string (min 2 characters).',
+                    },
+                    'limit': {
+                        'type': 'integer',
+                        'description': (
+                            f'Max matches (default {_MCP_SEARCH_DEFAULT_LIMIT}, '
+                            f'max {_MCP_SEARCH_MAX_LIMIT}).'
+                        ),
+                    },
+                },
+                'required': ['task_id', 'query'],
+            },
+            'annotations': {
+                'readOnlyHint': True,
+                'openWorldHint': False,
+            },
+        },
+        {
+            'name': 'report_feedback',
+            'description': (
+                'Send product feedback to the Podskrift team. Agents and developers '
+                'should report bugs, feature requests, and transcript-quality issues '
+                '(wrong language, bad speakers, missing parts, bad timestamps). '
+                'Use kind=bug|feature|transcript_quality|other; for quality issues '
+                'pass task_id and optional reason/rating. Message is 10–2000 chars. '
+                'This helps improve Podskrift — please report problems you hit.'
+            ),
+            'inputSchema': {
+                'type': 'object',
+                'properties': {
+                    'kind': {
+                        'type': 'string',
+                        'description': 'bug | feature | transcript_quality | other',
+                    },
+                    'message': {
+                        'type': 'string',
+                        'description': 'Feedback text (10–2000 characters).',
+                    },
+                    'task_id': {
+                        'type': 'string',
+                        'description': (
+                            'Optional task_id (required for transcript_quality).'
+                        ),
+                    },
+                    'reason': {
+                        'type': 'string',
+                        'description': (
+                            'Optional: wrong_language | bad_speakers | '
+                            'missing_parts | bad_timestamps | other'
+                        ),
+                    },
+                    'rating': {
+                        'description': 'Optional 1–5 or thumbs up/down.',
+                    },
+                },
+                'required': ['kind', 'message'],
+            },
+            'annotations': {
+                'readOnlyHint': False,
+                'destructiveHint': False,
+                'idempotentHint': False,
             },
         },
     ]
@@ -1024,6 +1127,39 @@ _EPISODE_META_ARGS = (
 )
 
 
+def _ready_summary(task) -> dict | None:
+    """Parsed summary when status is ready; otherwise None."""
+    if getattr(task, 'summary_status', None) != 'ready':
+        return None
+    import summary as summary_mod
+    return summary_mod.parse_summary_json(getattr(task, 'summary_json', None))
+
+
+def _attach_summary(payload: dict, task) -> dict:
+    """Add summary / summary_status when a ready summary exists."""
+    status = getattr(task, 'summary_status', None)
+    if status:
+        payload['summary_status'] = status
+    summary = _ready_summary(task)
+    if summary is not None:
+        payload['summary'] = summary
+    else:
+        payload.setdefault('summary', None)
+    return payload
+
+
+def _truthy_confirm(value) -> bool:
+    if value is True:
+        return True
+    if value is False or value is None:
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value) == 1
+    if isinstance(value, str):
+        return value.strip().lower() in ('1', 'true', 'yes', 'on')
+    return False
+
+
 def _page_transcript_text(task, *, offset=None, max_chars=None) -> dict:
     """Character window over transcript_text (same rules as get_my_transcript)."""
     try:
@@ -1068,6 +1204,7 @@ def _task_ready_payload(task, user, *, reused: bool, cost_minutes: int = 0,
     if include_text:
         payload.update(_page_transcript_text(
             task, offset=offset, max_chars=max_chars))
+    _attach_summary(payload, task)
     if extra:
         payload.update(extra)
     return _attach_balance_fact(payload, user)
@@ -1151,7 +1288,8 @@ def _optout_result(extra=None) -> dict:
 
 
 def tool_get_transcript(user, episode: str, language: str = '',
-                        meta: dict | None = None) -> dict:
+                        meta: dict | None = None,
+                        confirm=None) -> dict:
     A = _app()
     parsed = _parse_episode_arg(episode)
     if parsed.get('error'):
@@ -1201,6 +1339,41 @@ def tool_get_transcript(user, episode: str, language: str = '',
         refusal['balance_before'] = balance_before
         refusal['cost_minutes'] = cost_minutes
         return refusal
+
+    # Metered starts need an explicit confirm=true after the estimate step.
+    # BYOK skips confirmation (Podskrift does not meter those minutes).
+    metered = bool(balance_before.get('metered'))
+    if metered and not _truthy_confirm(confirm):
+        dur = catalog.get('duration_min')
+        try:
+            duration_min = float(dur) if dur is not None else float(cost_minutes)
+        except (TypeError, ValueError):
+            duration_min = float(cost_minutes)
+        instruction = (
+            f'This episode is about {int(round(duration_min))} minutes and will '
+            f'use about {cost_minutes} minutes of your Podskrift balance '
+            f'({balance_before.get("remaining_minutes")} minutes remaining). '
+            f'To start transcription and charge, call get_transcript again with '
+            f'the same episode arguments plus confirm=true. '
+            f'Do not invent a transcript — wait for confirmation.'
+        )
+        return _attach_balance_fact({
+            'confirmation_required': True,
+            'status': 'confirmation_required',
+            'transcript_status': 'confirmation_required',
+            'message': instruction,
+            'instruction': instruction,
+            'next_step': (
+                'call get_transcript again with the same arguments and confirm=true'
+            ),
+            'title': catalog.get('title'),
+            'publisher': catalog.get('publisher'),
+            'duration_min': duration_min,
+            'cost_minutes': cost_minutes,
+            'balance': balance_before,
+            'pricing_url': _pricing_url(),
+            'reused': False,
+        }, user)
 
     if not A._api_write_rate_limit_ok():
         return {
@@ -1304,9 +1477,10 @@ def tool_get_transcript_status(user, job_id: str = '', *,
                                task_id: str = '',
                                include_text=True,
                                offset=None, max_chars=None) -> dict:
-    job_id = (job_id or task_id or '').strip()
+    # Prefer task_id; job_id is a deprecated alias kept for older agents.
+    job_id = (task_id or job_id or '').strip()
     if not job_id:
-        return {'error': 'job_id is required'}
+        return {'error': 'task_id is required (job_id is a deprecated alias)'}
     task = _user_task(user.id, job_id)
     if task is None:
         return {'error': 'Job not found', 'transcript_status': 'none'}
@@ -1538,31 +1712,35 @@ def tool_get_my_transcript(user, task_id: str, *, format: str = 'txt',
         # Page by segment index when offset/max_chars used as segment window.
         window = segs[off: off + cap]
         next_off = off + len(window) if off + len(window) < len(segs) else None
-        return _attach_balance_fact({
+        seg_out = {
             **meta,
             'format': 'segments',
             'segments': window,
             'offset': off,
             'next_offset': next_off,
             'total_segments': len(segs),
-        }, user)
+        }
+        _attach_summary(seg_out, task)
+        return _attach_balance_fact(seg_out, user)
 
     if fmt == 'srt':
         full = A._segments_to_srt(task.segments_json, task.transcript_text or '')
         if full is None:
-            return {
+            out = {
                 **meta,
                 'error': 'SRT unavailable (no segment timestamps stored)',
                 'format': 'srt',
                 'text': None,
             }
+            _attach_summary(out, task)
+            return out
     else:
         full = task.transcript_text or ''
         fmt = 'txt'
 
     chunk = full[off: off + cap]
     next_off = off + len(chunk) if off + len(chunk) < len(full) else None
-    return _attach_balance_fact({
+    out = {
         **meta,
         'format': fmt,
         'text': chunk,
@@ -1570,7 +1748,124 @@ def tool_get_my_transcript(user, task_id: str, *, format: str = 'txt',
         'max_chars': cap,
         'next_offset': next_off,
         'total_chars': len(full),
-    }, user)
+    }
+    _attach_summary(out, task)
+    return _attach_balance_fact(out, user)
+
+
+def _snippet_around(text: str, match_start: int, match_end: int,
+                    *, window: int = _MCP_SEARCH_SNIPPET_CHARS) -> str:
+    """Trim a case-preserving snippet around a match, with ellipsis when cut."""
+    text = text or ''
+    if not text:
+        return ''
+    pad = max(16, window // 2)
+    start = max(0, match_start - pad)
+    end = min(len(text), match_end + pad)
+    snippet = text[start:end].strip()
+    if start > 0:
+        snippet = '…' + snippet
+    if end < len(text):
+        snippet = snippet + '…'
+    if len(snippet) > window + 4:
+        snippet = snippet[: window + 1] + '…'
+    return snippet
+
+
+def tool_search_transcript(user, task_id: str, query: str,
+                           limit=None) -> dict:
+    """Case-insensitive segment search on one of the caller's transcripts."""
+    task_id = (task_id or '').strip()
+    query = (query or '').strip()
+    if not task_id:
+        return {'error': 'task_id is required'}
+    if len(query) < 2:
+        return {'error': 'query must be at least 2 characters'}
+    try:
+        lim = int(limit) if limit is not None else _MCP_SEARCH_DEFAULT_LIMIT
+    except (TypeError, ValueError):
+        lim = _MCP_SEARCH_DEFAULT_LIMIT
+    lim = max(1, min(lim, _MCP_SEARCH_MAX_LIMIT))
+
+    task = _user_task(user.id, task_id)
+    if task is None:
+        return {'error': 'Transcript not found', 'matches': []}
+    if podcast_optout.is_opted_out_task(task):
+        return _optout_result({'matches': []})
+
+    segs: list = []
+    if task.segments_json:
+        try:
+            raw = json.loads(task.segments_json)
+            if isinstance(raw, list):
+                segs = raw
+        except (TypeError, ValueError, json.JSONDecodeError):
+            segs = []
+
+    needle = query.lower()
+    matches = []
+    for seg in segs:
+        if not isinstance(seg, dict):
+            continue
+        text = seg.get('text')
+        if not isinstance(text, str) or not text:
+            continue
+        lower = text.lower()
+        idx = lower.find(needle)
+        if idx < 0:
+            continue
+        start = seg.get('start')
+        end = seg.get('end')
+        try:
+            start_f = float(start) if start is not None else None
+        except (TypeError, ValueError):
+            start_f = None
+        try:
+            end_f = float(end) if end is not None else None
+        except (TypeError, ValueError):
+            end_f = None
+        matches.append({
+            'start': start_f,
+            'end': end_f,
+            'snippet': _snippet_around(text, idx, idx + len(query)),
+            'text': text.strip(),
+        })
+        if len(matches) >= lim:
+            break
+
+    return {
+        'task_id': task.id,
+        'query': query,
+        'count': len(matches),
+        'matches': matches,
+        'segments_available': bool(segs),
+        'title': task.episode_title,
+        'publisher': task.podcast_name,
+    }
+
+
+def tool_report_feedback(user, *, kind: str, message: str = '',
+                         task_id: str = '', reason: str = '',
+                         rating=None) -> dict:
+    """MCP entry point for the shared feedback writer."""
+    import feedback as feedback_mod
+    client = getattr(g, 'mcp_source_client', None) or request.headers.get(
+        'User-Agent', '')[:512]
+    payload, status = feedback_mod.submit_feedback(
+        user_id=user.id,
+        source='mcp',
+        kind=kind or '',
+        message=message or '',
+        task_id=task_id or None,
+        reason=reason or None,
+        rating=rating,
+        client=client,
+        user_email=getattr(user, 'email', None),
+    )
+    if status >= 400:
+        return payload
+    payload['message'] = 'Thanks — feedback received.'
+    return payload
 
 
 _ERROR_CODE_RE = re.compile(r'^[a-z][a-z0-9_]{0,40}$')
@@ -1598,9 +1893,15 @@ def _tool_event_props(tool: str, ok: bool, out, started: float) -> dict:
             reused = out.get('reused')
             if isinstance(reused, bool):
                 props['reused'] = reused
-            # The start call: a new job was queued (not a re-fetch / refusal).
+            # The start call: a new job was queued (not a re-fetch / refusal /
+            # confirmation estimate).
             props['job_started'] = bool(
-                not err and reused is False and (out.get('task_id') or out.get('job_id')))
+                not err
+                and reused is False
+                and not out.get('confirmation_required')
+                and (out.get('task_id') or out.get('job_id')))
+            if out.get('confirmation_required'):
+                props['confirmation_required'] = True
         status = out.get('transcript_status')
         if isinstance(status, str) and _ERROR_CODE_RE.match(status):
             props['transcript_status'] = status
@@ -1651,9 +1952,10 @@ def _call_tool(name: str, args: dict, user) -> tuple[dict, bool, bool]:
     if name == 'get_transcript':
         out = tool_get_transcript(
             user, args.get('episode') or '', args.get('language') or '',
-            meta=args)
+            meta=args, confirm=args.get('confirm'))
         # insufficient_balance is a clean refusal, not a crash, but still not
         # a successful call; a failed transcript is not a success either.
+        # confirmation_required is an intentional estimate step (not an error).
         ok = out.get('error') is None and out.get('transcript_status') != 'failed'
         return out, ok, 'error' in out
     if name == 'get_transcript_status':
@@ -1664,6 +1966,26 @@ def _call_tool(name: str, args: dict, user) -> tuple[dict, bool, bool]:
             include_text=args.get('include_text', True),
             offset=args.get('offset'),
             max_chars=args.get('max_chars'),
+        )
+        ok = 'error' not in out
+        return out, ok, not ok
+    if name == 'search_transcript':
+        out = tool_search_transcript(
+            user,
+            args.get('task_id') or '',
+            args.get('query') or '',
+            limit=args.get('limit'),
+        )
+        ok = 'error' not in out
+        return out, ok, not ok
+    if name == 'report_feedback':
+        out = tool_report_feedback(
+            user,
+            kind=args.get('kind') or '',
+            message=args.get('message') or '',
+            task_id=args.get('task_id') or '',
+            reason=args.get('reason') or '',
+            rating=args.get('rating'),
         )
         ok = 'error' not in out
         return out, ok, not ok
@@ -1715,16 +2037,19 @@ def _handle_initialize(params: dict) -> dict:
         },
         'instructions': (
             'Podskrift MCP: search podcasts, list episodes, list the user’s past '
-            'transcripts (list_my_transcripts / get_my_transcript), and fetch or '
-            'start transcripts (get_transcript). For “my transcripts / what have I '
-            'transcribed”, call list_my_transcripts — do not start a new job. '
-            'Re-fetching an already-transcribed episode is free. While a new job '
+            'transcripts (list_my_transcripts / get_my_transcript), search inside '
+            'a transcript (search_transcript), and fetch or start transcripts '
+            '(get_transcript). For “my transcripts / what have I transcribed”, '
+            'call list_my_transcripts — do not start a new job. Re-fetching an '
+            'already-transcribed episode is free. Metered starts need confirm=true '
+            'after the estimate step (confirmation_required). While a new job '
             'runs, call get_transcript_status yourself every 30–60s; do not ask the '
             'user to remind you — a transcript-ready email is sent when done. '
-            'Authenticate with Authorization: Bearer psk_… (API key from Settings) '
-            'or an OAuth access token from the Podskrift authorization server. '
-            'Transcription uses the same free trial / paid minutes / BYOK rules as '
-            f'the website. Pricing: {_pricing_url()}'
+            'Report bugs, feature ideas, and transcript-quality issues with '
+            'report_feedback. Authenticate with Authorization: Bearer psk_… '
+            '(API key from Settings) or an OAuth access token from the Podskrift '
+            'authorization server. Transcription uses the same free trial / paid '
+            f'minutes / BYOK rules as the website. Pricing: {_pricing_url()}'
         ),
     }
 

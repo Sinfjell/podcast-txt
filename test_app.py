@@ -6808,6 +6808,9 @@ def customer_api(trial_on, monkeypatch):
         'a': a, 'b': b, 'key_a': key_a, 'key_b': key_b,
     }
     with A.app.app_context():
+        from models import Feedback
+        db.session.query(Feedback).filter(
+            Feedback.user_id.in_([a, b])).delete()
         db.session.query(TranscriptionTask).filter(
             TranscriptionTask.user_id.in_([a, b])).delete()
         db.session.commit()
@@ -7194,13 +7197,15 @@ def test_mcp_initialize_and_tools_list(mcp_on):
     assert set(by_name) == {
         'search_podcasts', 'list_episodes', 'list_my_transcripts',
         'get_my_transcript', 'get_transcript', 'get_transcript_status',
+        'search_transcript', 'report_feedback',
     }
     for name in ('search_podcasts', 'list_episodes', 'get_transcript_status',
-                 'list_my_transcripts', 'get_my_transcript'):
+                 'list_my_transcripts', 'get_my_transcript', 'search_transcript'):
         ann = by_name[name]['annotations']
         assert ann['readOnlyHint'] is True
     assert by_name['list_my_transcripts']['annotations']['openWorldHint'] is False
     assert by_name['get_my_transcript']['annotations']['openWorldHint'] is False
+    assert by_name['search_transcript']['annotations']['openWorldHint'] is False
     gt = by_name['get_transcript']['annotations']
     assert gt['readOnlyHint'] is False
     assert gt['destructiveHint'] is False
@@ -7211,10 +7216,18 @@ def test_mcp_initialize_and_tools_list(mcp_on):
     gt_desc = by_name['get_transcript']['description'].lower()
     assert 'free' in gt_desc or 'cost_minutes 0' in gt_desc
     assert 'list_my_transcripts' in gt_desc
+    assert 'confirm' in gt_desc
+    assert 'summary' in gt_desc
+    assert 'summary' in by_name['get_my_transcript']['description'].lower()
     status_desc = by_name['get_transcript_status']['description'].lower()
     assert 'remind' in status_desc
     assert 'include_text' in status_desc or 'offset' in status_desc
+    assert 'task_id' in status_desc
+    assert 'deprecated' in by_name['get_transcript_status']['inputSchema'][
+        'properties']['job_id']['description'].lower()
     assert 'eta' in by_name['get_transcript']['description'].lower()
+    fb_desc = by_name['report_feedback']['description'].lower()
+    assert 'bug' in fb_desc and 'transcript' in fb_desc
 
 
 def test_mcp_search_podcasts_tool(mcp_on, monkeypatch):
@@ -7303,8 +7316,18 @@ def test_mcp_get_transcript_ready_existing(mcp_on):
 
 
 def test_mcp_get_transcript_starts_job(mcp_on, ph_events):
+    # Metered start requires confirm=true after the estimate step.
+    estimate, est_res = _mcp_tool(mcp_on['key_a'], 'get_transcript', {
+        'episode': 'Spårtsklubben|2026-09-10',
+    })
+    assert est_res.get('isError') is False
+    assert estimate.get('confirmation_required') is True
+    assert estimate['cost_minutes'] == 42
+    assert 'confirm=true' in (estimate.get('instruction') or '').lower()
+
     payload, result = _mcp_tool(mcp_on['key_a'], 'get_transcript', {
         'episode': 'Spårtsklubben|2026-09-10',
+        'confirm': True,
     })
     assert result.get('isError') is False
     assert payload.get('error') is None
@@ -7328,7 +7351,7 @@ def test_mcp_get_transcript_starts_job(mcp_on, ph_events):
     assert 'checkout' not in payload['balance_fact']['line'].lower()
 
     status_payload, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript_status', {
-        'job_id': payload['job_id'],
+        'task_id': payload['task_id'],
     })
     assert status_payload['job_id'] == payload['job_id']
     assert status_payload['transcript_status'] == 'pending'
@@ -7351,8 +7374,13 @@ _MCP_TOOL_CALL_ARGS = {
     'list_episodes': {'podcast': 'Spårtsklubben'},
     'list_my_transcripts': {},
     'get_my_transcript': {'task_id': 'cust-a-ep'},
-    'get_transcript': {'episode': 'Spårtsklubben|2026-09-10'},
-    'get_transcript_status': {'job_id': 'cust-a-ep'},
+    'get_transcript': {'episode': 'Spårtsklubben|2026-09-10', 'confirm': True},
+    'get_transcript_status': {'task_id': 'cust-a-ep'},
+    'search_transcript': {'task_id': 'cust-a-ep', 'query': 'Transcript'},
+    'report_feedback': {
+        'kind': 'bug',
+        'message': 'MCP tool returned an unexpected empty list of episodes.',
+    },
 }
 
 
@@ -7503,6 +7531,7 @@ def test_mcp_get_transcript_by_list_id_does_not_charge_twice(mcp_on):
         'episode': ep['id'], 'title': ep['title'], 'publisher': ep['publisher'],
         'date': ep['date'], 'duration_min': ep['duration_min'],
         'rss_url': ep['rss_url'],
+        'confirm': True,
     }
     first, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript', args)
     assert first['reused'] is False
@@ -7865,6 +7894,267 @@ def test_mcp_get_my_transcript_includes_balance_fact(mcp_on):
     assert got['charged'] is False
     assert 'balance_fact' in got
     assert isinstance(got['balance_fact']['minutes_left'], int)
+
+
+def test_mcp_ready_transcript_includes_stored_summary(mcp_on):
+    """get_transcript / get_my_transcript / status return ready summary from DB."""
+    from models import TranscriptionTask, db
+    summary = {
+        'tldr': 'A short summary of the episode.',
+        'key_points': ['One', 'Two', 'Three', 'Four', 'Five'],
+        'quotes': ['Nice quote'],
+        'is_partial': False,
+        'language': 'en',
+    }
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'cust-a-ep')
+        task.summary_json = json.dumps(summary)
+        task.summary_status = 'ready'
+        db.session.commit()
+
+    mine, res = _mcp_tool(mcp_on['key_a'], 'get_my_transcript', {
+        'task_id': 'cust-a-ep', 'max_chars': 40,
+    })
+    assert res.get('isError') is False, mine
+    assert mine['summary_status'] == 'ready'
+    assert mine['summary']['tldr'] == summary['tldr']
+
+    reused, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript', {
+        'episode': 'cust-a-ep',
+    })
+    assert reused['summary']['tldr'] == summary['tldr']
+
+    status, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript_status', {
+        'task_id': 'cust-a-ep', 'include_text': False,
+    })
+    assert status['summary']['tldr'] == summary['tldr']
+
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'cust-a-ep')
+        task.summary_json = None
+        task.summary_status = None
+        db.session.commit()
+    bare, _ = _mcp_tool(mcp_on['key_a'], 'get_my_transcript', {
+        'task_id': 'cust-a-ep', 'max_chars': 20,
+    })
+    assert bare.get('summary') is None
+
+
+def test_mcp_get_transcript_confirm_gate_no_charge(mcp_on):
+    """Without confirm, metered start returns estimate and does not reserve."""
+    from models import User, db
+    with A.app.app_context():
+        before = db.session.get(User, mcp_on['a']).trial_seconds_used or 0
+
+    payload, result = _mcp_tool(mcp_on['key_a'], 'get_transcript', {
+        'episode': 'Spårtsklubben|2026-09-10',
+    })
+    assert result.get('isError') is False, payload
+    assert payload.get('confirmation_required') is True
+    assert payload['status'] == 'confirmation_required'
+    assert payload['cost_minutes'] == 42
+    assert 'remaining_minutes' in payload['balance']
+    assert 'confirm=true' in (payload.get('instruction') or '').lower()
+    assert payload.get('error') is None
+
+    with A.app.app_context():
+        after = db.session.get(User, mcp_on['a']).trial_seconds_used or 0
+    assert after == before
+
+
+def test_mcp_get_transcript_status_prefers_task_id_alias(mcp_on):
+    """task_id is preferred; job_id remains a working deprecated alias."""
+    via_task, res = _mcp_tool(mcp_on['key_a'], 'get_transcript_status', {
+        'task_id': 'cust-a-ep', 'include_text': False,
+    })
+    assert res.get('isError') is False, via_task
+    assert via_task['task_id'] == 'cust-a-ep'
+    via_job, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript_status', {
+        'job_id': 'cust-a-ep', 'include_text': False,
+    })
+    assert via_job['task_id'] == 'cust-a-ep'
+    # Prefer task_id when both are sent.
+    prefer, _ = _mcp_tool(mcp_on['key_a'], 'get_transcript_status', {
+        'task_id': 'cust-a-ep', 'job_id': 'cust-b-ep', 'include_text': False,
+    })
+    assert prefer['task_id'] == 'cust-a-ep'
+    missing, missing_res = _mcp_tool(mcp_on['key_a'], 'get_transcript_status', {})
+    assert missing_res.get('isError') is True
+    assert 'task_id' in missing['error']
+
+
+def test_mcp_search_transcript_snippets(mcp_on):
+    from models import TranscriptionTask, db
+    segs = [
+        {'start': 1.0, 'end': 4.0, 'text': 'Hello from the northern lights show.'},
+        {'start': 10.0, 'end': 14.0, 'text': 'Later we discuss northern cuisine.'},
+        {'start': 20.0, 'end': 22.0, 'text': 'Unrelated filler here.'},
+    ]
+    with A.app.app_context():
+        task = db.session.get(TranscriptionTask, 'cust-a-ep')
+        task.segments_json = json.dumps(segs)
+        task.transcript_text = ' '.join(s['text'] for s in segs)
+        db.session.commit()
+
+    payload, result = _mcp_tool(mcp_on['key_a'], 'search_transcript', {
+        'task_id': 'cust-a-ep', 'query': 'northern', 'limit': 5,
+    })
+    assert result.get('isError') is False, payload
+    assert payload['count'] == 2
+    assert payload['matches'][0]['start'] == 1.0
+    assert payload['matches'][0]['end'] == 4.0
+    assert 'northern' in payload['matches'][0]['snippet'].lower()
+
+    # Case-insensitive
+    again, _ = _mcp_tool(mcp_on['key_a'], 'search_transcript', {
+        'task_id': 'cust-a-ep', 'query': 'NORTHERN',
+    })
+    assert again['count'] == 2
+
+    # Other user's transcript is invisible
+    stolen, stolen_res = _mcp_tool(mcp_on['key_b'], 'search_transcript', {
+        'task_id': 'cust-a-ep', 'query': 'northern',
+    })
+    assert stolen_res.get('isError') is True
+    assert stolen['error'] == 'Transcript not found'
+
+
+def test_mcp_report_feedback_and_api_feedback(mcp_on, ph_events, monkeypatch):
+    import feedback as feedback_mod
+    sent = []
+
+    def fake_send(**kwargs):
+        sent.append(kwargs)
+        return 'sent'
+
+    monkeypatch.setenv('EMAIL_ENABLED', '1')
+    monkeypatch.setattr('mail.send_email', fake_send)
+
+    payload, result = _mcp_tool(mcp_on['key_a'], 'report_feedback', {
+        'kind': 'feature',
+        'message': 'Please add speaker diarization labels in the MCP payload.',
+    })
+    assert result.get('isError') is False, payload
+    assert payload['ok'] is True
+    assert payload['kind'] == 'feature'
+    assert sent and sent[0]['to'] == 'hello@podskrift.com'
+    assert 'message' not in (ph_events.events[-1].get('properties') or {})
+    fb_events = [e for e in ph_events.events if e['event'] == 'feedback_submitted']
+    assert fb_events
+    props = fb_events[-1]['properties']
+    assert props['kind'] == 'feature'
+    assert props['source'] == 'mcp'
+    assert 'message' not in props
+
+    r = _agent_post('/api/v1/feedback', key=mcp_on['key_a'], json_body={
+        'kind': 'bug',
+        'message': 'API returned 500 when duration_min was a string somehow.',
+    })
+    assert r.status_code == 201, r.get_json()
+    assert r.get_json()['ok'] is True
+
+    # Validation: short message
+    bad = _agent_post('/api/v1/feedback', key=mcp_on['key_a'], json_body={
+        'kind': 'bug', 'message': 'too short',
+    })
+    assert bad.status_code == 400
+    assert bad.get_json()['error'] == 'invalid_message'
+
+    # Auth required
+    anon = A.app.test_client().post('/api/v1/feedback', json={
+        'kind': 'bug',
+        'message': 'This should not be accepted without authentication at all.',
+    })
+    assert anon.status_code == 401
+
+
+def test_feedback_quality_upsert_and_rate_limit(mcp_on, monkeypatch):
+    import feedback as feedback_mod
+    monkeypatch.setattr('mail.send_email', lambda **kw: 'sent')
+
+    with A.app.app_context():
+        first, status = feedback_mod.submit_feedback(
+            user_id=mcp_on['a'], source='web', kind='transcript_quality',
+            message='', task_id='cust-a-ep', reason='wrong_language', rating=1,
+            user_email='customer-a@example.com',
+        )
+        assert status == 201, first
+        second, status2 = feedback_mod.submit_feedback(
+            user_id=mcp_on['a'], source='web', kind='transcript_quality',
+            message='Still wrong language after a retry.',
+            task_id='cust-a-ep', reason='wrong_language', rating=1,
+            user_email='customer-a@example.com',
+        )
+        assert status2 == 200, second
+        assert second['upserted'] is True
+        assert second['id'] == first['id']
+
+        from models import Feedback, db
+        n = Feedback.query.filter_by(
+            user_id=mcp_on['a'], task_id='cust-a-ep',
+            kind='transcript_quality').count()
+        assert n == 1
+
+        # Rate limit: fill the hourly bucket with new inserts
+        monkeypatch.setattr(feedback_mod, 'RATE_LIMIT_HOUR', 2)
+        monkeypatch.setattr(feedback_mod, 'RATE_LIMIT_DAY', 15)
+        ok3, st3 = feedback_mod.submit_feedback(
+            user_id=mcp_on['a'], source='api', kind='bug',
+            message='Rate limit probe number one for the hourly cap test.',
+        )
+        assert st3 == 201, ok3
+        blocked, st_b = feedback_mod.submit_feedback(
+            user_id=mcp_on['a'], source='api', kind='bug',
+            message='Rate limit probe number two should be refused by hour cap.',
+        )
+        # hour limit 2: quality row + bug row = 2; next insert blocked.
+        assert st_b == 429, blocked
+        assert blocked['error'] == 'rate_limited'
+
+
+def test_web_feedback_widget_on_owner_page_not_share(mcp_on):
+    """Feedback widget lives on /transcription/<id>, not on public /t/ shares."""
+    client = _login(mcp_on['a'])
+    page = client.get('/transcription/cust-a-ep')
+    assert page.status_code == 200
+    body = page.get_data(as_text=True)
+    assert 'data-testid="feedback-card"' in body
+    assert 'id="feedbackSubmitBtn"' in body
+
+    share = client.post('/transcription/cust-a-ep/share')
+    assert share.status_code == 200, share.get_json()
+    token = share.get_json()['token']
+    public = A.app.test_client().get(f'/t/{token}')
+    assert public.status_code == 200
+    pub_body = public.get_data(as_text=True)
+    # Changelog toast copy may mention the feature; the widget markup must not.
+    assert 'data-testid="feedback-card"' not in pub_body
+    assert 'id="feedbackSubmitBtn"' not in pub_body
+    assert 'FEEDBACK_URL' not in pub_body
+
+    # POST feedback from owner with CSRF
+    token_csrf = 'feedback-csrf-test-token'
+    with client.session_transaction() as sess:
+        sess['_csrf_token'] = token_csrf
+    r = client.post(
+        '/transcription/cust-a-ep/feedback',
+        json={'kind': 'transcript_quality', 'reason': 'bad_timestamps',
+              'message': '', 'rating': 1},
+        headers={'X-CSRF-Token': token_csrf},
+    )
+    assert r.status_code in (200, 201), r.get_json()
+    assert r.get_json()['ok'] is True
+
+
+def test_feedback_table_ensured_on_boot(trial_on):
+    from models import Feedback
+    with A.app.app_context():
+        A.ensure_feedback_table()
+        cols = A._live_columns('feedback')
+        for needed in ('user_id', 'source', 'kind', 'message', 'task_id',
+                       'reason', 'rating', 'client', 'created_at', 'updated_at'):
+            assert needed in cols
+        assert Feedback.__tablename__ == 'feedback'
 
 
 def test_status_endpoint_balance_fact_on_completed(trial_on):

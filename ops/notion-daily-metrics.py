@@ -303,6 +303,53 @@ def emit_trial_global_sentry_warnings(
     return fired
 
 
+def feedback_notes_lines(conn: sqlite3.Connection, day: date,
+                         *, limit: int = 5) -> list[str]:
+    """Informational Notes lines for feedback submitted on the metric day.
+
+    Soft-fails when the feedback table is absent (pre-migration DBs). Omits
+    message bodies — only counts, kind, source, reason.
+    """
+    start, end = day_bounds_utc(day)
+    try:
+        count = int(_scalar(
+            conn,
+            '''
+            SELECT COUNT(*) FROM feedback
+             WHERE created_at >= ? AND created_at < ?
+            ''',
+            (start, end),
+        ))
+    except sqlite3.OperationalError:
+        return []
+    if count <= 0:
+        return []
+    lines = [f'Feedback 1d: {count}']
+    try:
+        rows = conn.execute(
+            '''
+            SELECT kind, source, reason, rating, created_at
+              FROM feedback
+             WHERE created_at >= ? AND created_at < ?
+             ORDER BY created_at DESC
+             LIMIT ?
+            ''',
+            (start, end, int(limit)),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return lines
+    for row in rows:
+        kind = row['kind'] or '?'
+        source = row['source'] or '?'
+        reason = row['reason'] or '—'
+        rating = row['rating']
+        rating_s = str(rating) if rating is not None else '—'
+        lines.append(
+            f'  · {kind}/{source} reason={reason} rating={rating_s}'
+        )
+    return lines
+
+
 def collect_metrics(conn: sqlite3.Connection, day: date,
                     trial_default_seconds: int,
                     trial_global_seconds: int | None = None,
@@ -737,6 +784,7 @@ def main(argv: list[str] | None = None) -> int:
 
     day = parse_day(args.day)
     unit_econ_notes: list[str] = []
+    feedback_lines: list[str] = []
     with open_db(db_path) as conn:
         metrics = collect_metrics(
             conn, day, trial_default_seconds,
@@ -753,10 +801,16 @@ def main(argv: list[str] | None = None) -> int:
         except sqlite3.Error as exc:
             unit_econ_notes.append(
                 f'Enhetsøkonomi kunne ikke beregnes: {type(exc).__name__}')
+        # Customer feedback digest (count + latest kinds; no message bodies).
+        try:
+            feedback_lines = feedback_notes_lines(conn, day)
+        except Exception:  # noqa: BLE001 — metrics must never die on feedback
+            feedback_lines = ['Feedback-digest kunne ikke hentes']
 
     # Health check after metrics collect; failures become a single Notes line.
     health_lines = run_health_check(day)
     health_lines.extend(unit_econ_notes)
+    health_lines.extend(feedback_lines)
     # Daily free-trial budget — silent stop risk for every free-trial user.
     used_s = metrics.pop(
         '_trial_daily_used_seconds',

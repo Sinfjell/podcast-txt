@@ -9,6 +9,12 @@
   ],
   "entries": [
     {
+      "id": "transcript-feedback-widget",
+      "date": "2026-11-18",
+      "title": "Tell us when a transcript misses the mark",
+      "summary": "On your transcript page, use Not satisfied? to flag wrong language, speakers, missing parts, or bad timestamps — optional comment included. Helps us improve Podskrift."
+    },
+    {
       "id": "byok-transcription-model-picker",
       "date": "2026-10-20",
       "title": "Choose your OpenAI transcription model",

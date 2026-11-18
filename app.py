@@ -63,7 +63,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError as SaIntegrityError
 
 from models import (db, User, SavedFeed, TranscriptionTask, CreditPurchase,
-                    TranscriptShare, EmailSentLog, SummaryEmailJob, SummaryEmailBudgetDay,
+                    TranscriptShare, Feedback, EmailSentLog, SummaryEmailJob,
+                    SummaryEmailBudgetDay,
                     TrialBudgetDay,
                     PasswordResetToken,
                     OAuthClient, OAuthAuthorizationCode, OAuthAccessToken,
@@ -89,6 +90,7 @@ import paywall_i18n
 import runtime_env as runtime_env_mod
 import mcp_server as mcp_server_mod
 import oauth_server as oauth_server_mod
+import feedback as feedback_mod
 from admin_dashboard import admin_bp, ensure_admin_indexes, is_admin_user
 
 try:
@@ -11757,6 +11759,36 @@ def _readable_share_segments(task):
     return lines
 
 
+@app.route('/transcription/<task_id>/feedback', methods=['POST'])
+@login_required
+def transcription_feedback(task_id):
+    """Logged-in 'Not satisfied?' widget on the owner result page (not /t/ shares)."""
+    if not validate_csrf_token():
+        return jsonify({'error': 'csrf_invalid', 'message': 'Invalid CSRF token.'}), 400
+    task, err = _task_owned_or_404(task_id)
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    kind = (body.get('kind') or request.form.get('kind')
+            or 'transcript_quality')
+    message = body.get('message') if 'message' in body else request.form.get('message')
+    reason = body.get('reason') if 'reason' in body else request.form.get('reason')
+    rating = body.get('rating') if 'rating' in body else request.form.get('rating')
+    client = (request.headers.get('User-Agent') or '')[:512]
+    payload, status = feedback_mod.submit_feedback(
+        user_id=current_user.id,
+        source='web',
+        kind=kind,
+        message=message or '',
+        task_id=task.id,
+        reason=reason,
+        rating=rating,
+        client=client,
+        user_email=getattr(current_user, 'email', None),
+    )
+    return jsonify(payload), status
+
+
 @app.route('/transcription/<task_id>/share', methods=['GET', 'POST'])
 @login_required
 def transcription_share(task_id):
@@ -12966,6 +12998,39 @@ def agent_resolve_episode():
         status = 400 if err.startswith('Provide ') or 'needs date' in err else 404
         return jsonify({'error': err, 'episode': None}), status
     return jsonify({'episode': catalog})
+
+
+@app.route('/api/v1/feedback', methods=['POST'])
+@require_agent_api_key
+def api_v1_feedback():
+    """Submit product feedback (same writer as MCP report_feedback / web widget)."""
+    user, err_payload, err_status = _api_write_user()
+    if err_payload:
+        return jsonify(err_payload), err_status
+    body = _agent_json_body()
+    # Also accept form fields for simple clients.
+    def _val(*keys):
+        for k in keys:
+            if k in body and body.get(k) not in (None, ''):
+                return body.get(k)
+            form_v = request.form.get(k)
+            if form_v not in (None, ''):
+                return form_v
+        return None
+
+    client = (request.headers.get('User-Agent') or '')[:512]
+    payload, status = feedback_mod.submit_feedback(
+        user_id=user.id,
+        source='api',
+        kind=_val('kind') or '',
+        message=_val('message') or '',
+        task_id=_val('task_id'),
+        reason=_val('reason'),
+        rating=_val('rating'),
+        client=client,
+        user_email=getattr(user, 'email', None),
+    )
+    return jsonify(payload), status
 
 
 @app.route('/api/v1/transcriptions', methods=['POST'])
@@ -16652,6 +16717,79 @@ def ensure_trial_budget_days_table():
             'trial_budget_days created by another worker; continuing')
 
 
+def ensure_feedback_table():
+    """Create feedback if missing. Index only after columns exist.
+
+    Same IF NOT EXISTS race pattern as transcript_shares. Partial unique index
+    enforces one transcript_quality rating per user×task.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        db.session.execute(text("""
+            CREATE TABLE IF NOT EXISTS feedback (
+                id INTEGER NOT NULL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                source VARCHAR(16) NOT NULL,
+                kind VARCHAR(32) NOT NULL,
+                message TEXT NOT NULL DEFAULT '',
+                task_id VARCHAR(36),
+                reason VARCHAR(64),
+                rating INTEGER,
+                client VARCHAR(512),
+                created_at DATETIME,
+                updated_at DATETIME,
+                FOREIGN KEY(user_id) REFERENCES users (id),
+                FOREIGN KEY(task_id) REFERENCES transcription_tasks (id)
+            )
+        """))
+        db.session.commit()
+    except OperationalError as exc:
+        db.session.rollback()
+        msg = str(exc).lower()
+        if 'already exists' not in msg:
+            raise
+        app.logger.info(
+            'feedback was created by another worker; continuing')
+
+    existing = _live_columns('feedback')
+    if not existing:
+        return
+    index_specs = []
+    if 'user_id' in existing:
+        index_specs.append(
+            ('ix_feedback_user_id',
+             'CREATE INDEX IF NOT EXISTS ix_feedback_user_id '
+             'ON feedback (user_id)')
+        )
+        index_specs.append(
+            ('ix_feedback_user_created',
+             'CREATE INDEX IF NOT EXISTS ix_feedback_user_created '
+             'ON feedback (user_id, created_at)')
+        )
+    if 'task_id' in existing:
+        index_specs.append(
+            ('ix_feedback_task_id',
+             'CREATE INDEX IF NOT EXISTS ix_feedback_task_id '
+             'ON feedback (task_id)')
+        )
+    if {'user_id', 'task_id', 'kind'} <= existing:
+        # One transcript_quality row per user×task (upsert target).
+        index_specs.append(
+            ('ix_feedback_quality_user_task',
+             'CREATE UNIQUE INDEX IF NOT EXISTS ix_feedback_quality_user_task '
+             'ON feedback (user_id, task_id) '
+             "WHERE kind = 'transcript_quality' AND task_id IS NOT NULL")
+        )
+    for name, ddl in index_specs:
+        try:
+            db.session.execute(text(ddl))
+            db.session.commit()
+        except OperationalError:
+            db.session.rollback()
+            app.logger.exception('Could not create %s', name)
+
+
 def ensure_password_reset_tokens_table():
     """Create password_reset_tokens if missing. Index only after columns exist.
 
@@ -16747,6 +16885,7 @@ with app.app_context():
     ensure_email_sent_log_table()
     ensure_summary_email_tables()
     ensure_trial_budget_days_table()
+    ensure_feedback_table()
     ensure_password_reset_tokens_table()
     oauth_server_mod.ensure_oauth_tables()
 
