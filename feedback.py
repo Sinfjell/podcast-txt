@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 import analytics as product_analytics
 import mail as mailer
-from models import Feedback, TranscriptionTask, db
+from models import EmailSentLog, Feedback, TranscriptionTask, db
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,9 @@ MESSAGE_MIN = 10
 MESSAGE_MAX = 2000
 RATE_LIMIT_HOUR = 5
 RATE_LIMIT_DAY = 15
+# Max notification emails per user per rolling day (covers upserts too, which
+# are not row-rate-limited). Cross-worker via email_sent_log.
+EMAIL_LIMIT_DAY = 15
 
 # Thumbs → 1–5 scale used in the rating column.
 _THUMBS_MAP = {
@@ -96,6 +99,28 @@ def _find_quality_row(user_id: int, task_id: str) -> Optional[Feedback]:
 def _notify_email(row: Feedback, *, user_email: str | None = None) -> None:
     """Best-effort notify; never raises into the writer."""
     try:
+        if not mailer.email_enabled():
+            return
+        day_ago = (_now() - timedelta(days=1)).replace(tzinfo=None)
+        sent_n = (EmailSentLog.query
+                  .filter(EmailSentLog.user_id == row.user_id,
+                          EmailSentLog.kind == 'feedback',
+                          EmailSentLog.created_at >= day_ago)
+                  .count())
+        if sent_n >= EMAIL_LIMIT_DAY:
+            logger.info('feedback email skipped (daily cap) user=%s', row.user_id)
+            return
+        stamp = (row.updated_at or row.created_at or _now()).strftime('%Y%m%dT%H%M%S%f')
+        claim_key = f'feedback:{row.id}:{stamp}'
+        try:
+            db.session.add(EmailSentLog(
+                user_id=row.user_id, kind='feedback',
+                idempotency_key=claim_key,
+                created_at=_now().replace(tzinfo=None)))
+            db.session.commit()
+        except Exception:  # noqa: BLE001 — duplicate claim → already sent
+            db.session.rollback()
+            return
         subject = (
             f'[Podskrift feedback] {row.kind}'
             + (f' / {row.reason}' if row.reason else '')
@@ -120,7 +145,7 @@ def _notify_email(row: Feedback, *, user_email: str | None = None) -> None:
             subject=subject,
             text='\n'.join(lines),
             kind='feedback',
-            idempotency_key=f'feedback:{row.id}',
+            idempotency_key=claim_key,
         )
     except Exception:  # noqa: BLE001 — notify must never break submit
         logger.exception('feedback email failed for id=%s', getattr(row, 'id', None))
