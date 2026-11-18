@@ -8112,6 +8112,41 @@ def test_feedback_quality_upsert_and_rate_limit(mcp_on, monkeypatch):
         assert blocked['error'] == 'rate_limited'
 
 
+def test_feedback_upsert_emails_capped_per_day(mcp_on, monkeypatch):
+    """Repeated transcript_quality upserts must not spam hello@ (daily cap)."""
+    import feedback as feedback_mod
+    sent = []
+    monkeypatch.setenv('EMAIL_ENABLED', '1')
+    monkeypatch.setattr('mail.send_email', lambda **kw: sent.append(kw) or 'sent')
+    monkeypatch.setattr(feedback_mod, 'EMAIL_LIMIT_DAY', 3)
+    with A.app.app_context():
+        from models import EmailSentLog, db
+        EmailSentLog.query.filter_by(user_id=mcp_on['a'], kind='feedback').delete()
+        db.session.commit()
+        for i in range(8):
+            _, st = feedback_mod.submit_feedback(
+                user_id=mcp_on['a'], source='web', kind='transcript_quality',
+                message=f'Upsert spam attempt number {i} for the email cap.',
+                task_id='cust-a-ep', reason='other', rating=1,
+            )
+            assert st in (200, 201)
+    assert len(sent) == 3
+
+
+def test_feedback_no_email_when_disabled(mcp_on, monkeypatch):
+    import feedback as feedback_mod
+    sent = []
+    monkeypatch.delenv('EMAIL_ENABLED', raising=False)
+    monkeypatch.setattr('mail.send_email', lambda **kw: sent.append(kw) or 'sent')
+    with A.app.app_context():
+        _, st = feedback_mod.submit_feedback(
+            user_id=mcp_on['a'], source='api', kind='bug',
+            message='Email is off, so nothing should be sent here.',
+        )
+        assert st == 201
+    assert sent == []
+
+
 def test_web_feedback_widget_on_owner_page_not_share(mcp_on):
     """Feedback widget lives on /transcription/<id>, not on public /t/ shares."""
     client = _login(mcp_on['a'])
