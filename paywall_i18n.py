@@ -35,6 +35,13 @@ CARD_COPY = {
         'nudge_downloaded': 'Downloaded',
         # {offer} is the same line as button_buy (remaining or full-episode).
         'nudge_preview': '{action} the free preview ({n} of {m} min). {offer}',
+        # Trial-exhausted in-transcript upsell (paywall / partial preview).
+        'exhausted_title': 'Your free trial minutes are used up',
+        'exhausted_note': ('Finish this episode and unlock the full transcript. '
+                           'Start with {minutes} min for {price} — enough for '
+                           'most episodes — or pick a larger pack.'),
+        'exhausted_button': 'Finish this episode — {minutes} min for {price}',
+        'exhausted_packs': 'See larger packs →',
     },
     'es': {
         'title': 'Vista previa gratis: primeros {n} minutos de {m}',
@@ -57,6 +64,12 @@ CARD_COPY = {
         'nudge_copied': 'Copiaste',
         'nudge_downloaded': 'Descargaste',
         'nudge_preview': '{action} la vista previa gratis ({n} de {m} min). {offer}',
+        'exhausted_title': 'Se te acabaron los minutos de prueba',
+        'exhausted_note': ('Termina este episodio y desbloquea la transcripción '
+                           'completa. Empieza con {minutes} min por {price} — '
+                           'bastante para la mayoría — o elige un pack mayor.'),
+        'exhausted_button': 'Terminar este episodio — {minutes} min por {price}',
+        'exhausted_packs': 'Ver packs mayores →',
     },
     'de': {
         'title': 'Kostenlose Vorschau: die ersten {n} von {m} Minuten',
@@ -80,6 +93,13 @@ CARD_COPY = {
         'nudge_copied': 'Kopiert',
         'nudge_downloaded': 'Heruntergeladen',
         'nudge_preview': '{action} die kostenlose Vorschau ({n} von {m} Min.). {offer}',
+        'exhausted_title': 'Deine kostenlosen Testminuten sind aufgebraucht',
+        'exhausted_note': ('Schließe diese Folge ab und hol dir das volle '
+                           'Transkript. Starte mit {minutes} Min. für {price} — '
+                           'reicht für die meisten Folgen — oder wähle ein '
+                           'größeres Paket.'),
+        'exhausted_button': 'Folge abschließen — {minutes} Min. für {price}',
+        'exhausted_packs': 'Größere Pakete ansehen →',
     },
     'nl': {
         'title': 'Gratis voorproefje: eerste {n} van {m} minuten',
@@ -102,6 +122,13 @@ CARD_COPY = {
         'nudge_copied': 'Gekopieerd',
         'nudge_downloaded': 'Gedownload',
         'nudge_preview': '{action} gratis voorproefje ({n} van {m} min). {offer}',
+        'exhausted_title': 'Je gratis proefminuten zijn op',
+        'exhausted_note': ('Maak deze aflevering af en ontgrendel het volledige '
+                           'transcript. Begin met {minutes} min voor {price} — '
+                           'genoeg voor de meeste afleveringen — of kies een '
+                           'groter pakket.'),
+        'exhausted_button': 'Aflevering afmaken — {minutes} min voor {price}',
+        'exhausted_packs': 'Bekijk grotere pakketten →',
     },
     'fr': {
         'title': f'Aperçu gratuit{_NBSP}: les {{n}} premières minutes sur {{m}}',
@@ -125,6 +152,14 @@ CARD_COPY = {
         'nudge_downloaded': 'Téléchargé',
         'nudge_preview': (f'{{action}} l’aperçu gratuit ({{n}} sur {{m}} min). '
                           f'{{offer}}'),
+        'exhausted_title': 'Vos minutes d’essai gratuites sont épuisées',
+        'exhausted_note': ('Terminez cet épisode et débloquez la transcription '
+                           'complète. Commencez avec {minutes} min pour '
+                           '{price} — assez pour la plupart des épisodes — ou '
+                           'choisissez un pack plus grand.'),
+        'exhausted_button': ('Terminer cet épisode — {minutes} min pour '
+                             '{price}'),
+        'exhausted_packs': 'Voir les packs plus grands →',
     },
     'pt': {
         'title': 'Prévia grátis: primeiros {n} de {m} minutos',
@@ -147,6 +182,13 @@ CARD_COPY = {
         'nudge_copied': 'Você copiou',
         'nudge_downloaded': 'Você baixou',
         'nudge_preview': '{action} a prévia grátis ({n} de {m} min). {offer}',
+        'exhausted_title': 'Seus minutos de teste acabaram',
+        'exhausted_note': ('Termine este episódio e desbloqueie a transcrição '
+                           'completa. Comece com {minutes} min por {price} — '
+                           'o bastante para a maioria — ou escolha um pacote '
+                           'maior.'),
+        'exhausted_button': 'Terminar este episódio — {minutes} min por {price}',
+        'exhausted_packs': 'Ver pacotes maiores →',
     },
 }
 
@@ -318,4 +360,37 @@ def partial_card(locale, *, partial_minutes, episode_minutes, offer=None,
         if local:
             out['local_price_line'] = t['local_price'].format(local=local)
             out['local_price'] = local
+    return out
+
+
+def trial_exhausted_box(locale, *, minutes, amount_cents, country=None,
+                        packs_url='/pricing'):
+    """Localized copy for the in-transcript trial-exhausted upsell box.
+
+    *minutes* / *amount_cents* come from the live pricing config (never
+    hard-coded in the template). Returns a dict the status JSON can pass
+    straight to the page.
+    """
+    if locale not in CARD_COPY:
+        locale = 'en'
+    t = CARD_COPY[locale]
+    minutes = int(minutes)
+    amount_cents = int(amount_cents)
+    price = format_usd(amount_cents, locale)
+    out = {
+        'locale': locale,
+        'title': t['exhausted_title'],
+        'note': t['exhausted_note'].format(minutes=minutes, price=price),
+        'button': t['exhausted_button'].format(minutes=minutes, price=price),
+        'packs_label': t['exhausted_packs'],
+        'packs_url': packs_url or '/pricing',
+        'minutes': minutes,
+        'amount_cents': amount_cents,
+        'price': price,
+        'local_price_line': '',
+    }
+    local = local_price(amount_cents, country, locale)
+    if local:
+        out['local_price_line'] = t['local_price'].format(local=local)
+        out['local_price'] = local
     return out

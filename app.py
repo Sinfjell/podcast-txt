@@ -8305,8 +8305,66 @@ def _checkout_email_campaign():
 #: Buy surfaces that are about one specific episode (not a general top-up).
 EPISODE_BUY_SOURCES = frozenset({
     'buy_modal_episode', 'home_error', 'partial_preview', 'episode_selection',
-    'episode_selection_error', 'result_offer',
+    'episode_selection_error', 'result_offer', 'trial_exhausted_box',
 })
+
+
+def cheapest_pack_quote():
+    """Live floor purchase (minutes, amount_cents, price) from current config.
+
+    Volume pricing on → VOLUME_MIN_*; otherwise the legacy fixed pack. Never
+    invent a price — callers display and checkout what this returns.
+    """
+    if VOLUME_PRICING_ENABLED:
+        minutes = pricing_volume.VOLUME_MIN_MINUTES
+        cents = pricing_volume.VOLUME_MIN_AMOUNT_CENTS
+    else:
+        minutes = CREDIT_PACK_MINUTES
+        cents = CREDIT_PACK_AMOUNT_CENTS
+    return {
+        'minutes': int(minutes),
+        'amount_cents': int(cents),
+        'price': pricing_volume.format_usd(int(cents)),
+    }
+
+
+def trial_exhausted_box_for(task, user):
+    """Status payload for the in-transcript trial-exhausted upsell, or None.
+
+    Shown when the signed-in owner has used up free trial minutes, has no
+    paid balance to finish with, Stripe is on, and the transcript is a
+    partial preview (paywall state) that is not already owned in full.
+    """
+    if task is None or user is None:
+        return None
+    if not stripe_checkout_enabled():
+        return None
+    if getattr(user, 'openai_api_key', None):
+        return None
+    if not task_is_partial(task):
+        return None
+    if completed_full_transcript(
+            user.id, task.source_audio_url, exclude_task_id=task.id) is not None:
+        return None
+    trial_left, paid_left = _platform_remaining_seconds(user.id)
+    if trial_left > 0 or paid_left > 0:
+        return None
+    # Must have had a trial that was actually used (not a zero-limit account).
+    limit = getattr(user, 'trial_seconds_limit', None)
+    used = int(getattr(user, 'trial_seconds_used', 0) or 0)
+    if used <= 0:
+        return None
+    if limit is not None and int(limit) <= 0:
+        return None
+    quote = cheapest_pack_quote()
+    packs = url_for('pricing') if has_request_context() else '/pricing'
+    return paywall_i18n.trial_exhausted_box(
+        _card_locale(),
+        minutes=quote['minutes'],
+        amount_cents=quote['amount_cents'],
+        country=_signup_country(),
+        packs_url=packs,
+    )
 
 
 @app.route('/billing/checkout', methods=['POST'])
@@ -8901,6 +8959,35 @@ def _schedule_transcript_ready_email(task_id, user_id):
 
     threading.Thread(
         target=_run, daemon=True, name=f'transcript-ready-{task_id[:8]}',
+    ).start()
+
+
+def _schedule_trial_exhausted_email(task_id, user_id):
+    """Once-ever trial-exhausted mail after a job that used the last free minutes."""
+    def _run():
+        with app.app_context():
+            try:
+                owner = db.session.get(User, user_id)
+                task = db.session.get(TranscriptionTask, task_id)
+                if owner is None or task is None:
+                    return
+                quote = cheapest_pack_quote()
+                email_notify.notify_trial_exhausted(
+                    db=db,
+                    user=owner,
+                    task=task,
+                    EmailSentLog=EmailSentLog,
+                    public_base_url=PUBLIC_BASE_URL,
+                    secret_key=app.secret_key,
+                    minutes=quote['minutes'],
+                    amount_cents=quote['amount_cents'],
+                )
+            except Exception:  # noqa: BLE001
+                app.logger.exception(
+                    'scheduled trial-exhausted email failed for %s', task_id)
+
+    threading.Thread(
+        target=_run, daemon=True, name=f'trial-exhausted-{task_id[:8]}',
     ).start()
 
 
@@ -10255,6 +10342,8 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
                             if finished is not None:
                                 _schedule_transcript_ready_email(
                                     task_id, user_id)
+                                _schedule_trial_exhausted_email(
+                                    task_id, user_id)
                                 # Optional AI summary — never fails the transcript.
                                 _schedule_transcript_summary(task_id, user_id)
                         except Exception:  # noqa: BLE001
@@ -10800,6 +10889,7 @@ def _spawn_worker_for_existing_task(task):
                             'transcript_completed', user_id, done_props)
                         if finished is not None:
                             _schedule_transcript_ready_email(task_id, user_id)
+                            _schedule_trial_exhausted_email(task_id, user_id)
                             # Optional AI summary — never fails the transcript.
                             _schedule_transcript_summary(task_id, user_id)
                     except Exception:  # noqa: BLE001
@@ -11092,6 +11182,9 @@ def get_status(task_id):
                 offer=offer, country=_signup_country(),
                 buy_available=stripe_checkout_enabled())
             result['card'] = card
+            exhausted = trial_exhausted_box_for(task, current_user)
+            if exhausted:
+                result['trial_exhausted_box'] = exhausted
         elif (
             stripe_checkout_enabled()
             and not bool(getattr(current_user, 'openai_api_key', None))

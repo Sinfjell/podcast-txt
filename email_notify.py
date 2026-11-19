@@ -30,6 +30,10 @@ UNSUBSCRIBE_MAX_AGE = 60 * 60 * 24 * 365 * 5  # five years
 TRANSCRIPT_READY = 'transcript_ready'
 PASSWORD_RESET = 'password_reset'
 PASSWORD_CHANGED = 'password_changed'
+TRIAL_EXHAUSTED = 'trial_exhausted'
+#: Once-ever EmailSentLog kind / idempotency prefix for the immediate
+#: trial-exhausted transactional mail (distinct from lifecycle trial_ended_*).
+TRIAL_EXHAUSTED_SENT_KIND = 'trial_exhausted'
 
 # Job finished quickly *and* the owner was still polling → skip the email.
 TRANSCRIPT_READY_MIN_DURATION_SEC = 60
@@ -486,6 +490,196 @@ def notify_transcript_ready(
     except Exception:  # noqa: BLE001
         logger.exception('notify_transcript_ready failed for task %s',
                          getattr(task, 'id', '?'))
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Trial exhausted (immediate transactional mail, once per user ever)
+# ---------------------------------------------------------------------------
+
+def trial_exhausted_utm_url(url: str) -> str:
+    """utm_source=podskrift&utm_medium=email&utm_campaign=trial_exhausted."""
+    if not url:
+        return url
+    params = {
+        'utm_source': 'podskrift',
+        'utm_medium': 'email',
+        'utm_campaign': TRIAL_EXHAUSTED,
+    }
+    sep = '&' if ('?' in url) else '?'
+    return f'{url}{sep}{urlencode(params)}'
+
+
+def build_trial_exhausted_bodies(
+    *,
+    episode_title: str,
+    transcript_url: str,
+    unsub_url: str,
+    price: str,
+    minutes: int,
+    is_partial: bool = True,
+) -> tuple[str, str, str]:
+    """Short plain email: link back to the transcript with a one-click buy path.
+
+    English only (matches other transactional mail). UI paywall locales cover
+    the in-app box; there is no stored user language for email.
+    """
+    ep = (episode_title or '').strip() or 'your episode'
+    link = trial_exhausted_utm_url(transcript_url)
+    minutes = max(0, int(minutes))
+    price = (price or '').strip() or pricing_volume.format_usd(
+        pricing_volume.VOLUME_MIN_AMOUNT_CENTS)
+    if is_partial:
+        subject = f'Finish “{ep}” — your free trial is used up'
+        lead = (
+            f'Your free trial minutes are used up. Open the preview of “{ep}” '
+            f'to finish the full transcript — from {price} for {minutes} min.'
+        )
+        cta = 'Open your transcript and finish the episode'
+    else:
+        subject = f'Your free trial is used up — keep going with “{ep}”'
+        lead = (
+            f'Your free trial minutes are used up. Open “{ep}” to buy minutes '
+            f'and keep transcribing — from {price} for {minutes} min.'
+        )
+        cta = 'Open your transcript'
+    text = (
+        f'{lead}\n\n'
+        f'{cta}: {link}\n\n'
+        f'{_footer_text(unsub_url)}'
+    )
+    safe_ep = html_lib.escape(ep)
+    safe_link = html_lib.escape(link, quote=True)
+    safe_cta = html_lib.escape(cta)
+    safe_price = html_lib.escape(price)
+    html = (
+        f'<p>Your free trial minutes are used up. Open '
+        f'<strong>{safe_ep}</strong> to finish the full transcript — from '
+        f'{safe_price} for {minutes} min.</p>'
+        f'<p><a href="{safe_link}">{safe_cta}</a></p>'
+        f'{_footer_html(unsub_url)}'
+    )
+    return subject, text, html
+
+
+def user_has_purchase(user) -> bool:
+    """True when the account already bought minutes (skip trial-exhausted mail)."""
+    if user is None:
+        return False
+    try:
+        from models import CreditPurchase
+        return CreditPurchase.query.filter_by(user_id=user.id).first() is not None
+    except Exception:  # noqa: BLE001
+        logger.exception('user_has_purchase failed for %s', getattr(user, 'id', '?'))
+        return True  # fail closed: do not mail if we cannot tell
+
+
+def notify_trial_exhausted(
+    *,
+    db,
+    user,
+    task,
+    EmailSentLog,
+    public_base_url: str,
+    secret_key: str,
+    minutes: int | None = None,
+    amount_cents: int | None = None,
+) -> bool:
+    """Send the once-ever trial-exhausted mail. Never raises into the worker."""
+    try:
+        if not mailer.mail_ready():
+            return False
+        if not user_accepts_email(user):
+            return False
+        # Same opt-out as lifecycle / transcript-ready marketing mail.
+        if not user_wants_transcript_ready(user):
+            return False
+        if getattr(user, 'openai_api_key', None):
+            return False
+        if user_has_purchase(user):
+            return False
+        limit = getattr(user, 'trial_seconds_limit', None)
+        used = int(getattr(user, 'trial_seconds_used', 0) or 0)
+        # Must have had a real trial that is now empty.
+        if limit is not None and int(limit) <= 0:
+            return False
+        if used <= 0:
+            return False
+        try:
+            import app as app_module
+            trial_left, _paid_left = app_module._platform_remaining_seconds(user.id)
+        except Exception:  # noqa: BLE001
+            logger.exception('notify_trial_exhausted: remaining lookup failed')
+            return False
+        if trial_left > 0:
+            return False
+        task_id = getattr(task, 'id', None)
+        if not task_id:
+            return False
+        key = f'{TRIAL_EXHAUSTED}:{int(user.id)}'
+        if not claim_email_send(
+            db, EmailSentLog, user_id=user.id, kind=TRIAL_EXHAUSTED_SENT_KIND,
+            idempotency_key=key,
+        ):
+            return False
+        base = (public_base_url or '').rstrip('/')
+        transcript_path = f'/transcription/{task_id}'
+        transcript_url = f'{base}{transcript_path}' if base else transcript_path
+        unsub = unsubscribe_url(public_base_url, secret_key, user.id)
+        if minutes is None or amount_cents is None:
+            try:
+                import app as app_module
+                if getattr(app_module, 'VOLUME_PRICING_ENABLED', False):
+                    minutes = pricing_volume.VOLUME_MIN_MINUTES
+                    amount_cents = pricing_volume.VOLUME_MIN_AMOUNT_CENTS
+                else:
+                    minutes = int(app_module.CREDIT_PACK_MINUTES)
+                    amount_cents = int(app_module.CREDIT_PACK_AMOUNT_CENTS)
+            except Exception:  # noqa: BLE001
+                minutes = pricing_volume.VOLUME_MIN_MINUTES
+                amount_cents = pricing_volume.VOLUME_MIN_AMOUNT_CENTS
+        price = pricing_volume.format_usd(int(amount_cents))
+        is_partial = task_is_partial_preview(task)
+        subject, text, html = build_trial_exhausted_bodies(
+            episode_title=getattr(task, 'episode_title', None) or '',
+            transcript_url=transcript_url,
+            unsub_url=unsub,
+            price=price,
+            minutes=int(minutes),
+            is_partial=is_partial,
+        )
+        outcome = mailer.send_email(
+            to=user.email,
+            subject=subject,
+            text=text,
+            html=html,
+            headers=_list_unsubscribe_headers(unsub),
+            tags=[TRIAL_EXHAUSTED],
+            kind=TRIAL_EXHAUSTED,
+            timeout=8,
+            idempotency_key=key,
+        )
+        if outcome != mailer.SEND_SENT:
+            if outcome == mailer.SEND_FAILED:
+                release_email_send(db, EmailSentLog, idempotency_key=key)
+            return False
+        product_analytics.capture(
+            'trial_exhausted_email_sent',
+            user.id,
+            {
+                'task_id': task_id,
+                'partial': bool(is_partial),
+                'minutes': int(minutes),
+                'amount_cents': int(amount_cents),
+            },
+        )
+        product_analytics.capture(
+            'email_sent', user.id, {'type': TRIAL_EXHAUSTED, 'partial': bool(is_partial)})
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            'notify_trial_exhausted failed for user %s task %s',
+            getattr(user, 'id', '?'), getattr(task, 'id', '?'))
         return False
 
 

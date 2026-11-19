@@ -13403,11 +13403,143 @@ def test_status_partial_unlock_and_full_result_offer(stripe_on):
     assert partial.get('buy_label') == A.UNLOCK_EPISODE_LABEL
     assert partial.get('unlock_label') == A.UNLOCK_EPISODE_LABEL
     assert partial.get('result_offer') is not True
+    # Trial still has minutes left → no exhausted box.
+    assert partial.get('trial_exhausted_box') is None
 
     full = client.get('/status/full-offer-1').get_json()
     assert full.get('result_offer') is True
     assert full.get('result_offer_label') == A.RESULT_OFFER_LABEL
     assert full.get('buy_available') is True
+
+
+def test_trial_exhausted_box_visibility_rules(volume_on):
+    """Box only when trial is empty, partial preview, Stripe on, not BYOK."""
+    from models import db, TranscriptionTask, User
+    import pricing_volume as pv
+
+    exhausted = _make_user('te-box@test.com', limit=600, used=600)
+    with_trial_left = _make_user('te-left@test.com', limit=600, used=120)
+    byok = _make_user('te-byok@test.com', key='sk-' + 'b' * 40, limit=600, used=600)
+
+    with A.app.app_context():
+        for tid, uid in (
+            ('te-partial-empty', exhausted),
+            ('te-partial-left', with_trial_left),
+            ('te-partial-byok', byok),
+            ('te-full-empty', exhausted),
+        ):
+            meta = None
+            if tid.startswith('te-partial'):
+                meta = A.encode_partial_task_meta(300, 3600)
+            db.session.add(TranscriptionTask(
+                id=tid, user_id=uid, episode_title='Ep',
+                status='completed', phase='completed',
+                transcript_text='hello',
+                partial_meta=meta,
+                source_audio_url=f'https://example.com/{tid}.mp3',
+            ))
+        db.session.commit()
+
+    empty = _login(exhausted).get('/status/te-partial-empty').get_json()
+    assert empty.get('partial') is True
+    box = empty.get('trial_exhausted_box')
+    assert box is not None
+    assert box['minutes'] == pv.VOLUME_MIN_MINUTES
+    assert box['amount_cents'] == pv.VOLUME_MIN_AMOUNT_CENTS
+    assert box['price'] == pv.format_usd(pv.VOLUME_MIN_AMOUNT_CENTS)
+    assert box['title']
+    assert box['button']
+    assert box['packs_url']
+    assert '/pricing' in box['packs_url']
+
+    left = _login(with_trial_left).get('/status/te-partial-left').get_json()
+    assert left.get('trial_exhausted_box') is None
+
+    byok_status = _login(byok).get('/status/te-partial-byok').get_json()
+    assert byok_status.get('trial_exhausted_box') is None
+
+    full = _login(exhausted).get('/status/te-full-empty').get_json()
+    assert full.get('partial') is not True
+    assert full.get('trial_exhausted_box') is None
+
+    # Template wires the box + distinct checkout source.
+    page = _login(exhausted).get('/transcription/te-partial-empty').data.decode()
+    assert 'data-testid="trial-exhausted-box"' in page
+    assert "postBuyForm('trial_exhausted_box'" in page
+    assert 'trial_exhausted_box' in A.EPISODE_BUY_SOURCES
+
+
+def test_trial_exhausted_box_checkout_source(volume_on, ph_events):
+    """Primary CTA posts source=trial_exhausted_box into checkout_started."""
+    from models import db, TranscriptionTask
+    import pricing_volume as pv
+
+    uid = _make_user('te-checkout@test.com', limit=600, used=600)
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='te-co-1', user_id=uid, episode_title='Long Ep',
+            status='completed', phase='completed',
+            transcript_text='hello',
+            partial_meta=A.encode_partial_task_meta(300, 67 * 60),
+            source_audio_url='https://cdn.example.com/te.mp3',
+            rss_url='https://cdn.example.com/feed.xml',
+        ))
+        db.session.commit()
+
+    client, token = _vol_csrf_client(uid)
+    quote = A.cheapest_pack_quote()
+    resp = client.post('/billing/checkout', data={
+        'csrf_token': token,
+        'source': 'trial_exhausted_box',
+        'minutes': str(quote['minutes']),
+        'price_source': 'episode',
+        'task_id': 'te-co-1',
+        'audio_url': 'https://cdn.example.com/te.mp3',
+        'rss_url': 'https://cdn.example.com/feed.xml',
+        'episode_title': 'Long Ep',
+        'duration_min': '67',
+        'return_to': '/transcription/te-co-1',
+    })
+    assert resp.status_code == 303
+    meta = volume_on['last_create_params']['metadata']
+    assert meta['source'] == 'trial_exhausted_box'
+    assert meta['location'] == 'trial_exhausted_box'
+    assert meta['minutes'] == str(pv.VOLUME_MIN_MINUTES)
+    assert int(meta['amount_cents']) == pv.VOLUME_MIN_AMOUNT_CENTS
+    started = [e for e in ph_events.events if e['event'] == 'checkout_started']
+    assert started
+    assert started[-1]['properties'].get('location') == 'trial_exhausted_box'
+    assert started[-1]['properties'].get('source') == 'trial_exhausted_box'
+
+
+def test_trial_exhausted_box_hidden_when_paid_balance(volume_on):
+    from models import db, TranscriptionTask, User
+
+    uid = _make_user('te-paid@test.com', limit=600, used=600)
+    with A.app.app_context():
+        u = db.session.get(User, uid)
+        u.paid_seconds_balance = 1800
+        db.session.add(TranscriptionTask(
+            id='te-paid-1', user_id=uid, episode_title='Ep',
+            status='completed', phase='completed',
+            transcript_text='hello',
+            partial_meta=A.encode_partial_task_meta(300, 3600),
+            source_audio_url='https://example.com/paid.mp3',
+        ))
+        db.session.commit()
+    data = _login(uid).get('/status/te-paid-1').get_json()
+    assert data.get('can_finish_full') is True
+    assert data.get('trial_exhausted_box') is None
+
+
+def test_paywall_i18n_trial_exhausted_all_locales():
+    import paywall_i18n as pi
+    for loc in pi.CARD_LOCALES:
+        box = pi.trial_exhausted_box(loc, minutes=60, amount_cents=150)
+        assert box['locale'] == loc
+        assert box['title']
+        assert '60' in box['button']
+        assert box['packs_label']
 
 
 def test_status_own_key_invalid_offers_pack(stripe_on):
