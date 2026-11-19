@@ -790,3 +790,163 @@ def test_transcript_ready_scheduled_off_worker_path(monkeypatch):
         assert post.call_count == 1
     assert any(n and n.startswith('transcript-ready-') for n in started)
 
+
+# ---------------------------------------------------------------------------
+# Trial-exhausted transactional email (once ever, EMAIL_ENABLED gated)
+# ---------------------------------------------------------------------------
+
+def _exhausted_user_and_task(email='exhausted-mail@test.com', **user_kw):
+    limit = user_kw.pop('limit', 600)
+    used = user_kw.pop('used', 600)
+    uid = _make_user(email, limit=limit, used=used, **user_kw)
+    with A.app.app_context():
+        task = A.TranscriptionTask(
+            id=f'te-{uid}',
+            user_id=uid,
+            episode_title='Last Free Ep',
+            podcast_name='Show',
+            status='completed',
+            partial_meta=A.encode_partial_task_meta(300, 3600),
+            source_audio_url='https://example.com/last.mp3',
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            completed_at=datetime.now(timezone.utc),
+            trial_seconds_charged=300,
+        )
+        A.db.session.add(task)
+        A.db.session.commit()
+        return uid, task.id
+
+
+def test_trial_exhausted_email_utm_and_bodies():
+    subj, text, html = email_notify.build_trial_exhausted_bodies(
+        episode_title='Hello',
+        transcript_url='https://podskrift.com/transcription/t1',
+        unsub_url='https://podskrift.com/email/unsubscribe/x',
+        price='$1.50',
+        minutes=60,
+        is_partial=True,
+    )
+    assert 'used up' in subj.lower() or 'trial' in subj.lower()
+    assert 'utm_source=podskrift' in text
+    assert 'utm_medium=email' in text
+    assert 'utm_campaign=trial_exhausted' in text
+    assert 'utm_source=podskrift' in html
+    assert '$1.50' in text and '60' in text
+
+
+def test_trial_exhausted_email_respects_email_enabled(monkeypatch, ph_events):
+    monkeypatch.setenv('EMAIL_ENABLED', '0')
+    monkeypatch.setenv('MAILGUN_API_KEY', 'key-test')
+    uid, tid = _exhausted_user_and_task('te-disabled@test.com')
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        task = A.db.session.get(A.TranscriptionTask, tid)
+        with mock.patch.object(mailer.requests, 'post') as post:
+            assert email_notify.notify_trial_exhausted(
+                db=A.db, user=user, task=task, EmailSentLog=A.EmailSentLog,
+                public_base_url='https://podskrift.com',
+                secret_key=A.app.secret_key,
+            ) is False
+            post.assert_not_called()
+    assert not any(
+        e['event'] == 'trial_exhausted_email_sent' for e in ph_events.events)
+
+
+def test_trial_exhausted_email_fires_exactly_once(monkeypatch, ph_events):
+    _enable_mail(monkeypatch)
+    uid, tid = _exhausted_user_and_task('te-once@test.com')
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        task = A.db.session.get(A.TranscriptionTask, tid)
+        fake = mock.Mock(status_code=200, text='ok')
+        with mock.patch.object(mailer.requests, 'post', return_value=fake) as post:
+            assert email_notify.notify_trial_exhausted(
+                db=A.db, user=user, task=task, EmailSentLog=A.EmailSentLog,
+                public_base_url='https://podskrift.com',
+                secret_key=A.app.secret_key,
+                minutes=60, amount_cents=150,
+            ) is True
+            assert email_notify.notify_trial_exhausted(
+                db=A.db, user=user, task=task, EmailSentLog=A.EmailSentLog,
+                public_base_url='https://podskrift.com',
+                secret_key=A.app.secret_key,
+                minutes=60, amount_cents=150,
+            ) is False
+            assert post.call_count == 1
+        rows = A.EmailSentLog.query.filter_by(
+            user_id=uid, kind=email_notify.TRIAL_EXHAUSTED_SENT_KIND).all()
+        assert len(rows) == 1
+        assert rows[0].idempotency_key == f'trial_exhausted:{uid}'
+    sent = [e for e in ph_events.events if e['event'] == 'trial_exhausted_email_sent']
+    assert len(sent) == 1
+    assert sent[0]['properties']['task_id'] == tid
+
+
+def test_trial_exhausted_email_skipped_for_buyers(monkeypatch, ph_events):
+    _enable_mail(monkeypatch)
+    uid, tid = _exhausted_user_and_task('te-buyer@test.com')
+    with A.app.app_context():
+        A.db.session.add(A.CreditPurchase(
+            user_id=uid,
+            stripe_session_id='cs_te_buyer',
+            stripe_payment_intent_id='pi_te_buyer',
+            minutes=300,
+            amount_cents=500,
+            currency='usd',
+            status='credited',
+        ))
+        A.db.session.commit()
+        user = A.db.session.get(A.User, uid)
+        task = A.db.session.get(A.TranscriptionTask, tid)
+        with mock.patch.object(mailer.requests, 'post') as post:
+            assert email_notify.notify_trial_exhausted(
+                db=A.db, user=user, task=task, EmailSentLog=A.EmailSentLog,
+                public_base_url='https://podskrift.com',
+                secret_key=A.app.secret_key,
+            ) is False
+            post.assert_not_called()
+    assert not any(
+        e['event'] == 'trial_exhausted_email_sent' for e in ph_events.events)
+
+
+def test_trial_exhausted_email_skipped_when_unsubscribed(monkeypatch):
+    _enable_mail(monkeypatch)
+    uid, tid = _exhausted_user_and_task(
+        'te-unsub@test.com',
+        email_unsubscribed_at=datetime.now(timezone.utc),
+    )
+    with A.app.app_context():
+        user = A.db.session.get(A.User, uid)
+        task = A.db.session.get(A.TranscriptionTask, tid)
+        with mock.patch.object(mailer.requests, 'post') as post:
+            assert email_notify.notify_trial_exhausted(
+                db=A.db, user=user, task=task, EmailSentLog=A.EmailSentLog,
+                public_base_url='https://podskrift.com',
+                secret_key=A.app.secret_key,
+            ) is False
+            post.assert_not_called()
+
+
+def test_schedule_trial_exhausted_email_runs(monkeypatch, ph_events):
+    started = []
+
+    class FakeThread:
+        def __init__(self, target=None, daemon=None, name=None):
+            self.target = target
+            self.name = name
+
+        def start(self):
+            started.append(self.name)
+            if self.target:
+                self.target()
+
+    _enable_mail(monkeypatch)
+    monkeypatch.setattr(A.threading, 'Thread', FakeThread)
+    uid, tid = _exhausted_user_and_task('te-sched@test.com')
+    fake = mock.Mock(status_code=200, text='ok')
+    with mock.patch.object(mailer.requests, 'post', return_value=fake) as post:
+        A._schedule_trial_exhausted_email(tid, uid)
+        assert post.call_count == 1
+    assert any(n and n.startswith('trial-exhausted-') for n in started)
+    assert any(e['event'] == 'trial_exhausted_email_sent' for e in ph_events.events)
+

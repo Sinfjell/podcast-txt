@@ -9,6 +9,12 @@
   ],
   "entries": [
     {
+      "id": "trial-exhausted-upsell",
+      "date": "2026-11-19",
+      "title": "Finish the episode when your free trial ends",
+      "summary": "When your free trial minutes run out, the transcript page shows a clear one-click option to finish that episode, and we email you a short link back to it."
+    },
+    {
       "id": "transcript-feedback-widget",
       "date": "2026-11-18",
       "title": "Tell us when a transcript misses the mark",

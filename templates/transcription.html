@@ -104,6 +104,25 @@
     </div>
 </div>
 
+<!-- Trial used up: cheapest pack CTA on the partial / paywall transcript -->
+<div id="trialExhaustedBox" class="hidden mb-2 trial-exhausted-box"
+     data-testid="trial-exhausted-box" hidden role="region"
+     aria-labelledby="trialExhaustedTitle">
+    <div class="ds-notice ds-notice--warning">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3l10 18H2L12 3z"/><path d="M12 10v5M12 18h.01"/>
+        </svg>
+        <div class="ds-notice__body">
+            <p class="result-offer-title" id="trialExhaustedTitle"></p>
+            <p class="text-sm result-offer-note" id="trialExhaustedNote"></p>
+            <p class="text-sm partial-local-price hidden" id="trialExhaustedLocal"
+               data-testid="trial-exhausted-local"></p>
+            <div class="result-offer-actions" id="trialExhaustedActions"></div>
+        </div>
+    </div>
+</div>
+
 <!-- Calm secondary offer after a full transcript (Copy stays the primary). -->
 <div id="resultOfferCard" class="hidden card mb-2 result-offer-card" data-testid="result-offer">
     <div class="card-body">
@@ -168,6 +187,9 @@
         .next-ep .btn { width: 100%; justify-content: center; }
     }
     .result-offer-card { margin-top: 16px; }
+    .trial-exhausted-box { margin-top: 16px; }
+    .trial-exhausted-box .result-offer-actions { margin-top: 4px; }
+    .trial-exhausted-box .ds-link-button { color: inherit; }
     .partial-local-price { margin: -4px 0 12px; }
     .result-offer-title { font-weight: 700; font-size: 15px; margin: 0 0 6px; }
     .result-offer-note { margin: 0 0 12px; line-height: 1.55; }
@@ -530,6 +552,108 @@
         return Object.keys(buyExtra).length ? buyExtra : null;
     }
 
+    function trialExhaustedBuyExtra(d) {
+        // Cheapest live pack (minutes from status), plus episode stash so
+        // checkout success can auto-start the full run.
+        var box = d.trial_exhausted_box || {};
+        var buyExtra = partialBuyExtra(d) || {};
+        if (box.minutes != null) {
+            buyExtra.minutes = box.minutes;
+            buyExtra.price_source = 'episode';
+            // Do not send offer=remaining — this CTA is the floor pack, not
+            // the remaining-minutes test price.
+            delete buyExtra.offer;
+        }
+        buyExtra.task_id = taskId;
+        return buyExtra;
+    }
+
+    function hideTrialExhaustedBox() {
+        var box = el('trialExhaustedBox');
+        if (!box) return;
+        show(box, false);
+        box.setAttribute('hidden', '');
+        var actions = el('trialExhaustedActions');
+        if (actions) {
+            while (actions.firstChild) actions.removeChild(actions.firstChild);
+        }
+    }
+
+    function triggerTrialExhaustedBuy(d) {
+        var box = d.trial_exhausted_box || {};
+        phCapture('finish_episode_clicked', {
+            task_id: taskId,
+            partial_minutes: d.partial_minutes,
+            episode_minutes: d.episode_minutes,
+            action: 'buy',
+            source: 'trial_exhausted_box',
+            offered_amount_cents: box.amount_cents != null ? box.amount_cents : null,
+            offered_minutes: box.minutes != null ? box.minutes : null,
+            ui_locale: box.locale || null,
+            placement: 'trial_exhausted_box',
+        }, leaveSafeOpts());
+        if (typeof window.podskriftPaywallBuyClicked === 'function') {
+            window.podskriftPaywallBuyClicked('trial_exhausted_box', 'partial', {
+                placement: 'trial_exhausted_box'
+            });
+        }
+        postBuyForm('trial_exhausted_box', window.location.pathname,
+                    trialExhaustedBuyExtra(d));
+    }
+
+    function renderTrialExhaustedBox(d) {
+        var root = el('trialExhaustedBox');
+        var actions = el('trialExhaustedActions');
+        var title = el('trialExhaustedTitle');
+        var note = el('trialExhaustedNote');
+        if (!root || !actions || !title || !note) return false;
+        hideTrialExhaustedBox();
+        var box = d.trial_exhausted_box;
+        if (!box || !STRIPE_BUY) return false;
+        title.textContent = box.title || 'Your free trial minutes are used up';
+        note.textContent = box.note || '';
+        if (box.locale) root.setAttribute('lang', box.locale);
+        var localLine = el('trialExhaustedLocal');
+        if (localLine) {
+            var showLocal = !!box.local_price_line;
+            localLine.textContent = showLocal ? box.local_price_line : '';
+            show(localLine, showLocal);
+        }
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-sm btn-primary';
+        btn.textContent = box.button || 'Finish this episode';
+        btn.setAttribute('data-testid', 'trial-exhausted-buy');
+        btn.addEventListener('click', function() {
+            triggerTrialExhaustedBuy(d);
+        });
+        actions.appendChild(btn);
+        var packs = document.createElement('a');
+        packs.href = box.packs_url || '/pricing';
+        packs.className = 'ds-link-button';
+        packs.textContent = box.packs_label || 'See larger packs →';
+        packs.setAttribute('data-testid', 'trial-exhausted-packs');
+        actions.appendChild(packs);
+        demoteCopyButton();
+        root.removeAttribute('hidden');
+        show(root, true);
+        if (typeof window.podskriftPaywallShown === 'function') {
+            window.podskriftPaywallShown('trial_exhausted_box', 'partial', {
+                surface: 'trial_exhausted_box',
+                task_id: taskId,
+                episode_minutes: d.episode_minutes != null ? d.episode_minutes : null,
+                preview_minutes: d.partial_minutes != null ? d.partial_minutes : null,
+                offered_price: box.price || null,
+                offered_minutes: box.minutes != null ? box.minutes : null,
+                offered_amount_cents: box.amount_cents != null ? box.amount_cents : null,
+                ui_locale: box.locale || null,
+                trial_remaining_min: d.trial_remaining_min,
+                paid_remaining_min: d.paid_remaining_min
+            });
+        }
+        return true;
+    }
+
     // Shared buy/finish click for top card, end unlock, and copy nudge.
     function triggerPartialUnlock(d, placement) {
         var card_t = d.card || {};
@@ -546,6 +670,12 @@
             return;
         }
         if (kind !== 'buy') return;
+        // When the trial-exhausted box is active, every buy surface attributes
+        // to source=trial_exhausted_box (and buys the cheapest pack).
+        if (d.trial_exhausted_box) {
+            triggerTrialExhaustedBuy(d);
+            return;
+        }
         phCapture('finish_episode_clicked', {
             task_id: taskId,
             partial_minutes: d.partial_minutes,
@@ -586,7 +716,9 @@
         if (kind === 'finish') {
             btn.textContent = card_t.button_finish || 'Transcribe the full episode';
         } else {
-            btn.textContent = card_t.button_buy || d.unlock_label || d.buy_label || UNLOCK_LABEL;
+            var exhausted = d.trial_exhausted_box;
+            btn.textContent = (exhausted && exhausted.button)
+                || card_t.button_buy || d.unlock_label || d.buy_label || UNLOCK_LABEL;
             if (testId) btn.setAttribute('data-testid', testId);
         }
         btn.addEventListener('click', function() {
@@ -769,6 +901,7 @@
             staleByok[i].parentNode.removeChild(staleByok[i]);
         }
         show(el('resultOfferCard'), false);
+        hideTrialExhaustedBox();
 
         if (d.full_transcript_url) {
             // Finished in full since this preview: open that, never sell it again.
@@ -781,10 +914,16 @@
             actions.appendChild(fullLink);
             hidePartialEndUnlock();
         } else {
-            var unlockBtn = makePartialUnlockButton(d, 'top_card', 'partial-buy');
-            if (unlockBtn) {
-                demoteCopyButton();
-                actions.appendChild(unlockBtn);
+            var exhaustedShown = renderTrialExhaustedBox(d);
+            var kind = partialUnlockKind(d);
+            // Trial-exhausted box owns the buy CTA (one primary). Finish-with-
+            // balance still uses the existing unlock button.
+            if (!exhaustedShown || kind === 'finish') {
+                var unlockBtn = makePartialUnlockButton(d, 'top_card', 'partial-buy');
+                if (unlockBtn) {
+                    demoteCopyButton();
+                    actions.appendChild(unlockBtn);
+                }
             }
             renderPartialEndUnlock(d);
         }
@@ -1186,6 +1325,7 @@
                 el('completionTitle').textContent = 'Transcription complete';
                 show(el('partialPreviewCard'), false);
                 hidePartialEndUnlock();
+                hideTrialExhaustedBox();
                 var nudgeOff = el('partialCopyNudge');
                 if (nudgeOff) {
                     show(nudgeOff, false);
