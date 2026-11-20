@@ -352,6 +352,10 @@ class CreditPurchase(db.Model):
     #: Lifecycle email campaign that led to this checkout (Checkout metadata
     #: email_campaign, written server-side from a signed click). NULL = none.
     email_campaign = db.Column(db.String(32), nullable=True)
+    #: In-app checkout surface (normalized). See app.CHECKOUT_SOURCES.
+    #: NULL on rows written before this column, or when the form source was
+    #: unknown. Distinct from email_campaign (email attribution).
+    checkout_source = db.Column(db.String(32), nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -519,6 +523,7 @@ CREDIT_PURCHASE_COLUMN_MIGRATIONS = {
     'price_source': 'VARCHAR(16)',
     'pricing_version': 'VARCHAR(16)',
     'email_campaign': 'VARCHAR(32)',
+    'checkout_source': 'VARCHAR(32)',
 }
 
 #: Additive columns for transcript_shares. Applied by

@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -133,15 +134,33 @@ def provider_bucket(label) -> str:
 
 # --------------------------------------------------------------------------- DB
 
+def _purchase_columns(conn) -> set[str]:
+    """Column names on credit_purchases (empty when the table is missing)."""
+    try:
+        return {row[1] for row in conn.execute('PRAGMA table_info(credit_purchases)')}
+    except sqlite3.Error:
+        return set()
+
+
 def counted_purchases(conn, end_day: date) -> list[dict]:
     """Counted purchases created before the end of Oslo day *end_day*."""
     hi = _utc_naive(end_day + timedelta(days=1))
+    cols = _purchase_columns(conn)
+    # checkout_source / email_campaign are additive; older DB snapshots omit them.
+    has_checkout_source = 'checkout_source' in cols
+    has_email_campaign = 'email_campaign' in cols
+    select_extra = []
+    if has_checkout_source:
+        select_extra.append('cp.checkout_source')
+    if has_email_campaign:
+        select_extra.append('cp.email_campaign')
+    extra_sql = (', ' + ', '.join(select_extra)) if select_extra else ''
     rows = conn.execute(
-        '''
+        f'''
         SELECT cp.id, cp.user_id, u.email, cp.created_at,
                COALESCE(cp.amount_total_cents, cp.amount_cents) AS gross_cents,
                COALESCE(cp.amount_tax_cents, 0) AS tax_cents,
-               cp.stripe_payment_intent_id AS pi
+               cp.stripe_payment_intent_id AS pi{extra_sql}
           FROM credit_purchases cp
           LEFT JOIN users u ON u.id = cp.user_id
          WHERE cp.status = ? AND cp.created_at < ?
@@ -157,6 +176,10 @@ def counted_purchases(conn, end_day: date) -> list[dict]:
         r['day'] = oslo_day(r['created_at'])
         if r['day'] is None:
             continue
+        if not has_checkout_source:
+            r['checkout_source'] = None
+        if not has_email_campaign:
+            r['email_campaign'] = None
         out.append(r)
     return out
 
@@ -343,6 +366,26 @@ def collect_unit_economics(conn, day: date, *, bts: list[dict] | None,
         d += timedelta(days=1)
 
     todays = [p for p in purchases if p['day'] == day]
+    buyers_1d = {p['user_id'] for p in todays}
+    new_buyers_1d = {uid for uid in buyers_1d if first_day_by_user.get(uid) == day}
+    # Buyers today who already had a purchase before today (Oslo).
+    repeat_buyers_1d = buyers_1d - new_buyers_1d
+    te_box_1d = sum(
+        1 for p in todays if (p.get('checkout_source') or '') == 'trial_exhausted_box')
+    email_1d = sum(1 for p in todays if p.get('email_campaign'))
+
+    # Cumulative: distinct counted buyers with >=2 purchases / all buyers.
+    purchase_count_by_user: dict = {}
+    for p in purchases:
+        uid = p['user_id']
+        if uid is None:
+            continue
+        purchase_count_by_user[uid] = purchase_count_by_user.get(uid, 0) + 1
+    all_buyers = len(purchase_count_by_user)
+    multi_buyers = sum(1 for n in purchase_count_by_user.values() if n >= 2)
+    cum_repeat_rate = (
+        round(multi_buyers / all_buyers, 4) if all_buyers else 0.0)
+
     c = costs.get(day, zero)
     net = net_by_day.get(day, 0.0)
     var_cost = c['stt'] + c['llm']
@@ -359,9 +402,14 @@ def collect_unit_economics(conn, day: date, *, bts: list[dict] | None,
         'Net revenue (USD)': r2(net),
         'Net revenue source': source,
         'Purchases 1d': len(todays),
-        'Buyers 1d': len({p['user_id'] for p in todays}),
-        'New buyers 1d': len({p['user_id'] for p in todays
-                              if first_day_by_user.get(p['user_id']) == day}),
+        'Buyers 1d': len(buyers_1d),
+        'New buyers 1d': len(new_buyers_1d),
+        # Attribution / retention (also written into Notion Notes — see
+        # format_checkout_attr_notes; the job does not create Notion columns).
+        'Trial-exhausted box purchases 1d': int(te_box_1d),
+        'Email-attributed purchases 1d': int(email_1d),
+        'Repeat buyers 1d': len(repeat_buyers_1d),
+        'Cumulative repeat-buyer rate': cum_repeat_rate,
         'STT cost Together (USD)': r4(c['stt_together']),
         'STT cost OpenAI (USD)': r4(c['stt_openai']),
         'STT cost mixed/Scribe (USD)': r4(c['stt_mixed']),
@@ -381,8 +429,39 @@ NOTION_NUMBER_KEYS = (
     'LLM cost est. (USD)', 'Variable cost (USD)', 'Contribution margin (USD)',
     'Cumulative CM (USD)',
 )
+#: Checkout attribution keys — computed with unit economics but written to
+#: Notion Notes (compact line), not as database properties (the job never
+#: creates Notion schema).
+CHECKOUT_ATTR_KEYS = (
+    'Trial-exhausted box purchases 1d',
+    'Email-attributed purchases 1d',
+    'Repeat buyers 1d',
+    'Cumulative repeat-buyer rate',
+)
+#: Short keys for the parseable Notes line (stable for grep / sheets import).
+CHECKOUT_ATTR_NOTES_KEYS = (
+    ('te_box_1d', 'Trial-exhausted box purchases 1d'),
+    ('email_1d', 'Email-attributed purchases 1d'),
+    ('repeat_buyers_1d', 'Repeat buyers 1d'),
+    ('cum_repeat_rate', 'Cumulative repeat-buyer rate'),
+)
 NOTION_SELECT_KEYS = ('Net revenue source',)
 USD_KEYS = tuple(k for k in NOTION_NUMBER_KEYS if k.endswith('(USD)'))
+
+
+def format_checkout_attr_notes(metrics: dict) -> str:
+    """One compact, parseable Notes line for checkout attribution metrics.
+
+    Example: ``checkout_attr te_box_1d=2 email_1d=1 repeat_buyers_1d=0
+    cum_repeat_rate=0.25``. Missing keys render as 0.
+    """
+    parts = ['checkout_attr']
+    for short, full in CHECKOUT_ATTR_NOTES_KEYS:
+        val = metrics.get(full, 0)
+        if val is None:
+            val = 0
+        parts.append(f'{short}={val}')
+    return ' '.join(parts)
 
 
 def load_stripe_bts(app_dir: Path, since: date = FIRST_REVENUE_DAY) -> tuple[list | None, str | None]:

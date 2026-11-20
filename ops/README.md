@@ -572,11 +572,15 @@ exclude the same internal cohort as dashboard
 [Podskrift — aktivering](https://eu.posthog.com/project/283916/dashboard/975121)
 (`filterTestAccounts` → cohort «Internal / Test users»).
 
-Warnings go only to the Notion `Notes` property (Norwegian lines, ⚠️-prefixed,
-capped at 2000 chars). No Notes write when everything looks fine. A missing
-`POSTHOG_PERSONAL_API_KEY`, timeout, or API error still upserts metrics and
-writes one “helsesjekk kjørte ikke” line. The same Notes channel also flags a
-missing or >26 h-old `data/backups/podcast-*.db.gz`. No email/Slack/webhooks.
+Warnings go to the Notion `Notes` property (Norwegian lines, ⚠️-prefixed,
+capped at 2000 chars). The same Notes channel also always carries a compact
+checkout-attribution line from SQLite (`checkout_attr te_box_1d=… email_1d=…
+repeat_buyers_1d=… cum_repeat_rate=…`) — the job does not create Notion
+schema, so these are not separate number properties. Health warnings append
+below that line when present. A missing `POSTHOG_PERSONAL_API_KEY`, timeout,
+or API error still upserts metrics and writes one “helsesjekk kjørte ikke”
+line. Notes also flags a missing or >26 h-old `data/backups/podcast-*.db.gz`.
+No email/Slack/webhooks.
 
 Thresholds (named constants in `ops/posthog_daily_health.py`): check window =
 metric day, or 3 days when the metric day is Sunday (covers Fri–Sat which the

@@ -7846,9 +7846,14 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
     ph_sid = (metadata.get('ph_sid') or '')[:128] or None
     ph_did = (metadata.get('ph_did') or '')[:128] or None
     email_campaign = metadata.get('email_campaign') or None
-    if email_campaign not in lifecycle_emails.CAMPAIGNS and (
-            email_campaign != checkout_recovery.CAMPAIGN):
+    if email_campaign not in _checkout_email_campaigns_allowed():
         email_campaign = None
+    # Prefer the normalized metadata key; fall back to raw source/location for
+    # sessions created before checkout_source was written at create time.
+    checkout_source = (metadata.get('checkout_source') or '').strip()[:32] or None
+    if checkout_source not in CHECKOUT_SOURCES:
+        checkout_source = normalize_checkout_source(
+            metadata.get('source') or metadata.get('location'))
 
     prior_credited = CreditPurchase.query.filter_by(
         user_id=user_id, status='credited').count()
@@ -7870,6 +7875,7 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
             (metadata.get('pricing_version') or '')[:16] or (
                 'legacy_v0' if metadata.get('pack') == CREDIT_PACK_SKU else None)),
         email_campaign=email_campaign,
+        checkout_source=checkout_source,
         status='credited',
     )
     db.session.add(purchase)
@@ -7933,6 +7939,7 @@ def fulfill_checkout(session_id, event_id=None, fulfilled_via='webhook'):
         'missing_minutes': _int_or_none(metadata.get('missing_minutes')),
         'is_first_purchase': prior_credited == 0,
         'email_campaign': email_campaign,
+        'checkout_source': checkout_source,
         'revenue': (amount_total_cents or amount_for_legacy or 0) / 100.0,
         '$set': person_set,
     }
@@ -8277,11 +8284,21 @@ def settings():
     )
 
 
-def _checkout_email_campaign():
-    """Lifecycle / recovery campaign to credit this checkout to, or None.
+def _checkout_email_campaigns_allowed():
+    """Campaign ids that may be written onto credit_purchases.email_campaign."""
+    return lifecycle_emails.CAMPAIGNS + (
+        checkout_recovery.CAMPAIGN,
+        email_notify.TRIAL_EXHAUSTED,
+    )
 
-    Only from a signed email click stashed on this session in the last
-    week (lifecycle_emails.SESSION_CAMPAIGN_KEY), for the same user.
+
+def _checkout_email_campaign():
+    """Lifecycle / recovery / trial-exhausted campaign for this checkout, or None.
+
+    Only from a click stashed on this session in the last week
+    (lifecycle_emails.SESSION_CAMPAIGN_KEY), for the same user. Lifecycle and
+    recovery use signed ``/e/`` / ``/r/`` links; the trial-exhausted mail
+    stashes on the transcript landing when utm_campaign=trial_exhausted.
     """
     stash = session.get(lifecycle_emails.SESSION_CAMPAIGN_KEY)
     if not isinstance(stash, dict):
@@ -8292,8 +8309,7 @@ def _checkout_email_campaign():
         uid = int(stash.get('u') or 0)
     except (TypeError, ValueError):
         return None
-    allowed = lifecycle_emails.CAMPAIGNS + (checkout_recovery.CAMPAIGN,)
-    if campaign not in allowed:
+    if campaign not in _checkout_email_campaigns_allowed():
         return None
     if uid != current_user.id:
         return None
@@ -8302,11 +8318,69 @@ def _checkout_email_campaign():
     return campaign
 
 
+def _stash_trial_exhausted_email_campaign(user_id):
+    """Attribute a later checkout to the trial-exhausted email (session stash)."""
+    session[lifecycle_emails.SESSION_CAMPAIGN_KEY] = {
+        'c': email_notify.TRIAL_EXHAUSTED,
+        'u': int(user_id),
+        'at': time.time(),
+    }
+    session.modified = True
+
+
 #: Buy surfaces that are about one specific episode (not a general top-up).
 EPISODE_BUY_SOURCES = frozenset({
     'buy_modal_episode', 'home_error', 'partial_preview', 'episode_selection',
     'episode_selection_error', 'result_offer', 'trial_exhausted_box',
 })
+
+#: Canonical in-app checkout surfaces persisted on credit_purchases.checkout_source
+#: (and Stripe Checkout Session metadata). Unknown form sources → NULL.
+CHECKOUT_SOURCES = frozenset({
+    'trial_exhausted_box',
+    'pricing_page',
+    'partial_preview',
+    'episode_page',
+    'mcp',
+    'email',
+})
+
+#: Map form ``source`` values (and a few aliases) onto CHECKOUT_SOURCES.
+_CHECKOUT_SOURCE_ALIASES = {
+    'trial_exhausted_box': 'trial_exhausted_box',
+    'pricing': 'pricing_page',
+    'pricing_page': 'pricing_page',
+    'home_pricing': 'pricing_page',
+    'partial_preview': 'partial_preview',
+    'paywall': 'partial_preview',
+    'buy_modal_episode': 'episode_page',
+    'episode_selection': 'episode_page',
+    'episode_selection_error': 'episode_page',
+    'home_error': 'episode_page',
+    'result_offer': 'episode_page',
+    'episode_page': 'episode_page',
+    'mcp': 'mcp',
+    'email': 'email',
+}
+
+
+def normalize_checkout_source(source):
+    """Map a form/metadata ``source`` to a CHECKOUT_SOURCES value, or None.
+
+    Lifecycle / recovery email clicks post ``email_<campaign>`` → ``email``.
+    Unknown or empty → None (stored as NULL).
+    """
+    raw = (source or '').strip()[:64]
+    if not raw:
+        return None
+    if raw in CHECKOUT_SOURCES:
+        return raw
+    mapped = _CHECKOUT_SOURCE_ALIASES.get(raw)
+    if mapped:
+        return mapped
+    if raw.startswith('email_'):
+        return 'email'
+    return None
 
 
 def cheapest_pack_quote():
@@ -8536,6 +8610,7 @@ def billing_checkout():
                 },
             }
 
+    checkout_source = normalize_checkout_source(source)
     meta = {
         'user_id': str(current_user.id),
         'minutes': str(buy_minutes),
@@ -8545,6 +8620,8 @@ def billing_checkout():
         'location': source,
         'source': source,
     }
+    if checkout_source:
+        meta['checkout_source'] = checkout_source
     if pack_sku == pricing_volume.VOLUME_PACK_SKU:
         meta['pricing_version'] = pricing_volume.CURRENT_PRICING_VERSION
     if remaining_offer is not None:
@@ -8655,6 +8732,7 @@ def billing_checkout():
         'expires_hours': CHECKOUT_EXPIRES_HOURS,
         'recovery_enabled': bool(CHECKOUT_RECOVERY_ENABLED),
         'email_campaign': email_campaign,
+        'checkout_source': checkout_source,
     }
     started_props.update(trial_variant_props(current_user))
     _merge_attribution_into_event_props(started_props, current_user)
@@ -11388,8 +11466,19 @@ def transcription_page(task_id):
         return "Task not found", 404
     if podcast_optout.is_opted_out_task(task):
         return _podcast_opted_out_page()
-    if (request.args.get('utm_source') or '').strip().lower() == 'email':
-        campaign = (request.args.get('utm_campaign') or '').strip()[:64] or 'unknown'
+    utm_campaign = (request.args.get('utm_campaign') or '').strip()[:64]
+    utm_medium = (request.args.get('utm_medium') or '').strip().lower()
+    utm_source = (request.args.get('utm_source') or '').strip().lower()
+    # Trial-exhausted transactional mail links here with
+    # utm_campaign=trial_exhausted (utm_source=podskrift, utm_medium=email).
+    # Stash so a buy from this visit gets email_campaign on the purchase row.
+    if (
+        utm_campaign == email_notify.TRIAL_EXHAUSTED
+        and (utm_medium == 'email' or utm_source in ('email', 'podskrift'))
+    ):
+        _stash_trial_exhausted_email_campaign(current_user.id)
+    if utm_source == 'email':
+        campaign = utm_campaign or 'unknown'
         product_analytics.capture(
             'email_clicked',
             current_user.id,

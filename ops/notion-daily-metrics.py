@@ -580,14 +580,16 @@ def notion_properties(
         if key in metrics:
             props[key] = {'number': metrics[key]}
     # Unit economics (variable costs only) -- present when collected.
+    # Checkout attribution metrics are NOT Notion number properties: this job
+    # never creates schema, so they live in Notes (see format_checkout_attr_notes).
     for key in ue.NOTION_NUMBER_KEYS:
         if key in metrics:
             props[key] = {'number': metrics[key]}
     for key in ue.NOTION_SELECT_KEYS:
         if metrics.get(key):
             props[key] = {'select': {'name': metrics[key]}}
-    # Only set Notes when the health check produced warnings — omit otherwise
-    # so a manual note on the row is left untouched.
+    # Notes carries checkout attribution (always, when present) plus optional
+    # health warnings. Attribution alone still writes Notes.
     if notes_content:
         props['Notes'] = phh.notes_rich_text_property(notes_content)
     return props
@@ -840,7 +842,16 @@ def main(argv: list[str] | None = None) -> int:
             or (app_dir / 'data' / 'backups')
         )
         health_lines.extend(backup_staleness_warning_lines(backup_dir))
-    notes_content = phh.format_notes_content(health_lines)
+    # Checkout attribution always goes into Notes (compact parseable line).
+    # The Notion DB schema is not created/updated by this job, so these are
+    # not separate properties. Health warnings append below the attr line.
+    notes_parts: list[str] = []
+    if any(k in metrics for k in ue.CHECKOUT_ATTR_KEYS):
+        notes_parts.append(ue.format_checkout_attr_notes(metrics))
+    warning_notes = phh.format_notes_content(health_lines)
+    if warning_notes:
+        notes_parts.append(warning_notes)
+    notes_content = '\n'.join(notes_parts) if notes_parts else None
 
     # Public metrics JSON (no internal underscore keys).
     print(json.dumps(metrics, indent=2, sort_keys=True))
