@@ -22,7 +22,8 @@ def _db():
             id INTEGER PRIMARY KEY, user_id INTEGER, created_at TEXT,
             amount_cents INTEGER, amount_total_cents INTEGER,
             amount_tax_cents INTEGER, status TEXT,
-            stripe_payment_intent_id TEXT);
+            stripe_payment_intent_id TEXT,
+            checkout_source TEXT, email_campaign TEXT);
         CREATE TABLE transcription_tasks (
             id TEXT PRIMARY KEY, user_id INTEGER, status TEXT,
             started_at TEXT, completed_at TEXT,
@@ -36,15 +37,21 @@ def _db():
         (502, 'smoke-1@gmail.com', '2026-10-01'),   # test email
     ])
     conn.executemany(
-        'INSERT INTO credit_purchases VALUES (?,?,?,?,?,?,?,?)', [
+        'INSERT INTO credit_purchases VALUES (?,?,?,?,?,?,?,?,?,?)', [
             # 2026-10-10 Oslo
-            (1, 500, '2026-10-10 10:00:00', 172, 172, 0, 'credited', 'pi_a1'),
+            (1, 500, '2026-10-10 10:00:00', 172, 172, 0, 'credited', 'pi_a1',
+             'pricing_page', None),
             # 2026-10-12: repeat buyer 500 + new buyer 501 (late UTC = 13th Oslo? no: 20:00Z = 22:00 Oslo)
-            (2, 500, '2026-10-12 20:00:00', 282, 282, 57, 'credited', 'pi_a2'),
-            (3, 501, '2026-10-12 21:30:00', 172, 172, 0, 'credited', 'pi_b1'),  # 23:30 Oslo
-            (4, 90, '2026-10-12 11:00:00', 999, 999, 0, 'credited', 'pi_t1'),
-            (5, 502, '2026-10-12 11:00:00', 999, 999, 0, 'credited', 'pi_t2'),
-            (6, 501, '2026-10-12 12:00:00', 500, 500, 0, 'refunded', 'pi_r1'),
+            (2, 500, '2026-10-12 20:00:00', 282, 282, 57, 'credited', 'pi_a2',
+             'trial_exhausted_box', 'trial_exhausted'),
+            (3, 501, '2026-10-12 21:30:00', 172, 172, 0, 'credited', 'pi_b1',
+             'partial_preview', None),  # 23:30 Oslo
+            (4, 90, '2026-10-12 11:00:00', 999, 999, 0, 'credited', 'pi_t1',
+             'trial_exhausted_box', 'trial_exhausted'),
+            (5, 502, '2026-10-12 11:00:00', 999, 999, 0, 'credited', 'pi_t2',
+             'trial_exhausted_box', None),
+            (6, 501, '2026-10-12 12:00:00', 500, 500, 0, 'refunded', 'pi_r1',
+             None, None),
         ])
     conn.executemany(
         'INSERT INTO transcription_tasks VALUES (?,?,?,?,?,?,?,?,?,?)', [
@@ -197,8 +204,9 @@ def test_notion_properties_include_unit_economics():
 def test_managed_payments_fee_follows_purchase_oslo_day():
     """A charge at 22:44Z belongs to the next Oslo day -- so does its fee share."""
     conn = _db()
-    conn.execute("INSERT INTO credit_purchases VALUES "
-                 "(7, 501, '2026-10-12 22:44:00', 172, 172, 0, 'credited', 'pi_late')")
+    conn.execute(
+        "INSERT INTO credit_purchases VALUES "
+        "(7, 501, '2026-10-12 22:44:00', 172, 172, 0, 'credited', 'pi_late', NULL, NULL)")
     bts = _bts() + [_bt('pi_late', 1720, 1400, '2026-10-12 22:44:00')]
     total = 1720 + 2820 + 1720 + 9990 + 1720           # all UTC-12 charges
     f = sum([172 / 1720, 282 / 2820, 172 / 1720, 172 / 1720]) / 4
@@ -210,3 +218,74 @@ def test_managed_payments_fee_follows_purchase_oslo_day():
     # Cumulative is the running sum of the daily rows (no fee leaking across days).
     assert d13['Cumulative CM (USD)'] == pytest.approx(
         d12['Cumulative CM (USD)'] + d13['Contribution margin (USD)'], abs=0.011)
+
+
+def test_checkout_attribution_and_repeat_buyers():
+    """Box / email counts and repeat logic exclude test users."""
+    out = ue.collect_unit_economics(_db(), date(2026, 10, 12), bts=_bts())
+    # Counted on the 12th: id 2 (500, te_box + email) and id 3 (501, partial).
+    # Test users 90 / 502 are excluded even with te_box set.
+    assert out['Trial-exhausted box purchases 1d'] == 1
+    assert out['Email-attributed purchases 1d'] == 1
+    assert out['Buyers 1d'] == 2
+    assert out['New buyers 1d'] == 1          # 501 first purchase today
+    assert out['Repeat buyers 1d'] == 1       # 500 bought on the 10th
+    # Cumulative through the 12th: buyers 500 (2 purchases) + 501 (1) → 1/2
+    assert out['Cumulative repeat-buyer rate'] == 0.5
+    line = ue.format_checkout_attr_notes(out)
+    assert line.startswith('checkout_attr ')
+    assert 'te_box_1d=1' in line
+    assert 'email_1d=1' in line
+    assert 'repeat_buyers_1d=1' in line
+    assert 'cum_repeat_rate=0.5' in line
+
+
+def test_checkout_attr_null_safe_without_columns():
+    """Older DB snapshots without checkout_source / email_campaign still work."""
+    conn = sqlite3.connect(':memory:')
+    conn.row_factory = sqlite3.Row
+    conn.executescript('''
+        CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, created_at TEXT);
+        CREATE TABLE credit_purchases (
+            id INTEGER PRIMARY KEY, user_id INTEGER, created_at TEXT,
+            amount_cents INTEGER, amount_total_cents INTEGER,
+            amount_tax_cents INTEGER, status TEXT,
+            stripe_payment_intent_id TEXT);
+        CREATE TABLE transcription_tasks (
+            id TEXT PRIMARY KEY, user_id INTEGER, status TEXT,
+            started_at TEXT, completed_at TEXT,
+            trial_seconds_charged INTEGER, paid_seconds_charged INTEGER,
+            stt_provider TEXT, stt_cost_usd REAL, summary_cost_usd_est REAL);
+    ''')
+    conn.execute("INSERT INTO users VALUES (500, 'a@gmail.com', '2026-10-01')")
+    conn.execute(
+        "INSERT INTO credit_purchases VALUES "
+        "(1, 500, '2026-10-10 10:00:00', 172, 172, 0, 'credited', 'pi_a1')")
+    out = ue.collect_unit_economics(conn, date(2026, 10, 10), bts=None)
+    assert out['Trial-exhausted box purchases 1d'] == 0
+    assert out['Email-attributed purchases 1d'] == 0
+    assert out['Repeat buyers 1d'] == 0
+    assert out['Cumulative repeat-buyer rate'] == 0.0
+    assert out['Purchases 1d'] == 1
+
+
+def test_notion_notes_include_checkout_attr_line():
+    spec = importlib.util.spec_from_file_location(
+        'notion_daily_metrics_attr', OPS / 'notion-daily-metrics.py')
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    metrics = {k: 0 for k in (
+        'Users total', 'Signups 1d', 'Active users 1d', 'Completions 1d',
+        'Errors 1d', 'Never started', 'Ever completed', 'Returned 2+ days',
+        'Trial minutes used', 'Trial exhausted')}
+    metrics['day'] = '2026-10-12'
+    metrics.update(ue.collect_unit_economics(_db(), date(2026, 10, 12), bts=_bts()))
+    notes = ue.format_checkout_attr_notes(metrics)
+    props = mod.notion_properties(
+        metrics, 'cron', datetime.now(timezone.utc), notes_content=notes)
+    assert 'Notes' in props
+    content = props['Notes']['rich_text'][0]['text']['content']
+    assert content.startswith('checkout_attr ')
+    # Attribution keys are Notes-only — not Notion number properties.
+    for key in ue.CHECKOUT_ATTR_KEYS:
+        assert key not in props

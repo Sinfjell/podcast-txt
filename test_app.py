@@ -13504,12 +13504,177 @@ def test_trial_exhausted_box_checkout_source(volume_on, ph_events):
     meta = volume_on['last_create_params']['metadata']
     assert meta['source'] == 'trial_exhausted_box'
     assert meta['location'] == 'trial_exhausted_box'
+    assert meta['checkout_source'] == 'trial_exhausted_box'
     assert meta['minutes'] == str(pv.VOLUME_MIN_MINUTES)
     assert int(meta['amount_cents']) == pv.VOLUME_MIN_AMOUNT_CENTS
     started = [e for e in ph_events.events if e['event'] == 'checkout_started']
     assert started
     assert started[-1]['properties'].get('location') == 'trial_exhausted_box'
     assert started[-1]['properties'].get('source') == 'trial_exhausted_box'
+    assert started[-1]['properties'].get('checkout_source') == 'trial_exhausted_box'
+
+
+def test_normalize_checkout_source_aliases():
+    assert A.normalize_checkout_source('trial_exhausted_box') == 'trial_exhausted_box'
+    assert A.normalize_checkout_source('pricing') == 'pricing_page'
+    assert A.normalize_checkout_source('home_pricing') == 'pricing_page'
+    assert A.normalize_checkout_source('partial_preview') == 'partial_preview'
+    assert A.normalize_checkout_source('paywall') == 'partial_preview'
+    assert A.normalize_checkout_source('buy_modal_episode') == 'episode_page'
+    assert A.normalize_checkout_source('episode_selection') == 'episode_page'
+    assert A.normalize_checkout_source('mcp') == 'mcp'
+    assert A.normalize_checkout_source('email_trial_ended_1h') == 'email'
+    assert A.normalize_checkout_source('email_abandoned_checkout') == 'email'
+    assert A.normalize_checkout_source('settings') is None
+    assert A.normalize_checkout_source('') is None
+    assert A.normalize_checkout_source('made_up_surface') is None
+
+
+def test_webhook_persists_checkout_source_from_metadata(volume_on):
+    """Stripe metadata checkout_source lands on credit_purchases."""
+    from models import CreditPurchase
+    uid = _make_user('cs-persist@test.com', limit=600, used=600)
+    sid = f'cs_csrc_{uid}'
+    sess = _volume_session(uid, 60, 150, session_id=sid, price_source='episode')
+    sess['metadata']['source'] = 'trial_exhausted_box'
+    sess['metadata']['location'] = 'trial_exhausted_box'
+    sess['metadata']['checkout_source'] = 'trial_exhausted_box'
+    assert _register_and_post(volume_on, sess).status_code == 200
+    with A.app.app_context():
+        row = CreditPurchase.query.filter_by(stripe_session_id=sid).one()
+        assert row.checkout_source == 'trial_exhausted_box'
+
+
+def test_webhook_checkout_source_null_when_unknown_or_absent(volume_on):
+    """Old sessions without checkout_source (and unknown sources) store NULL."""
+    from models import CreditPurchase
+    uid = _make_user('cs-null@test.com', limit=600, used=600)
+    sid_old = f'cs_csrc_old_{uid}'
+    sess_old = _volume_session(uid, 60, 150, session_id=sid_old)
+    # Pre-column sessions: only location=pricing alias → pricing_page via fallback.
+    sess_old['metadata'].pop('checkout_source', None)
+    sess_old['metadata']['source'] = 'pricing'
+    sess_old['metadata']['location'] = 'pricing'
+    _register_and_post(volume_on, sess_old)
+
+    sid_unk = f'cs_csrc_unk_{uid}'
+    sess_unk = _volume_session(uid, 60, 150, session_id=sid_unk)
+    sess_unk['metadata']['source'] = 'settings'
+    sess_unk['metadata']['location'] = 'settings'
+    sess_unk['metadata']['checkout_source'] = 'not_a_real_source'
+    _register_and_post(volume_on, sess_unk)
+
+    sid_bare = f'cs_csrc_bare_{uid}'
+    sess_bare = _pack_session(uid, session_id=sid_bare)
+    _register_and_post(volume_on, sess_bare)
+
+    with A.app.app_context():
+        assert CreditPurchase.query.filter_by(
+            stripe_session_id=sid_old).one().checkout_source == 'pricing_page'
+        assert CreditPurchase.query.filter_by(
+            stripe_session_id=sid_unk).one().checkout_source is None
+        assert CreditPurchase.query.filter_by(
+            stripe_session_id=sid_bare).one().checkout_source is None
+
+
+def test_checkout_source_column_migration_is_idempotent(trial_on):
+    """Additive checkout_source column applies twice against a schema copy."""
+    assert 'checkout_source' in A.CREDIT_PURCHASE_COLUMN_MIGRATIONS
+    assert A.CREDIT_PURCHASE_COLUMN_MIGRATIONS['checkout_source'] == 'VARCHAR(32)'
+    with A.app.app_context():
+        A.db.session.execute(A.text('DROP TABLE IF EXISTS credit_purchases'))
+        A.db.session.execute(A.text("""
+            CREATE TABLE credit_purchases (
+                id INTEGER NOT NULL PRIMARY KEY,
+                user_id INTEGER,
+                stripe_session_id VARCHAR(255) NOT NULL UNIQUE,
+                stripe_event_id VARCHAR(255),
+                amount_cents INTEGER NOT NULL,
+                currency VARCHAR(16) NOT NULL,
+                minutes INTEGER NOT NULL,
+                created_at DATETIME
+            )
+        """))
+        A.db.session.execute(A.text(
+            "INSERT INTO credit_purchases (user_id, stripe_session_id, "
+            "amount_cents, currency, minutes) "
+            "VALUES (1, 'cs_pre_csrc', 500, 'usd', 300)"
+        ))
+        A.db.session.commit()
+        A.db.session.remove()
+        A.db.engine.dispose()
+        try:
+            A.ensure_credit_purchases_table()
+            A.ensure_credit_purchases_table()
+            cols = {c['name'] for c in A.sa_inspect(A.db.engine).get_columns(
+                'credit_purchases')}
+            assert 'checkout_source' in cols
+            for col in A.CREDIT_PURCHASE_COLUMN_MIGRATIONS:
+                assert col in cols
+            row = A.db.session.execute(A.text(
+                "SELECT checkout_source FROM credit_purchases "
+                "WHERE stripe_session_id='cs_pre_csrc'"
+            )).fetchone()
+            assert row[0] is None
+        finally:
+            A.db.session.execute(A.text('DROP TABLE IF EXISTS credit_purchases'))
+            A.db.session.commit()
+            A.db.session.remove()
+            A.db.engine.dispose()
+            A.db.create_all()
+            A.ensure_credit_purchases_table()
+
+
+def test_trial_exhausted_email_landing_stashes_campaign(volume_on):
+    """Transcript UTM from the trial-exhausted mail sets email_campaign on checkout."""
+    import email_notify as en
+    from models import db, TranscriptionTask
+    uid = _make_user('te-email-land@test.com', limit=600, used=600)
+    with A.app.app_context():
+        db.session.add(TranscriptionTask(
+            id='te-land-1', user_id=uid, episode_title='Ep',
+            status='completed', phase='completed',
+            transcript_text='hi',
+            partial_meta=A.encode_partial_task_meta(300, 3600),
+            source_audio_url='https://cdn.example.com/te-land.mp3',
+        ))
+        db.session.commit()
+    client, token = _vol_csrf_client(uid)
+    resp = client.get(
+        '/transcription/te-land-1'
+        f'?utm_source=podskrift&utm_medium=email&utm_campaign={en.TRIAL_EXHAUSTED}'
+    )
+    assert resp.status_code == 200
+    with client.session_transaction() as sess:
+        stash = sess.get('lifecycle_email_campaign')
+        assert stash and stash['c'] == en.TRIAL_EXHAUSTED
+        assert stash['u'] == uid
+        token = sess.get('_csrf_token') or token
+    quote = A.cheapest_pack_quote()
+    client.post('/billing/checkout', data={
+        'csrf_token': token,
+        'source': 'trial_exhausted_box',
+        'minutes': str(quote['minutes']),
+        'price_source': 'episode',
+    })
+    meta = volume_on['last_create_params']['metadata']
+    assert meta['email_campaign'] == en.TRIAL_EXHAUSTED
+    assert meta['checkout_source'] == 'trial_exhausted_box'
+
+
+def test_webhook_stores_trial_exhausted_email_campaign(volume_on):
+    import email_notify as en
+    from models import CreditPurchase
+    uid = _make_user('te-email-wh@test.com', limit=600, used=600)
+    sid = f'cs_te_email_{uid}'
+    sess = _volume_session(uid, 60, 150, session_id=sid)
+    sess['metadata']['checkout_source'] = 'trial_exhausted_box'
+    sess['metadata']['email_campaign'] = en.TRIAL_EXHAUSTED
+    assert _register_and_post(volume_on, sess).status_code == 200
+    with A.app.app_context():
+        row = CreditPurchase.query.filter_by(stripe_session_id=sid).one()
+        assert row.email_campaign == en.TRIAL_EXHAUSTED
+        assert row.checkout_source == 'trial_exhausted_box'
 
 
 def test_trial_exhausted_box_hidden_when_paid_balance(volume_on):
