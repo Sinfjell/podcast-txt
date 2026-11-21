@@ -569,6 +569,7 @@ def test_notion_property_names_subset_of_known_schema():
         'New buyers 1d': 0,
         'Buyers total': 0,
         'Repeat buyers total': 0,
+        'Minutes transcribed 1d': 12.5,
         'STT cost Together (USD)': 0.0,
         'STT cost OpenAI (USD)': 0.0,
         'STT cost mixed/Scribe (USD)': 0.0,

@@ -578,10 +578,12 @@ dashboard
 (`filterTestAccounts` → cohort «Internal / Test users»).
 
 SQLite also fills cumulative `Buyers total` / `Repeat buyers total` (≥ 2
-counted purchases, test buyers excluded) as of end of the metric day.
-`Signups 1d` and `Active users 1d` exclude test users; cumulative columns
-(`Users total`, `Never started`, …) stay unfiltered so their deltas do not
-jump.
+counted purchases, test buyers excluded) as of end of the metric day, and
+`Minutes transcribed 1d` (charged trial+paid seconds / 60 for the same
+platform-funded jobs that feed STT cost that day, test users excluded — for
+Utsikt cost-per-minute). `Signups 1d` and `Active users 1d` exclude test
+users; cumulative columns (`Users total`, `Never started`, …) stay
+unfiltered so their deltas do not jump.
 
 Warnings go to the Notion `Notes` property (Norwegian lines, ⚠️-prefixed,
 capped at 2000 chars). The same Notes channel also always carries a compact

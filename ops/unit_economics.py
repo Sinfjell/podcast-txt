@@ -18,6 +18,9 @@ the metrics row):
   any Scribe shadow spend) for platform-funded jobs. Jobs before per-job cost
   tracking (no ``stt_provider``) are estimated at whisper-1 list price on the
   charged minutes. BYOK jobs (nothing charged to trial/paid) cost us nothing.
+* Minutes transcribed 1d = sum of charged seconds (trial + paid) / 60 for the
+  same platform-funded jobs that feed STT cost that Oslo day, excluding test
+  users (``is_test_buyer``). BYOK excluded. Enables cost-per-minute in Utsikt.
 * LLM cost       = ``summary_cost_usd_est`` (token-based estimate).
 * Contribution margin = Net revenue - (STT + LLM).
 * Cumulative CM  = sum of daily CM from FIRST_REVENUE_DAY through the day.
@@ -185,23 +188,30 @@ def counted_purchases(conn, end_day: date) -> list[dict]:
 
 
 def variable_costs_by_day(conn, start: date, end: date) -> dict[date, dict]:
-    """{oslo_day: {stt_<bucket>, stt_est, stt, llm}} for platform-funded jobs."""
+    """{oslo_day: {stt_<bucket>, stt_est, stt, llm, minutes}} for platform-funded jobs.
+
+    ``minutes`` is charged seconds/60 for non-test users only (STT/LLM dollar
+    totals still include everyone — same as before this column existed).
+    """
     lo, hi = _utc_naive(start), _utc_naive(end + timedelta(days=1))
     out: dict[date, dict] = {}
 
     def slot(d):
         return out.setdefault(d, {**{f'stt_{b}': 0.0 for b in PROVIDER_BUCKETS},
-                                  'stt_est': 0.0, 'stt': 0.0, 'llm': 0.0})
+                                  'stt_est': 0.0, 'stt': 0.0, 'llm': 0.0,
+                                  'minutes': 0.0})
 
     for r in conn.execute(
         '''
-        SELECT COALESCE(completed_at, started_at) AS ev, stt_provider, stt_cost_usd,
-               COALESCE(trial_seconds_charged, 0) + COALESCE(paid_seconds_charged, 0)
-                   AS charged_s
-          FROM transcription_tasks
-         WHERE status IN ('completed', 'error', 'cancelled')
-           AND COALESCE(completed_at, started_at) >= ?
-           AND COALESCE(completed_at, started_at) < ?
+        SELECT COALESCE(t.completed_at, t.started_at) AS ev, t.stt_provider,
+               t.stt_cost_usd, t.user_id, u.email,
+               COALESCE(t.trial_seconds_charged, 0)
+                   + COALESCE(t.paid_seconds_charged, 0) AS charged_s
+          FROM transcription_tasks t
+          LEFT JOIN users u ON u.id = t.user_id
+         WHERE t.status IN ('completed', 'error', 'cancelled')
+           AND COALESCE(t.completed_at, t.started_at) >= ?
+           AND COALESCE(t.completed_at, t.started_at) < ?
         ''',
         (lo, hi),
     ):
@@ -220,6 +230,8 @@ def variable_costs_by_day(conn, start: date, end: date) -> dict[date, dict]:
             cost = 0.0
         s[f'stt_{provider_bucket(r["stt_provider"])}'] += cost
         s['stt'] += cost
+        if not is_test_buyer(r['user_id'], r['email']):
+            s['minutes'] += int(r['charged_s']) / 60.0
 
     for r in conn.execute(
         '''
@@ -356,7 +368,7 @@ def collect_unit_economics(conn, day: date, *, bts: list[dict] | None,
 
     costs = variable_costs_by_day(conn, min(start, day), day)
     zero = {**{f'stt_{b}': 0.0 for b in PROVIDER_BUCKETS},
-            'stt_est': 0.0, 'stt': 0.0, 'llm': 0.0}
+            'stt_est': 0.0, 'stt': 0.0, 'llm': 0.0, 'minutes': 0.0}
 
     cumulative = 0.0
     d = start
@@ -414,6 +426,8 @@ def collect_unit_economics(conn, day: date, *, bts: list[dict] | None,
         'Email-attributed purchases 1d': int(email_1d),
         'Repeat buyers 1d': len(repeat_buyers_1d),
         'Cumulative repeat-buyer rate': cum_repeat_rate,
+        # Same platform-funded jobs as STT cost; test users excluded.
+        'Minutes transcribed 1d': r2(c['minutes']),
         'STT cost Together (USD)': r4(c['stt_together']),
         'STT cost OpenAI (USD)': r4(c['stt_openai']),
         'STT cost mixed/Scribe (USD)': r4(c['stt_mixed']),
@@ -429,6 +443,7 @@ def collect_unit_economics(conn, day: date, *, bts: list[dict] | None,
 NOTION_NUMBER_KEYS = (
     'Gross revenue (USD)', 'Net revenue (USD)', 'Purchases 1d', 'Buyers 1d',
     'New buyers 1d', 'Buyers total', 'Repeat buyers total',
+    'Minutes transcribed 1d',
     'STT cost Together (USD)', 'STT cost OpenAI (USD)',
     'STT cost mixed/Scribe (USD)', 'STT cost estimated (USD)', 'STT cost (USD)',
     'LLM cost est. (USD)', 'Variable cost (USD)', 'Contribution margin (USD)',

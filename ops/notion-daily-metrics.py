@@ -19,10 +19,12 @@ Run via ops/notion-daily-metrics.sh on the host, or:
     python3 ops/notion-daily-metrics.py --day 2026-09-10
 
 Unit economics (variable costs only, see ops/unit_economics.py): gross/net
-revenue, buyers (incl. cumulative Buyers total / Repeat buyers total), STT +
-LLM cost, contribution margin and cumulative CM since 2026-10-09. Net revenue
-uses Stripe balance transactions (read-only; the key is STRIPE_SECRET_KEY from
-the env or the app .env) and falls back to a labelled estimate.
+revenue, buyers (incl. cumulative Buyers total / Repeat buyers total),
+Minutes transcribed 1d (platform-funded charged minutes, test users
+excluded), STT + LLM cost, contribution margin and cumulative CM since
+2026-10-09. Net revenue uses Stripe balance transactions (read-only; the key
+is STRIPE_SECRET_KEY from the env or the app .env) and falls back to a
+labelled estimate.
 
 This job never creates Notion schema — only writes known property names
 (see KNOWN_NOTION_SCHEMA_PROPERTIES).
@@ -91,7 +93,7 @@ KNOWN_NOTION_SCHEMA_PROPERTIES = frozenset({
     'STT cost (USD)', 'LLM cost est. (USD)', 'Variable cost (USD)',
     'Contribution margin (USD)', 'Cumulative CM (USD)',
     'Visitors 1d', 'Visitors ChatGPT 1d', 'Signups ChatGPT 1d',
-    'Buyers total', 'Repeat buyers total',
+    'Buyers total', 'Repeat buyers total', 'Minutes transcribed 1d',
 })
 
 try:

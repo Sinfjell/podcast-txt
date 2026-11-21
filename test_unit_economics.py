@@ -109,6 +109,25 @@ def test_costs_skip_byok_and_estimate_legacy():
     assert d['stt'] == pytest.approx(0.83)        # BYOK t2 and running t6 excluded
     assert d['llm'] == pytest.approx(0.003)
     assert c[date(2026, 10, 10)]['stt'] == pytest.approx(0.06)
+    # Minutes = charged_s/60 for non-test users (t1 100 + t3 20 + t4 10).
+    assert d['minutes'] == pytest.approx(130.0)
+    assert c[date(2026, 10, 10)]['minutes'] == pytest.approx(10.0)
+
+
+def test_minutes_transcribed_excludes_test_users_and_byok():
+    """Minutes transcribed 1d: same jobs as STT cost, minus test buyers / BYOK."""
+    conn = _db()
+    # Test user 90 with 60 charged minutes on the 12th — must not count.
+    conn.execute(
+        "INSERT INTO transcription_tasks VALUES "
+        "('t_test', 90, 'completed', '2026-10-12 09:00', '2026-10-12 09:30', "
+        "3600, 0, 'together', 0.05, NULL)")
+    out = ue.collect_unit_economics(conn, date(2026, 10, 12), bts=_bts())
+    assert out['Minutes transcribed 1d'] == 130.0   # still 100+20+10; not +60
+    assert 'Minutes transcribed 1d' in ue.NOTION_NUMBER_KEYS
+    # Backfill day 10 only sees t5's 10 min.
+    d10 = ue.collect_unit_economics(conn, date(2026, 10, 10), bts=_bts())
+    assert d10['Minutes transcribed 1d'] == 10.0
 
 
 def test_stripe_net_and_prorated_managed_payments_fee():
