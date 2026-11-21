@@ -102,6 +102,19 @@ def test_1h_is_not_sent_after_the_24h():
     assert L.decide_campaigns(f, NOW, RULES) == []
 
 
+def test_1h_skipped_when_trial_exhausted_email_already_sent():
+    """Immediate trial-exhausted mail covers the moment; skip the 1 h nudge."""
+    f = _trial_user(trial_exhausted_email_sent=True)
+    assert L.decide_campaigns(f, NOW, RULES) == []
+
+
+def test_24h_still_sends_after_trial_exhausted_email():
+    """The 24 h follow-up is independent of the immediate exhausted mail."""
+    f = _trial_user(trial_ended_at=NOW - timedelta(hours=25),
+                    trial_exhausted_email_sent=True)
+    assert L.decide_campaigns(f, NOW, RULES) == [L.TRIAL_ENDED_24H]
+
+
 def test_minimum_spacing_between_lifecycle_emails():
     f = _payer(sent={L.TRIAL_ENDED_24H: NOW - timedelta(hours=3)})
     assert L.decide_campaigns(f, NOW, RULES) == []
@@ -336,6 +349,30 @@ def test_sweep_sends_trial_ended_once(trial_on, stripe_on, ph_events, monkeypatc
     link = [w for w in fields['text'].split() if '/e/' in w][0]
     token = urlparse(link).path.split('/e/')[1]
     assert L.parse_click_token(A.app.secret_key, token)['t'] == task_id
+
+
+def test_sweep_skips_1h_after_trial_exhausted_email(
+        trial_on, stripe_on, ph_events, monkeypatch):
+    """Users who got the immediate exhausted mail must not get the 1 h nudge."""
+    import email_notify
+    _enable(monkeypatch)
+    uid = _make_user(f'te-skip-1h-{uuid.uuid4().hex[:6]}@gmail.com',
+                     limit=3600, used=3600)
+    _partial_task(uid)
+    with A.app.app_context():
+        assert email_notify.claim_email_send(
+            A.db, A.EmailSentLog, user_id=uid,
+            kind=email_notify.TRIAL_EXHAUSTED_SENT_KIND,
+            idempotency_key=f'trial_exhausted:{uid}')
+    with mock.patch.object(mailer.requests, 'get', return_value=_ok(404)), \
+            mock.patch.object(mailer.requests, 'post', return_value=_ok()) as post:
+        with A.app.app_context():
+            res = L.sweep(only_user_ids=[uid])
+    post.assert_not_called()
+    assert res['sent'] == {}
+    assert _sent_rows(uid) == [f'trial_exhausted:{uid}']
+    assert not any(
+        e['event'] == 'lifecycle_email_sent' for e in ph_events.events)
 
 
 def test_sweep_off_by_default(trial_on, monkeypatch):

@@ -11537,8 +11537,22 @@ def test_trial_ab_disabled_by_default_changes_nothing(trial_on):
     assert A.assign_trial_variant(1)[0] in ('60', '120')
 
 
-def test_trial_ab_assign_is_deterministic_control_or_trial30(monkeypatch, trial_on):
+def test_trial_ab_rollout_assigns_trial30_all_to_everyone(monkeypatch, trial_on):
+    """Default with AB on: every signup gets trial30_all / 30 min."""
     monkeypatch.setattr(A, 'TRIAL_AB_ENABLED', True)
+    monkeypatch.setattr(A, 'TRIAL_AB_ROLLOUT_OFF', False)
+    a1, s1 = A.assign_trial_variant(42)
+    a2, s2 = A.assign_trial_variant(99)
+    assert (a1, s1) == (A.TRIAL_AB_TRIAL30_ALL_LABEL, 1800)
+    assert (a2, s2) == (A.TRIAL_AB_TRIAL30_ALL_LABEL, 1800)
+    seen = {A.assign_trial_variant(i) for i in range(1, 200)}
+    assert seen == {(A.TRIAL_AB_TRIAL30_ALL_LABEL, 1800)}
+
+
+def test_trial_ab_rollout_off_restores_50_50(monkeypatch, trial_on):
+    """TRIAL_AB_ROLLOUT=off keeps the historical control/trial30 hash split."""
+    monkeypatch.setattr(A, 'TRIAL_AB_ENABLED', True)
+    monkeypatch.setattr(A, 'TRIAL_AB_ROLLOUT_OFF', True)
     a1, s1 = A.assign_trial_variant(42)
     a2, s2 = A.assign_trial_variant(42)
     assert (a1, s1) == (a2, s2)
@@ -11553,6 +11567,7 @@ def test_trial_ab_assign_is_deterministic_control_or_trial30(monkeypatch, trial_
 
 def test_trial_ab_signup_stamps_and_emits_assigned(ph_events, monkeypatch, trial_on):
     monkeypatch.setattr(A, 'TRIAL_AB_ENABLED', True)
+    monkeypatch.setattr(A, 'TRIAL_AB_ROLLOUT_OFF', False)
     email = 'trial-ab@example.com'
     _purge([email])
     A._register_attempts.clear()
@@ -11564,21 +11579,19 @@ def test_trial_ab_signup_stamps_and_emits_assigned(ph_events, monkeypatch, trial
     assert resp.status_code in (302, 303)
     with A.app.app_context():
         u = A.User.query.filter_by(email=email).first()
-        assert u.trial_variant in ('control', 'trial30')
-        expected_min = 60 if u.trial_variant == 'control' else 30
-        assert u.trial_seconds_limit == expected_min * 60
+        assert u.trial_variant == 'trial30_all'
+        assert u.trial_seconds_limit == 30 * 60
     signed = [e for e in ph_events.events if e['event'] == 'user_signed_up']
     assigned = [e for e in ph_events.events if e['event'] == 'trial_ab_assigned']
     assert signed and assigned
-    assert signed[-1]['properties']['trial_variant'] == assigned[-1]['properties']['trial_variant']
-    assert assigned[-1]['properties']['trial_granted_min'] == (
-        signed[-1]['properties']['trial_granted_min'])
-    assert assigned[-1]['properties']['$set']['trial_variant'] == (
-        assigned[-1]['properties']['trial_variant'])
+    assert signed[-1]['properties']['trial_variant'] == 'trial30_all'
+    assert assigned[-1]['properties']['trial_variant'] == 'trial30_all'
+    assert assigned[-1]['properties']['trial_granted_min'] == 30
+    assert signed[-1]['properties']['trial_granted_min'] == 30
+    assert assigned[-1]['properties']['$set']['trial_variant'] == 'trial30_all'
     # Flash quotes the stamped allowance.
     follow = client.get(resp.headers['Location'])
-    assert f"you have {signed[-1]['properties']['trial_granted_min']} free minutes" in (
-        follow.data.decode())
+    assert 'you have 30 free minutes' in follow.data.decode()
     _purge([email])
 
 

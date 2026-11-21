@@ -158,7 +158,7 @@
       "id": "partial-trial-preview",
       "date": "2026-10-09",
       "title": "Long episodes start with a free preview",
-      "summary": "If an episode is longer than your remaining free minutes, Podskrift transcribes the first stretch for free (60 minutes for new accounts), then lets you buy minutes to finish the rest. Paid balance or your own OpenAI key still runs the full episode."
+      "summary": "If an episode is longer than your remaining free minutes, Podskrift transcribes the first stretch for free, then lets you buy minutes to finish the rest. Paid balance or your own OpenAI key still runs the full episode."
     },
     {
       "id": "own-key-billing-clarity",
@@ -175,8 +175,8 @@
     {
       "id": "new-signup-60-min-trial",
       "date": "2026-10-09",
-      "title": "New accounts get 60 free minutes",
-      "summary": "Sign up and you get 60 minutes of free transcription on our key. Longer episodes still prompt you to buy more minutes or add your own OpenAI key when your free balance isn’t enough."
+      "title": "New accounts get free minutes",
+      "summary": "Sign up and you get free transcription minutes on our key. Longer episodes still prompt you to buy more minutes or add your own OpenAI key when your free balance isn’t enough."
     },
     {
       "id": "spotify-paste-robustness",

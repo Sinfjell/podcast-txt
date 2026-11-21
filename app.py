@@ -1157,16 +1157,21 @@ def _parse_trial_split_variants(raw):
 
 TRIAL_SPLIT_VARIANTS = _parse_trial_split_variants(
     os.getenv('TRIAL_SPLIT_VARIANTS', '60,120'))
-#: Off-by-default 30 vs 60 trial experiment (docs/experiments/trial-ab-30-vs-60.md).
-#: When on, new signups get control (60 min) or trial30 (30 min) 50/50 by
-#: user-id hash; TRIAL_SPLIT is ignored for those rows. Merging with the
-#: default off changes nothing.
+#: Off-by-default trial AB flag (docs/experiments/trial-ab-30-vs-60.md).
+#: When on, new signups get 30 minutes with trial_variant=trial30_all
+#: (rolled-out default). Set TRIAL_AB_ROLLOUT=off to restore the old
+#: control (60) / trial30 (30) 50/50 split by user-id hash. TRIAL_SPLIT
+#: is ignored for those rows either way.
 TRIAL_AB_ENABLED = os.getenv('TRIAL_AB_ENABLED', '0').strip().lower() in (
     '1', 'true', 'yes', 'on')
+#: 'off' restores the 50/50 AB; any other value (default) grants 30 to all.
+TRIAL_AB_ROLLOUT = (os.getenv('TRIAL_AB_ROLLOUT', 'all') or 'all').strip().lower()
+TRIAL_AB_ROLLOUT_OFF = TRIAL_AB_ROLLOUT in ('0', 'false', 'no', 'off')
 TRIAL_AB_CONTROL_MINUTES = max(1, _env_minutes('TRIAL_AB_CONTROL_MINUTES', 60))
 TRIAL_AB_TRIAL30_MINUTES = max(1, _env_minutes('TRIAL_AB_TRIAL30_MINUTES', 30))
 TRIAL_AB_CONTROL_LABEL = 'control'
 TRIAL_AB_TRIAL30_LABEL = 'trial30'
+TRIAL_AB_TRIAL30_ALL_LABEL = 'trial30_all'
 #: The 60-minute signup grant (PR #54) ran from 2026-10-09 ~06:40 UTC until
 #: the 120-minute default shipped. raise_60_minute_trial_cohort() lifts those
 #: rows once at boot. Bounds are UTC, matching how users.created_at is stored;
@@ -1537,13 +1542,19 @@ def assign_trial_variant(user_id):
     """Deterministic (variant_label, seconds) for a new signup.
 
     Precedence:
-    1. TRIAL_AB_ENABLED → ('control'| 'trial30', matching seconds).
-    2. TRIAL_SPLIT_ENABLED → (minute-label, seconds) from TRIAL_SPLIT_VARIANTS.
-    3. Else → (None, NEW_USER_TRIAL_SECONDS) so legacy NULL variant is kept.
+    1. TRIAL_AB_ENABLED + rollout on → ('trial30_all', 30 min seconds).
+    2. TRIAL_AB_ENABLED + TRIAL_AB_ROLLOUT=off → ('control'|'trial30', …).
+    3. TRIAL_SPLIT_ENABLED → (minute-label, seconds) from TRIAL_SPLIT_VARIANTS.
+    4. Else → (None, NEW_USER_TRIAL_SECONDS) so legacy NULL variant is kept.
 
     Assignment is signup-only; existing rows are never rewritten.
     """
     if TRIAL_AB_ENABLED:
+        if not TRIAL_AB_ROLLOUT_OFF:
+            return (
+                TRIAL_AB_TRIAL30_ALL_LABEL,
+                TRIAL_AB_TRIAL30_MINUTES * 60,
+            )
         digest = hashlib.sha256(
             f'podskrift-trial-ab-30-vs-60:{int(user_id)}'.encode('utf-8')
         ).digest()
@@ -6770,7 +6781,8 @@ def register():
             signup_props, user.id, sid=ph_sid, did=ph_did)
         product_analytics.capture('user_signed_up', user.id, signup_props)
         if TRIAL_AB_ENABLED and variant in (
-                TRIAL_AB_CONTROL_LABEL, TRIAL_AB_TRIAL30_LABEL):
+                TRIAL_AB_CONTROL_LABEL, TRIAL_AB_TRIAL30_LABEL,
+                TRIAL_AB_TRIAL30_ALL_LABEL):
             ab_props = {
                 'trial_variant': variant,
                 'trial_granted_min': granted_min,

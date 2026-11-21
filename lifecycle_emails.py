@@ -200,6 +200,9 @@ class UserFacts:
     started_after_trial_end: bool = False
     #: campaign -> when it was sent (from email_sent_log).
     sent: dict = field(default_factory=dict)
+    #: Immediate trial-exhausted transactional mail already went out
+    #: (email_sent_log kind=trial_exhausted). Skip the 1 h lifecycle nudge.
+    trial_exhausted_email_sent: bool = False
 
 
 def exclusion_reason(f: UserFacts, excluded_ids: Iterable[int] = ()) -> Optional[str]:
@@ -265,7 +268,10 @@ def decide_campaigns(f: UserFacts, now: datetime, rules: Rules,
         if (TRIAL_ENDED_24H not in sent
                 and rules.trial_24h_after <= age < rules.trial_24h_until):
             return [TRIAL_ENDED_24H]
+        # Immediate trial-exhausted mail already covered the "trial is over"
+        # moment — skip the 1 h nudge; the 24 h follow-up still sends.
         if (TRIAL_ENDED_1H not in sent and TRIAL_ENDED_24H not in sent
+                and not f.trial_exhausted_email_sent
                 and rules.trial_1h_after <= age < rules.trial_1h_until):
             return [TRIAL_ENDED_1H]
         return []
@@ -621,6 +627,12 @@ def gather_facts(user) -> UserFacts:
         A.EmailSentLog.user_id == uid,
         A.EmailSentLog.kind.like(SENT_LOG_KIND_PREFIX + '%')).all()
     f.sent = {r.kind[len(SENT_LOG_KIND_PREFIX):]: _aware(r.created_at) for r in rows}
+    # Distinct from lifecycle kinds: the once-ever trial_exhausted mail.
+    import email_notify
+    f.trial_exhausted_email_sent = (
+        A.EmailSentLog.query.filter_by(
+            user_id=uid, kind=email_notify.TRIAL_EXHAUSTED_SENT_KIND
+        ).first() is not None)
     return f
 
 

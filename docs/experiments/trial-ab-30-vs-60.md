@@ -1,30 +1,46 @@
 # Trial A/B: 60 vs 30 free minutes
 
-Off-by-default experiment. Merging the code changes nothing until
-`TRIAL_AB_ENABLED=1` is set in the environment.
+**Status: concluded — ship 30 for all new signups.**
 
-## Arms
+The experiment ran with `TRIAL_AB_ENABLED=1`. New signups now get
+`trial_variant=trial30_all` and 30 minutes (no `.env` change needed while
+AB stays on). Set `TRIAL_AB_ROLLOUT=off` only to restore the old 50/50
+`control` / `trial30` split.
+
+## Outcome
+
+| Arm | Purchase rate (sample) | Revenue / signup |
+| --- | --- | --- |
+| `trial30` (30 min) | 14.7% | $0.45 |
+| `control` (60 min) | 10.0% | $0.27 |
+
+Sample is small. **Revisit if the 14-day purchase rate falls below 10%.**
+
+## Arms (historical)
 
 | Variant (`users.trial_variant`) | Grant | Notes |
 | --- | --- | --- |
-| `control` | 60 minutes | Baseline grant while the experiment runs. |
+| `control` | 60 minutes | Baseline while the experiment ran. |
 | `trial30` | 30 minutes | Treatment. |
+| `trial30_all` | 30 minutes | Post-decision rollout label for every new signup. |
 
-Assignment is deterministic 50/50 at signup from
+Assignment during the experiment was deterministic 50/50 at signup from
 `sha256("podskrift-trial-ab-30-vs-60:{user_id}")`. Existing users (NULL
-`trial_variant`, or rows stamped before enablement) are never rewritten.
+`trial_variant`, or rows stamped before enablement / before rollout) are
+never rewritten — variant is signup-only.
 
 When the flag is on, `advertised_trial_minutes()` returns `None` so
 logged-out marketing never quotes 30 or 60 — templates use neutral
 “start free / try it free” copy. After signup/login, UI shows the
-account’s stamped allowance. When the flag is off, signup behaviour and
-marketing copy are unchanged (existing `TRIAL_SPLIT_ENABLED` /
-`NEW_USER_TRIAL_MINUTES` path).
+account’s stamped allowance. Pack / pricing copy that mentions
+“60 minutes” as a paid pack size is unrelated and stays as-is.
 
 ## Env
 
 ```bash
-TRIAL_AB_ENABLED=0                 # default — no behaviour change
+TRIAL_AB_ENABLED=0                 # kill switch — off restores TRIAL_SPLIT / NEW_USER path
+TRIAL_AB_ROLLOUT=all               # default when AB is on: everyone gets trial30_all / 30 min
+# TRIAL_AB_ROLLOUT=off             # restore control (60) / trial30 (30) 50/50
 # TRIAL_AB_CONTROL_MINUTES=60
 # TRIAL_AB_TRIAL30_MINUTES=30
 ```
@@ -38,9 +54,9 @@ only one experiment assigns new signups (AB already takes precedence in code).
   `transcript_started` / `transcript_completed`, client `paywall_shown`,
   `checkout_started`, `purchase_completed`.
 - Event `trial_ab_assigned` at signup (same distinct_id = user id) with
-  `trial_variant` and `trial_granted_min`.
+  `trial_variant` and `trial_granted_min` (30 under the rollout).
 
-## Decision rule
+## Decision rule (historical)
 
 - **Primary metric:** share of new signups who make a purchase within 7 days
   of signup.
@@ -53,9 +69,5 @@ only one experiment assigns new signups (AB already takes precedence in code).
   finished-transcript rate drops by less than 5 percentage points **and**
   CM per signup is not worse; otherwise keep 60 (`control`).
 
-## Expected calendar length
-
-At ~20 signups/day, 300 per arm (600 total) takes about **30 days**. The
-21-day floor is therefore not binding at that rate — plan on roughly a
-month of traffic after enablement before a decision, and longer if daily
-signups are softer.
+Owner approved ending the experiment in favour of 30 for all new signups
+(`trial30_all`) despite the small sample, with the revisit guard above.
