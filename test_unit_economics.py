@@ -232,12 +232,38 @@ def test_checkout_attribution_and_repeat_buyers():
     assert out['Repeat buyers 1d'] == 1       # 500 bought on the 10th
     # Cumulative through the 12th: buyers 500 (2 purchases) + 501 (1) → 1/2
     assert out['Cumulative repeat-buyer rate'] == 0.5
+    assert out['Buyers total'] == 2
+    assert out['Repeat buyers total'] == 1
     line = ue.format_checkout_attr_notes(out)
     assert line.startswith('checkout_attr ')
     assert 'te_box_1d=1' in line
     assert 'email_1d=1' in line
     assert 'repeat_buyers_1d=1' in line
     assert 'cum_repeat_rate=0.5' in line
+
+
+def test_buyers_total_and_repeat_as_of_backfill_day():
+    """Buyers total / Repeat buyers total cut at end of metric day (backfill-safe).
+
+    Test buyers (id 90, smoke email) never count. Day 10 has only user 500's
+    first purchase; day 12 adds 501 and makes 500 a repeat buyer.
+    """
+    conn = _db()
+    d10 = ue.collect_unit_economics(conn, date(2026, 10, 10), bts=_bts())
+    assert d10['Buyers total'] == 1
+    assert d10['Repeat buyers total'] == 0
+    assert d10['Buyers 1d'] == 1
+    d12 = ue.collect_unit_economics(conn, date(2026, 10, 12), bts=_bts())
+    assert d12['Buyers total'] == 2
+    assert d12['Repeat buyers total'] == 1
+    # counted_purchases(conn, day) itself is end-of-day bounded.
+    assert [r['id'] for r in ue.counted_purchases(conn, date(2026, 10, 10))] == [1]
+    assert [r['id'] for r in ue.counted_purchases(conn, date(2026, 10, 12))] == [1, 2, 3]
+    # Notion number keys include the new columns; Notes still carries the rate.
+    assert 'Buyers total' in ue.NOTION_NUMBER_KEYS
+    assert 'Repeat buyers total' in ue.NOTION_NUMBER_KEYS
+    assert 'Cumulative repeat-buyer rate' in ue.CHECKOUT_ATTR_KEYS
+    assert 'Repeat buyers 1d' in ue.CHECKOUT_ATTR_KEYS
 
 
 def test_checkout_attr_null_safe_without_columns():

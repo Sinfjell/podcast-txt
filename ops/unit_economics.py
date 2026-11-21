@@ -374,7 +374,9 @@ def collect_unit_economics(conn, day: date, *, bts: list[dict] | None,
         1 for p in todays if (p.get('checkout_source') or '') == 'trial_exhausted_box')
     email_1d = sum(1 for p in todays if p.get('email_campaign'))
 
-    # Cumulative: distinct counted buyers with >=2 purchases / all buyers.
+    # Cumulative as of end of *day* (counted_purchases already cuts at day+1):
+    # distinct counted buyers, and those with >=2 purchases. Notion columns
+    # "Buyers total" / "Repeat buyers total"; rate + Repeat buyers 1d stay in Notes.
     purchase_count_by_user: dict = {}
     for p in purchases:
         uid = p['user_id']
@@ -404,6 +406,8 @@ def collect_unit_economics(conn, day: date, *, bts: list[dict] | None,
         'Purchases 1d': len(todays),
         'Buyers 1d': len(buyers_1d),
         'New buyers 1d': len(new_buyers_1d),
+        'Buyers total': int(all_buyers),
+        'Repeat buyers total': int(multi_buyers),
         # Attribution / retention (also written into Notion Notes — see
         # format_checkout_attr_notes; the job does not create Notion columns).
         'Trial-exhausted box purchases 1d': int(te_box_1d),
@@ -424,7 +428,8 @@ def collect_unit_economics(conn, day: date, *, bts: list[dict] | None,
 
 NOTION_NUMBER_KEYS = (
     'Gross revenue (USD)', 'Net revenue (USD)', 'Purchases 1d', 'Buyers 1d',
-    'New buyers 1d', 'STT cost Together (USD)', 'STT cost OpenAI (USD)',
+    'New buyers 1d', 'Buyers total', 'Repeat buyers total',
+    'STT cost Together (USD)', 'STT cost OpenAI (USD)',
     'STT cost mixed/Scribe (USD)', 'STT cost estimated (USD)', 'STT cost (USD)',
     'LLM cost est. (USD)', 'Variable cost (USD)', 'Contribution margin (USD)',
     'Cumulative CM (USD)',

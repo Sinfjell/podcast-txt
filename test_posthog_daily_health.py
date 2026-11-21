@@ -254,6 +254,7 @@ def _minimal_podcast_db(path: Path) -> None:
         '''
         CREATE TABLE users (
             id INTEGER PRIMARY KEY,
+            email TEXT,
             created_at TEXT,
             trial_seconds_used INTEGER,
             trial_seconds_limit INTEGER
@@ -368,8 +369,8 @@ def test_collect_metrics_includes_daily_trial_used_vs_cap():
         _minimal_podcast_db(db)
         conn = sqlite3.connect(db)
         conn.execute(
-            "INSERT INTO users (id, created_at, trial_seconds_used, trial_seconds_limit) "
-            "VALUES (1, '2026-01-01 00:00:00', ?, 10800)",
+            "INSERT INTO users (id, email, created_at, trial_seconds_used, trial_seconds_limit) "
+            "VALUES (1, 'a@gmail.com', '2026-01-01 00:00:00', ?, 10800)",
             (1260 * 60,),  # lifetime personal burn (still reported)
         )
         conn.execute(
@@ -406,11 +407,11 @@ def test_backfill_day_reports_trial_state_as_of_that_day():
         _minimal_podcast_db(db)
         conn = sqlite3.connect(db)
         conn.executemany(
-            "INSERT INTO users (id, created_at, trial_seconds_used, trial_seconds_limit) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO users (id, email, created_at, trial_seconds_used, trial_seconds_limit) "
+            "VALUES (?, ?, ?, ?, ?)",
             [
-                (1, '2026-10-01 08:00:00', 3600, 3600),   # 30 min on 10-02, 30 on 10-05
-                (2, '2026-10-04 08:00:00', 600, None),    # signs up after the day
+                (1, 'a@gmail.com', '2026-10-01 08:00:00', 3600, 3600),  # 30 on 10-02, 30 on 10-05
+                (2, 'b@gmail.com', '2026-10-04 08:00:00', 600, None),   # signs up after the day
             ],
         )
         conn.executemany(
@@ -472,3 +473,161 @@ def test_day_bounds_utc_handles_dst_days():
     # 2026-03-29: summer time starts -> 23-hour day.
     assert mod.day_bounds_utc(date(2026, 3, 29)) == ('2026-03-28 23:00:00', '2026-03-29 22:00:00')
     assert mod.day_bounds_utc(date(2026, 10, 26)) == ('2026-10-25 23:00:00', '2026-10-26 23:00:00')
+
+
+def test_build_funnel_query_oslo_day_and_cohort():
+    start, end = phh.metric_day_bounds(date(2026, 11, 13))
+    sql = phh.build_funnel_query(start, end)
+    assert "properties.$host IN ('podskrift.com', 'www.podskrift.com')" in sql
+    assert "ILIKE '%chatgpt%'" in sql
+    assert f'NOT person_id IN COHORT {phh.INTERNAL_COHORT_ID}' in sql
+    assert "event IN ('$pageview', 'user_signed_up')" in sql
+    # Oslo 13.11.2026 = UTC 12.11 23:00 → 13.11 23:00 (CET).
+    assert "toDateTime('2026-11-12 23:00:00')" in sql
+    assert "toDateTime('2026-11-13 23:00:00')" in sql
+    assert 'AS visitors' in sql
+    assert 'AS visitors_chatgpt' in sql
+    assert 'AS signups_chatgpt' in sql
+
+
+def test_parse_funnel_row_list_and_mapping():
+    assert phh.parse_funnel_row([38, 14, 3]) == {
+        'Visitors 1d': 38,
+        'Visitors ChatGPT 1d': 14,
+        'Signups ChatGPT 1d': 3,
+    }
+    assert phh.parse_funnel_row({
+        'visitors': 74, 'visitors_chatgpt': 31, 'signups_chatgpt': 8,
+    }) == {
+        'Visitors 1d': 74,
+        'Visitors ChatGPT 1d': 31,
+        'Signups ChatGPT 1d': 8,
+    }
+    assert phh.parse_funnel_row(None) == {
+        'Visitors 1d': 0,
+        'Visitors ChatGPT 1d': 0,
+        'Signups ChatGPT 1d': 0,
+    }
+
+
+def test_fetch_funnel_failure_omits_keys_and_notes_line(capsys, monkeypatch):
+    """Missing PostHog key → omit funnel keys (never 0) + Notes reason line."""
+    mod = _load_metrics_module('notion_daily_metrics_funnel_fail')
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / 'podcast.db'
+        _minimal_podcast_db(db)
+        monkeypatch.setenv('DRY_RUN', '1')
+        monkeypatch.delenv('POSTHOG_PERSONAL_API_KEY', raising=False)
+        monkeypatch.delenv('NOTION_TOKEN', raising=False)
+        monkeypatch.setenv('PODSKRIFT_DB', str(db))
+        rc = mod.main(['--day', '2026-11-13', '--db', str(db)])
+        assert rc == 0
+    out = capsys.readouterr().out
+    assert 'Trakt-tall fra PostHog mangler: POSTHOG_PERSONAL_API_KEY mangler' in out
+    # Keys must be absent from the printed JSON (not written as 0).
+    assert '"Visitors 1d"' not in out
+    assert '"Visitors ChatGPT 1d"' not in out
+    assert '"Signups ChatGPT 1d"' not in out
+
+
+def test_fetch_funnel_success_adds_keys(monkeypatch):
+    mod = _load_metrics_module('notion_daily_metrics_funnel_ok')
+
+    def fake_query(host, project_id, api_key, hogql):
+        assert 'uniqIf' in hogql
+        return [[55, 20, 5]]
+
+    monkeypatch.setattr(mod, 'posthog_query', fake_query)
+    monkeypatch.setenv('POSTHOG_PERSONAL_API_KEY', 'phx_test_not_a_real_key')
+    metrics, reason = mod.fetch_funnel_metrics(date(2026, 11, 13))
+    assert reason is None
+    assert metrics == {
+        'Visitors 1d': 55,
+        'Visitors ChatGPT 1d': 20,
+        'Signups ChatGPT 1d': 5,
+    }
+
+
+def test_notion_property_names_subset_of_known_schema():
+    """Unknown property names make Notion PATCH fail — keep writes ⊆ schema."""
+    import unit_economics as ue
+    mod = _load_metrics_module('notion_daily_metrics_schema')
+    metrics = {k: 0 for k in (
+        'Users total', 'Signups 1d', 'Active users 1d', 'Completions 1d',
+        'Errors 1d', 'Never started', 'Ever completed', 'Returned 2+ days',
+        'Trial minutes used', 'Trial exhausted')}
+    metrics.update({
+        'day': '2026-11-13',
+        'Trial minutes 1d': 1.0,
+        'Trial daily cap minutes 1d': 2000.0,
+        'Trial daily cap used 1d': 0.0005,
+        'Gross revenue (USD)': 0.0,
+        'Net revenue (USD)': 0.0,
+        'Net revenue source': 'n/a',
+        'Purchases 1d': 0,
+        'Buyers 1d': 0,
+        'New buyers 1d': 0,
+        'Buyers total': 0,
+        'Repeat buyers total': 0,
+        'STT cost Together (USD)': 0.0,
+        'STT cost OpenAI (USD)': 0.0,
+        'STT cost mixed/Scribe (USD)': 0.0,
+        'STT cost estimated (USD)': 0.0,
+        'STT cost (USD)': 0.0,
+        'LLM cost est. (USD)': 0.0,
+        'Variable cost (USD)': 0.0,
+        'Contribution margin (USD)': 0.0,
+        'Cumulative CM (USD)': 0.0,
+        'Visitors 1d': 40,
+        'Visitors ChatGPT 1d': 15,
+        'Signups ChatGPT 1d': 4,
+    })
+    props = mod.notion_properties(
+        metrics, 'cron', datetime.now(timezone.utc),
+        notes_content='checkout_attr te_box_1d=0',
+    )
+    assert set(props) <= mod.KNOWN_NOTION_SCHEMA_PROPERTIES
+    # And the constants that drive writes are themselves ⊆ schema.
+    assert set(ue.NOTION_NUMBER_KEYS) <= mod.KNOWN_NOTION_SCHEMA_PROPERTIES
+    assert set(ue.NOTION_SELECT_KEYS) <= mod.KNOWN_NOTION_SCHEMA_PROPERTIES
+    assert set(phh.FUNNEL_NUMBER_KEYS) <= mod.KNOWN_NOTION_SCHEMA_PROPERTIES
+
+
+def test_signups_and_active_exclude_test_users():
+    """Signups 1d / Active users 1d drop test buyers; cumulatives stay unfiltered."""
+    mod = _load_metrics_module('notion_daily_metrics_test_users')
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / 'podcast.db'
+        _minimal_podcast_db(db)
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        # Day 2026-11-13 Oslo = UTC [2026-11-12 23:00, 2026-11-13 23:00).
+        conn.executemany(
+            "INSERT INTO users (id, email, created_at, trial_seconds_used, trial_seconds_limit) "
+            "VALUES (?, ?, ?, 0, NULL)",
+            [
+                (600, 'real@gmail.com', '2026-11-13 10:00:00'),
+                (90, 'excluded-id@gmail.com', '2026-11-13 11:00:00'),  # excluded id
+                (601, 'smoke-1@gmail.com', '2026-11-13 12:00:00'),     # test email
+                (602, 'old@gmail.com', '2026-11-01 08:00:00'),         # before day
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO transcription_tasks "
+            "(id, user_id, status, started_at, completed_at, heartbeat_at, "
+            "trial_seconds_charged) VALUES (?, ?, 'completed', ?, ?, NULL, 0)",
+            [
+                ('t1', 600, '2026-11-13 10:30:00', '2026-11-13 10:40:00'),
+                ('t2', 90, '2026-11-13 11:30:00', '2026-11-13 11:40:00'),
+                ('t3', 601, '2026-11-13 12:30:00', '2026-11-13 12:40:00'),
+            ],
+        )
+        conn.commit()
+        metrics = mod.collect_metrics(
+            conn, date(2026, 11, 13), trial_default_seconds=180 * 60,
+        )
+        conn.close()
+    assert metrics['Signups 1d'] == 1          # only real@gmail.com
+    assert metrics['Active users 1d'] == 1     # only user 600
+    # Cumulative columns still count everyone created by end of day.
+    assert metrics['Users total'] == 4
