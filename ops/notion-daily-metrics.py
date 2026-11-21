@@ -4,12 +4,14 @@
 Python 3 stdlib only (sqlite3, urllib). Read-only against the SQLite database.
 Timezone for the metric day is Europe/Oslo; default day is yesterday.
 
-Each run also queries PostHog (EU) for a short product-health check, and flags
-a stale/missing SQLite backup under data/backups/ (older than 26 h). When
-something looks abnormal — or the check cannot run — warning lines are written
-to the Notion rich-text property Notes (Norwegian, under 2000 chars). When
-everything is fine, Notes is omitted so manual notes stay untouched. A missing
-PostHog key, timeout, or API error never blocks the metrics upsert.
+Each run also queries PostHog (EU) for a short product-health check and for
+one-day funnel counts (Visitors 1d, Visitors ChatGPT 1d, Signups ChatGPT 1d),
+and flags a stale/missing SQLite backup under data/backups/ (older than 26 h).
+When something looks abnormal — or the check cannot run — warning lines are
+written to the Notion rich-text property Notes (Norwegian, under 2000 chars).
+When everything is fine, Notes is omitted so manual notes stay untouched. A
+missing PostHog key, timeout, or API error never blocks the metrics upsert;
+funnel keys are omitted (never written as 0) with a Notes line instead.
 
 Run via ops/notion-daily-metrics.sh on the host, or:
 
@@ -17,10 +19,15 @@ Run via ops/notion-daily-metrics.sh on the host, or:
     python3 ops/notion-daily-metrics.py --day 2026-09-10
 
 Unit economics (variable costs only, see ops/unit_economics.py): gross/net
-revenue, buyers, STT + LLM cost, contribution margin and cumulative CM since
-2026-10-09. Net revenue uses Stripe balance transactions (read-only; the key is
-STRIPE_SECRET_KEY from the env or the app .env) and falls back to a labelled
-estimate.
+revenue, buyers (incl. cumulative Buyers total / Repeat buyers total),
+Minutes transcribed 1d (platform-funded charged minutes, test users
+excluded), STT + LLM cost, contribution margin and cumulative CM since
+2026-10-09. Net revenue uses Stripe balance transactions (read-only; the key
+is STRIPE_SECRET_KEY from the env or the app .env) and falls back to a
+labelled estimate.
+
+This job never creates Notion schema — only writes known property names
+(see KNOWN_NOTION_SCHEMA_PROPERTIES).
 
 Requires ops/.env.metrics (or $APP_DIR/.env.metrics) with NOTION_TOKEN.
 Optional: POSTHOG_PERSONAL_API_KEY (query:read), POSTHOG_PROJECT_ID,
@@ -70,6 +77,24 @@ BACKUP_STALE_AFTER_HOURS = 26
 # taken 2026-10-13 shows TRIAL_DAILY_MINUTES=3500). Before this the cap is not
 # reconstructable, so cap columns stay empty on backfilled rows.
 TRIAL_DAILY_CAP_KNOWN_FROM = date(2026, 10, 13)
+
+# Exact Notion DB property names this job may write. An unknown name makes the
+# whole PATCH fail (HTTP 400) and loses the day's row — never invent names.
+KNOWN_NOTION_SCHEMA_PROPERTIES = frozenset({
+    'Name', 'Date', 'Source', 'Synced at', 'Notes',
+    'Users total', 'Signups 1d', 'Active users 1d', 'Completions 1d',
+    'Errors 1d', 'Never started', 'Ever completed', 'Returned 2+ days',
+    'Trial minutes used', 'Trial exhausted', 'Trial minutes 1d',
+    'Trial daily cap minutes 1d', 'Trial daily cap used 1d',
+    'Gross revenue (USD)', 'Net revenue (USD)', 'Net revenue source',
+    'Purchases 1d', 'Buyers 1d', 'New buyers 1d',
+    'STT cost Together (USD)', 'STT cost OpenAI (USD)',
+    'STT cost mixed/Scribe (USD)', 'STT cost estimated (USD)',
+    'STT cost (USD)', 'LLM cost est. (USD)', 'Variable cost (USD)',
+    'Contribution margin (USD)', 'Cumulative CM (USD)',
+    'Visitors 1d', 'Visitors ChatGPT 1d', 'Signups ChatGPT 1d',
+    'Buyers total', 'Repeat buyers total', 'Minutes transcribed 1d',
+})
 
 try:
     import sentry_sdk
@@ -361,21 +386,36 @@ def collect_metrics(conn: sqlite3.Connection, day: date,
         'SELECT COUNT(*) FROM users WHERE created_at < ?',
         (end,),
     )
-    signups_1d = _scalar(
-        conn,
-        'SELECT COUNT(*) FROM users WHERE created_at >= ? AND created_at < ?',
+    # Signups 1d / Active users 1d exclude test users (is_test_buyer). Cumulative
+    # columns below (Users total, Never started, Ever completed, Trial exhausted,
+    # Trial minutes used, Returned 2+ days) stay unfiltered so day-over-day
+    # deltas on those series do not jump when this filter lands.
+    signup_rows = conn.execute(
+        '''
+        SELECT id, email FROM users
+         WHERE created_at >= ? AND created_at < ?
+        ''',
         (start, end),
+    ).fetchall()
+    signups_1d = sum(
+        1 for r in signup_rows
+        if not ue.is_test_buyer(r['id'], r['email'])
     )
     # No updated_at on transcription_tasks — activity from started/completed/heartbeat.
-    active_users_1d = _scalar(
-        conn,
+    active_rows = conn.execute(
         '''
-        SELECT COUNT(DISTINCT user_id) FROM transcription_tasks
-         WHERE (started_at >= ? AND started_at < ?)
-            OR (completed_at >= ? AND completed_at < ?)
-            OR (heartbeat_at >= ? AND heartbeat_at < ?)
+        SELECT DISTINCT u.id, u.email
+          FROM transcription_tasks t
+          JOIN users u ON u.id = t.user_id
+         WHERE (t.started_at >= ? AND t.started_at < ?)
+            OR (t.completed_at >= ? AND t.completed_at < ?)
+            OR (t.heartbeat_at >= ? AND t.heartbeat_at < ?)
         ''',
         (start, end, start, end, start, end),
+    ).fetchall()
+    active_users_1d = sum(
+        1 for r in active_rows
+        if not ue.is_test_buyer(r['id'], r['email'])
     )
     completions_1d = _scalar(
         conn,
@@ -588,6 +628,10 @@ def notion_properties(
     for key in ue.NOTION_SELECT_KEYS:
         if metrics.get(key):
             props[key] = {'select': {'name': metrics[key]}}
+    # PostHog funnel counts — only when successfully fetched (omit on failure).
+    for key in phh.FUNNEL_NUMBER_KEYS:
+        if key in metrics:
+            props[key] = {'number': metrics[key]}
     # Notes carries checkout attribution (always, when present) plus optional
     # health warnings. Attribution alone still writes Notes.
     if notes_content:
@@ -751,6 +795,33 @@ def run_health_check(metric_day: date) -> list[str]:
         return [f'PostHog-helsesjekk kjørte ikke: {_health_error_reason(exc)}']
 
 
+def fetch_funnel_metrics(metric_day: date) -> tuple[dict, str | None]:
+    """Visitors / ChatGPT funnel counts for *metric_day*.
+
+    Returns ``(metrics_dict, None)`` on success, or ``({}, reason)`` on failure.
+    Never raises. On failure the three keys are omitted (caller must not write 0).
+    """
+    try:
+        api_key = os.environ.get('POSTHOG_PERSONAL_API_KEY', '').strip()
+        if not api_key:
+            return {}, 'POSTHOG_PERSONAL_API_KEY mangler'
+        host = (
+            os.environ.get('POSTHOG_HOST', '').strip().rstrip('/')
+            or phh.DEFAULT_POSTHOG_HOST
+        )
+        project_id = (
+            os.environ.get('POSTHOG_PROJECT_ID', '').strip()
+            or phh.DEFAULT_POSTHOG_PROJECT_ID
+        )
+        day_start, day_end = phh.metric_day_bounds(metric_day)
+        hogql = phh.build_funnel_query(day_start, day_end)
+        rows = posthog_query(host, project_id, api_key, hogql)
+        row = rows[0] if rows else None
+        return phh.parse_funnel_row(row), None
+    except Exception as exc:  # noqa: BLE001 — funnel must never break metrics
+        return {}, _health_error_reason(exc)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--day', help='Metric day YYYY-MM-DD in Europe/Oslo (default: yesterday)')
@@ -811,6 +882,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # Health check after metrics collect; failures become a single Notes line.
     health_lines = run_health_check(day)
+    # Funnel counts are independent of the health check: missing key / timeout /
+    # HTTP error omits the three keys (never 0) and adds one Notes line.
+    funnel_metrics, funnel_reason = fetch_funnel_metrics(day)
+    if funnel_metrics:
+        metrics.update(funnel_metrics)
+    if funnel_reason:
+        health_lines.append(f'Trakt-tall fra PostHog mangler: {funnel_reason}')
     health_lines.extend(unit_econ_notes)
     health_lines.extend(feedback_lines)
     # Daily free-trial budget — silent stop risk for every free-trial user.

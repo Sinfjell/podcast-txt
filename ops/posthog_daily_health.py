@@ -85,6 +85,15 @@ PODSKRIFT_EVENTS = (
 )
 
 PT_HOSTS = ('productivitytech.io', 'www.productivitytech.io')
+PODSKRIFT_HOSTS = ('podskrift.com', 'www.podskrift.com')
+
+#: Notion number properties filled from the ChatGPT / visitors funnel query.
+#: Omitted entirely when PostHog is unavailable — never written as 0.
+FUNNEL_NUMBER_KEYS = (
+    'Visitors 1d',
+    'Visitors ChatGPT 1d',
+    'Signups ChatGPT 1d',
+)
 
 
 @dataclass
@@ -291,6 +300,51 @@ def notes_rich_text_property(content: str) -> dict:
 def hogql_dt(dt: datetime) -> str:
     """UTC timestamp literal for HogQL toDateTime(...)."""
     return dt.astimezone(UTC).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def metric_day_bounds(metric_day: date) -> tuple[datetime, datetime]:
+    """Half-open [Oslo midnight, next Oslo midnight) as UTC datetimes."""
+    start = datetime(
+        metric_day.year, metric_day.month, metric_day.day, tzinfo=OSLO,
+    ).astimezone(UTC)
+    nxt = metric_day + timedelta(days=1)
+    end = datetime(nxt.year, nxt.month, nxt.day, tzinfo=OSLO).astimezone(UTC)
+    return start, end
+
+
+def build_funnel_query(day_start: datetime, day_end: datetime) -> str:
+    """HogQL for Visitors / ChatGPT visitors / ChatGPT signups on one Oslo day.
+
+    Half-open [day_start, day_end). Excludes INTERNAL_COHORT_ID.
+    """
+    start_s, end_s = hogql_dt(day_start), hogql_dt(day_end)
+    hosts = ', '.join(f"'{h}'" for h in PODSKRIFT_HOSTS)
+    cohort = INTERNAL_COHORT_ID
+    return f'''
+SELECT
+  uniqIf(person_id, event = '$pageview' AND properties.$host IN ({hosts})) AS visitors,
+  uniqIf(person_id, event = '$pageview' AND properties.$host IN ({hosts})
+         AND (properties.$referring_domain ILIKE '%chatgpt%' OR properties.utm_source ILIKE '%chatgpt%')) AS visitors_chatgpt,
+  countIf(event = 'user_signed_up'
+         AND (person.properties.$initial_referring_domain ILIKE '%chatgpt%' OR person.properties.$initial_utm_source ILIKE '%chatgpt%')) AS signups_chatgpt
+FROM events
+WHERE timestamp >= toDateTime('{start_s}') AND timestamp < toDateTime('{end_s}')
+  AND event IN ('$pageview', 'user_signed_up')
+  AND NOT person_id IN COHORT {cohort}
+'''.strip()
+
+
+def parse_funnel_row(row: Mapping[str, int] | list | tuple | None) -> dict[str, int]:
+    """Map one HogQL result row to the three Notion funnel number keys."""
+    keys = ('visitors', 'visitors_chatgpt', 'signups_chatgpt')
+    notion = FUNNEL_NUMBER_KEYS
+    if row is None:
+        values = (0, 0, 0)
+    elif isinstance(row, Mapping):
+        values = tuple(int(row.get(k) or 0) for k in keys)
+    else:
+        values = tuple(int(row[i] or 0) if i < len(row) else 0 for i in range(3))
+    return {notion[i]: values[i] for i in range(3)}
 
 
 def build_health_queries(

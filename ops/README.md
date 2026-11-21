@@ -561,26 +561,39 @@ a request to Soniox. Confirm account retention settings before enabling.
 ## Notion daily metrics
 
 Weekday cron upserts one row into the Podskrift daily metrics Notion database
-(signups, completions, trial burn, etc.). Read-only against SQLite; Python 3
-stdlib only.
+(signups, completions, trial burn, visitors, buyers, etc.). Read-only against
+SQLite; Python 3 stdlib only. The job never creates Notion schema — it only
+writes known property names (`KNOWN_NOTION_SCHEMA_PROPERTIES` in
+`ops/notion-daily-metrics.py`).
 
-Each run also hits PostHog EU (HogQL) for a short health check: whether
+Each run also hits PostHog EU (HogQL) for (1) a short health check: whether
 productivitytech.io is sending events / `cta_clicked`, whether Podskrift sees
 `utm_source=productivitytech` referrals, whether named Podskrift funnel events
 have stopped or fallen sharply vs a 14-day baseline, and whether
-`transcript_failed` rates (overall and per `reason`) spiked. Podskrift queries
-exclude the same internal cohort as dashboard
+`transcript_failed` rates (overall and per `reason`) spiked; and (2) one-day
+funnel counts written as Notion numbers: `Visitors 1d`, `Visitors ChatGPT 1d`,
+`Signups ChatGPT 1d`. Podskrift queries exclude the same internal cohort as
+dashboard
 [Podskrift — aktivering](https://eu.posthog.com/project/283916/dashboard/975121)
 (`filterTestAccounts` → cohort «Internal / Test users»).
+
+SQLite also fills cumulative `Buyers total` / `Repeat buyers total` (≥ 2
+counted purchases, test buyers excluded) as of end of the metric day, and
+`Minutes transcribed 1d` (charged trial+paid seconds / 60 for the same
+platform-funded jobs that feed STT cost that day, test users excluded — for
+Utsikt cost-per-minute). `Signups 1d` and `Active users 1d` exclude test
+users; cumulative columns (`Users total`, `Never started`, …) stay
+unfiltered so their deltas do not jump.
 
 Warnings go to the Notion `Notes` property (Norwegian lines, ⚠️-prefixed,
 capped at 2000 chars). The same Notes channel also always carries a compact
 checkout-attribution line from SQLite (`checkout_attr te_box_1d=… email_1d=…
-repeat_buyers_1d=… cum_repeat_rate=…`) — the job does not create Notion
-schema, so these are not separate number properties. Health warnings append
-below that line when present. A missing `POSTHOG_PERSONAL_API_KEY`, timeout,
-or API error still upserts metrics and writes one “helsesjekk kjørte ikke”
-line. Notes also flags a missing or >26 h-old `data/backups/podcast-*.db.gz`.
+repeat_buyers_1d=… cum_repeat_rate=…`) — those attribution fields are not
+separate number properties. Health warnings append below that line when
+present. A missing `POSTHOG_PERSONAL_API_KEY`, timeout, or API error still
+upserts metrics and writes one “helsesjekk kjørte ikke” line; funnel keys are
+omitted (never written as 0) with a “Trakt-tall fra PostHog mangler” line.
+Notes also flags a missing or >26 h-old `data/backups/podcast-*.db.gz`.
 No email/Slack/webhooks.
 
 Thresholds (named constants in `ops/posthog_daily_health.py`): check window =
