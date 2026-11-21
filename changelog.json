@@ -9,6 +9,12 @@
   ],
   "entries": [
     {
+      "id": "spotify-fallback-paywall-youtube",
+      "date": "2026-11-21",
+      "title": "More Spotify shows resolve, clearer paywall",
+      "summary": "Smaller and non-English Spotify shows are more likely to match a public feed. Pasting a YouTube link explains that we transcribe podcasts (Spotify, Apple, RSS). When you need minutes, the paywall shows how many this episode still needs and the exact price."
+    },
+    {
       "id": "trial-exhausted-upsell",
       "date": "2026-11-19",
       "title": "Finish the episode when your free trial ends",

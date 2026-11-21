@@ -2168,7 +2168,8 @@ def test_start_transcription_refuses_an_exhausted_trial(trial_on, monkeypatch):
                              'language': 'no'})
     assert resp.status_code == 402
     error = resp.get_json()['error'].lower()
-    assert 'free minutes' in error
+    assert 'still needs 30 min' in error
+    assert '0 free' in error
     assert 'openai api key' in error
     assert f'${A.openai_whisper_cost_usd(30):.2f}' in resp.get_json()['error']
 
@@ -5261,6 +5262,153 @@ def test_resolve_spotify_json_includes_error_kind(monkeypatch):
     assert data['results'] == []
 
 
+def test_podcastindex_skipped_when_credentials_unset(monkeypatch):
+    """Unset keys → fallback is a no-op (no Podcast Index HTTP)."""
+    monkeypatch.delenv('PODCASTINDEX_API_KEY', raising=False)
+    monkeypatch.delenv('PODCASTINDEX_API_SECRET', raising=False)
+    A._podcastindex_cache.clear()
+    fetched = []
+
+    def get(url, params=None, **kw):
+        fetched.append(url)
+        raise AssertionError(f'unexpected fetch {url}')
+
+    _patch_requests_get(monkeypatch, get)
+    hit, outcome = A._podcastindex_fallback_episode('Only On Spotify', 'Ep 1')
+    assert hit is None and outcome == 'skipped'
+    assert fetched == []
+    assert A.podcastindex_enabled() is False
+
+
+def test_podcastindex_fallback_resolves_episode_when_apple_misses(
+        monkeypatch, ph_events):
+    """Apple empty → Podcast Index by show title + episode match in feed."""
+    monkeypatch.setenv('PODCASTINDEX_API_KEY', 'pi_test_key')
+    monkeypatch.setenv('PODCASTINDEX_API_SECRET', 'pi_test_secret')
+    A._podcastindex_cache.clear()
+    pi_feed = 'https://feeds.example.com/small-show.xml'
+    entity = {
+        'type': 'episode', 'name': 'Lokal episode',
+        'subtitle': 'Liten Norsk Podkast',
+    }
+
+    def get(url, params=None, **kw):
+        if '/embed/' in url:
+            return _HttpResp(200, text=_embed_page(entity))
+        if 'itunes.apple.com' in url:
+            return _HttpResp(200, payload={'results': []})
+        if 'api.podcastindex.org' in url and '/search/bytitle' in url:
+            assert params.get('q') == 'Liten Norsk Podkast'
+            assert 'X-Auth-Key' in (kw.get('headers') or {})
+            return _HttpResp(200, payload={'feeds': [{
+                'id': 42,
+                'title': 'Liten Norsk Podkast',
+                'url': pi_feed,
+                'author': 'Host',
+                'artwork': 'https://cdn.example.com/art.jpg',
+            }]})
+        if url == pi_feed:
+            return _HttpResp(200, content=_rss('Lokal episode'))
+        raise AssertionError(url)
+
+    _patch_requests_get(monkeypatch, get)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    out = A.resolve_spotify_url(
+        f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['error'] is None
+    assert out['results'][0]['audio_url'] == 'https://cdn.example.com/0.mp3'
+    assert out['results'][0]['feed_url'] == pi_feed
+    assert out['results'][0]['origin'] == 'spotify'
+    events = [e for e in ph_events.events
+              if e['event'] == 'spotify_lookup_fallback']
+    assert events and events[-1]['properties']['outcome'] == 'hit'
+
+
+def test_podcastindex_fallback_miss_is_tracked(monkeypatch, ph_events):
+    monkeypatch.setenv('PODCASTINDEX_API_KEY', 'pi_test_key')
+    monkeypatch.setenv('PODCASTINDEX_API_SECRET', 'pi_test_secret')
+    A._podcastindex_cache.clear()
+    entity = {
+        'type': 'episode', 'name': 'Missing Ep',
+        'subtitle': 'Nowhere Show',
+    }
+
+    def get(url, params=None, **kw):
+        if '/embed/' in url:
+            return _HttpResp(200, text=_embed_page(entity))
+        if 'itunes.apple.com' in url:
+            return _HttpResp(200, payload={'results': []})
+        if 'api.podcastindex.org' in url:
+            return _HttpResp(200, payload={'feeds': []})
+        raise AssertionError(url)
+
+    _patch_requests_get(monkeypatch, get)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    out = A.resolve_spotify_url(
+        f'https://open.spotify.com/episode/{_SPOTIFY_EP}')
+    assert out['error_kind'] == 'no_feed'
+    events = [e for e in ph_events.events
+              if e['event'] == 'spotify_lookup_fallback']
+    assert events and events[-1]['properties']['outcome'] == 'miss'
+
+
+def test_podcastindex_show_link_fallback(monkeypatch, ph_events):
+    monkeypatch.setenv('PODCASTINDEX_API_KEY', 'pi_test_key')
+    monkeypatch.setenv('PODCASTINDEX_API_SECRET', 'pi_test_secret')
+    A._podcastindex_cache.clear()
+    pi_feed = 'https://feeds.example.com/show-only.xml'
+    entity = {
+        'type': 'episode', 'name': 'Latest',
+        'subtitle': 'Indie Show',
+    }
+
+    def get(url, params=None, **kw):
+        if '/embed/' in url:
+            return _HttpResp(200, text=_embed_page(entity))
+        if 'itunes.apple.com' in url:
+            return _HttpResp(200, payload={'results': []})
+        if 'api.podcastindex.org' in url and '/search/bytitle' in url:
+            return _HttpResp(200, payload={'feeds': [{
+                'id': 7, 'title': 'Indie Show', 'url': pi_feed,
+                'author': 'A', 'artwork': '',
+            }]})
+        raise AssertionError(url)
+
+    _patch_requests_get(monkeypatch, get)
+    monkeypatch.setattr(A, '_is_fetchable_url', lambda u: True)
+    out = A.resolve_spotify_url(
+        f'https://open.spotify.com/show/{_SPOTIFY_SHOW}')
+    assert out['error'] is None
+    assert out['results'][0]['type'] == 'show'
+    assert out['results'][0]['feed_url'] == pi_feed
+    assert out['results'][0]['origin'] == 'podcastindex'
+
+
+def test_podcastindex_auth_header_is_sha1_of_key_secret_time():
+    headers = A._podcastindex_auth_headers('KEY', 'SECRET', now=1613713388)
+    import hashlib
+    expect = hashlib.sha1(b'KEYSECRET1613713388').hexdigest()
+    assert headers['Authorization'] == expect
+    assert headers['X-Auth-Key'] == 'KEY'
+    assert headers['X-Auth-Date'] == '1613713388'
+    assert headers['User-Agent'] == A.PODCASTINDEX_USER_AGENT
+
+
+def test_youtube_message_and_event_on_home():
+    body = A.app.test_client().get('/').data.decode()
+    assert 'youtube_link_pasted' in body
+    assert 'Spotify or Apple Podcasts link instead' in body
+    assert "YouTube isn't supported yet" not in body
+
+
+def test_buy_modal_paywall_copy_names_remaining_and_value(stripe_on):
+    uid = _make_user('buy-copy@test.com', limit=600, used=600)
+    body = _login(uid).get('/').data.decode()
+    assert 'This episode still needs' in body
+    assert 'Full transcript in minutes' in body
+    assert 'never expires' in body
+
+
 def test_resolve_spotify_logs_error_kind(monkeypatch, caplog):
     import logging
     _fake_web(monkeypatch,
@@ -5669,7 +5817,9 @@ def test_index_routes_apple_rss_audio_youtube():
     assert 'resolveApple' in body
     assert 'showDirectAudioRow' in body
     assert 'Transcribe this audio file' in body
-    assert "YouTube isn't supported yet" in body
+    assert 'Podskrift transcribes podcasts' in body
+    assert 'not YouTube videos' in body
+    assert "posthog.capture('youtube_link_pasted'" in body
     assert 'PARSE_RSS_URL' in body
     assert "inputType === 'rss_feed'" in body or "inputType === \"rss_feed\"" in body
     assert 'emptyStateTipText' in body
@@ -10426,8 +10576,9 @@ def test_trial_limit_hit_when_the_account_is_short(ph_events, monkeypatch, trial
         'estimate_min': 5, 'remaining_min': 1, 'app': 'podskrift',
     }
     body = resp.get_json()
-    assert 'about 5 minutes' in body['error']
-    assert '1 free minutes' in body['error']
+    assert 'still needs 4 min' in body['error']
+    assert 'episode is 5 min' in body['error']
+    assert '1 free' in body['error']
     assert f'${A.openai_whisper_cost_usd(5):.2f}' in body['error']
     assert body.get('action_label') == 'Add OpenAI key →'
     assert body.get('action_url', '').endswith('/settings#openai')
@@ -10469,7 +10620,8 @@ def test_trial_limit_hit_for_an_over_long_episode(ph_events, monkeypatch, trial_
     assert hits[0]['properties']['estimate_min'] == 60
     assert 'remaining_min' in hits[0]['properties']
     body = resp.get_json()
-    assert 'too long for the free trial' in body['error']
+    assert 'still needs 60 min' in body['error']
+    assert 'free trial max is 30' in body['error']
     assert f'${A.openai_whisper_cost_usd(60):.2f}' in body['error']
     assert body.get('action_url', '').endswith('#openai')
 
@@ -11318,9 +11470,14 @@ def test_byok_quota_message_offers_pack_when_stripe_on(stripe_on):
 
 def test_pack_covers_episode_line():
     assert A.pack_covers_episode_line(84) == (
-        'This episode is 84 min — 300 min for $5 covers it and more.')
+        'This episode still needs 84 min. '
+        '300 min for $5 covers it. Full transcript in minutes · never expires.')
+    assert A.pack_covers_episode_line(84, balance_minutes=10) == (
+        'This episode still needs 74 min. '
+        '300 min for $5 covers it. Full transcript in minutes · never expires.')
     assert A.pack_covers_episode_line(0) == ''
     assert A.pack_covers_episode_line(None) == ''
+    assert A.PAYWALL_VALUE_LINE in A.pack_covers_episode_line(30)
 
 
 def test_whisper_does_not_retry_quota_or_auth_errors(tmp_path, monkeypatch):
@@ -13298,9 +13455,13 @@ def test_paywall_json_prefers_buy_and_episode_cover(stripe_on, monkeypatch, tria
     assert body.get('buy_label') == A.CREDIT_PACK_LABEL
     assert body.get('action_label') == A.CREDIT_PACK_LABEL
     assert body.get('byok_label') == 'Add OpenAI key →'
-    assert 'covers it and more' in (body.get('paywall_cover_line') or '')
-    assert '84 min' in body['paywall_cover_line']
-    assert '84 min' in body['error'] or '84 minutes' in body['error']
+    cover = body.get('paywall_cover_line') or ''
+    assert 'still needs 84 min' in cover
+    assert '$5' in cover or '300 min' in cover
+    assert 'never expires' in cover
+    assert body.get('paywall_value_line') == A.PAYWALL_VALUE_LINE
+    assert 'still needs 84 min' in body['error']
+    assert '84 min' in body['error']
 
 
 def test_home_paywall_buy_is_primary_byok_is_text_link(stripe_on):
@@ -20167,7 +20328,10 @@ def test_episode_offer(monkeypatch):
     # 20 min left: the shortfall is 55 → the $1 minimum (60 min).
     assert A.episode_offer(75, 20)['label'] == 'Transcribe this episode (75 min) for $1.50'
     assert A.episode_offer(30, 40) is None
-    assert 'for $1.50' in A.pack_covers_episode_line(45)
+    line = A.pack_covers_episode_line(45)
+    assert 'still needs 45 min' in line
+    assert 'for $1.50' in line
+    assert 'never expires' in line
 
 
 def test_pricing_page_shows_slider_only_with_flag(stripe_on, monkeypatch):

@@ -175,9 +175,11 @@
             api.set(qty, false);
             minutesIn.value = String(qty);
             sourceIn.value = 'episode';
+            var shortfall = Math.max(1, Math.ceil(needed - Math.max(0, left || 0)));
             submit.textContent = 'Transcribe this episode (' + needed + ' min) for ' + row.price;
-            titleEl.textContent = 'This episode needs ' + needed + ' min, you have ' + (left || 0) + ' left';
-            var line = 'Adds ' + qty + ' min to your balance. Launch price, one-time, minutes never expire.';
+            titleEl.textContent = 'This episode still needs ' + shortfall + ' min';
+            var line = 'Transcribe this episode for ' + row.price
+                + '. Full transcript in minutes · never expires.';
             if (epTitle) line = '"' + epTitle.replace(/"/g, '') + '" — ' + line;
             subEl.textContent = line;
             more.open = false;
@@ -187,7 +189,8 @@
             root.removeAttribute('data-volume-passive');
             api.set(VOLUME_DEFAULT, true);
             titleEl.textContent = 'Buy transcription minutes';
-            subEl.textContent = 'Pick any amount from ' + VOLUME_FROM_PRICE + '. Launch price, one-time, minutes never expire.';
+            subEl.textContent = 'Pick any amount from ' + VOLUME_FROM_PRICE
+                + '. Full transcript in minutes · never expires.';
             more.open = true;
             document.getElementById('buyModalMoreLabel').textContent = 'Choose your amount';
         }
@@ -261,19 +264,22 @@
         if (VOLUME && renderVolume(needed, left, epTitle)) {
             /* volume pricing rendered title, subline and the Buy button */
         } else if (needed != null && left != null) {
-            titleEl.textContent = 'This episode needs ' + needed + ' min, you have ' + left + ' left';
+            var shortfallFixed = Math.max(1, Math.round(needed) - Math.max(0, Math.round(left)));
+            titleEl.textContent = 'This episode still needs ' + shortfallFixed + ' min';
             var cover = PACK + left - needed;
-            var more = needed > 0 ? Math.floor(cover / needed) : 0;
-            var line = PACK + ' min for $' + PRICE + ' covers this';
-            if (more > 0) {
-                line += ' and about ' + more + ' more episode' + (more === 1 ? '' : 's') + ' like it';
+            var moreEps = needed > 0 ? Math.floor(cover / needed) : 0;
+            var line = PACK + ' min for $' + PRICE + ' covers it';
+            if (moreEps > 0) {
+                line += ' and about ' + moreEps + ' more episode'
+                    + (moreEps === 1 ? '' : 's') + ' like it';
             }
-            line += '.';
+            line += '. Full transcript in minutes · never expires.';
             if (epTitle) line = '"' + epTitle.replace(/"/g, '') + '" — ' + line;
             subEl.textContent = line;
         } else {
             titleEl.textContent = 'Buy transcription minutes';
-            subEl.textContent = PACK + ' minutes for $' + PRICE + ' — one-time, never expires.';
+            subEl.textContent = PACK + ' minutes for $' + PRICE
+                + ' — full transcript in minutes · never expires.';
         }
         scrim.hidden = false;
         scrim.classList.add('is-open');

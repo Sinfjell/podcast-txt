@@ -152,6 +152,10 @@
             <p class="form-hint" data-trial-denied-note>Free minutes aren't available for this account.</p>
             {% endif %}
             <p style="margin-top: 8px;">
+                <span class="form-hint">
+                    Pick an episode — we'll show how many minutes it still needs and the exact price.
+                    Full transcript in minutes · never expires.
+                </span>
                 {% if stripe_buy_enabled %}
                 {# Buy submits via form= — must not nest a <form> inside episodeForm
                    or browsers drop the inner form and close episodeForm early,
