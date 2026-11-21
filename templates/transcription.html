@@ -882,8 +882,8 @@
             cover = 'Finish it for ' + d.episode_offer.price
                 + ' (adds ' + d.episode_offer.minutes + ' min, launch price).';
         } else if (d.episode_minutes && STRIPE_BUY) {
-            cover = 'This episode is ' + d.episode_minutes
-                + ' min — 300 min for $5 covers it and more.';
+            cover = 'This episode still needs ' + d.episode_minutes
+                + ' min. 300 min for $5 covers it. Full transcript in minutes · never expires.';
         }
         el('partialPreviewNote').textContent = card_t.note || (cover
             ? ('This transcript covers the opening of the episode. ' + cover)

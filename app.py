@@ -2608,18 +2608,36 @@ def _is_openai_error(exc):
     return type(exc).__module__.split('.')[0] == 'openai'
 
 
-def pack_covers_episode_line(estimate_min):
-    """Episode-aware paywall subline when Stripe pack is available."""
+#: One-line value pitch under paywall / buy CTAs (not a second price).
+PAYWALL_VALUE_LINE = 'Full transcript in minutes · never expires'
+
+
+def pack_covers_episode_line(estimate_min, balance_minutes=0):
+    """Episode-aware paywall subline: remaining minutes, episode price, value.
+
+    ``balance_minutes`` is free+paid left so the line can name the shortfall
+    for *this* episode. Price comes from the configured episode option
+    (volume curve when on, else the fixed pack) — never invents a new price.
+    """
     if not estimate_min or estimate_min <= 0:
         return ''
     minutes = int(estimate_min)
+    try:
+        have = max(0, int(balance_minutes or 0))
+    except (TypeError, ValueError):
+        have = 0
+    remaining_needed = max(1, minutes - have) if minutes > have else minutes
     if VOLUME_PRICING_ENABLED:
-        offer = episode_offer(minutes)
+        offer = episode_offer(minutes, have)
         if offer:
-            return f'This episode is {minutes} min. {offer["label"]}.'
+            return (
+                f'This episode still needs {remaining_needed} min. '
+                f'{offer["label"]}. {PAYWALL_VALUE_LINE}.'
+            )
     return (
-        f'This episode is {minutes} min — {CREDIT_PACK_MINUTES} min for '
-        f'{DEFAULT_PACK_PRICE} covers it and more.'
+        f'This episode still needs {remaining_needed} min. '
+        f'{CREDIT_PACK_MINUTES} min for {DEFAULT_PACK_PRICE} covers it. '
+        f'{PAYWALL_VALUE_LINE}.'
     )
 
 
@@ -9556,7 +9574,9 @@ def _is_minutes_limit_error(message):
     msg = str(message).lower()
     return any(marker in msg for marker in (
         'minutes you have left',
+        'still needs',
         'too long for the free trial',
+        'free trial max is',
         'out of free minutes',
         'buy more minutes',
         CREDIT_PACK_LABEL.lower(),
@@ -9611,17 +9631,30 @@ def _show_openai_cost_estimates():
 
 
 def _minutes_limit_actions(user_id, location='enqueue', reason=None,
-                           estimate_min=None):
+                           estimate_min=None, balance_minutes=None):
     """CTA payload for out-of-minutes messages: Buy (if configured) + add key.
 
     Buy is the primary CTA when Stripe is on; BYOK is a secondary text link
     in the browser. Analytics for paywall/offer are browser-side
     (paywall_shown / offer_shown / paywall_buy_clicked / paywall_byok_clicked).
+
+    When volume pricing is on and we know the episode length, ``buy_label`` /
+    ``action_label`` prefer the per-episode option so the primary CTA matches
+    the cover line (pack remains available in the buy modal slider).
     """
     actions = []
+    primary_label = CREDIT_PACK_LABEL
+    cover = ''
+    if estimate_min and stripe_checkout_enabled():
+        have = 0 if balance_minutes is None else balance_minutes
+        cover = pack_covers_episode_line(estimate_min, have)
+        if VOLUME_PRICING_ENABLED:
+            offer = episode_offer(estimate_min, have)
+            if offer:
+                primary_label = offer['label']
     if stripe_checkout_enabled():
         actions.append({
-            'label': CREDIT_PACK_LABEL,
+            'label': primary_label,
             'url': url_for('billing_checkout'),
             'method': 'POST',
             'primary': True,
@@ -9634,17 +9667,17 @@ def _minutes_limit_actions(user_id, location='enqueue', reason=None,
     })
     # Keep the legacy single-action fields pointing at the primary CTA.
     primary = actions[0]
-    cover = pack_covers_episode_line(estimate_min) if estimate_min else ''
     return {
         'actions': actions,
         'action_url': primary['url'] if primary['method'] == 'GET' else settings_credits_url(),
         'action_label': primary['label'],
         'buy_available': stripe_checkout_enabled(),
-        'buy_label': CREDIT_PACK_LABEL if stripe_checkout_enabled() else None,
+        'buy_label': primary_label if stripe_checkout_enabled() else None,
         'buy_url': url_for('billing_checkout') if stripe_checkout_enabled() else None,
         'paywall_reason': reason,
         'paywall_location': location,
         'paywall_cover_line': cover if stripe_checkout_enabled() else '',
+        'paywall_value_line': PAYWALL_VALUE_LINE if stripe_checkout_enabled() else '',
         'byok_label': 'Add OpenAI key →',
         'byok_url': settings_openai_url(),
     }
@@ -10164,20 +10197,22 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
                             user_id, scope, 'start', source,
                             estimate_min=estimate_min, remaining_min=remaining // 60)
                         cost = openai_whisper_cost_usd(estimate_min)
-                        cover = pack_covers_episode_line(estimate_min)
-                        cover_bit = f' {cover}' if cover and stripe_checkout_enabled() else ''
+                        # Over the free per-episode cap: only paid minutes count
+                        # toward covering it (free trial cannot).
+                        paid_left = paid_balance_seconds(user) // 60
+                        needed = max(1, estimate_min - paid_left)
                         payload = {
                             'error': (
-                                f'This episode is {estimate_min} minutes — too long for the '
-                                f'free trial (max {TRIAL_MAX_EPISODE_SECONDS // 60}). '
-                                f'{CREDIT_PACK_LABEL if stripe_checkout_enabled() else "Buy more minutes"}, '
-                                f'or add your own OpenAI API key (about ${cost} at '
-                                f'OpenAI\'s rate).{cover_bit}'
+                                f'This episode still needs {needed} min '
+                                f'(episode is {estimate_min} min; free trial max is '
+                                f'{TRIAL_MAX_EPISODE_SECONDS // 60}). '
+                                f'Or add your own OpenAI API key (about ${cost} at '
+                                f'OpenAI\'s rate).'
                             ),
                         }
                         payload.update(_minutes_limit_actions(
                             user_id, 'enqueue_episode_length', reason='episode_too_long',
-                            estimate_min=estimate_min))
+                            estimate_min=estimate_min, balance_minutes=paid_left))
                         return payload, 402
 
                     scope = trial_refusal_scope(user, estimate)
@@ -10197,21 +10232,19 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
                     if scope == 'user':
                         cost = openai_whisper_cost_usd(estimate_min)
                         paid_left = paid_balance_seconds(user) // 60
-                        paid_bit = (
-                            f' (and {paid_left} paid)' if paid_left else '')
-                        buy_bit = (
-                            f'{CREDIT_PACK_LABEL.lower()}, or '
-                            if stripe_checkout_enabled() else '')
-                        cover = pack_covers_episode_line(estimate_min)
-                        cover_bit = (
-                            f' {cover}' if cover and stripe_checkout_enabled() else '')
+                        free_left = remaining // 60
+                        bal_min = free_left + paid_left
+                        needed = max(1, estimate_min - bal_min)
+                        have_bit = (
+                            f'you have {free_left} free'
+                            + (f' + {paid_left} paid' if paid_left else '')
+                            + ' min left'
+                        )
                         message = (
-                            f'This episode is about {estimate_min} minutes — longer than '
-                            f'the {remaining // 60} free minutes you have left{paid_bit}. '
-                            f'Pick a shorter episode, or {buy_bit}'
-                            f'add your own OpenAI API key '
+                            f'This episode still needs {needed} min '
+                            f'(episode is {estimate_min} min; {have_bit}). '
+                            f'Or add your own OpenAI API key '
                             f'(about ${cost} for this one, billed by OpenAI).'
-                            f'{cover_bit}'
                         )
                         if remaining <= 0 and paid_left <= 0:
                             paywall_reason = (
@@ -10220,6 +10253,7 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
                         else:
                             paywall_reason = 'low_balance'
                     else:
+                        bal_min = None
                         paywall_reason = 'daily_cap' if scope == 'daily' else 'global_cap'
                         message = trial_daily_exhausted_message()
                         if scope == 'daily':
@@ -10227,7 +10261,8 @@ def enqueue_transcription(user, meta, rss_url=None, language='', source='web',
                     payload = {'error': message}
                     payload.update(_minutes_limit_actions(
                         user_id, 'enqueue', reason=paywall_reason,
-                        estimate_min=estimate_min))
+                        estimate_min=estimate_min,
+                        balance_minutes=bal_min if scope == 'user' else None))
                     return payload, 402
 
         task_id = str(uuid.uuid4())
@@ -11173,7 +11208,8 @@ def get_status(task_id):
             result['minutes_error'] = True
             reason = 'trial_exhausted'
             low = err.lower()
-            if 'too long for the free trial' in low:
+            if ('too long for the free trial' in low
+                    or 'free trial max is' in low):
                 reason = 'episode_too_long'
             elif ("today's free minutes are used up" in low
                   or 'refill at midnight' in low):
@@ -11182,14 +11218,23 @@ def get_status(task_id):
                 reason = 'global_cap'
             elif 'paid minutes you have left' in low:
                 reason = 'paid_exhausted'
-            elif 'minutes you have left' in low:
+            elif 'minutes you have left' in low or 'min left' in low:
                 reason = 'low_balance'
             estimate_min = None
             if task.audio_duration:
                 estimate_min = max(1, int(round(task.audio_duration / 60.0)))
+            bal_min = None
+            try:
+                owner = db.session.get(User, task.user_id)
+                if owner is not None:
+                    bal_min = (
+                        trial_status(owner)[2] // 60
+                        + paid_balance_seconds(owner) // 60)
+            except Exception:  # noqa: BLE001
+                bal_min = None
             result.update(_minutes_limit_actions(
                 task.user_id, 'reconcile_status', reason=reason,
-                estimate_min=estimate_min))
+                estimate_min=estimate_min, balance_minutes=bal_min))
 
     # Partial text so the page fills in as chunks land, rather than staying empty
     if task.transcript_text and task.status != 'completed':
@@ -16173,6 +16218,251 @@ def _spotify_resolve_outcome(results, error=None, error_kind=None, show_name=Non
     }
 
 
+# ---------------------------------------------------------------------------
+# Podcast Index fallback (optional; when Apple/iTunes catalog misses)
+# ---------------------------------------------------------------------------
+
+#: Process cache: (kind, normalized show, normalized episode) → result dict or None.
+_podcastindex_cache = {}
+_podcastindex_cache_lock = threading.Lock()
+PODCASTINDEX_TIMEOUT_SEC = 8.0
+PODCASTINDEX_USER_AGENT = 'Podskrift/1.0'
+PODCASTINDEX_API_BASE = 'https://api.podcastindex.org/api/1.0'
+
+
+def podcastindex_credentials(environ=None):
+    """(api_key, api_secret) when both env vars are set; else (None, None)."""
+    env = os.environ if environ is None else environ
+    key = (env.get('PODCASTINDEX_API_KEY') or '').strip()
+    secret = (env.get('PODCASTINDEX_API_SECRET') or '').strip()
+    if key and secret:
+        return key, secret
+    return None, None
+
+
+def podcastindex_enabled(environ=None):
+    """True when the Podcast Index fallback is configured."""
+    key, secret = podcastindex_credentials(environ)
+    return bool(key and secret)
+
+
+def _podcastindex_auth_headers(api_key, api_secret, now=None):
+    """Headers for one Podcast Index request (SHA-1 of key+secret+unix time)."""
+    ts = str(int(time.time() if now is None else now))
+    token = hashlib.sha1(
+        f'{api_key}{api_secret}{ts}'.encode('utf-8')).hexdigest()
+    return {
+        'User-Agent': PODCASTINDEX_USER_AGENT,
+        'X-Auth-Key': api_key,
+        'X-Auth-Date': ts,
+        'Authorization': token,
+    }
+
+
+def _podcastindex_get(path, params, *, timeout=None, environ=None):
+    """JSON body from Podcast Index, or None on any failure / when unset."""
+    api_key, api_secret = podcastindex_credentials(environ)
+    if not api_key:
+        return None
+    limit = PODCASTINDEX_TIMEOUT_SEC if timeout is None else float(timeout)
+    if limit <= 0:
+        return None
+    try:
+        resp = requests.get(
+            f'{PODCASTINDEX_API_BASE}{path}',
+            params=params,
+            headers=_podcastindex_auth_headers(api_key, api_secret),
+            timeout=limit,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except (requests.RequestException, ValueError, TypeError):
+        return None
+
+
+def _podcastindex_feed_result(feed):
+    """Search-box show row from a Podcast Index feed object."""
+    feed_url = safe_public_http_url(feed.get('url') or feed.get('originalUrl') or '')
+    if not feed_url:
+        return None
+    artwork = (
+        safe_public_http_url(feed.get('artwork') or '')
+        or safe_public_http_url(feed.get('image') or '')
+        or ''
+    )
+    return {
+        'type': 'show',
+        'name': (feed.get('title') or '').strip(),
+        'artist': (feed.get('author') or '').strip(),
+        'artwork': artwork,
+        'feed_url': feed_url,
+        'genre': '',
+        'apple_url': '',
+        'origin': 'podcastindex',
+        'podcastindex_id': feed.get('id'),
+    }
+
+
+def _podcastindex_feeds_named(show_name, *, timeout=None, environ=None):
+    """Podcast Index feeds whose title matches ``show_name`` (normalized)."""
+    want = _normalize_title(show_name)
+    if not want:
+        return []
+    data = _podcastindex_get(
+        '/search/bytitle', {'q': show_name[:200], 'max': 20, 'clean': 1},
+        timeout=timeout, environ=environ)
+    if not data:
+        return []
+    found = []
+    for feed in data.get('feeds') or []:
+        if _normalize_title(feed.get('title')) != want:
+            continue
+        row = _podcastindex_feed_result(feed)
+        if row:
+            found.append(row)
+    return found
+
+
+def _podcastindex_feeds_by_term(term, *, timeout=None, environ=None):
+    """Podcast Index feeds from search/byterm (title/author/owner)."""
+    query = (term or '').strip()
+    if len(query) < 2:
+        return []
+    data = _podcastindex_get(
+        '/search/byterm', {'q': query[:200], 'max': 20, 'clean': 1},
+        timeout=timeout, environ=environ)
+    if not data:
+        return []
+    found, seen = [], set()
+    for feed in data.get('feeds') or []:
+        row = _podcastindex_feed_result(feed)
+        if not row or row['feed_url'] in seen:
+            continue
+        seen.add(row['feed_url'])
+        found.append(row)
+    return found
+
+
+def _capture_spotify_lookup_fallback(outcome, *, show_name='', episode_title='',
+                                     detail=''):
+    """PostHog: spotify_lookup_fallback with outcome hit/miss."""
+    props = {
+        'outcome': outcome,
+        'app': 'podskrift',
+    }
+    if show_name:
+        props['show_name'] = str(show_name)[:120]
+    if episode_title:
+        props['episode_title'] = str(episode_title)[:120]
+    if detail:
+        props['detail'] = str(detail)[:80]
+    distinct = 'anonymous'
+    try:
+        if has_request_context() and getattr(current_user, 'is_authenticated', False):
+            distinct = current_user.id
+    except Exception:  # noqa: BLE001
+        distinct = 'anonymous'
+    product_analytics.capture('spotify_lookup_fallback', distinct, props)
+
+
+def _podcastindex_fallback_episode(show_name, episode_title, *, environ=None,
+                                   track=True):
+    """Find episode audio via Podcast Index when Apple lookup missed.
+
+    Returns (hit_dict_or_None, outcome) where outcome is 'hit', 'miss', or
+    'skipped' (credentials unset). Cached per process. Total budget ≤ 8s.
+    """
+    if not podcastindex_enabled(environ):
+        return None, 'skipped'
+    show_key = _normalize_title(show_name)
+    ep_key = _normalize_title(episode_title)
+    if not show_key and not ep_key:
+        return None, 'miss'
+    cache_key = ('episode', show_key, ep_key)
+    with _podcastindex_cache_lock:
+        if cache_key in _podcastindex_cache:
+            cached = _podcastindex_cache[cache_key]
+            outcome = 'hit' if cached else 'miss'
+            if track:
+                _capture_spotify_lookup_fallback(
+                    outcome, show_name=show_name, episode_title=episode_title,
+                    detail='episode_cached')
+            return (dict(cached) if cached else None, outcome)
+
+    deadline = time.monotonic() + PODCASTINDEX_TIMEOUT_SEC
+    hit = None
+
+    def remaining_timeout():
+        return max(0.1, deadline - time.monotonic())
+
+    feeds = []
+    if show_name and time.monotonic() < deadline:
+        feeds = _podcastindex_feeds_named(
+            show_name, timeout=remaining_timeout(), environ=environ)
+    if not feeds and show_name and episode_title and time.monotonic() < deadline:
+        # Show title alone missed: try show + episode as a term search.
+        feeds = _podcastindex_feeds_by_term(
+            f'{show_name} {episode_title}',
+            timeout=remaining_timeout(), environ=environ)
+        # Prefer feeds whose title matches the show when we know it.
+        if show_key and feeds:
+            exact = [f for f in feeds
+                     if _normalize_title(f.get('name')) == show_key]
+            if exact:
+                feeds = exact
+    if not feeds and episode_title and not show_name and time.monotonic() < deadline:
+        feeds = _podcastindex_feeds_by_term(
+            episode_title, timeout=remaining_timeout(), environ=environ)
+
+    for feed in feeds[:3]:
+        if time.monotonic() >= deadline:
+            break
+        if not episode_title:
+            break
+        found = _episode_from_feed(feed['feed_url'], episode_title)
+        if found:
+            hit = dict(found, origin='podcastindex')
+            break
+
+    with _podcastindex_cache_lock:
+        _podcastindex_cache[cache_key] = dict(hit) if hit else None
+    outcome = 'hit' if hit else 'miss'
+    if track:
+        _capture_spotify_lookup_fallback(
+            outcome, show_name=show_name, episode_title=episode_title,
+            detail='episode')
+    return hit, outcome
+
+
+def _podcastindex_fallback_show(show_name, *, environ=None, track=True):
+    """Find a show feed via Podcast Index. Returns (show_row_or_None, outcome)."""
+    if not podcastindex_enabled(environ):
+        return None, 'skipped'
+    show_key = _normalize_title(show_name)
+    if not show_key:
+        return None, 'miss'
+    cache_key = ('show', show_key, '')
+    with _podcastindex_cache_lock:
+        if cache_key in _podcastindex_cache:
+            cached = _podcastindex_cache[cache_key]
+            outcome = 'hit' if cached else 'miss'
+            if track:
+                _capture_spotify_lookup_fallback(
+                    outcome, show_name=show_name, detail='show_cached')
+            return (dict(cached) if cached else None, outcome)
+
+    feeds = _podcastindex_feeds_named(
+        show_name, timeout=PODCASTINDEX_TIMEOUT_SEC, environ=environ)
+    row = feeds[0] if feeds else None
+    with _podcastindex_cache_lock:
+        _podcastindex_cache[cache_key] = dict(row) if row else None
+    outcome = 'hit' if row else 'miss'
+    if track:
+        _capture_spotify_lookup_fallback(
+            outcome, show_name=show_name, detail='show')
+    return row, outcome
+
+
 def resolve_spotify_url(raw):
     """Map a Spotify link onto the public feed Podskrift can fetch.
 
@@ -16213,6 +16503,10 @@ def resolve_spotify_url(raw):
         if shows:
             return _spotify_resolve_outcome([_itunes_show_result(shows[0])],
                                             show_name=show_name)
+        # Apple catalog miss → optional Podcast Index (small / non-English shows).
+        pi_show, _ = _podcastindex_fallback_show(show_name)
+        if pi_show:
+            return _spotify_resolve_outcome([pi_show], show_name=show_name)
         return _spotify_resolve_outcome(
             [], _no_feed_message(show_name), 'no_feed', show_name)
 
@@ -16222,6 +16516,11 @@ def resolve_spotify_url(raw):
             return _spotify_resolve_outcome(
                 [_itunes_show_result(shows[0])],
                 _paid_episode_message(show_name), 'paid_episode', show_name)
+        pi_show, _ = _podcastindex_fallback_show(show_name)
+        if pi_show:
+            return _spotify_resolve_outcome(
+                [pi_show], _paid_episode_message(show_name), 'paid_episode',
+                show_name)
         return _spotify_resolve_outcome(
             [], _paid_episode_message(show_name), 'paid_episode', show_name)
 
@@ -16275,6 +16574,44 @@ def resolve_spotify_url(raw):
             (f'Found "{show_name}", but this episode isn\'t in its public feed. '
              'Open the show below to pick from the episodes that are.'),
             'episode_not_in_feed', show_name)
+
+    # Apple catalog had no show and no episode — try Podcast Index by show
+    # (and episode) title before giving up. One analytics event for the chain.
+    if not meta.get('has_video'):
+        pi_hit, pi_ep_outcome = _podcastindex_fallback_episode(
+            show_name, title, track=False)
+        if pi_hit:
+            _capture_spotify_lookup_fallback(
+                'hit', show_name=show_name, episode_title=title, detail='episode')
+            return _spotify_resolve_outcome(
+                [_with_spotify(pi_hit)], show_name=show_name)
+        pi_show, pi_show_outcome = _podcastindex_fallback_show(
+            show_name, track=False)
+        if pi_show and title:
+            feed_hit = _episode_from_feed(pi_show['feed_url'], title)
+            if feed_hit:
+                _capture_spotify_lookup_fallback(
+                    'hit', show_name=show_name, episode_title=title,
+                    detail='show_feed')
+                return _spotify_resolve_outcome(
+                    [_with_spotify(feed_hit)], show_name=show_name)
+            if pi_ep_outcome != 'skipped' or pi_show_outcome != 'skipped':
+                _capture_spotify_lookup_fallback(
+                    'hit', show_name=show_name, episode_title=title,
+                    detail='show_only')
+            return _spotify_resolve_outcome(
+                [pi_show],
+                (f'Found "{show_name}", but this episode isn\'t in its public feed. '
+                 'Open the show below to pick from the episodes that are.'),
+                'episode_not_in_feed', show_name)
+        if pi_show:
+            _capture_spotify_lookup_fallback(
+                'hit', show_name=show_name, detail='show')
+            return _spotify_resolve_outcome([pi_show], show_name=show_name)
+        if pi_ep_outcome != 'skipped' or pi_show_outcome != 'skipped':
+            _capture_spotify_lookup_fallback(
+                'miss', show_name=show_name, episode_title=title)
+
     name = show_name or title
     if meta.get('has_video'):
         # Spotify video shows (often YouTube uploads) usually have no public

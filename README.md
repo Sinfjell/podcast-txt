@@ -198,6 +198,11 @@ The app includes a comprehensive help guide for finding RSS feeds from:
   and session replay. Unset means fully off (no client SDK, no server events).
   `POSTHOG_HOST` defaults to `https://eu.i.posthog.com` (EU Cloud).
   See [ops/README.md](ops/README.md#product-analytics-posthog).
+- `PODCASTINDEX_API_KEY` / `PODCASTINDEX_API_SECRET` — optional Podcast Index
+  fallback when a pasted Spotify show/episode is missing from Apple Podcasts
+  search (common for small non-English shows). Unset = fallback skipped
+  silently. Register at https://api.podcastindex.org/. See
+  [ops/README.md](ops/README.md#podcast-index-spotify-fallback).
 - `AGENT_API_KEY` / `AGENT_API_USER_ID` — internal CoS agent API only.
   See [docs/agent-api.md](docs/agent-api.md). Never commit values. Customers
   use a per-user key from Settings ([docs/customer-api.md](docs/customer-api.md)).

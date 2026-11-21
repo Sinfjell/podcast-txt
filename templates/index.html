@@ -93,6 +93,8 @@
         {% elif trial.exhausted %}
         Your free trial is used up.
         {% if trial.stripe_buy %}
+        Paste an episode to see minutes left for it and the exact price —
+        full transcript in minutes · never expires.
         <a href="{{ url_for('pricing') }}" class="btn btn-sm btn-primary" style="margin: 0 6px;"
            data-open-buy-modal data-buy-source="home_banner"
            data-paywall-buy="home_banner">{{ trial.buy_label }}</a>
@@ -1170,10 +1172,18 @@
         if (inputType === 'spotify_link') { resolveSpotify(query, seq); return; }
         if (inputType === 'apple_link') { resolveApple(query, seq); return; }
         if (inputType === 'youtube_link') {
+            try {
+                if (window.posthog && typeof window.posthog.capture === 'function') {
+                    window.posthog.capture('youtube_link_pasted', {
+                        query: query.slice(0, 200),
+                        input_type: 'youtube_link'
+                    });
+                }
+            } catch (e) { /* never block the empty state */ }
             showSearchEmptyState({
                 query: query,
                 errored: true,
-                errorText: "YouTube isn't supported yet. Paste a podcast link (Apple, Spotify or RSS).",
+                errorText: "Podskrift transcribes podcasts (Spotify, Apple Podcasts, or RSS) — not YouTube videos. If this video is also a podcast episode, paste its Spotify or Apple Podcasts link instead.",
                 resultCount: 0,
                 errorKind: 'unsupported',
                 inputType: inputType

@@ -410,6 +410,8 @@ Named events:
 | Event | Where | Properties |
 |---|---|---|
 | `podcast_searched` | browser, before signup | `search_type`, `result_count` (never the query) |
+| `youtube_link_pasted` | browser, search box | `input_type=youtube_link`, truncated `query` |
+| `spotify_lookup_fallback` | server, `/resolve-spotify` | `outcome` (`hit`/`miss`) when Podcast Index is configured and Apple catalog missed; optional `show_name` / `episode_title` / `detail` |
 | `user_signed_up`, `settings_viewed` | server | `user_signed_up`: `trial_granted_min`, optional `trial_variant` + `$set.trial_variant` when the split assigned one |
 | `openai_key_saved` / `openai_key_validation_failed` | server | `status` / `reason` |
 | `transcript_started` / `transcript_completed` | server | `key_source` (trial/user), `source` (web/api) |
@@ -420,6 +422,32 @@ Named events:
 `trial_limit_hit` is the buying signal: a trial user wanted more than the free
 allowance gives. `trial_daily_budget_exhausted` fires on the first refusal of
 the day when the shared daily budget is empty.
+
+## Podcast Index (Spotify fallback)
+
+When a pasted Spotify episode/show is missing from Apple Podcasts search
+(~small / non-English catalogs), `/resolve-spotify` can look up the show by
+title (and match the episode title) via
+[Podcast Index](https://podcastindex-org.github.io/docs-api/). Unset keys =
+feature off (no network calls, no events).
+
+| Var | Default | Notes |
+| --- | --- | --- |
+| `PODCASTINDEX_API_KEY` | unset | Public API key from https://api.podcastindex.org/ |
+| `PODCASTINDEX_API_SECRET` | unset | Matching secret. Both required. **Never log or commit.** |
+
+Timeout budget is ≤ 8 s per resolve; results (hits and misses) are cached in
+process memory like other directory lookups. PostHog
+`spotify_lookup_fallback` records `outcome=hit|miss` when the fallback runs.
+
+```bash
+# once, as root, from the app directory
+printf '%s\n' \
+  'PODCASTINDEX_API_KEY=…' \
+  'PODCASTINDEX_API_SECRET=…' \
+  >> .env
+systemctl restart podskrift
+```
 
 ## Speech-to-text provider (Together whisper-large-v3)
 
